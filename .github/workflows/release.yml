@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+
+      - run: rustup update --no-self-update stable && rustup default stable
+      - run: cargo fmt --check
+      - run: cargo build --release --locked
+      - name: archiving
+        id: archive
+        run: |
+          strip target/release/macmon
+          cp target/release/macmon macmon
+          tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
+          ls -lah | grep macmon
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: macmon-${{ github.ref_name }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          homebrew-tap: vladkens/homebrew-apps
+          formula-name: macmon
+          formula-path: macmon.rb
+          commit-message: "{{formulaName}} {{version}}"
+          download-url: https://github.com/vladkens/macmon/releases/download/${{ github.ref_name }}/macmon-${{ github.ref_name }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

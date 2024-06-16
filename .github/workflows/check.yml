@@ -1,0 +1,25 @@
+name: check
+
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+
+      - run: rustup update --no-self-update stable && rustup default stable
+      - run: cargo fmt --check
+      - run: cargo build --release --locked

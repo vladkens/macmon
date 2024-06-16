@@ -1,0 +1,19 @@
+[package]
+name = "macmon"
+version = "0.1.0"
+edition = "2021"
+
+[lints.rust]
+non_camel_case_types = "allow"
+unused_assignments = "allow"
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+clap = {version = "4.5.7", features = ["derive"]}
+core-foundation = "0.9.4"
+crossterm = "0.27.0"
+libc = "0.2.155"
+ratatui = "0.26.3"
+serde_json = "1.0.117"

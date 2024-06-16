@@ -1,0 +1,12 @@
+{
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true,
+  },
+  "terminal.integrated.tabStopWidth": 2,
+  "editor.formatOnSave": true,
+  "code-runner.executorMap": {
+    "rust": "cargo run -r #$fileName",
+  },
+  "files.exclude": { "Cargo.lock": true },
+}
