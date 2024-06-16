@@ -41,7 +41,7 @@ jobs:
 
       - uses: mislav/bump-homebrew-formula-action@v3
         with:
-          homebrew-tap: vladkens/homebrew-apps
+          homebrew-tap: vladkens/homebrew-tap
           formula-name: macmon
           formula-path: macmon.rb
           commit-message: "{{formulaName}} {{version}}"

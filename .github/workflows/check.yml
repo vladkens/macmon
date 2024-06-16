@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - '**'
+    paths:
+      - .github/workflows/*.yml
+      - Cargo.toml
+      - src/**
 
 jobs:
   check:
