@@ -1,15 +1,19 @@
-use crate::metrics::{self, MemoryUsage, PerfSample, SocInfo};
+use crate::metrics::{self, MemoryMetrics, Metrics, SocInfo};
 use crossterm::{
   event::{self, KeyCode, KeyModifiers},
   terminal, ExecutableCommand,
 };
 use ratatui::{prelude::*, widgets::*};
-use std::{error::Error, io::stdout, time::Instant};
+use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
+
+type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
 const MAX_SPARKLINE: usize = 128;
 const BASE_COLOR: Color = Color::LightGreen;
+
+// MARK: Terminal
 
 fn enter_term() -> Terminal<impl Backend> {
   std::panic::set_hook(Box::new(|info| {
@@ -30,7 +34,7 @@ fn leave_term() {
   stdout().execute(terminal::LeaveAlternateScreen).unwrap();
 }
 
-// Metrics
+// MARK: Storage
 
 fn items_add(vec: &mut Vec<u64>, val: u64) -> &Vec<u64> {
   vec.insert(0, val);
@@ -84,7 +88,7 @@ struct MemoryStore {
 }
 
 impl MemoryStore {
-  fn push(&mut self, value: MemoryUsage) {
+  fn push(&mut self, value: MemoryMetrics) {
     items_add(&mut self.items, value.ram_usage);
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
@@ -94,7 +98,7 @@ impl MemoryStore {
   }
 }
 
-// Rendering
+// MARK: Components
 
 fn h_stack(area: Rect) -> (Rect, Rect) {
   let ha = Layout::default()
@@ -111,7 +115,7 @@ fn title_block<'a>(label_l: &str, label_r: &str) -> Block<'a> {
     .border_type(BorderType::Rounded)
     .border_style(BASE_COLOR)
     // .title_style(Style::default().gray())
-    .padding(Padding::horizontal(0));
+    .padding(Padding::zero());
 
   if label_l.len() > 0 {
     block = block.title(block::Title::from(format!(" {label_l} ")).alignment(Alignment::Left));
@@ -170,15 +174,15 @@ fn get_ram_block<'a>(val: &'a MemoryStore) -> Sparkline<'a> {
     .style(BASE_COLOR)
 }
 
-// App
+// MARK: Threads
 
 enum Event {
-  Update(PerfSample),
-  Quit,
+  Update(Metrics),
   Tick,
+  Quit,
 }
 
-fn run_input_loop(tx: mpsc::Sender<Event>, tick: u64) {
+fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   let tick_rate = Duration::from_millis(tick);
 
   std::thread::spawn(move || {
@@ -205,20 +209,22 @@ fn run_input_loop(tx: mpsc::Sender<Event>, tick: u64) {
   });
 }
 
-fn run_perfs_loop(tx: mpsc::Sender<Event>, info: SocInfo, cycle_time: u64) {
+fn run_sampler_thread(tx: mpsc::Sender<Event>, info: SocInfo, cycle_time: u64) {
   let interval = cycle_time.max(100);
   let check_ts = 100;
 
   std::thread::spawn(move || {
-    let mut sub = metrics::SubsChan::new(info).unwrap();
+    let mut sampler = metrics::get_metrics_sampler(info).unwrap();
 
     loop {
-      let data = sub.sample(check_ts).unwrap();
-      tx.send(Event::Update(data)).unwrap();
+      let metrics = sampler.get_metrics(interval).unwrap();
+      tx.send(Event::Update(metrics)).unwrap();
       std::thread::sleep(Duration::from_millis(interval - check_ts));
     }
   });
 }
+
+// MARK: App
 
 #[derive(Debug, Default)]
 pub struct App {
@@ -240,11 +246,11 @@ impl App {
     app
   }
 
-  fn update_metrics(&mut self, data: PerfSample) {
+  fn update_metrics(&mut self, data: Metrics) {
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
-    self.all_power.push(data.all_watts as f64);
+    self.all_power.push(data.all_power as f64);
     self.ecpu_freq.push(data.ecpu_usage.0 as u64, (data.ecpu_usage.1 * 100.0) as u8);
     self.pcpu_freq.push(data.pcpu_usage.0 as u64, (data.pcpu_usage.1 * 100.0) as u8);
     self.gpu_freq.push(data.gpu_usage.0 as u64, (data.gpu_usage.1 * 100.0) as u8);
@@ -266,16 +272,13 @@ impl App {
       self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value
     );
 
-    // let p = LineGauge::default().label(format!("─ {label_l}"));
-    // f.render_widget(p, f.size());
-    // return;
-
     let rows = Layout::default()
       .direction(Direction::Vertical)
       .constraints([Constraint::Fill(2), Constraint::Fill(1)].as_ref())
       .split(f.size());
 
-    let block = title_block(&label_l, "");
+    let brand = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    let block = title_block(&label_l, &brand);
     let iarea = block.inner(rows[0]);
     f.render_widget(block, rows[0]);
 
@@ -309,10 +312,10 @@ impl App {
     f.render_widget(get_power_block("ANE", &self.ane_power), ha[2]);
   }
 
-  pub fn run_loop(&mut self, interval: u64) -> Result<(), Box<dyn Error>> {
+  pub fn run_loop(&mut self, interval: u64) -> WithError<()> {
     let (tx, rx) = mpsc::channel::<Event>();
-    run_input_loop(tx.clone(), 200);
-    run_perfs_loop(tx.clone(), self.info.clone(), interval);
+    run_inputs_thread(tx.clone(), 200);
+    run_sampler_thread(tx.clone(), self.info.clone(), interval);
 
     let mut term = enter_term();
 

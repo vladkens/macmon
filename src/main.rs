@@ -1,15 +1,27 @@
 pub mod app;
-pub mod cfutil;
+pub mod ioreport;
 pub mod metrics;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::error::Error;
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+  /// Print raw metrics data instead of TUI
+  Raw,
+
+  /// Print diagnostic information (all possible metrics)
+  Diagnostic,
+}
 
 /// Sudoless performance monitoring CLI tool for Apple Silicon processors
 /// https://github.com/vladkens/macmon
 #[derive(Debug, Parser)]
 #[command(version, verbatim_doc_comment)]
 struct Cli {
+  #[command(subcommand)]
+  command: Option<Commands>,
+
   /// Update interval in milliseconds
   #[arg(short, long, default_value_t = 1000)]
   interval: u64,
@@ -21,17 +33,23 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
-  let info = metrics::initialize().unwrap();
+  let info = metrics::get_soc_info()?;
+  let interval = args.interval.max(100);
 
-  if args.raw {
-    let mut subs = metrics::SubsChan::new(info)?;
-    loop {
-      let data = subs.sample(args.interval)?;
-      println!("{:?}", data);
+  match &args.command {
+    // Some(Commands::Diagnostic) => metrics::print_diagnostic(info, args.interval)?,
+    Some(Commands::Raw) => {
+      let mut sampler = metrics::get_metrics_sampler(info)?;
+
+      loop {
+        let metrics = sampler.get_metrics(interval)?;
+        println!("{:?}", metrics);
+      }
     }
-  } else {
-    let mut app = app::App::new(info);
-    app.run_loop(args.interval).unwrap();
+    _ => {
+      let mut app = app::App::new(info);
+      app.run_loop(interval)?;
+    }
   }
 
   Ok(())

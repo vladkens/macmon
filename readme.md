@@ -1,4 +1,4 @@
-# macmon
+# macmon – Mac Monitor
 
 <div align="center">
   <img src=".github/macmon.png" alt="macmon preview" />
