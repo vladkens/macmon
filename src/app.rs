@@ -11,7 +11,9 @@ type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
 const MAX_SPARKLINE: usize = 128;
-const BASE_COLOR: Color = Color::LightGreen;
+
+const COLORS_OPTIONS: [Color; 6] =
+  [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan];
 
 // MARK: Terminal
 
@@ -109,77 +111,22 @@ fn h_stack(area: Rect) -> (Rect, Rect) {
   (ha[0], ha[1])
 }
 
-fn title_block<'a>(label_l: &str, label_r: &str) -> Block<'a> {
-  let mut block = Block::new()
-    .borders(Borders::ALL)
-    .border_type(BorderType::Rounded)
-    .border_style(BASE_COLOR)
-    // .title_style(Style::default().gray())
-    .padding(Padding::zero());
-
-  if label_l.len() > 0 {
-    block = block.title(block::Title::from(format!(" {label_l} ")).alignment(Alignment::Left));
-  }
-
-  if label_r.len() > 0 {
-    block = block.title(block::Title::from(format!(" {label_r} ")).alignment(Alignment::Right));
-  }
-
-  block
-}
-
-fn get_freq_block<'a>(label: &str, val: &'a FreqStore) -> Sparkline<'a> {
-  let label = format!("{} {:3}% @ {:4.0} MHz", label, val.usage, val.top_value);
-  Sparkline::default()
-    .block(title_block(label.as_str(), ""))
-    .direction(RenderDirection::RightToLeft)
-    .data(&val.items)
-    .max(100)
-    .style(BASE_COLOR)
-}
-
-fn get_power_block<'a>(label: &str, val: &'a PowerStore) -> Sparkline<'a> {
-  let label = format!(
-    // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
-    "{} {:.2}W (~{:.2}W ^{:.2}W)",
-    // "{} {:.2}W (~{:.2}W ↑{:.2}W)",
-    label,
-    val.top_value,
-    val.avg_value,
-    val.max_value
-  );
-
-  Sparkline::default()
-    .block(title_block(label.as_str(), ""))
-    .direction(RenderDirection::RightToLeft)
-    .data(&val.items)
-    .style(BASE_COLOR)
-}
-
-fn get_ram_block<'a>(val: &'a MemoryStore) -> Sparkline<'a> {
-  let ram_usage_gb = val.ram_usage as f64 / GB as f64;
-  let ram_total_gb = val.ram_total as f64 / GB as f64;
-
-  let swap_usage_gb = val.swap_usage as f64 / GB as f64;
-  let swap_total_gb = val.swap_total as f64 / GB as f64;
-
-  let label_l = format!("RAM {:4.2} / {:4.1} GB", ram_usage_gb, ram_total_gb);
-  let label_r = format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb);
-
-  Sparkline::default()
-    .block(title_block(label_l.as_str(), label_r.as_str()))
-    .direction(RenderDirection::RightToLeft)
-    .data(&val.items)
-    .max(val.ram_total)
-    .style(BASE_COLOR)
-}
-
 // MARK: Threads
 
 enum Event {
   Update(Metrics),
+  Color,
   Tick,
   Quit,
+}
+
+fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithError<()> {
+  match key.code {
+    KeyCode::Char('q') => Ok(tx.send(Event::Quit)?),
+    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
+    KeyCode::Char('c') => Ok(tx.send(Event::Color)?),
+    _ => Ok(()),
+  }
 }
 
 fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
@@ -191,16 +138,11 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
     loop {
       if event::poll(Duration::from_millis(100)).unwrap() {
         match event::read().unwrap() {
-          event::Event::Key(key) => {
-            if key.code == KeyCode::Char('q')
-              || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
-            {
-              tx.send(Event::Quit).unwrap();
-            }
-          }
+          event::Event::Key(key) => handle_key_event(&key, &tx).unwrap(),
           _ => {}
         };
       }
+
       if last_tick.elapsed() >= tick_rate {
         tx.send(Event::Tick).unwrap();
         last_tick = Instant::now();
@@ -228,6 +170,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, info: SocInfo, cycle_time: u64) {
 
 #[derive(Debug, Default)]
 pub struct App {
+  color: Color,
   info: metrics::SocInfo,
   ecpu_freq: FreqStore,
   pcpu_freq: FreqStore,
@@ -242,6 +185,7 @@ pub struct App {
 impl App {
   pub fn new(info: metrics::SocInfo) -> Self {
     let mut app = App::default();
+    app.color = COLORS_OPTIONS[0];
     app.info = info;
     app
   }
@@ -255,6 +199,71 @@ impl App {
     self.pcpu_freq.push(data.pcpu_usage.0 as u64, (data.pcpu_usage.1 * 100.0) as u8);
     self.gpu_freq.push(data.gpu_usage.0 as u64, (data.gpu_usage.1 * 100.0) as u8);
     self.memory.push(data.memory);
+  }
+
+  fn title_block<'a>(&self, label_l: &str, label_r: &str) -> Block<'a> {
+    let mut block = Block::new()
+      .borders(Borders::ALL)
+      .border_type(BorderType::Rounded)
+      .border_style(self.color)
+      // .title_style(Style::default().gray())
+      .padding(Padding::zero());
+
+    if label_l.len() > 0 {
+      block = block.title(block::Title::from(format!(" {label_l} ")).alignment(Alignment::Left));
+    }
+
+    if label_r.len() > 0 {
+      block = block.title(block::Title::from(format!(" {label_r} ")).alignment(Alignment::Right));
+    }
+
+    block
+  }
+
+  fn get_freq_block<'a>(&self, label: &str, val: &'a FreqStore) -> Sparkline<'a> {
+    let label = format!("{} {:3}% @ {:4.0} MHz", label, val.usage, val.top_value);
+    Sparkline::default()
+      .block(self.title_block(label.as_str(), ""))
+      .direction(RenderDirection::RightToLeft)
+      .data(&val.items)
+      .max(100)
+      .style(self.color)
+  }
+
+  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore) -> Sparkline<'a> {
+    let label = format!(
+      // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
+      "{} {:.2}W (~{:.2}W ^{:.2}W)",
+      // "{} {:.2}W (~{:.2}W ↑{:.2}W)",
+      label,
+      val.top_value,
+      val.avg_value,
+      val.max_value
+    );
+
+    Sparkline::default()
+      .block(self.title_block(label.as_str(), ""))
+      .direction(RenderDirection::RightToLeft)
+      .data(&val.items)
+      .style(self.color)
+  }
+
+  fn get_ram_block<'a>(&self, val: &'a MemoryStore) -> Sparkline<'a> {
+    let ram_usage_gb = val.ram_usage as f64 / GB as f64;
+    let ram_total_gb = val.ram_total as f64 / GB as f64;
+
+    let swap_usage_gb = val.swap_usage as f64 / GB as f64;
+    let swap_total_gb = val.swap_total as f64 / GB as f64;
+
+    let label_l = format!("RAM {:4.2} / {:4.1} GB", ram_usage_gb, ram_total_gb);
+    let label_r = format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb);
+
+    Sparkline::default()
+      .block(self.title_block(label_l.as_str(), label_r.as_str()))
+      .direction(RenderDirection::RightToLeft)
+      .data(&val.items)
+      .max(val.ram_total)
+      .style(self.color)
   }
 
   fn render(&self, f: &mut Frame) {
@@ -278,7 +287,7 @@ impl App {
       .split(f.size());
 
     let brand = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    let block = title_block(&label_l, &brand);
+    let block = self.title_block(&label_l, &brand);
     let iarea = block.inner(rows[0]);
     f.render_widget(block, rows[0]);
 
@@ -289,16 +298,16 @@ impl App {
 
     // 1st row
     let (c1, c2) = h_stack(iarea[0]);
-    f.render_widget(get_freq_block("E-CPU", &self.ecpu_freq), c1);
-    f.render_widget(get_freq_block("P-CPU", &self.pcpu_freq), c2);
+    f.render_widget(self.get_freq_block("E-CPU", &self.ecpu_freq), c1);
+    f.render_widget(self.get_freq_block("P-CPU", &self.pcpu_freq), c2);
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
-    f.render_widget(get_ram_block(&self.memory), c1);
-    f.render_widget(get_freq_block("GPU", &self.gpu_freq), c2);
+    f.render_widget(self.get_ram_block(&self.memory), c1);
+    f.render_widget(self.get_freq_block("GPU", &self.gpu_freq), c2);
 
     // 3rd row
-    let block = title_block(&label_r, "");
+    let block = self.title_block(&label_r, "");
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
 
@@ -307,9 +316,9 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(get_power_block("CPU", &self.cpu_power), ha[0]);
-    f.render_widget(get_power_block("GPU", &self.gpu_power), ha[1]);
-    f.render_widget(get_power_block("ANE", &self.ane_power), ha[2]);
+    f.render_widget(self.get_power_block("CPU", &self.cpu_power), ha[0]);
+    f.render_widget(self.get_power_block("GPU", &self.gpu_power), ha[1]);
+    f.render_widget(self.get_power_block("ANE", &self.ane_power), ha[2]);
   }
 
   pub fn run_loop(&mut self, interval: u64) -> WithError<()> {
@@ -323,8 +332,12 @@ impl App {
       term.draw(|f| self.render(f)).unwrap();
 
       match rx.recv()? {
-        Event::Update(data) => self.update_metrics(data),
         Event::Quit => break,
+        Event::Update(data) => self.update_metrics(data),
+        Event::Color => {
+          let idx = COLORS_OPTIONS.iter().position(|&c| c == self.color).unwrap();
+          self.color = COLORS_OPTIONS[(idx + 1) % COLORS_OPTIONS.len()];
+        }
         _ => {}
       }
     }

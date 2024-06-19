@@ -26,4 +26,4 @@ jobs:
 
       - run: rustup update --no-self-update stable && rustup default stable
       - run: cargo fmt --check
-      - run: cargo build --release --locked
+      - run: cargo check --release --locked
