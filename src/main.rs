@@ -1,8 +1,10 @@
 pub mod app;
-pub mod ioreport;
 pub mod metrics;
+pub mod sources;
 
+use app::App;
 use clap::{Parser, Subcommand};
+use metrics::Sampler;
 use std::error::Error;
 
 #[derive(Debug, Subcommand)]
@@ -11,7 +13,7 @@ enum Commands {
   Raw,
 
   /// Print diagnostic information (all possible metrics)
-  Diagnostic,
+  Debug,
 }
 
 /// Sudoless performance monitoring CLI tool for Apple Silicon processors
@@ -33,22 +35,20 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
-  let info = metrics::get_soc_info()?;
-  let interval = args.interval.max(100);
+  let msec = args.interval.max(100);
 
   match &args.command {
-    // Some(Commands::Diagnostic) => metrics::print_diagnostic(info, args.interval)?,
     Some(Commands::Raw) => {
-      let mut sampler = metrics::get_metrics_sampler(info)?;
+      let mut sampler = Sampler::new()?;
 
       loop {
-        let metrics = sampler.get_metrics(interval)?;
+        let metrics = sampler.get_metrics(msec)?;
         println!("{:?}", metrics);
       }
     }
     _ => {
-      let mut app = app::App::new(info);
-      app.run_loop(interval)?;
+      let mut app = App::new()?;
+      app.run_loop(msec)?;
     }
   }
 

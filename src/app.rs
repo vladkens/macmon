@@ -1,11 +1,17 @@
-use crate::metrics::{self, MemoryMetrics, Metrics, SocInfo};
+use std::{io::stdout, time::Instant};
+use std::{sync::mpsc, time::Duration};
+
 use crossterm::{
   event::{self, KeyCode, KeyModifiers},
   terminal, ExecutableCommand,
 };
 use ratatui::{prelude::*, widgets::*};
-use std::{io::stdout, time::Instant};
-use std::{sync::mpsc, time::Duration};
+
+use crate::metrics::{Metrics, Sampler};
+use crate::{
+  metrics::{MemMetrics, TempMetrics},
+  sources::SocInfo,
+};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -15,7 +21,7 @@ const MAX_SPARKLINE: usize = 128;
 const COLORS_OPTIONS: [Color; 6] =
   [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan];
 
-// MARK: Terminal
+// MARK: Term utils
 
 fn enter_term() -> Terminal<impl Backend> {
   std::panic::set_hook(Box::new(|info| {
@@ -38,7 +44,7 @@ fn leave_term() {
 
 // MARK: Storage
 
-fn items_add(vec: &mut Vec<u64>, val: u64) -> &Vec<u64> {
+fn items_add<T>(vec: &mut Vec<T>, val: T) -> &Vec<T> {
   vec.insert(0, val);
   if vec.len() > MAX_SPARKLINE {
     vec.pop();
@@ -55,7 +61,6 @@ struct FreqStore {
 
 impl FreqStore {
   fn push(&mut self, value: u64, usage: u8) {
-    // items_add(&mut self.items, value);
     items_add(&mut self.items, usage as u64);
     self.top_value = value;
     self.usage = usage;
@@ -90,7 +95,7 @@ struct MemoryStore {
 }
 
 impl MemoryStore {
-  fn push(&mut self, value: MemoryMetrics) {
+  fn push(&mut self, value: MemMetrics) {
     items_add(&mut self.items, value.ram_usage);
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
@@ -151,12 +156,12 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   });
 }
 
-fn run_sampler_thread(tx: mpsc::Sender<Event>, info: SocInfo, cycle_time: u64) {
-  let interval = cycle_time.max(100);
+fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: u64) {
+  let interval = msec.max(100);
   let check_ts = 100;
 
   std::thread::spawn(move || {
-    let mut sampler = metrics::get_metrics_sampler(info).unwrap();
+    let mut sampler = Sampler::new().unwrap();
 
     loop {
       let metrics = sampler.get_metrics(interval).unwrap();
@@ -171,23 +176,25 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, info: SocInfo, cycle_time: u64) {
 #[derive(Debug, Default)]
 pub struct App {
   color: Color,
-  info: metrics::SocInfo,
-  ecpu_freq: FreqStore,
-  pcpu_freq: FreqStore,
-  gpu_freq: FreqStore,
+
+  soc: SocInfo,
+  mem: MemoryStore,
+  temp: TempMetrics,
+
   cpu_power: PowerStore,
   gpu_power: PowerStore,
   ane_power: PowerStore,
   all_power: PowerStore,
-  memory: MemoryStore,
+
+  ecpu_freq: FreqStore,
+  pcpu_freq: FreqStore,
+  igpu_freq: FreqStore,
 }
 
 impl App {
-  pub fn new(info: metrics::SocInfo) -> Self {
-    let mut app = App::default();
-    app.color = COLORS_OPTIONS[0];
-    app.info = info;
-    app
+  pub fn new() -> WithError<Self> {
+    let soc = SocInfo::new()?;
+    Ok(Self { color: COLORS_OPTIONS[0], soc, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -197,8 +204,9 @@ impl App {
     self.all_power.push(data.all_power as f64);
     self.ecpu_freq.push(data.ecpu_usage.0 as u64, (data.ecpu_usage.1 * 100.0) as u8);
     self.pcpu_freq.push(data.pcpu_usage.0 as u64, (data.pcpu_usage.1 * 100.0) as u8);
-    self.gpu_freq.push(data.gpu_usage.0 as u64, (data.gpu_usage.1 * 100.0) as u8);
-    self.memory.push(data.memory);
+    self.igpu_freq.push(data.gpu_usage.0 as u64, (data.gpu_usage.1 * 100.0) as u8);
+    self.temp = data.temp;
+    self.mem.push(data.memory);
   }
 
   fn title_block<'a>(&self, label_l: &str, label_r: &str) -> Block<'a> {
@@ -230,25 +238,27 @@ impl App {
       .style(self.color)
   }
 
-  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore) -> Sparkline<'a> {
-    let label = format!(
+  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
+    let label_l = format!(
+      "{} {:.2}W ({:.1} / {:.1})",
       // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
-      "{} {:.2}W (~{:.2}W ^{:.2}W)",
-      // "{} {:.2}W (~{:.2}W ↑{:.2}W)",
+      // "{} {:.2}W (~{:.2}W ^{:.2}W)",
       label,
       val.top_value,
       val.avg_value,
       val.max_value
     );
 
+    let label_r = if temp > 0.0 { format!("{:.1}°C", temp) } else { "".to_string() };
+
     Sparkline::default()
-      .block(self.title_block(label.as_str(), ""))
+      .block(self.title_block(label_l.as_str(), label_r.as_str()))
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
       .style(self.color)
   }
 
-  fn get_ram_block<'a>(&self, val: &'a MemoryStore) -> Sparkline<'a> {
+  fn get_mem_block<'a>(&self, val: &'a MemoryStore) -> Sparkline<'a> {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
 
@@ -266,14 +276,14 @@ impl App {
       .style(self.color)
   }
 
-  fn render(&self, f: &mut Frame) {
+  fn render(&mut self, f: &mut Frame) {
     let label_l = format!(
       "{} ({}E+{}P+{}GPU {}GB)",
-      self.info.chip_name,
-      self.info.ecpu_cores,
-      self.info.pcpu_cores,
-      self.info.gpu_cores,
-      self.info.memory_gb,
+      self.soc.chip_name,
+      self.soc.ecpu_cores,
+      self.soc.pcpu_cores,
+      self.soc.gpu_cores,
+      self.soc.memory_gb,
     );
 
     let label_r = format!(
@@ -303,8 +313,8 @@ impl App {
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
-    f.render_widget(self.get_ram_block(&self.memory), c1);
-    f.render_widget(self.get_freq_block("GPU", &self.gpu_freq), c2);
+    f.render_widget(self.get_mem_block(&self.mem), c1);
+    f.render_widget(self.get_freq_block("GPU", &self.igpu_freq), c2);
 
     // 3rd row
     let block = self.title_block(&label_r, "");
@@ -316,15 +326,15 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(self.get_power_block("CPU", &self.cpu_power), ha[0]);
-    f.render_widget(self.get_power_block("GPU", &self.gpu_power), ha[1]);
-    f.render_widget(self.get_power_block("ANE", &self.ane_power), ha[2]);
+    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.temp.cpu_temp_avg), ha[0]);
+    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.temp.gpu_temp_avg), ha[1]);
+    f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
   }
 
   pub fn run_loop(&mut self, interval: u64) -> WithError<()> {
     let (tx, rx) = mpsc::channel::<Event>();
     run_inputs_thread(tx.clone(), 200);
-    run_sampler_thread(tx.clone(), self.info.clone(), interval);
+    run_sampler_thread(tx.clone(), interval);
 
     let mut term = enter_term();
 

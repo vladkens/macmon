@@ -9,4 +9,5 @@
     "rust": "cargo run -r #$fileName",
   },
   "files.exclude": { "Cargo.lock": true },
+  "rust-analyzer.lens.implementations.enable": false,
 }

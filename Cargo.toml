@@ -6,6 +6,7 @@ edition = "2021"
 [lints.rust]
 non_camel_case_types = "allow"
 unused_assignments = "allow"
+unreachable_code = "allow"
 
 [profile.release]
 panic = "abort"
