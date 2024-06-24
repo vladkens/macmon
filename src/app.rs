@@ -240,7 +240,7 @@ impl App {
 
   fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
     let label_l = format!(
-      "{} {:.2}W ({:.1} / {:.1})",
+      "{} {:.2}W ({:.2}, {:.2})",
       // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
       // "{} {:.2}W (~{:.2}W ^{:.2}W)",
       label,

@@ -7,8 +7,9 @@ use crate::sources::{
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
-const CPU_POWER_SUBG: &str = "CPU Complex Performance States";
-const GPU_POWER_SUBG: &str = "GPU Performance States";
+// const CPU_FREQ_DICE_SUBG: &str = "CPU Complex Performance States";
+const CPU_FREQ_CORE_SUBG: &str = "CPU Core Performance States";
+const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 
 // MARK: Structs
 
@@ -47,7 +48,7 @@ fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T) -> 
 }
 
 fn calc_freq(item: CFDictionaryRef, freqs: &Vec<u32>) -> (u32, f32) {
-  let residencies = cfio_get_residencies(item);
+  let residencies = cfio_get_residencies(item); // (ns, freq)
   let (len1, len2) = (residencies.len(), freqs.len());
   assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
 
@@ -55,6 +56,7 @@ fn calc_freq(item: CFDictionaryRef, freqs: &Vec<u32>) -> (u32, f32) {
   let usage = residencies.iter().map(|x| x.1 as f64).skip(1).sum::<f64>();
   let total = residencies.iter().map(|x| x.1 as f64).sum::<f64>();
   let count = freqs.len();
+  // println!("{:?}", residencies);
 
   let mut freq = 0f64;
   for i in 0..count {
@@ -63,10 +65,19 @@ fn calc_freq(item: CFDictionaryRef, freqs: &Vec<u32>) -> (u32, f32) {
   }
 
   let percent = zero_div(usage, total);
+  let min_freq = freqs.first().unwrap().clone() as f64;
   let max_freq = freqs.last().unwrap().clone() as f64;
-  let from_max = (freq * percent) / max_freq;
+  let from_max = (freq.max(min_freq) * percent) / max_freq;
 
   (freq as u32, from_max as f32)
+}
+
+fn calc_freq_final(items: &Vec<(u32, f32)>, freqs: &Vec<u32>) -> (u32, f32) {
+  let avg_freq = zero_div(items.iter().map(|x| x.0 as f32).sum(), items.len() as f32);
+  let avg_perc = zero_div(items.iter().map(|x| x.1 as f32).sum(), items.len() as f32);
+  let min_freq = freqs.first().unwrap().clone() as f32;
+
+  (avg_freq.max(min_freq) as u32, avg_perc)
 }
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
@@ -90,6 +101,9 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
       Ok(val) => val,
       Err(_) => continue,
     };
+
+    // Unfortunately, it is not known which keys are responsible for what.
+    // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
     match name {
       name if name.starts_with("Tp") => cpu_sensors.push(name.clone()),
@@ -116,9 +130,10 @@ pub struct Sampler {
 impl Sampler {
   pub fn new() -> WithError<Self> {
     let channels = vec![
-      ("Energy Model", None),              // cpu+gpu+ane power
-      ("CPU Stats", Some(CPU_POWER_SUBG)), // cpu freq by cluster
-      ("GPU Stats", Some(GPU_POWER_SUBG)), // gpu freq
+      ("Energy Model", None), // cpu/gpu/ane power
+      // ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
+      ("CPU Stats", Some(CPU_FREQ_CORE_SUBG)), // cpu freq per core
+      ("GPU Stats", Some(GPU_FREQ_DICE_SUBG)), // gpu freq
     ];
 
     let soc = SocInfo::new()?;
@@ -193,16 +208,31 @@ impl Sampler {
   pub fn get_metrics(&mut self, duration: u64) -> WithError<Metrics> {
     let mut rs = Metrics::default();
 
+    let mut ecpu_usages = Vec::new();
+    let mut pcpu_usages = Vec::new();
+
     for x in self.ior.get_sample(duration) {
-      if x.group == "CPU Stats" && x.subgroup == CPU_POWER_SUBG {
-        match x.channel.as_str() {
-          "ECPU" => rs.ecpu_usage = calc_freq(x.item, &self.soc.ecpu_freqs),
-          "PCPU" => rs.pcpu_usage = calc_freq(x.item, &self.soc.pcpu_freqs),
-          _ => {}
+      // if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_DICE_SUBG {
+      //   match x.channel.as_str() {
+      //     "ECPU" => rs.ecpu_usage = calc_freq(x.item, &self.soc.ecpu_freqs),
+      //     "PCPU" => rs.pcpu_usage = calc_freq(x.item, &self.soc.pcpu_freqs),
+      //     _ => {}
+      //   }
+      // }
+
+      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
+        if x.channel.contains("ECPU") {
+          ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
+          continue;
+        }
+
+        if x.channel.contains("PCPU") {
+          pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
+          continue;
         }
       }
 
-      if x.group == "GPU Stats" && x.subgroup == GPU_POWER_SUBG {
+      if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
         match x.channel.as_str() {
           "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..].to_vec()),
           _ => {}
@@ -218,6 +248,14 @@ impl Sampler {
         }
       }
     }
+
+    // println!("----------");
+    // println!("{:?}", ecpu_usages);
+    // println!("{:?}", pcpu_usages);
+    // println!("1 {:?} {:?}", rs.ecpu_usage, rs.pcpu_usage);
+    rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
+    rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+    // println!("2 {:?} {:?}", rs.ecpu_usage, rs.pcpu_usage);
 
     rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
     rs.memory = self.get_mem()?;
