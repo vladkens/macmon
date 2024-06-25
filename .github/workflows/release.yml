@@ -28,7 +28,6 @@ jobs:
       - name: archiving
         id: archive
         run: |
-          strip target/release/macmon
           cp target/release/macmon macmon
           tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
           ls -lah | grep macmon

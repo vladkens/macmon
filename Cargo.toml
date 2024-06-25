@@ -1,6 +1,6 @@
 [package]
 name = "macmon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lints.rust]
@@ -10,6 +10,7 @@ unreachable_code = "allow"
 
 [profile.release]
 panic = "abort"
+strip = false
 
 [dependencies]
 clap = {version = "4.5.7", features = ["derive"]}

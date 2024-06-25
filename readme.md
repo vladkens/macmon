@@ -1,4 +1,8 @@
-# macmon – Mac Monitor
+# `macmon` – Mac Monitor
+
+[<img src="https://badgen.net/github/release/vladkens/macmon" alt="version" />](https://github.com/vladkens/macmon/releases)
+[<img src="https://badgen.net/github/license/vladkens/macmon" alt="license" />](https://github.com/vladkens/macmon/blob/main/LICENSE)
+[<img src="https://badgen.net/static/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 <div align="center">
   <img src=".github/macmon.png" alt="macmon preview" />
@@ -17,6 +21,8 @@ Apple Silicon processors don't provide an easy way to see live power consumption
 - 📊 CPU utilization per cluster
 - 💾 RAM / Swap usage
 - 📈 Historical charts + avg / max values
+- 🌡️ Average CPU / GPU temperature
+- 🎨 Switchable colors (6 variants)
 - 🪟 Can be rendered in a small window
 - 🦀 Written in Rust
 
@@ -51,13 +57,20 @@ sudo cp target/release/macmon /usr/local/bin
 ## 🚀 Usage
 
 ```sh
-Usage: macmon [OPTIONS]
+Usage: macmon [OPTIONS] [COMMAND]
+
+Commands:
+  raw   Print raw metrics data instead of TUI
+  help  Print this message or the help of the given subcommand(s)
 
 Options:
   -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
-      --raw                  Print raw data instead of TUI
   -h, --help                 Print help
   -V, --version              Print version
+
+Controls:
+  c - change color
+  q - quit
 ```
 
 ## 🤝 Contributing
