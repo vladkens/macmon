@@ -1,8 +1,7 @@
 use core_foundation::dictionary::CFDictionaryRef;
 
 use crate::sources::{
-  cfio_get_residencies, cfio_watts, libc_ram_info, libc_swap_info, IOHIDSensors, IOReport, SocInfo,
-  SMC,
+  cfio_get_residencies, cfio_watts, libc_ram, libc_swap, IOHIDSensors, IOReport, SocInfo, SMC,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -200,8 +199,8 @@ impl Sampler {
   }
 
   fn get_mem(&mut self) -> WithError<MemMetrics> {
-    let (ram_usage, ram_total) = libc_ram_info()?;
-    let (swap_usage, swap_total) = libc_swap_info()?;
+    let (ram_usage, ram_total) = libc_ram()?;
+    let (swap_usage, swap_total) = libc_swap()?;
     Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
   }
 

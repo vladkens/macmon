@@ -1,4 +1,5 @@
 pub mod app;
+pub mod debug;
 pub mod metrics;
 pub mod sources;
 
@@ -12,7 +13,7 @@ enum Commands {
   /// Print raw metrics data instead of TUI
   Raw,
 
-  /// Print diagnostic information (all possible metrics)
+  /// Print raw metrics data instead of TUI
   Debug,
 }
 
@@ -27,10 +28,6 @@ struct Cli {
   /// Update interval in milliseconds
   #[arg(short, long, default_value_t = 1000)]
   interval: u64,
-
-  /// Print raw data instead of TUI
-  #[arg(long, default_value_t = false)]
-  raw: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -46,6 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{:?}", metrics);
       }
     }
+    Some(Commands::Debug) => debug::print_debug()?,
     _ => {
       let mut app = App::new()?;
       app.run_loop(msec)?;

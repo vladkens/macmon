@@ -287,7 +287,7 @@ impl Iterator for IOReportIterator {
 
 // MARK: RAM
 
-pub fn libc_ram_info() -> WithError<(u64, u64)> {
+pub fn libc_ram() -> WithError<(u64, u64)> {
   let (mut usage, mut total) = (0u64, 0u64);
 
   unsafe {
@@ -339,7 +339,7 @@ pub fn libc_ram_info() -> WithError<(u64, u64)> {
   Ok((usage, total))
 }
 
-pub fn libc_swap_info() -> WithError<(u64, u64)> {
+pub fn libc_swap() -> WithError<(u64, u64)> {
   let (mut usage, mut total) = (0u64, 0u64);
 
   unsafe {
@@ -371,6 +371,7 @@ pub fn libc_swap_info() -> WithError<(u64, u64)> {
 
 #[derive(Debug, Default, Clone)]
 pub struct SocInfo {
+  pub mac_model: String,
   pub chip_name: String,
   pub memory_gb: u8,
   pub ecpu_cores: u8,
@@ -388,7 +389,7 @@ impl SocInfo {
 }
 
 // dynamic voltage and frequency scaling
-fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
+pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
   unsafe {
     let obj = cfdict_get_val(dict, key).unwrap() as CFDataRef;
     let obj_len = CFDataGetLength(obj);
@@ -423,6 +424,9 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   // SPHardwareDataType.0.chip_type
   let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap().to_string();
 
+  // SPHardwareDataType.0.machine_model
+  let mac_model = out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap().to_string();
+
   // SPHardwareDataType.0.physical_memory -> "x GB"
   let mem_gb = out["SPHardwareDataType"][0]["physical_memory"].as_str();
   let mem_gb = mem_gb.expect("No memory found").strip_suffix(" GB").unwrap();
@@ -441,6 +445,7 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   };
 
   info.chip_name = chip_name;
+  info.mac_model = mac_model;
   info.memory_gb = mem_gb as u8;
   info.gpu_cores = gpu_cores as u8;
   info.ecpu_cores = ecpu_cores as u8;
@@ -450,6 +455,8 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
+      // `strings /usr/bin/powermetrics | grep voltage-states` uses non sram keys
+      // but their values are zero, so sram used here, its looks valid
       info.ecpu_freqs = get_dvfs_mhz(item, "voltage-states1-sram").1;
       info.pcpu_freqs = get_dvfs_mhz(item, "voltage-states5-sram").1;
       info.gpu_freqs = get_dvfs_mhz(item, "voltage-states9").1;
