@@ -176,6 +176,7 @@ pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithEr
   let val = val / (duration as f32 / 1000.0);
   match unit.as_str() {
     "mJ" => Ok(val / 1e3f32),
+    "uJ" => Ok(val / 1e6f32),
     "nJ" => Ok(val / 1e9f32),
     _ => Err(format!("Invalid energy unit: {}", unit).into()),
   }
@@ -409,17 +410,20 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
   }
 }
 
-pub fn get_soc_info() -> WithError<SocInfo> {
-  let mut info = SocInfo::default();
-
+pub fn run_system_profiler() -> WithError<serde_json::Value> {
   // system_profiler -listDataTypes
   let out = std::process::Command::new("system_profiler")
-    .args(&["SPHardwareDataType", "SPDisplaysDataType", "-json"])
-    .output()
-    .unwrap();
+    .args(&["SPHardwareDataType", "SPDisplaysDataType", "SPSoftwareDataType", "-json"])
+    .output()?;
 
-  let out = std::str::from_utf8(&out.stdout).unwrap();
-  let out = serde_json::from_str::<serde_json::Value>(out).unwrap();
+  let out = std::str::from_utf8(&out.stdout)?;
+  let out = serde_json::from_str::<serde_json::Value>(out)?;
+  Ok(out)
+}
+
+pub fn get_soc_info() -> WithError<SocInfo> {
+  let out = run_system_profiler()?;
+  let mut info = SocInfo::default();
 
   // SPHardwareDataType.0.chip_type
   let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap().to_string();
@@ -779,6 +783,7 @@ impl SMC {
       return Err("SMC key must be 4 bytes long".into());
     }
 
+    // key is FourCC
     let key = key.bytes().fold(0, |acc, x| (acc << 8) + x as u32);
     if let Some(ki) = self.keys.get(&key) {
       // println!("cache hit for {}", key);

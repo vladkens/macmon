@@ -1,7 +1,7 @@
 use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
 
-use crossterm::{
+use ratatui::crossterm::{
   event::{self, KeyCode, KeyModifiers},
   terminal, ExecutableCommand,
 };
@@ -18,8 +18,8 @@ type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 const GB: u64 = 1024 * 1024 * 1024;
 const MAX_SPARKLINE: usize = 128;
 
-const COLORS_OPTIONS: [Color; 6] =
-  [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan];
+const COLORS_OPTIONS: [Color; 7] =
+  [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
 // MARK: Term utils
 
@@ -185,6 +185,7 @@ pub struct App {
   gpu_power: PowerStore,
   ane_power: PowerStore,
   all_power: PowerStore,
+  sys_power: PowerStore,
 
   ecpu_freq: FreqStore,
   pcpu_freq: FreqStore,
@@ -202,6 +203,7 @@ impl App {
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
     self.all_power.push(data.all_power as f64);
+    self.sys_power.push(data.sys_power as f64);
     self.ecpu_freq.push(data.ecpu_usage.0 as u64, (data.ecpu_usage.1 * 100.0) as u8);
     self.pcpu_freq.push(data.pcpu_usage.0 as u64, (data.pcpu_usage.1 * 100.0) as u8);
     self.igpu_freq.push(data.gpu_usage.0 as u64, (data.gpu_usage.1 * 100.0) as u8);
@@ -215,7 +217,7 @@ impl App {
       .border_type(BorderType::Rounded)
       .border_style(self.color)
       // .title_style(Style::default().gray())
-      .padding(Padding::zero());
+      .padding(Padding::ZERO);
 
     if label_l.len() > 0 {
       block = block.title(block::Title::from(format!(" {label_l} ")).alignment(Alignment::Left));
@@ -286,11 +288,6 @@ impl App {
       self.soc.memory_gb,
     );
 
-    let label_r = format!(
-      "Power: {:.2}W (avg: {:.2}W, max: {:.2}W)",
-      self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value
-    );
-
     let rows = Layout::default()
       .direction(Direction::Vertical)
       .constraints([Constraint::Fill(2), Constraint::Fill(1)].as_ref())
@@ -317,7 +314,25 @@ impl App {
     f.render_widget(self.get_freq_block("GPU", &self.igpu_freq), c2);
 
     // 3rd row
-    let block = self.title_block(&label_r, "");
+
+    let label_l = format!(
+      "Power: {:.2}W (avg {:.2}W, max {:.2}W)",
+      self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
+    );
+
+    // Show label only if sensor is available
+    let label_r = if self.sys_power.top_value > 0.0 {
+      format!(
+        "Total {:.2}W ({:.2}, {:.2})",
+        self.sys_power.top_value, self.sys_power.avg_value, self.sys_power.max_value
+      )
+    } else {
+      "".to_string()
+    };
+
+    let block = self.title_block(&label_l, &label_r);
+    let usage = " Press 'q' to quit, 'c' to change color ";
+    let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
 

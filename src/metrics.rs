@@ -37,6 +37,7 @@ pub struct Metrics {
   pub gpu_power: f32,         // Watts
   pub ane_power: f32,         // Watts
   pub all_power: f32,         // Watts
+  pub sys_power: f32,         // Watts
 }
 
 // MARK: Helpers
@@ -192,6 +193,7 @@ impl Sampler {
 
   fn get_temp(&mut self) -> WithError<TempMetrics> {
     // HID for M1, SMC for M2/M3
+    // UPD: Looks like HID/SMC related to OS version, not to the chip (SMC available from macOS 14)
     match self.smc_cpu_keys.len() > 0 {
       true => self.get_temp_smc(),
       false => self.get_temp_hid(),
@@ -202,6 +204,12 @@ impl Sampler {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
     Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
+  }
+
+  fn get_sys_power(&mut self) -> WithError<f32> {
+    let val = self.smc.read_val("PSTR")?;
+    let val = f32::from_le_bytes(val.data.clone().try_into().unwrap());
+    Ok(val)
   }
 
   pub fn get_metrics(&mut self, duration: u64) -> WithError<Metrics> {
@@ -259,6 +267,11 @@ impl Sampler {
     rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
+
+    rs.sys_power = match self.get_sys_power() {
+      Ok(val) => val.max(rs.all_power),
+      Err(_) => 0.0,
+    };
 
     Ok(rs)
   }
