@@ -25,6 +25,9 @@ jobs:
       - run: rustup update --no-self-update stable && rustup default stable
       - run: cargo fmt --check
       - run: cargo build --release --locked
+
+      - name: check version
+        run: ./macmon -V | grep "${GITHUB_REF_NAME#v}" || exit 1
       - name: archiving
         id: archive
         run: |
