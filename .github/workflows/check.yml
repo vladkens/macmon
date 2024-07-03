@@ -27,3 +27,15 @@ jobs:
       - run: rustup update --no-self-update stable && rustup default stable
       - run: cargo fmt --check
       - run: cargo check --release --locked
+
+      - run: cargo build --release --locked
+      - run: |
+          cp target/release/macmon macmon
+          tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
+          ls -lah | grep macmon
+        id: archive
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macmon-${{ github.ref_name }}.tar.gz
+          path: macmon-${{ github.ref_name }}.tar.gz

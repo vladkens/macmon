@@ -566,6 +566,7 @@ impl Drop for IOReport {
 }
 
 // MARK: IOHID Bindings
+// referenced from: https://github.com/freedomtan/sensors/blob/master/sensors/sensors.m
 
 #[repr(C)]
 struct IOHIDServiceClient(libc::c_void);
@@ -625,8 +626,15 @@ impl IOHIDSensors {
   pub fn get_metrics(&self) -> Vec<(String, f32)> {
     unsafe {
       let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+      if system.is_null() {
+        return vec![];
+      }
+
       IOHIDEventSystemClientSetMatching(system, self.sensors);
       let services = IOHIDEventSystemClientCopyServices(system);
+      if services.is_null() {
+        return vec![];
+      }
 
       let mut items = vec![] as Vec<(String, f32)>;
       for i in 0..CFArrayGetCount(services) {
@@ -635,9 +643,11 @@ impl IOHIDSensors {
         let name = from_cfstr(name);
 
         let event = IOHIDServiceClientCopyEvent(sc, kIOHIDEventTypeTemperature, 0, 0);
-        let temp = IOHIDEventGetFloatValue(event, kIOHIDEventTypeTemperature << 16);
-        CFRelease(event as _);
-        items.push((name, temp as f32));
+        if !event.is_null() {
+          let temp = IOHIDEventGetFloatValue(event, kIOHIDEventTypeTemperature << 16);
+          CFRelease(event as _);
+          items.push((name, temp as f32));
+        }
       }
 
       CFRelease(services as _);

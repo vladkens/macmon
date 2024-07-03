@@ -7,7 +7,7 @@ use crate::sources::{
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
-fn divider(msg: &str) {
+fn print_divider(msg: &str) {
   if msg.len() == 0 {
     println!("{}", "-".repeat(80));
     return;
@@ -26,7 +26,7 @@ pub fn print_debug() -> WithError<()> {
   let procs = out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap().to_string();
   println!("Chip: {} | Model: {} | OS: {} | {}", chip, model, os_ver, procs);
 
-  divider("AppleARMIODevice");
+  print_divider("AppleARMIODevice");
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
@@ -49,7 +49,7 @@ pub fn print_debug() -> WithError<()> {
     }
   }
 
-  divider("IOReport");
+  print_divider("IOReport");
   let channels = vec![
     ("Energy Model", None),
     ("CPU Stats", Some("CPU Complex Performance States")),
@@ -67,15 +67,15 @@ pub fn print_debug() -> WithError<()> {
     }
   }
 
-  divider("IOHID");
+  print_divider("IOHID");
   let hid = IOHIDSensors::new()?;
   for (key, val) in hid.get_metrics() {
     println!("{:>32}: {:6.2}", key, val);
   }
 
+  print_divider("SMC temp sensors");
   const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
-  divider("SMC temp sensors");
   let mut smc = SMC::new()?;
   let keys = smc.read_all_keys().unwrap_or(vec![]);
   for key in &keys {
@@ -103,7 +103,7 @@ pub fn print_debug() -> WithError<()> {
   }
 
   println!(""); // close previous line
-  divider("");
+  print_divider("");
 
   Ok(())
 }
