@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - '**'
+    tags-ignore:
+      - 'v*'
     paths:
       - .github/workflows/*.yml
       - Cargo.toml
@@ -39,3 +41,4 @@ jobs:
         with:
           name: macmon-${{ github.ref_name }}.tar.gz
           path: macmon-${{ github.ref_name }}.tar.gz
+          retention-days: 7
