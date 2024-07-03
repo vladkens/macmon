@@ -27,7 +27,8 @@ jobs:
       - run: cargo build --release --locked
 
       - name: check version
-        run: ./macmon -V | grep "${GITHUB_REF_NAME#v}" || exit 1
+        run: ./target/release/macmon -V | grep "${GITHUB_REF_NAME#v}" || exit 1
+
       - name: archiving
         id: archive
         run: |
