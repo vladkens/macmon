@@ -625,41 +625,38 @@ impl IOHIDSensors {
 
   pub fn get_metrics(&self) -> Vec<(String, f32)> {
     unsafe {
-      let system = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-      if system.is_null() {
-        eprintln!("Failed to create event system");
-        return vec![];
-      }
+      let system = match IOHIDEventSystemClientCreate(kCFAllocatorDefault) {
+        x if x.is_null() => return vec![],
+        x => x,
+      };
 
       IOHIDEventSystemClientSetMatching(system, self.sensors);
-      let services = IOHIDEventSystemClientCopyServices(system);
-      if services.is_null() {
-        eprintln!("Failed to get services");
-        return vec![];
-      }
+
+      let services = match IOHIDEventSystemClientCopyServices(system) {
+        x if x.is_null() => return vec![],
+        x => x,
+      };
 
       let mut items = vec![] as Vec<(String, f32)>;
       for i in 0..CFArrayGetCount(services) {
-        let sc = CFArrayGetValueAtIndex(services, i) as IOHIDServiceClientRef;
-        if sc.is_null() {
-          eprintln!("Failed to get service client");
-          continue;
-        }
+        let sc = match CFArrayGetValueAtIndex(services, i) as IOHIDServiceClientRef {
+          x if x.is_null() => continue,
+          x => x,
+        };
 
-        let name = IOHIDServiceClientCopyProperty(sc, cfstr("Product"));
-        if name.is_null() {
-          eprintln!("Failed to get product name");
-          continue;
-        }
-        let name = from_cfstr(name);
+        let name = match IOHIDServiceClientCopyProperty(sc, cfstr("Product")) {
+          x if x.is_null() => continue,
+          x => from_cfstr(x),
+        };
 
-        let event = IOHIDServiceClientCopyEvent(sc, kIOHIDEventTypeTemperature, 0, 0);
-        if !event.is_null() {
-          eprintln!("Failed to get event. Sensor: {}. Skipping...", name);
-          let temp = IOHIDEventGetFloatValue(event, kIOHIDEventTypeTemperature << 16);
-          CFRelease(event as _);
-          items.push((name, temp as f32));
-        }
+        let event = match IOHIDServiceClientCopyEvent(sc, kIOHIDEventTypeTemperature, 0, 0) {
+          x if x.is_null() => continue,
+          x => x,
+        };
+
+        let temp = IOHIDEventGetFloatValue(event, kIOHIDEventTypeTemperature << 16);
+        CFRelease(event as _);
+        items.push((name, temp as f32));
       }
 
       CFRelease(services as _);

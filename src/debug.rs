@@ -67,12 +67,6 @@ pub fn print_debug() -> WithError<()> {
     }
   }
 
-  print_divider("IOHID");
-  let hid = IOHIDSensors::new()?;
-  for (key, val) in hid.get_metrics() {
-    println!("{:>32}: {:6.2}", key, val);
-  }
-
   print_divider("SMC temp sensors");
   const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
@@ -103,7 +97,12 @@ pub fn print_debug() -> WithError<()> {
   }
 
   println!(""); // close previous line
-  print_divider("");
+
+  print_divider("IOHID");
+  let hid = IOHIDSensors::new()?;
+  for (key, val) in hid.get_metrics() {
+    println!("{:>32}: {:6.2}", key, val);
+  }
 
   Ok(())
 }
