@@ -13,8 +13,9 @@ panic = "abort"
 strip = false
 
 [dependencies]
-clap = {version = "4.5.19", features = ["derive"]}
+clap = { version = "4.5.19", features = ["derive"] }
 core-foundation = "0.10.0"
 libc = "0.2.159"
-ratatui = "0.28.1"
+ratatui = { version = "0.28.1", features = ["serde"] }
+serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"

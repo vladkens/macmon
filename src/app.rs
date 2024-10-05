@@ -7,6 +7,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 
+use crate::config::Config;
 use crate::metrics::{Metrics, Sampler};
 use crate::{
   metrics::{MemMetrics, TempMetrics},
@@ -17,9 +18,6 @@ type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
 const MAX_SPARKLINE: usize = 128;
-
-const COLORS_OPTIONS: [Color; 7] =
-  [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
 // MARK: Term utils
 
@@ -175,7 +173,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: u64) {
 
 #[derive(Debug, Default)]
 pub struct App {
-  color: Color,
+  cfg: Config,
 
   soc: SocInfo,
   mem: MemoryStore,
@@ -195,7 +193,8 @@ pub struct App {
 impl App {
   pub fn new() -> WithError<Self> {
     let soc = SocInfo::new()?;
-    Ok(Self { color: COLORS_OPTIONS[0], soc, ..Default::default() })
+    let cfg = Config::load();
+    Ok(Self { cfg, soc, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -215,7 +214,7 @@ impl App {
     let mut block = Block::new()
       .borders(Borders::ALL)
       .border_type(BorderType::Rounded)
-      .border_style(self.color)
+      .border_style(self.cfg.color)
       // .title_style(Style::default().gray())
       .padding(Padding::ZERO);
 
@@ -237,7 +236,7 @@ impl App {
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
       .max(100)
-      .style(self.color)
+      .style(self.cfg.color)
   }
 
   fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
@@ -257,7 +256,7 @@ impl App {
       .block(self.title_block(label_l.as_str(), label_r.as_str()))
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
-      .style(self.color)
+      .style(self.cfg.color)
   }
 
   fn get_mem_block<'a>(&self, val: &'a MemoryStore) -> Sparkline<'a> {
@@ -275,7 +274,7 @@ impl App {
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
       .max(val.ram_total)
-      .style(self.color)
+      .style(self.cfg.color)
   }
 
   fn render(&mut self, f: &mut Frame) {
@@ -360,8 +359,7 @@ impl App {
         Event::Quit => break,
         Event::Update(data) => self.update_metrics(data),
         Event::Color => {
-          let idx = COLORS_OPTIONS.iter().position(|&c| c == self.color).unwrap();
-          self.color = COLORS_OPTIONS[(idx + 1) % COLORS_OPTIONS.len()];
+          self.cfg.next_color();
         }
         _ => {}
       }

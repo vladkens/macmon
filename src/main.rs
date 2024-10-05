@@ -1,7 +1,8 @@
-pub mod app;
-pub mod debug;
-pub mod metrics;
-pub mod sources;
+mod app;
+mod config;
+mod debug;
+mod metrics;
+mod sources;
 
 use app::App;
 use clap::{Parser, Subcommand};
