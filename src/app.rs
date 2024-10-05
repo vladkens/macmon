@@ -291,7 +291,7 @@ impl App {
     let rows = Layout::default()
       .direction(Direction::Vertical)
       .constraints([Constraint::Fill(2), Constraint::Fill(1)].as_ref())
-      .split(f.size());
+      .split(f.area());
 
     let brand = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     let block = self.title_block(&label_l, &brand);
