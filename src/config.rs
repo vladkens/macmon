@@ -4,8 +4,15 @@ use serde::{Deserialize, Serialize};
 const COLORS_OPTIONS: [Color; 7] =
   [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub enum ViewType {
+  Sparkline,
+  Gauge,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+  pub view_type: ViewType,
   pub color: Color,
 }
 
@@ -57,10 +64,18 @@ impl Config {
     };
     self.save();
   }
+
+  pub fn next_view_type(&mut self) {
+    self.view_type = match self.view_type {
+      ViewType::Sparkline => ViewType::Gauge,
+      ViewType::Gauge => ViewType::Sparkline,
+    };
+    self.save();
+  }
 }
 
 impl Default for Config {
   fn default() -> Self {
-    Self { color: COLORS_OPTIONS[0] }
+    Self { color: COLORS_OPTIONS[0], view_type: ViewType::Sparkline }
   }
 }

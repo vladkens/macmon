@@ -7,8 +7,8 @@ use ratatui::crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 
-use crate::config::Config;
-use crate::metrics::{Metrics, Sampler};
+use crate::config::{Config, ViewType};
+use crate::metrics::{zero_div, Metrics, Sampler};
 use crate::{
   metrics::{MemMetrics, TempMetrics},
   sources::SocInfo,
@@ -52,14 +52,14 @@ fn items_add<T>(vec: &mut Vec<T>, val: T) -> &Vec<T> {
 
 #[derive(Debug, Default)]
 struct FreqStore {
-  items: Vec<u64>,
+  items: Vec<u64>, // from 0 to 100
   top_value: u64,
-  usage: u8,
+  usage: f64, // from 0.0 to 1.0
 }
 
 impl FreqStore {
-  fn push(&mut self, value: u64, usage: u8) {
-    items_add(&mut self.items, usage as u64);
+  fn push(&mut self, value: u64, usage: f64) {
+    items_add(&mut self.items, (usage * 100.0) as u64);
     self.top_value = value;
     self.usage = usage;
   }
@@ -118,7 +118,8 @@ fn h_stack(area: Rect) -> (Rect, Rect) {
 
 enum Event {
   Update(Metrics),
-  Color,
+  ChangeColor,
+  ChangeView,
   Tick,
   Quit,
 }
@@ -127,7 +128,8 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
   match key.code {
     KeyCode::Char('q') => Ok(tx.send(Event::Quit)?),
     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
-    KeyCode::Char('c') => Ok(tx.send(Event::Color)?),
+    KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
+    KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
     _ => Ok(()),
   }
 }
@@ -154,17 +156,17 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   });
 }
 
-fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: u64) {
-  let interval = msec.max(100);
-  let check_ts = 100;
+fn run_sampler_thread(tx: mpsc::Sender<Event>, interval: u64) {
+  let interval = interval.max(100).min(10000);
+  let sample_duration = 80;
 
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
 
     loop {
-      let metrics = sampler.get_metrics(interval).unwrap();
+      let metrics = sampler.get_metrics(sample_duration).unwrap();
       tx.send(Event::Update(metrics)).unwrap();
-      std::thread::sleep(Duration::from_millis(interval - check_ts));
+      std::thread::sleep(Duration::from_millis(interval - sample_duration));
     }
   });
 }
@@ -203,9 +205,9 @@ impl App {
     self.ane_power.push(data.ane_power as f64);
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
-    self.ecpu_freq.push(data.ecpu_usage.0 as u64, (data.ecpu_usage.1 * 100.0) as u8);
-    self.pcpu_freq.push(data.pcpu_usage.0 as u64, (data.pcpu_usage.1 * 100.0) as u8);
-    self.igpu_freq.push(data.gpu_usage.0 as u64, (data.gpu_usage.1 * 100.0) as u8);
+    self.ecpu_freq.push(data.ecpu_usage.0 as u64, data.ecpu_usage.1 as f64);
+    self.pcpu_freq.push(data.pcpu_usage.0 as u64, data.pcpu_usage.1 as f64);
+    self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
     self.temp = data.temp;
     self.mem.push(data.memory);
   }
@@ -229,16 +231,6 @@ impl App {
     block
   }
 
-  fn get_freq_block<'a>(&self, label: &str, val: &'a FreqStore) -> Sparkline<'a> {
-    let label = format!("{} {:3}% @ {:4.0} MHz", label, val.usage, val.top_value);
-    Sparkline::default()
-      .block(self.title_block(label.as_str(), ""))
-      .direction(RenderDirection::RightToLeft)
-      .data(&val.items)
-      .max(100)
-      .style(self.cfg.color)
-  }
-
   fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
     let label_l = format!(
       "{} {:.2}W ({:.2}, {:.2})",
@@ -259,7 +251,33 @@ impl App {
       .style(self.cfg.color)
   }
 
-  fn get_mem_block<'a>(&self, val: &'a MemoryStore) -> Sparkline<'a> {
+  fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
+    let label = format!("{} {:3.0}% @ {:4.0} MHz", label, val.usage * 100.0, val.top_value);
+    let block = self.title_block(label.as_str(), "");
+
+    match self.cfg.view_type {
+      ViewType::Sparkline => {
+        let w = Sparkline::default()
+          .block(block)
+          .direction(RenderDirection::RightToLeft)
+          .data(&val.items)
+          .max(100)
+          .style(self.cfg.color);
+        f.render_widget(w, r);
+      }
+      ViewType::Gauge => {
+        let w = Gauge::default()
+          .block(block)
+          .gauge_style(self.cfg.color)
+          .style(self.cfg.color)
+          .label("")
+          .ratio(val.usage);
+        f.render_widget(w, r);
+      }
+    }
+  }
+
+  fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
 
@@ -269,12 +287,27 @@ impl App {
     let label_l = format!("RAM {:4.2} / {:4.1} GB", ram_usage_gb, ram_total_gb);
     let label_r = format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb);
 
-    Sparkline::default()
-      .block(self.title_block(label_l.as_str(), label_r.as_str()))
-      .direction(RenderDirection::RightToLeft)
-      .data(&val.items)
-      .max(val.ram_total)
-      .style(self.cfg.color)
+    let block = self.title_block(label_l.as_str(), label_r.as_str());
+    match self.cfg.view_type {
+      ViewType::Sparkline => {
+        let w = Sparkline::default()
+          .block(block)
+          .direction(RenderDirection::RightToLeft)
+          .data(&val.items)
+          .max(val.max_ram)
+          .style(self.cfg.color);
+        f.render_widget(w, r);
+      }
+      ViewType::Gauge => {
+        let w = Gauge::default()
+          .block(block)
+          .gauge_style(self.cfg.color)
+          .style(self.cfg.color)
+          .label("")
+          .ratio(zero_div(ram_usage_gb, ram_total_gb));
+        f.render_widget(w, r);
+      }
+    }
   }
 
   fn render(&mut self, f: &mut Frame) {
@@ -304,13 +337,13 @@ impl App {
 
     // 1st row
     let (c1, c2) = h_stack(iarea[0]);
-    f.render_widget(self.get_freq_block("E-CPU", &self.ecpu_freq), c1);
-    f.render_widget(self.get_freq_block("P-CPU", &self.pcpu_freq), c2);
+    self.render_freq_block(f, c1, "E-CPU", &self.ecpu_freq);
+    self.render_freq_block(f, c2, "P-CPU", &self.pcpu_freq);
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
-    f.render_widget(self.get_mem_block(&self.mem), c1);
-    f.render_widget(self.get_freq_block("GPU", &self.igpu_freq), c2);
+    self.render_mem_block(f, c1, &self.mem);
+    self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
 
     // 3rd row
 
@@ -330,7 +363,7 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = " Press 'q' to quit, 'c' to change color ";
+    let usage = " Press 'q' to quit, 'c' – color, 'v' – view ";
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -358,9 +391,8 @@ impl App {
       match rx.recv()? {
         Event::Quit => break,
         Event::Update(data) => self.update_metrics(data),
-        Event::Color => {
-          self.cfg.next_color();
-        }
+        Event::ChangeColor => self.cfg.next_color(),
+        Event::ChangeView => self.cfg.next_view_type(),
         _ => {}
       }
     }
