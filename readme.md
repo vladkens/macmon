@@ -5,7 +5,7 @@
 [<img src="https://badgen.net/static/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 <div align="center">
-  <img src=".github/macmon.png" alt="macmon preview" />
+  <img src="https://github.com/vladkens/macmon/blob/assets/macmon.png?raw=true" alt="preview" />
   <br />
   Sudoless performance monitoring CLI tool for Apple Silicon processors.
 </div>
