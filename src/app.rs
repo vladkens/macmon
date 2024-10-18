@@ -294,7 +294,7 @@ impl App {
           .block(block)
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
-          .max(val.max_ram)
+          .max(val.ram_total)
           .style(self.cfg.color);
         f.render_widget(w, r);
       }
