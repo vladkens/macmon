@@ -4,8 +4,9 @@
 
 Sudoless performance monitoring CLI tool for Apple Silicon processors.
 
-[<img src="https://badgen.net/github/release/vladkens/macmon" alt="version" />](https://github.com/vladkens/macmon/releases)
-[<img src="https://badgen.net/github/license/vladkens/macmon" alt="license" />](https://github.com/vladkens/macmon/blob/main/LICENSE)
+[<img src="https://badgen.net/github/assets-dl/vladkens/macmon" />](https://github.com/vladkens/macmon/releases)
+[<img src="https://badgen.net/github/release/vladkens/macmon" />](https://github.com/vladkens/macmon/releases)
+[<img src="https://badgen.net/github/license/vladkens/macmon" />](https://github.com/vladkens/macmon/blob/main/LICENSE)
 [<img src="https://badgen.net/static/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 </div>
