@@ -75,6 +75,7 @@ Options:
 
 Controls:
   c - change color
+  v - switch charts view: gauge / sparkline
   q - quit
 ```
 

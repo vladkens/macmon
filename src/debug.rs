@@ -1,8 +1,8 @@
 use core_foundation::base::CFRelease;
 
 use crate::sources::{
-  cfdict_keys, cfio_get_props, cfio_watts, get_dvfs_mhz, run_system_profiler, IOHIDSensors,
-  IOReport, IOServiceIterator, SMC,
+  cfdict_keys, cfio_get_props, cfio_get_residencies, cfio_watts, get_dvfs_mhz, run_system_profiler,
+  IOHIDSensors, IOReport, IOServiceIterator, SMC,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -62,7 +62,7 @@ pub fn print_debug() -> WithError<()> {
   for x in ior.get_sample(dur) {
     let msg = format!("{} :: {} :: {} ({}) =", x.group, x.subgroup, x.channel, x.unit);
     match x.unit.as_str() {
-      "24Mticks" => println!("{}", msg),
+      "24Mticks" => println!("{} {:?}", msg, cfio_get_residencies(x.item)),
       _ => println!("{} {:.2}W", msg, cfio_watts(x.item, &x.unit, dur)?),
     }
   }
