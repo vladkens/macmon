@@ -221,11 +221,11 @@ impl App {
       .padding(Padding::ZERO);
 
     if label_l.len() > 0 {
-      block = block.title(block::Title::from(format!(" {label_l} ")).alignment(Alignment::Left));
+      block = block.title_top(Line::from(format!(" {label_l} ")));
     }
 
     if label_r.len() > 0 {
-      block = block.title(block::Title::from(format!(" {label_r} ")).alignment(Alignment::Right));
+      block = block.title_top(Line::from(format!(" {label_r} ")).alignment(Alignment::Right));
     }
 
     block
