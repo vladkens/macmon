@@ -48,28 +48,29 @@ pub fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T)
 }
 
 fn calc_freq(item: CFDictionaryRef, freqs: &Vec<u32>) -> (u32, f32) {
-  let residencies = cfio_get_residencies(item); // (ns, freq)
-  let (len1, len2) = (residencies.len(), freqs.len());
+  let items = cfio_get_residencies(item); // (ns, freq)
+  let (len1, len2) = (items.len(), freqs.len());
   assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
 
-  // first is IDLE for CPU and OFF for GPU
-  let usage = residencies.iter().map(|x| x.1 as f64).skip(1).sum::<f64>();
-  let total = residencies.iter().map(|x| x.1 as f64).sum::<f64>();
-  let count = freqs.len();
-  // println!("{:?}", residencies);
+  // IDLE / DOWN for CPU; OFF for GPU; DOWN only on M2?/M3 Max Chips
+  let offset = items.iter().position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF").unwrap();
 
-  let mut freq = 0f64;
+  let usage = items.iter().map(|x| x.1 as f64).skip(offset).sum::<f64>();
+  let total = items.iter().map(|x| x.1 as f64).sum::<f64>();
+  let count = freqs.len();
+
+  let mut avg_freq = 0f64;
   for i in 0..count {
-    let percent = zero_div(residencies[i + 1].1 as _, usage);
-    freq += percent * freqs[i] as f64;
+    let percent = zero_div(items[i + offset].1 as _, usage);
+    avg_freq += percent * freqs[i] as f64;
   }
 
-  let percent = zero_div(usage, total);
+  let usage_ratio = zero_div(usage, total);
   let min_freq = freqs.first().unwrap().clone() as f64;
   let max_freq = freqs.last().unwrap().clone() as f64;
-  let from_max = (freq.max(min_freq) * percent) / max_freq;
+  let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
 
-  (freq as u32, from_max as f32)
+  (avg_freq as u32, from_max as f32)
 }
 
 fn calc_freq_final(items: &Vec<(u32, f32)>, freqs: &Vec<u32>) -> (u32, f32) {
