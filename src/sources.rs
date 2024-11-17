@@ -532,6 +532,7 @@ unsafe fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubsc
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
+  prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
@@ -539,7 +540,7 @@ impl IOReport {
     let chan = unsafe { cfio_get_chan(channels)? };
     let subs = unsafe { cfio_get_subs(chan)? };
 
-    Ok(Self { subs, chan })
+    Ok(Self { subs, chan, prev: None })
   }
 
   pub fn get_sample(&self, duration: u64) -> IOReportIterator {
@@ -554,6 +555,37 @@ impl IOReport {
       IOReportIterator::new(sample3)
     }
   }
+
+  fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant) {
+    (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
+  }
+
+  pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
+    let count = count.max(1).min(32);
+    let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
+    let step_msec = duration / count as u64;
+
+    let mut prev = match self.prev {
+      Some(x) => x,
+      None => self.raw_sample(),
+    };
+
+    for _ in 0..count {
+      std::thread::sleep(std::time::Duration::from_millis(step_msec));
+
+      let next = self.raw_sample();
+      let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
+      unsafe { CFRelease(prev.0 as _) };
+
+      let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
+      prev = next;
+
+      samples.push((IOReportIterator::new(diff), elapsed.max(1)));
+    }
+
+    self.prev = Some(prev);
+    samples
+  }
 }
 
 impl Drop for IOReport {
@@ -561,6 +593,9 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
+      if self.prev.is_some() {
+        CFRelease(self.prev.unwrap().0 as _);
+      }
     }
   }
 }

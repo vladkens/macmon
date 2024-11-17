@@ -40,8 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
 
       loop {
-        let metrics = sampler.get_metrics(msec)?;
-        println!("{:?}", metrics);
+        println!("{:?}", sampler.get_metrics(msec)?);
       }
     }
     Some(Commands::Debug) => debug::print_debug()?,

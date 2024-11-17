@@ -141,7 +141,7 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
     let mut last_tick = Instant::now();
 
     loop {
-      if event::poll(Duration::from_millis(100)).unwrap() {
+      if event::poll(Duration::from_millis(tick)).unwrap() {
         match event::read().unwrap() {
           event::Event::Key(key) => handle_key_event(&key, &tx).unwrap(),
           _ => {}
@@ -158,15 +158,15 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
 
 fn run_sampler_thread(tx: mpsc::Sender<Event>, interval: u64) {
   let interval = interval.max(100).min(10000);
-  let sample_duration = 80;
 
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
 
+    // Send initial metrics
+    tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
+
     loop {
-      let metrics = sampler.get_metrics(sample_duration).unwrap();
-      tx.send(Event::Update(metrics)).unwrap();
-      std::thread::sleep(Duration::from_millis(interval - sample_duration));
+      tx.send(Event::Update(sampler.get_metrics(interval).unwrap())).unwrap();
     }
   });
 }
@@ -346,7 +346,6 @@ impl App {
     self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
 
     // 3rd row
-
     let label_l = format!(
       "Power: {:.2}W (avg {:.2}W, max {:.2}W)",
       self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
@@ -380,7 +379,7 @@ impl App {
 
   pub fn run_loop(&mut self, interval: u64) -> WithError<()> {
     let (tx, rx) = mpsc::channel::<Event>();
-    run_inputs_thread(tx.clone(), 200);
+    run_inputs_thread(tx.clone(), 250);
     run_sampler_thread(tx.clone(), interval);
 
     let mut term = enter_term();

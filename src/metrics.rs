@@ -214,58 +214,63 @@ impl Sampler {
   }
 
   pub fn get_metrics(&mut self, duration: u64) -> WithError<Metrics> {
-    let mut rs = Metrics::default();
+    let measures: usize = 4;
+    let mut results: Vec<Metrics> = Vec::with_capacity(measures);
 
-    let mut ecpu_usages = Vec::new();
-    let mut pcpu_usages = Vec::new();
+    // do several samples to smooth metrics
+    // see: https://github.com/vladkens/macmon/issues/10
+    for (sample, sample_dt) in self.ior.get_samples(duration, measures) {
+      let mut ecpu_usages = Vec::new();
+      let mut pcpu_usages = Vec::new();
+      let mut rs = Metrics::default();
 
-    for x in self.ior.get_sample(duration) {
-      // if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_DICE_SUBG {
-      //   match x.channel.as_str() {
-      //     "ECPU" => rs.ecpu_usage = calc_freq(x.item, &self.soc.ecpu_freqs),
-      //     "PCPU" => rs.pcpu_usage = calc_freq(x.item, &self.soc.pcpu_freqs),
-      //     _ => {}
-      //   }
-      // }
+      for x in sample {
+        if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
+          if x.channel.contains("ECPU") {
+            ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
+            continue;
+          }
 
-      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-        if x.channel.contains("ECPU") {
-          ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
-          continue;
+          if x.channel.contains("PCPU") {
+            pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
+            continue;
+          }
         }
 
-        if x.channel.contains("PCPU") {
-          pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
-          continue;
+        if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
+          match x.channel.as_str() {
+            "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..].to_vec()),
+            _ => {}
+          }
         }
-      }
 
-      if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
-        match x.channel.as_str() {
-          "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..].to_vec()),
-          _ => {}
-        }
-      }
-
-      if x.group == "Energy Model" {
-        match x.channel.as_str() {
-          "CPU Energy" => rs.cpu_power += cfio_watts(x.item, &x.unit, duration)?,
-          "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, duration)?,
-          c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, duration)?,
-          _ => {}
+        if x.group == "Energy Model" {
+          match x.channel.as_str() {
+            "CPU Energy" => rs.cpu_power += cfio_watts(x.item, &x.unit, sample_dt)?,
+            "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, sample_dt)?,
+            c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, sample_dt)?,
+            _ => {}
+          }
         }
       }
+
+      rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
+      rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+      results.push(rs);
     }
 
-    // println!("----------");
-    // println!("{:?}", ecpu_usages);
-    // println!("{:?}", pcpu_usages);
-    // println!("1 {:?} {:?}", rs.ecpu_usage, rs.pcpu_usage);
-    rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
-    rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
-    // println!("2 {:?} {:?}", rs.ecpu_usage, rs.pcpu_usage);
-
+    let mut rs = Metrics::default();
+    rs.ecpu_usage.0 = zero_div(results.iter().map(|x| x.ecpu_usage.0).sum(), measures as _);
+    rs.ecpu_usage.1 = zero_div(results.iter().map(|x| x.ecpu_usage.1).sum(), measures as _);
+    rs.pcpu_usage.0 = zero_div(results.iter().map(|x| x.pcpu_usage.0).sum(), measures as _);
+    rs.pcpu_usage.1 = zero_div(results.iter().map(|x| x.pcpu_usage.1).sum(), measures as _);
+    rs.gpu_usage.0 = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
+    rs.gpu_usage.1 = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
+    rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
+    rs.gpu_power = zero_div(results.iter().map(|x| x.gpu_power).sum(), measures as _);
+    rs.ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
     rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
+
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
 
