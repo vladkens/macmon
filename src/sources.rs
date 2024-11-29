@@ -312,6 +312,8 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
     let mut count: u32 = libc::HOST_VM_INFO64_COUNT as _;
     let mut stats = std::mem::zeroed::<libc::vm_statistics64>();
 
+    // todo: https://github.com/JohnTitor/mach2/issues/34
+    #[allow(deprecated)]
     let ret_code = libc::host_statistics64(
       libc::mach_host_self(),
       libc::HOST_VM_INFO64,

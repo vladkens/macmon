@@ -75,8 +75,9 @@ struct PowerStore {
 
 impl PowerStore {
   fn push(&mut self, value: f64) {
+    let was_top = if self.items.len() > 0 { self.items[0] as f64 / 1000.0 } else { 0.0 };
     items_add(&mut self.items, (value * 1000.0) as u64);
-    self.top_value = value;
+    self.top_value = avg2(was_top, value);
     self.avg_value = self.items.iter().sum::<u64>() as f64 / self.items.len() as f64 / 1000.0;
     self.max_value = self.items.iter().max().map_or(0, |v| *v) as f64 / 1000.0;
   }
@@ -171,6 +172,12 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, interval: u64) {
   });
 }
 
+// get avaerage of two values, used to smooth out metrics
+// see: https://github.com/vladkens/macmon/issues/10
+fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
+  return if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() };
+}
+
 // MARK: App
 
 #[derive(Debug, Default)]
@@ -208,7 +215,10 @@ impl App {
     self.ecpu_freq.push(data.ecpu_usage.0 as u64, data.ecpu_usage.1 as f64);
     self.pcpu_freq.push(data.pcpu_usage.0 as u64, data.pcpu_usage.1 as f64);
     self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
-    self.temp = data.temp;
+
+    self.temp.cpu_temp_avg = avg2(self.temp.cpu_temp_avg, data.temp.cpu_temp_avg);
+    self.temp.gpu_temp_avg = avg2(self.temp.gpu_temp_avg, data.temp.gpu_temp_avg);
+
     self.mem.push(data.memory);
   }
 
