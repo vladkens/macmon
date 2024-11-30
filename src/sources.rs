@@ -405,7 +405,6 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
     for (i, x) in obj_val.chunks_exact(8).enumerate() {
       volts[i] = u32::from_le_bytes([x[4], x[5], x[6], x[7]]);
       freqs[i] = u32::from_le_bytes([x[0], x[1], x[2], x[3]]);
-      freqs[i] = freqs[i] / 1000 / 1000; // as MHz
     }
 
     (volts, freqs)
@@ -421,6 +420,16 @@ pub fn run_system_profiler() -> WithError<serde_json::Value> {
   let out = std::str::from_utf8(&out.stdout)?;
   let out = serde_json::from_str::<serde_json::Value>(out)?;
   Ok(out)
+}
+
+fn to_mhz(vals: Vec<u32>, chip: &str) -> Vec<u32> {
+  let scale = if chip.contains("M1") || chip.contains("M2") || chip.contains("M3") {
+    1000 * 1000 // MHz
+  } else {
+    1000 // KHz
+  };
+
+  vals.iter().map(|x| *x / scale).collect()
 }
 
 pub fn get_soc_info() -> WithError<SocInfo> {
@@ -461,11 +470,12 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
-      // `strings /usr/bin/powermetrics | grep voltage-states` uses non sram keys
+      // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non sram keys
       // but their values are zero, so sram used here, its looks valid
-      info.ecpu_freqs = get_dvfs_mhz(item, "voltage-states1-sram").1;
-      info.pcpu_freqs = get_dvfs_mhz(item, "voltage-states5-sram").1;
-      info.gpu_freqs = get_dvfs_mhz(item, "voltage-states9").1;
+      // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
+      info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, &info.chip_name);
+      info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, &info.chip_name);
+      info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, &info.chip_name);
       unsafe { CFRelease(item as _) }
     }
   }
