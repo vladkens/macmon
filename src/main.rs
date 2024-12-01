@@ -11,10 +11,10 @@ use std::error::Error;
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-  /// Print raw metrics data instead of TUI
+  /// Print metrics in JSON format – can be used for piping
   Raw,
 
-  /// Print raw metrics data instead of TUI
+  /// Print debug information
   Debug,
 }
 
@@ -40,7 +40,9 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
 
       loop {
-        println!("{:?}", sampler.get_metrics(msec)?);
+        let doc = sampler.get_metrics(msec)?;
+        let doc = serde_json::to_string(&doc)?;
+        println!("{}", doc);
       }
     }
     Some(Commands::Debug) => debug::print_debug()?,

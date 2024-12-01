@@ -1,4 +1,5 @@
 use core_foundation::dictionary::CFDictionaryRef;
+use serde::Serialize;
 
 use crate::sources::{
   cfio_get_residencies, cfio_watts, libc_ram, libc_swap, IOHIDSensors, IOReport, SocInfo, SMC,
@@ -12,13 +13,13 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 
 // MARK: Structs
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct TempMetrics {
   pub cpu_temp_avg: f32, // Celsius
   pub gpu_temp_avg: f32, // Celsius
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct MemMetrics {
   pub ram_total: u64,  // bytes
   pub ram_usage: u64,  // bytes
@@ -26,7 +27,7 @@ pub struct MemMetrics {
   pub swap_usage: u64, // bytes
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,

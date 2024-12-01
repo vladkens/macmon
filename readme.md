@@ -65,8 +65,9 @@ sudo cp target/release/macmon /usr/local/bin
 Usage: macmon [OPTIONS] [COMMAND]
 
 Commands:
-  raw   Print raw metrics data instead of TUI
-  help  Print this message or the help of the given subcommand(s)
+  raw    Print metrics in JSON format – can be used for piping
+  debug  Print debug information
+  help   Print this message or the help of the given subcommand(s)
 
 Options:
   -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
