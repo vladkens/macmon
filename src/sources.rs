@@ -422,13 +422,7 @@ pub fn run_system_profiler() -> WithError<serde_json::Value> {
   Ok(out)
 }
 
-fn to_mhz(vals: Vec<u32>, chip: &str) -> Vec<u32> {
-  let scale = if chip.contains("M1") || chip.contains("M2") || chip.contains("M3") {
-    1000 * 1000 // MHz
-  } else {
-    1000 // KHz
-  };
-
+fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
@@ -459,6 +453,10 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     None => 0,
   };
 
+  let before_m4 = chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
+  let cpu_scale: u32 = if before_m4 { 1000 * 1000 } else { 1000 }; // MHz before M4, KHz after
+  let gpu_scale: u32 = 1000 * 1000; // MHz
+
   info.chip_name = chip_name;
   info.mac_model = mac_model;
   info.memory_gb = mem_gb as u8;
@@ -473,9 +471,9 @@ pub fn get_soc_info() -> WithError<SocInfo> {
       // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non sram keys
       // but their values are zero, so sram used here, its looks valid
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
-      info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, &info.chip_name);
-      info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, &info.chip_name);
-      info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, &info.chip_name);
+      info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, cpu_scale);
+      info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
+      info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, gpu_scale);
       unsafe { CFRelease(item as _) }
     }
   }
