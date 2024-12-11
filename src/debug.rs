@@ -20,10 +20,16 @@ fn print_divider(msg: &str) {
 pub fn print_debug() -> WithError<()> {
   let out = run_system_profiler()?;
 
-  let chip = out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap().to_string();
-  let model = out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap().to_string();
-  let os_ver = out["SPSoftwareDataType"][0]["os_version"].as_str().unwrap().to_string();
-  let procs = out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap().to_string();
+  let chip =
+    out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap_or("Unknown chip").to_string();
+  let model =
+    out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap_or("Unknown model").to_string();
+  let os_ver =
+    out["SPSoftwareDataType"][0]["os_version"].as_str().unwrap_or("Unknown OS version").to_string();
+  let procs = out["SPHardwareDataType"][0]["number_processors"]
+    .as_str()
+    .unwrap_or("Unknown processors")
+    .to_string();
   println!("Chip: {} | Model: {} | OS: {} | {}", chip, model, os_ver, procs);
 
   print_divider("AppleARMIODevice");
