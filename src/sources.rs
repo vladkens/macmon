@@ -431,32 +431,45 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   let mut info = SocInfo::default();
 
   // SPHardwareDataType.0.chip_type
-  let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap().to_string();
+  let chip_name =
+    out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap_or("Unknown chip").to_string();
 
   // SPHardwareDataType.0.machine_model
-  let mac_model = out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap().to_string();
+  let mac_model =
+    out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap_or("Unknown model").to_string();
 
   // SPHardwareDataType.0.physical_memory -> "x GB"
-  let mem_gb = out["SPHardwareDataType"][0]["physical_memory"].as_str();
-  let mem_gb = mem_gb.expect("No memory found").strip_suffix(" GB").unwrap();
-  let mem_gb = mem_gb.parse::<u64>().unwrap();
+  let mem_gb = out["SPHardwareDataType"][0]["physical_memory"]
+    .as_str()
+    .and_then(|mem| mem.strip_suffix(" GB"))
+    .unwrap_or("0")
+    .parse::<u64>()
+    .unwrap_or(0);
 
   // SPHardwareDataType.0.number_processors -> "proc x:y:z"
-  let cpu_cores = out["SPHardwareDataType"][0]["number_processors"].as_str();
-  let cpu_cores = cpu_cores.expect("No CPU cores found").strip_prefix("proc ").unwrap();
-  let cpu_cores = cpu_cores.split(':').map(|x| x.parse::<u64>().unwrap()).collect::<Vec<_>>();
-  assert_eq!(cpu_cores.len(), 3, "Invalid number of CPU cores");
-  let (ecpu_cores, pcpu_cores, _) = (cpu_cores[2], cpu_cores[1], cpu_cores[0]);
-
-  let gpu_cores = match out["SPDisplaysDataType"][0]["sppci_cores"].as_str() {
-    Some(x) => x.parse::<u64>().unwrap(),
-    None => 0,
+  let cpu_cores = out["SPHardwareDataType"][0]["number_processors"]
+    .as_str()
+    .and_then(|cores| cores.strip_prefix("proc "))
+    .unwrap_or("")
+    .split(':')
+    .map(|x| x.parse::<u64>().unwrap_or(0))
+    .collect::<Vec<_>>();
+  let (ecpu_cores, pcpu_cores) = if cpu_cores.len() == 3 {
+    (cpu_cores[2], cpu_cores[1])
+  } else {
+    (0, 0) // Fallback in case of invalid data
   };
 
+  // SPDisplaysDataType.0.sppci_cores
+  let gpu_cores =
+    out["SPDisplaysDataType"][0]["sppci_cores"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+
+  // Determine scaling based on chip type
   let before_m4 = chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
   let cpu_scale: u32 = if before_m4 { 1000 * 1000 } else { 1000 }; // MHz before M4, KHz after
   let gpu_scale: u32 = 1000 * 1000; // MHz
 
+  // Assign parsed values to info
   info.chip_name = chip_name;
   info.mac_model = mac_model;
   info.memory_gb = mem_gb as u8;
@@ -464,12 +477,12 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   info.ecpu_cores = ecpu_cores as u8;
   info.pcpu_cores = pcpu_cores as u8;
 
-  // cpu frequencies
+  // CPU frequencies
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
-      // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non sram keys
-      // but their values are zero, so sram used here, its looks valid
+      // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
+      //    but their values are zero, so sram used here; it looks valid.
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
       info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, cpu_scale);
       info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
@@ -478,8 +491,8 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     }
   }
 
-  if info.ecpu_freqs.len() == 0 || info.pcpu_freqs.len() == 0 {
-    return Err("No CPU cores found".into());
+  if info.ecpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
+    return Err("No CPU frequencies found".into());
   }
 
   Ok(info)
