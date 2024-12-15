@@ -33,8 +33,10 @@ Apple Silicon processors don't provide an easy way to see live power consumption
 
 ## 🍺 Install via Homebrew
 
+You can install [`macmon`](https://formulae.brew.sh/formula/macmon) using [brew](https://brew.sh/):
+
 ```sh
-brew install vladkens/tap/macmon
+$ brew install macmon
 ```
 
 ## 📦 Install from source
