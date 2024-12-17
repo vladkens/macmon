@@ -67,7 +67,7 @@ sudo cp target/release/macmon /usr/local/bin
 Usage: macmon [OPTIONS] [COMMAND]
 
 Commands:
-  raw    Print metrics in JSON format – can be used for piping
+  pipe   Output metrics in JSON format
   debug  Print debug information
   help   Print this message or the help of the given subcommand(s)
 
@@ -80,6 +80,51 @@ Controls:
   c - change color
   v - switch charts view: gauge / sparkline
   q - quit
+```
+
+## Piping
+
+You can use the pipe subcommand to output metrics in JSON format, which is suitable for piping into other tools or scripts. For example:
+
+```sh
+macmon pipe | jq
+```
+
+This command runs `macmon` in "pipe" mode and navigate output to `jq` for pretty-printing.
+
+You can also specify the number of samples to run using `-s` or `--samples` parameter (default: `0`, which runs indefinitely), and set update interval in milliseconds using the `-i` or `--interval` parameter (default: `1000` ms). For example:
+
+```sh
+macmon pipe -s 10 -i 500 | jq
+```
+
+This will collect 10 samples with an update interval of 500 milliseconds.
+
+### Output
+
+```json
+{
+  "temp": {
+    "cpu_temp_avg": 43.73614,         // Celsius
+    "gpu_temp_avg": 36.95167          // Celsius
+  },
+  "memory": {
+    "ram_total": 25769803776,         // Bytes
+    "ram_usage": 20985479168,         // Bytes
+    "swap_total": 4294967296,         // Bytes
+    "swap_usage": 2602434560          // Bytes
+  },
+  "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %)
+  "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, Usage %)
+  "gpu_usage": [461, 0.021497859],    // (Frequency MHz, Usage %)
+  "cpu_power": 0.20486385,            // Watts
+  "gpu_power": 0.017451683,           // Watts
+  "ane_power": 0.0,                   // Watts
+  "all_power": 0.22231553,            // Watts
+  "sys_power": 5.876533,              // Watts
+  "ram_power": 0.11635789,            // Watts
+  "gpu_ram_power": 0.0009615385       // Watts
+}
 ```
 
 ## 🤝 Contributing

@@ -11,8 +11,13 @@ use std::error::Error;
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-  /// Print metrics in JSON format – can be used for piping
-  Raw,
+  /// Output metrics in JSON format (suitable for piping)
+  #[command(alias = "raw")]
+  Pipe {
+    /// Number of samples to run for. Set to 0 to run indefinitely
+    #[arg(short, long, default_value_t = 0)]
+    samples: u32,
+  },
 
   /// Print debug information
   Debug,
@@ -36,13 +41,19 @@ fn main() -> Result<(), Box<dyn Error>> {
   let msec = args.interval.max(100);
 
   match &args.command {
-    Some(Commands::Raw) => {
+    Some(Commands::Pipe { samples }) => {
       let mut sampler = Sampler::new()?;
+      let mut counter = 0u32;
 
       loop {
         let doc = sampler.get_metrics(msec)?;
         let doc = serde_json::to_string(&doc)?;
         println!("{}", doc);
+
+        counter += 1;
+        if *samples > 0 && counter >= *samples {
+          break;
+        }
       }
     }
     Some(Commands::Debug) => debug::print_debug()?,

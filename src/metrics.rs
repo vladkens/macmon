@@ -39,6 +39,8 @@ pub struct Metrics {
   pub ane_power: f32,         // Watts
   pub all_power: f32,         // Watts
   pub sys_power: f32,         // Watts
+  pub ram_power: f32,         // Watts
+  pub gpu_ram_power: f32,     // Watts
 }
 
 // MARK: Helpers
@@ -220,7 +222,7 @@ impl Sampler {
 
     // do several samples to smooth metrics
     // see: https://github.com/vladkens/macmon/issues/10
-    for (sample, sample_dt) in self.ior.get_samples(duration, measures) {
+    for (sample, dt) in self.ior.get_samples(duration, measures) {
       let mut ecpu_usages = Vec::new();
       let mut pcpu_usages = Vec::new();
       let mut rs = Metrics::default();
@@ -247,9 +249,11 @@ impl Sampler {
 
         if x.group == "Energy Model" {
           match x.channel.as_str() {
-            "CPU Energy" => rs.cpu_power += cfio_watts(x.item, &x.unit, sample_dt)?,
-            "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, sample_dt)?,
-            c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, sample_dt)?,
+            "CPU Energy" => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
+            "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
+            c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
+            c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
+            c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
             _ => {}
           }
         }
@@ -270,6 +274,8 @@ impl Sampler {
     rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
     rs.gpu_power = zero_div(results.iter().map(|x| x.gpu_power).sum(), measures as _);
     rs.ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
+    rs.ram_power = zero_div(results.iter().map(|x| x.ram_power).sum(), measures as _);
+    rs.gpu_ram_power = zero_div(results.iter().map(|x| x.gpu_ram_power).sum(), measures as _);
     rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
 
     rs.memory = self.get_mem()?;
