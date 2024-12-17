@@ -82,7 +82,7 @@ Controls:
   q - quit
 ```
 
-## Piping
+## 🚰 Piping
 
 You can use the pipe subcommand to output metrics in JSON format, which is suitable for piping into other tools or scripts. For example:
 
@@ -102,7 +102,7 @@ This will collect 10 samples with an update interval of 500 milliseconds.
 
 ### Output
 
-```json
+```jsonc
 {
   "temp": {
     "cpu_temp_avg": 43.73614,         // Celsius
@@ -123,7 +123,7 @@ This will collect 10 samples with an update interval of 500 milliseconds.
   "all_power": 0.22231553,            // Watts
   "sys_power": 5.876533,              // Watts
   "ram_power": 0.11635789,            // Watts
-  "gpu_ram_power": 0.0009615385       // Watts
+  "gpu_ram_power": 0.0009615385       // Watts (not sure what it means)
 }
 ```
 
