@@ -39,6 +39,14 @@ You can install [`macmon`](https://formulae.brew.sh/formula/macmon) using [brew]
 $ brew install macmon
 ```
 
+## 🖥️ Install via MacPorts
+
+You can also install [`macmon`](https://ports.macports.org/port/macmon/) using [MacPorts](https://macports.org/):
+
+```sh
+$ sudo port install macmon
+```
+
 ## 📦 Install from source
 
 1. Install [Rust toolchain](https://www.rust-lang.org/tools/install)
