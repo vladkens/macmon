@@ -5,7 +5,7 @@ mod metrics;
 mod sources;
 
 use app::App;
-use clap::{Parser, Subcommand};
+use clap::{parser::ValueSource, CommandFactory, Parser, Subcommand};
 use metrics::Sampler;
 use std::error::Error;
 
@@ -33,12 +33,11 @@ struct Cli {
 
   /// Update interval in milliseconds
   #[arg(short, long, default_value_t = 1000)]
-  interval: u64,
+  interval: u32,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
-  let msec = args.interval.max(100);
 
   match &args.command {
     Some(Commands::Pipe { samples }) => {
@@ -46,7 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut counter = 0u32;
 
       loop {
-        let doc = sampler.get_metrics(msec)?;
+        let doc = sampler.get_metrics(args.interval.max(100))?;
         let doc = serde_json::to_string(&doc)?;
         println!("{}", doc);
 
@@ -59,6 +58,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     Some(Commands::Debug) => debug::print_debug()?,
     _ => {
       let mut app = App::new()?;
+
+      let matches = Cli::command().get_matches();
+      let msec = match matches.value_source("interval") {
+        Some(ValueSource::CommandLine) => Some(args.interval),
+        _ => None,
+      };
+
       app.run_loop(msec)?;
     }
   }

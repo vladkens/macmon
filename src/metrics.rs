@@ -216,13 +216,13 @@ impl Sampler {
     Ok(val)
   }
 
-  pub fn get_metrics(&mut self, duration: u64) -> WithError<Metrics> {
+  pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
     let measures: usize = 4;
     let mut results: Vec<Metrics> = Vec::with_capacity(measures);
 
     // do several samples to smooth metrics
     // see: https://github.com/vladkens/macmon/issues/10
-    for (sample, dt) in self.ior.get_samples(duration, measures) {
+    for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
       let mut ecpu_usages = Vec::new();
       let mut pcpu_usages = Vec::new();
       let mut rs = Metrics::default();

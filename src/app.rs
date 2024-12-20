@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
 
@@ -121,6 +122,8 @@ enum Event {
   Update(Metrics),
   ChangeColor,
   ChangeView,
+  IncInterval,
+  DecInterval,
   Tick,
   Quit,
 }
@@ -131,6 +134,9 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
+    KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
+    KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
+    KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
     _ => Ok(()),
   }
 }
@@ -157,9 +163,7 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   });
 }
 
-fn run_sampler_thread(tx: mpsc::Sender<Event>, interval: u64) {
-  let interval = interval.max(100).min(10000);
-
+fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
 
@@ -167,7 +171,8 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, interval: u64) {
     tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
 
     loop {
-      tx.send(Event::Update(sampler.get_metrics(interval).unwrap())).unwrap();
+      let msec = *msec.read().unwrap();
+      tx.send(Event::Update(sampler.get_metrics(msec).unwrap())).unwrap();
     }
   });
 }
@@ -372,7 +377,7 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = " Press 'q' to quit, 'c' – color, 'v' – view ";
+    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view | -/+ {}ms ", self.cfg.interval);
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -387,10 +392,14 @@ impl App {
     f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
   }
 
-  pub fn run_loop(&mut self, interval: u64) -> WithError<()> {
+  pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
+    // use from arg if provided, otherwise use config restored value
+    self.cfg.interval = interval.unwrap_or(self.cfg.interval).max(100).min(10_000);
+    let msec = Arc::new(RwLock::new(self.cfg.interval));
+
     let (tx, rx) = mpsc::channel::<Event>();
     run_inputs_thread(tx.clone(), 250);
-    run_sampler_thread(tx.clone(), interval);
+    run_sampler_thread(tx.clone(), msec.clone());
 
     let mut term = enter_term();
 
@@ -402,6 +411,14 @@ impl App {
         Event::Update(data) => self.update_metrics(data),
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
+        Event::IncInterval => {
+          self.cfg.inc_interval();
+          *msec.write().unwrap() = self.cfg.interval;
+        }
+        Event::DecInterval => {
+          self.cfg.dec_interval();
+          *msec.write().unwrap() = self.cfg.interval;
+        }
         _ => {}
       }
     }
