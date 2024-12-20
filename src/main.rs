@@ -32,7 +32,7 @@ struct Cli {
   command: Option<Commands>,
 
   /// Update interval in milliseconds
-  #[arg(short, long, default_value_t = 1000)]
+  #[arg(short, long, global = true, default_value_t = 1000)]
   interval: u32,
 }
 
