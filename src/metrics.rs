@@ -249,8 +249,10 @@ impl Sampler {
 
         if x.group == "Energy Model" {
           match x.channel.as_str() {
-            "CPU Energy" => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
             "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
+            // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
+            c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
+            // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
             c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
             c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
             c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
