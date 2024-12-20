@@ -36,10 +36,17 @@ jobs:
           tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
           ls -lah | grep macmon
 
+      - name: Generate a changelog
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        id: git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          args: --latest
+
       - uses: softprops/action-gh-release@v2
         with:
+          body: ${{ steps.git-cliff.outputs.changelog }}
           files: macmon-${{ github.ref_name }}.tar.gz
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
