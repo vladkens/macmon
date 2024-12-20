@@ -45,7 +45,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          body: ${{ steps.git-cliff.outputs.changelog }}
+          body: ${{ steps.git-cliff.outputs.content }}
           files: macmon-${{ github.ref_name }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
