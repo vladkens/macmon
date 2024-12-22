@@ -86,6 +86,7 @@ fn calc_freq_final(items: &Vec<(u32, f32)>, freqs: &Vec<u32>) -> (u32, f32) {
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
   let mut smc = SMC::new()?;
+  const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
@@ -97,7 +98,7 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
       Err(_) => continue,
     };
 
-    if key.data_size != 4 || key.data_type != 1718383648 {
+    if key.data_size != 4 || key.data_type != FLOAT_TYPE {
       continue;
     }
 
@@ -110,7 +111,8 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
     // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
     match name {
-      name if name.starts_with("Tp") => cpu_sensors.push(name.clone()),
+      // "Tp" – performance cores, "Te" – efficiency cores
+      name if name.starts_with("Tp") || name.starts_with("Te") => cpu_sensors.push(name.clone()),
       name if name.starts_with("Tg") => gpu_sensors.push(name.clone()),
       _ => (),
     }
