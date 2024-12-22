@@ -1,4 +1,4 @@
-use core_foundation::base::CFRelease;
+use core_foundation::base::{CFRelease, CFShow};
 
 use crate::sources::{
   cfdict_keys, cfio_get_props, cfio_get_residencies, cfio_watts, get_dvfs_mhz, run_system_profiler,
@@ -61,6 +61,7 @@ pub fn print_debug() -> WithError<()> {
     ("CPU Stats", Some("CPU Complex Performance States")),
     ("CPU Stats", Some("CPU Core Performance States")),
     ("GPU Stats", Some("GPU Performance States")),
+    // ("GPU Stats", Some("Temperature")), // have 256 bit values, doesn't look parseable to f32/f64
   ];
 
   let dur = 100;
@@ -68,8 +69,12 @@ pub fn print_debug() -> WithError<()> {
   for x in ior.get_sample(dur) {
     let msg = format!("{} :: {} :: {} ({}) =", x.group, x.subgroup, x.channel, x.unit);
     match x.unit.as_str() {
-      "24Mticks" => println!("{} {:?}", msg, cfio_get_residencies(x.item)),
-      _ => println!("{} {:.2}W", msg, cfio_watts(x.item, &x.unit, dur)?),
+      "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
+      "mJ" | "uJ" | "nJ" => println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, dur)?),
+      _ => {
+        println!("{msg} {:?}", x.item);
+        unsafe { CFShow(x.item as _) };
+      }
     }
   }
 
@@ -95,11 +100,11 @@ pub fn print_debug() -> WithError<()> {
 
     let val = val.unwrap();
     let val = f32::from_le_bytes(val.data.clone().try_into().unwrap());
-    if val < 20.0 || val > 99.0 {
-      continue;
-    }
+    // if val < 20.0 || val > 99.0 {
+    //   continue;
+    // }
 
-    print!("{}={:.2}  ", key, val);
+    print!("{}={:04.1}  ", key, val);
   }
 
   println!(""); // close previous line
