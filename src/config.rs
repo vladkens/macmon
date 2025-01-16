@@ -2,8 +2,16 @@ use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;
 
-const COLORS_OPTIONS: [Color; 7] =
-  [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
+const PIPBOY_GREEN: Color = Color::Rgb(26, 255, 128);
+const PIPBOY_AMBER: Color = Color::Rgb(255, 182, 66);
+const PIPBOY_BLUE: Color = Color::Rgb(46, 207, 255);
+const PIPBOY_WHITE : Color = Color::Rgb(192, 255, 255);
+
+const COLORS_OPTIONS: [Color; 11] =
+  [Color::Green, Color::Yellow, Color::Red,
+   Color::Blue, Color::Magenta, Color::Cyan,
+   PIPBOY_GREEN, PIPBOY_AMBER, PIPBOY_BLUE, PIPBOY_WHITE,
+   Color::Reset];
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum ViewType {
