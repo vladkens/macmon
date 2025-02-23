@@ -3,13 +3,14 @@ use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
 
 use ratatui::crossterm::{
+  ExecutableCommand,
   event::{self, KeyCode, KeyModifiers},
-  terminal, ExecutableCommand,
+  terminal,
 };
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::metrics::{zero_div, Metrics, Sampler};
+use crate::metrics::{Metrics, Sampler, zero_div};
 use crate::{
   metrics::{MemMetrics, TempMetrics},
   sources::SocInfo,

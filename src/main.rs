@@ -5,7 +5,7 @@ mod metrics;
 mod sources;
 
 use app::App;
-use clap::{parser::ValueSource, CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
 use metrics::Sampler;
 use std::error::Error;
 

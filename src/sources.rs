@@ -4,22 +4,22 @@
 use std::{
   collections::HashMap,
   marker::{PhantomData, PhantomPinned},
-  mem::{size_of, MaybeUninit},
+  mem::{MaybeUninit, size_of},
   os::raw::c_void,
   ptr::null,
 };
 
 use core_foundation::{
   array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef},
-  base::{kCFAllocatorDefault, kCFAllocatorNull, CFAllocatorRef, CFRange, CFRelease, CFTypeRef},
+  base::{CFAllocatorRef, CFRange, CFRelease, CFTypeRef, kCFAllocatorDefault, kCFAllocatorNull},
   data::{CFDataGetBytes, CFDataGetLength, CFDataRef},
   dictionary::{
-    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreate,
-    CFDictionaryCreateMutableCopy, CFDictionaryGetCount, CFDictionaryGetKeysAndValues,
-    CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
+    CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
+    CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
+    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
   },
-  number::{kCFNumberSInt32Type, CFNumberCreate, CFNumberRef},
-  string::{kCFStringEncodingUTF8, CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef},
+  number::{CFNumberCreate, CFNumberRef, kCFNumberSInt32Type},
+  string::{CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
 };
 
 pub type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -88,7 +88,7 @@ pub fn cfdict_get_val(dict: CFDictionaryRef, key: &str) -> Option<CFTypeRef> {
 
 #[link(name = "IOKit", kind = "framework")]
 #[rustfmt::skip]
-extern "C" {
+unsafe extern "C" {
   fn IOServiceMatching(name: *const i8) -> CFMutableDictionaryRef;
   fn IOServiceGetMatchingServices(mainPort: u32, matching: CFDictionaryRef, existing: *mut u32) -> i32;
   fn IOIteratorNext(iterator: u32) -> u32;
@@ -107,7 +107,7 @@ type IOReportSubscriptionRef = *const IOReportSubscription;
 
 #[link(name = "IOReport", kind = "dylib")]
 #[rustfmt::skip]
-extern "C" {
+unsafe extern "C" {
   fn IOReportCopyAllChannels(a: u64, b: u64) -> CFDictionaryRef;
   fn IOReportCopyChannelsInGroup(a: CFStringRef, b: CFStringRef, c: u64, d: u64, e: u64) -> CFDictionaryRef;
   fn IOReportMergeChannels(a: CFDictionaryRef, b: CFDictionaryRef, nil: CFTypeRef);
@@ -251,9 +251,7 @@ impl IOReportIterator {
 
 impl Drop for IOReportIterator {
   fn drop(&mut self) {
-    unsafe {
-      CFRelease(self.sample as _);
-    }
+    unsafe { CFRelease(self.sample as _) };
   }
 }
 
@@ -500,38 +498,40 @@ pub fn get_soc_info() -> WithError<SocInfo> {
 
 // MARK: IOReport
 
-unsafe fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutableDictionaryRef> {
+fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutableDictionaryRef> {
   // if no items are provided, return all channels
   if items.len() == 0 {
-    let c = IOReportCopyAllChannels(0, 0);
-    let r = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(c), c);
-    CFRelease(c as _);
-    return Ok(r);
+    unsafe {
+      let c = IOReportCopyAllChannels(0, 0);
+      let r = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(c), c);
+      CFRelease(c as _);
+      return Ok(r);
+    }
   }
 
   let mut channels = vec![];
   for (group, subgroup) in items {
     let gname = cfstr(group);
     let sname = subgroup.map_or(null(), |x| cfstr(x));
-    let chan = IOReportCopyChannelsInGroup(gname, sname, 0, 0, 0);
+    let chan = unsafe { IOReportCopyChannelsInGroup(gname, sname, 0, 0, 0) };
     channels.push(chan);
 
-    CFRelease(gname as _);
+    unsafe { CFRelease(gname as _) };
     if subgroup.is_some() {
-      CFRelease(sname as _);
+      unsafe { CFRelease(sname as _) };
     }
   }
 
   let chan = channels[0];
   for i in 1..channels.len() {
-    IOReportMergeChannels(chan, channels[i], null());
+    unsafe { IOReportMergeChannels(chan, channels[i], null()) };
   }
 
-  let size = CFDictionaryGetCount(chan);
-  let chan = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, chan);
+  let size = unsafe { CFDictionaryGetCount(chan) };
+  let chan = unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, chan) };
 
   for i in 0..channels.len() {
-    CFRelease(channels[i] as _);
+    unsafe { CFRelease(channels[i] as _) };
   }
 
   if cfdict_get_val(chan, "IOReportChannels").is_none() {
@@ -541,14 +541,14 @@ unsafe fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutable
   Ok(chan)
 }
 
-unsafe fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
+fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
   let mut s: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
-  let rs = IOReportCreateSubscription(std::ptr::null(), chan, s.as_mut_ptr(), 0, std::ptr::null());
-  if rs == std::ptr::null() {
+  let rs = unsafe { IOReportCreateSubscription(null(), chan, s.as_mut_ptr(), 0, null()) };
+  if rs.is_null() {
     return Err("Failed to create subscription".into());
   }
 
-  s.assume_init();
+  unsafe { s.assume_init() };
   Ok(rs)
 }
 
@@ -560,9 +560,8 @@ pub struct IOReport {
 
 impl IOReport {
   pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
-    let chan = unsafe { cfio_get_chan(channels)? };
-    let subs = unsafe { cfio_get_subs(chan)? };
-
+    let chan = cfio_get_chan(channels)?;
+    let subs = cfio_get_subs(chan)?;
     Ok(Self { subs, chan, prev: None })
   }
 
@@ -647,7 +646,7 @@ const kIOHIDEventTypePower: i64 = 25;
 
 #[link(name = "IOKit", kind = "framework")]
 #[rustfmt::skip]
-extern "C" {
+unsafe extern "C" {
   fn IOHIDEventSystemClientCreate(allocator: CFAllocatorRef) -> IOHIDEventSystemClientRef;
   fn IOHIDEventSystemClientSetMatching(a: IOHIDEventSystemClientRef, b: CFDictionaryRef) -> i32;
   fn IOHIDEventSystemClientCopyServices(a: IOHIDEventSystemClientRef) -> CFArrayRef;
@@ -728,16 +727,14 @@ impl IOHIDSensors {
 
 impl Drop for IOHIDSensors {
   fn drop(&mut self) {
-    unsafe {
-      CFRelease(self.sensors as _);
-    }
+    unsafe { CFRelease(self.sensors as _) };
   }
 }
 
 // MARK: SMC Bindings
 
 #[link(name = "IOKit", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
   fn mach_task_self() -> u32;
   fn IOServiceOpen(device: u32, a: u32, b: u32, c: *mut u32) -> i32;
   fn IOServiceClose(conn: u32) -> i32;
