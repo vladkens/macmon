@@ -14,6 +14,7 @@ strip = false
 lto = false
 
 [dependencies]
+chrono = "0.4.39"
 clap = { version = "4.5.30", features = ["derive"] }
 core-foundation = "0.10.0"
 libc = "0.2.170"

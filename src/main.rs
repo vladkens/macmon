@@ -46,7 +46,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
       loop {
         let doc = sampler.get_metrics(args.interval.max(100))?;
+
+        let mut doc = serde_json::to_value(&doc)?;
+        doc["timestamp"] = serde_json::to_value(chrono::Utc::now().to_rfc3339())?;
         let doc = serde_json::to_string(&doc)?;
+
         println!("{}", doc);
 
         counter += 1;
