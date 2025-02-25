@@ -11,15 +11,13 @@ use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
 use crate::metrics::{Metrics, Sampler, zero_div};
-use crate::{
-  metrics::{MemMetrics, TempMetrics},
-  sources::SocInfo,
-};
+use crate::{metrics::MemMetrics, sources::SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
 const MAX_SPARKLINE: usize = 128;
+const MAX_TEMPS: usize = 8;
 
 // MARK: Term utils
 
@@ -44,14 +42,6 @@ fn leave_term() {
 
 // MARK: Storage
 
-fn items_add<T>(vec: &mut Vec<T>, val: T) -> &Vec<T> {
-  vec.insert(0, val);
-  if vec.len() > MAX_SPARKLINE {
-    vec.pop();
-  }
-  vec
-}
-
 #[derive(Debug, Default)]
 struct FreqStore {
   items: Vec<u64>, // from 0 to 100
@@ -61,7 +51,9 @@ struct FreqStore {
 
 impl FreqStore {
   fn push(&mut self, value: u64, usage: f64) {
-    items_add(&mut self.items, (usage * 100.0) as u64);
+    self.items.insert(0, (usage * 100.0) as u64);
+    self.items.truncate(MAX_SPARKLINE);
+
     self.top_value = value;
     self.usage = usage;
   }
@@ -77,8 +69,11 @@ struct PowerStore {
 
 impl PowerStore {
   fn push(&mut self, value: f64) {
-    let was_top = if self.items.len() > 0 { self.items[0] as f64 / 1000.0 } else { 0.0 };
-    items_add(&mut self.items, (value * 1000.0) as u64);
+    let was_top = if !self.items.is_empty() { self.items[0] as f64 / 1000.0 } else { 0.0 };
+
+    self.items.insert(0, (value * 1000.0) as u64);
+    self.items.truncate(MAX_SPARKLINE);
+
     self.top_value = avg2(was_top, value);
     self.avg_value = self.items.iter().sum::<u64>() as f64 / self.items.len() as f64 / 1000.0;
     self.max_value = self.items.iter().max().map_or(0, |v| *v) as f64 / 1000.0;
@@ -97,12 +92,54 @@ struct MemoryStore {
 
 impl MemoryStore {
   fn push(&mut self, value: MemMetrics) {
-    items_add(&mut self.items, value.ram_usage);
+    self.items.insert(0, value.ram_usage);
+    self.items.truncate(MAX_SPARKLINE);
+
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
     self.max_ram = self.items.iter().max().map_or(0, |v| *v);
+  }
+}
+
+#[derive(Debug, Default)]
+struct TempStore {
+  items: Vec<f32>,
+}
+
+impl TempStore {
+  fn last(&self) -> f32 {
+    *self.items.first().unwrap_or(&0.0)
+  }
+
+  fn push(&mut self, value: f32) {
+    // https://www.tunabellysoftware.com/blog/files/tg-pro-apple-silicon-m3-series-support.html
+    // https://github.com/vladkens/macmon/issues/12
+    let value = if value == 0.0 { self.trend_ema(0.8) } else { value };
+    if value == 0.0 {
+      return; // skip if not sensor available
+    }
+
+    self.items.insert(0, value);
+    self.items.truncate(MAX_TEMPS);
+  }
+
+  // https://en.wikipedia.org/wiki/Exponential_smoothing
+  fn trend_ema(&self, alpha: f32) -> f32 {
+    if self.items.len() < 2 {
+      return 0.0;
+    }
+
+    // starts from most recent value, so need to be reversed
+    let mut iter = self.items.iter().rev();
+    let mut ema = *iter.next().unwrap_or(&0.0);
+
+    for &item in iter {
+      ema = alpha * item + (1.0 - alpha) * ema;
+    }
+
+    ema
   }
 }
 
@@ -178,7 +215,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   });
 }
 
-// get avaerage of two values, used to smooth out metrics
+// get average of two values, used to smooth out metrics
 // see: https://github.com/vladkens/macmon/issues/10
 fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
   return if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() };
@@ -192,13 +229,15 @@ pub struct App {
 
   soc: SocInfo,
   mem: MemoryStore,
-  temp: TempMetrics,
 
   cpu_power: PowerStore,
   gpu_power: PowerStore,
   ane_power: PowerStore,
   all_power: PowerStore,
   sys_power: PowerStore,
+
+  cpu_temp: TempStore,
+  gpu_temp: TempStore,
 
   ecpu_freq: FreqStore,
   pcpu_freq: FreqStore,
@@ -222,8 +261,8 @@ impl App {
     self.pcpu_freq.push(data.pcpu_usage.0 as u64, data.pcpu_usage.1 as f64);
     self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
 
-    self.temp.cpu_temp_avg = avg2(self.temp.cpu_temp_avg, data.temp.cpu_temp_avg);
-    self.temp.gpu_temp_avg = avg2(self.temp.gpu_temp_avg, data.temp.gpu_temp_avg);
+    self.cpu_temp.push(data.temp.cpu_temp_avg);
+    self.gpu_temp.push(data.temp.gpu_temp_avg);
 
     self.mem.push(data.memory);
   }
@@ -388,8 +427,8 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.temp.cpu_temp_avg), ha[0]);
-    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.temp.gpu_temp_avg), ha[1]);
+    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
+    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
     f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
   }
 

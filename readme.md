@@ -112,6 +112,7 @@ This will collect 10 samples with an update interval of 500 milliseconds.
 
 ```jsonc
 {
+  "timestamp": "2025-02-24T20:38:15.427569+00:00",
   "temp": {
     "cpu_temp_avg": 43.73614,         // Celsius
     "gpu_temp_avg": 36.95167          // Celsius

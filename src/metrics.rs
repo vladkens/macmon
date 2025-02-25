@@ -155,14 +155,18 @@ impl Sampler {
     for sensor in &self.smc_cpu_keys {
       let val = self.smc.read_val(sensor)?;
       let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
-      cpu_metrics.push(val);
+      if val != 0.0 {
+        cpu_metrics.push(val);
+      }
     }
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
       let val = self.smc.read_val(sensor)?;
       let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
-      gpu_metrics.push(val);
+      if val != 0.0 {
+        gpu_metrics.push(val);
+      }
     }
 
     let cpu_temp_avg = zero_div(cpu_metrics.iter().sum::<f32>(), cpu_metrics.len() as f32);
