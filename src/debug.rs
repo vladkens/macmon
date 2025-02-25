@@ -8,7 +8,7 @@ use crate::sources::{
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn print_divider(msg: &str) {
-  if msg.len() == 0 {
+  if msg.is_empty() {
     println!("{}", "-".repeat(80));
     return;
   }
@@ -88,12 +88,12 @@ pub fn print_debug() -> WithError<()> {
       continue;
     }
 
-    let ki = smc.read_key_info(&key)?;
+    let ki = smc.read_key_info(key)?;
     if !(ki.data_type == FLOAT_TYPE && ki.data_size == 4) {
       continue;
     }
 
-    let val = smc.read_val(&key);
+    let val = smc.read_val(key);
     if val.is_err() {
       continue;
     }
@@ -107,7 +107,7 @@ pub fn print_debug() -> WithError<()> {
     print!("{}={:04.1}  ", key, val);
   }
 
-  println!(""); // close previous line
+  println!(); // close previous line
 
   print_divider("IOHID");
   let hid = IOHIDSensors::new()?;

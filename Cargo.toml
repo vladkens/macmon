@@ -8,6 +8,10 @@ non_camel_case_types = "allow"
 unused_assignments = "allow"
 unreachable_code = "allow"
 
+[lints.clippy]
+single_match = "allow"
+needless_range_loop = "allow"
+
 [profile.release]
 panic = "abort"
 strip = false
@@ -15,7 +19,7 @@ lto = false
 
 [dependencies]
 chrono = "0.4.39"
-clap = { version = "4.5.30", features = ["derive"] }
+clap = { version = "4.5.31", features = ["derive"] }
 core-foundation = "0.10.0"
 libc = "0.2.170"
 num-traits = "0.2.19"

@@ -47,10 +47,10 @@ pub struct Metrics {
 
 pub fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T) -> T {
   let zero: T = Default::default();
-  return if b == zero { zero } else { a / b };
+  if b == zero { zero } else { a / b }
 }
 
-fn calc_freq(item: CFDictionaryRef, freqs: &Vec<u32>) -> (u32, f32) {
+fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   let items = cfio_get_residencies(item); // (ns, freq)
   let (len1, len2) = (items.len(), freqs.len());
   assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
@@ -69,17 +69,17 @@ fn calc_freq(item: CFDictionaryRef, freqs: &Vec<u32>) -> (u32, f32) {
   }
 
   let usage_ratio = zero_div(usage, total);
-  let min_freq = freqs.first().unwrap().clone() as f64;
-  let max_freq = freqs.last().unwrap().clone() as f64;
+  let min_freq = *freqs.first().unwrap() as f64;
+  let max_freq = *freqs.last().unwrap() as f64;
   let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
 
   (avg_freq as u32, from_max as f32)
 }
 
-fn calc_freq_final(items: &Vec<(u32, f32)>, freqs: &Vec<u32>) -> (u32, f32) {
+fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
   let avg_freq = zero_div(items.iter().map(|x| x.0 as f32).sum(), items.len() as f32);
-  let avg_perc = zero_div(items.iter().map(|x| x.1 as f32).sum(), items.len() as f32);
-  let min_freq = freqs.first().unwrap().clone() as f32;
+  let avg_perc = zero_div(items.iter().map(|x| x.1).sum(), items.len() as f32);
+  let min_freq = *freqs.first().unwrap() as f32;
 
   (avg_freq.max(min_freq) as u32, avg_perc)
 }
@@ -93,7 +93,7 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
 
   let names = smc.read_all_keys().unwrap_or(vec![]);
   for name in &names {
-    let key = match smc.read_key_info(&name) {
+    let key = match smc.read_key_info(name) {
       Ok(key) => key,
       Err(_) => continue,
     };
@@ -102,7 +102,7 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
       continue;
     }
 
-    let _ = match smc.read_val(&name) {
+    let _ = match smc.read_val(name) {
       Ok(val) => val,
       Err(_) => continue,
     };
@@ -204,7 +204,7 @@ impl Sampler {
   fn get_temp(&mut self) -> WithError<TempMetrics> {
     // HID for M1, SMC for M2/M3
     // UPD: Looks like HID/SMC related to OS version, not to the chip (SMC available from macOS 14)
-    match self.smc_cpu_keys.len() > 0 {
+    match !self.smc_cpu_keys.is_empty() {
       true => self.get_temp_smc(),
       false => self.get_temp_hid(),
     }
@@ -248,7 +248,7 @@ impl Sampler {
 
         if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
           match x.channel.as_str() {
-            "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..].to_vec()),
+            "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
             _ => {}
           }
         }

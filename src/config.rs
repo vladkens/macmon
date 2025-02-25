@@ -50,10 +50,7 @@ impl Config {
       };
 
       let reader = std::io::BufReader::new(file);
-      return match serde_json::from_reader(reader) {
-        Ok(config) => config,
-        Err(_) => Self::default(),
-      };
+      return serde_json::from_reader(reader).unwrap_or_default();
     }
 
     Self::default()
@@ -89,7 +86,7 @@ impl Config {
 
   pub fn dec_interval(&mut self) {
     let step = 250;
-    self.interval = ((self.interval.saturating_sub(step) + step - 1) / step * step).max(step);
+    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(step);
     self.save();
   }
 

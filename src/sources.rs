@@ -325,15 +325,13 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
 
     let page_size_kb = libc::sysconf(libc::_SC_PAGESIZE) as u64;
 
-    usage = (0
-      + stats.active_count as u64
+    usage = (stats.active_count as u64
       + stats.inactive_count as u64
       + stats.wire_count as u64
       + stats.speculative_count as u64
       + stats.compressor_page_count as u64
       - stats.purgeable_count as u64
-      - stats.external_page_count as u64
-      + 0)
+      - stats.external_page_count as u64)
       * page_size_kb;
   }
 
@@ -412,7 +410,7 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
 pub fn run_system_profiler() -> WithError<serde_json::Value> {
   // system_profiler -listDataTypes
   let out = std::process::Command::new("system_profiler")
-    .args(&["SPHardwareDataType", "SPDisplaysDataType", "SPSoftwareDataType", "-json"])
+    .args(["SPHardwareDataType", "SPDisplaysDataType", "SPSoftwareDataType", "-json"])
     .output()?;
 
   let out = std::str::from_utf8(&out.stdout)?;
@@ -500,7 +498,7 @@ pub fn get_soc_info() -> WithError<SocInfo> {
 
 fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutableDictionaryRef> {
   // if no items are provided, return all channels
-  if items.len() == 0 {
+  if items.is_empty() {
     unsafe {
       let c = IOReportCopyAllChannels(0, 0);
       let r = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(c), c);
@@ -512,7 +510,7 @@ fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutableDiction
   let mut channels = vec![];
   for (group, subgroup) in items {
     let gname = cfstr(group);
-    let sname = subgroup.map_or(null(), |x| cfstr(x));
+    let sname = subgroup.map_or(null(), cfstr);
     let chan = unsafe { IOReportCopyChannelsInGroup(gname, sname, 0, 0, 0) };
     channels.push(chan);
 
@@ -583,7 +581,7 @@ impl IOReport {
   }
 
   pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
-    let count = count.max(1).min(32);
+    let count = count.clamp(1, 32);
     let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
     let step_msec = duration / count as u64;
 
@@ -663,8 +661,8 @@ pub struct IOHIDSensors {
 
 impl IOHIDSensors {
   pub fn new() -> WithError<Self> {
-    let keys = vec![cfstr("PrimaryUsagePage"), cfstr("PrimaryUsage")];
-    let nums = vec![cfnum(kHIDPage_AppleVendor), cfnum(kHIDUsage_AppleVendor_TemperatureSensor)];
+    let keys = [cfstr("PrimaryUsagePage"), cfstr("PrimaryUsage")];
+    let nums = [cfnum(kHIDPage_AppleVendor), cfnum(kHIDUsage_AppleVendor_TemperatureSensor)];
 
     let dict = unsafe {
       CFDictionaryCreate(
@@ -799,6 +797,7 @@ pub struct SensorVal {
 
 // MARK: SMC
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct SMC {
   conn: u32,
   keys: HashMap<u32, KeyInfo>,
@@ -861,7 +860,7 @@ impl SMC {
     let key = key.bytes().fold(0, |acc, x| (acc << 8) + x as u32);
     if let Some(ki) = self.keys.get(&key) {
       // println!("cache hit for {}", key);
-      return Ok(ki.clone());
+      return Ok(*ki);
     }
 
     let ival = KeyData { data8: 9, key, ..Default::default() };

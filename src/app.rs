@@ -31,8 +31,7 @@ fn enter_term() -> Terminal<impl Backend> {
   stdout().execute(terminal::EnterAlternateScreen).unwrap();
 
   let term = CrosstermBackend::new(std::io::stdout());
-  let term = Terminal::new(term).unwrap();
-  term
+  Terminal::new(term).unwrap()
 }
 
 fn leave_term() {
@@ -218,7 +217,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
 // get average of two values, used to smooth out metrics
 // see: https://github.com/vladkens/macmon/issues/10
 fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
-  return if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() };
+  if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() }
 }
 
 // MARK: App
@@ -275,11 +274,11 @@ impl App {
       // .title_style(Style::default().gray())
       .padding(Padding::ZERO);
 
-    if label_l.len() > 0 {
+    if !label_l.is_empty() {
       block = block.title_top(Line::from(format!(" {label_l} ")));
     }
 
-    if label_r.len() > 0 {
+    if !label_r.is_empty() {
       block = block.title_top(Line::from(format!(" {label_r} ")).alignment(Alignment::Right));
     }
 
@@ -434,7 +433,7 @@ impl App {
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
     // use from arg if provided, otherwise use config restored value
-    self.cfg.interval = interval.unwrap_or(self.cfg.interval).max(100).min(10_000);
+    self.cfg.interval = interval.unwrap_or(self.cfg.interval).clamp(100, 10_000);
     let msec = Arc::new(RwLock::new(self.cfg.interval));
 
     let (tx, rx) = mpsc::channel::<Event>();
