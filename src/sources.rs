@@ -21,6 +21,7 @@ use core_foundation::{
   number::{CFNumberCreate, CFNumberRef, kCFNumberSInt32Type},
   string::{CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
 };
+use serde::Serialize;
 
 pub type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 pub type CVoidRef = *const std::ffi::c_void;
@@ -368,7 +369,7 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
 
 // MARK: SockInfo
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct SocInfo {
   pub mac_model: String,
   pub chip_name: String,
