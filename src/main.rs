@@ -44,10 +44,14 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let mut counter = 0u32;
 
+      // Clone soc_info to avoid borrow conflicts
+      let soc_info = sampler.get_soc_info().clone();
+
       loop {
         let doc = sampler.get_metrics(args.interval.max(100))?;
 
         let mut doc = serde_json::to_value(&doc)?;
+        doc["soc"] = serde_json::to_value(&soc_info)?;
         doc["timestamp"] = serde_json::to_value(chrono::Utc::now().to_rfc3339())?;
         let doc = serde_json::to_string(&doc)?;
 

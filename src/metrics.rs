@@ -296,4 +296,9 @@ impl Sampler {
 
     Ok(rs)
   }
+
+  /// Getter for the `soc` field
+  pub fn get_soc_info(&self) -> &SocInfo {
+    &self.soc
+  }
 }
