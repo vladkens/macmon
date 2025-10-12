@@ -1092,7 +1092,7 @@ mod tests {
   #[test]
   fn renders_every_box_at_any_size() {
     use Metric::*;
-    let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, AnePower];
+    let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, AnePower, TotalPower];
     let sizes = [
       (400, 120),
       (200, 50),
@@ -1139,7 +1139,7 @@ mod tests {
 
   /// Full box titles of `test_metrics`: the original format without the RAM total and without
   /// alignment padding.
-  const TITLES: [&str; 7] = [
+  const TITLES: [&str; 8] = [
     "E-CPU 42% @ 1800 MHz",
     "P-CPU 77% @ 3200 MHz",
     "GPU 23% @ 1400 MHz",
@@ -1147,6 +1147,7 @@ mod tests {
     "CPU 4.50W (4.50, 4.50)",
     "GPU 2.00W (2.00, 2.00)",
     "ANE 0.10W (0.10, 0.10)",
+    "Total 12.00W (12.00, 12.00)",
   ];
 
   /// Top border of the metric box `metric` in a rendered frame.
@@ -1199,9 +1200,21 @@ mod tests {
     assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45°C ─╮"));
     assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40°C ─╮"));
     assert!(box_top(&app, &buf, Metric::AnePower).ends_with("───╮"));
-    // the power summary on the bottom border of the metrics box
-    let summary = "╰─ Power 6.60W (6.60, 6.60) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ─";
-    assert!(row(&buf, PROC_Y - 1).starts_with(summary), "{}", row(&buf, PROC_Y - 1));
+    // the fans right on the total power box; no summary on the bottom border of the metrics box
+    assert!(box_top(&app, &buf, Metric::TotalPower).ends_with("─ Fan 1200 RPM ─╮"));
+    assert_eq!(row(&buf, PROC_Y - 1), format!("╰{}╯", "─".repeat(198)));
+  }
+
+  #[test]
+  fn total_power_falls_back_to_the_soc_sum_without_the_system_sensor() {
+    // without the system power sensor and fans: CPU + GPU + ANE, nothing on the right
+    let mut app = test_app_with(|m| {
+      m.sys_power = 0.0;
+      m.fans.clear();
+    });
+    let buf = render_buffer(&mut app, 200, 50);
+    let top = box_top(&app, &buf, Metric::TotalPower);
+    assert!(top.starts_with("╭─ Power 6.60W (6.60, 6.60) ───") && top.ends_with("───╮"), "{top}");
   }
 
   #[test]

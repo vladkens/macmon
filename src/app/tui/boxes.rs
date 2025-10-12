@@ -1,6 +1,6 @@
 //! Metrics box (the metric boxes of the original macmon: CPU clusters, GPU, RAM, CPU / GPU / ANE
-//! power) and the box frame it shares with the process list: rounded borders, titles fitted on
-//! the top border, a text and the key hints on the bottom border.
+//! / total power) and the box frame it shares with the process list: rounded borders, titles fitted
+//! on the top border, a text and the key hints on the bottom border.
 
 use std::ops::Range;
 
@@ -21,7 +21,7 @@ use crate::config::ViewType;
 
 /// Bytes in a GiB, the unit of the RAM box title.
 const GIB: f64 = (1u64 << 30) as f64;
-/// Between the parts of the power summary and between the key hints on a bottom border.
+/// Between the key hints on a bottom border.
 const SEPARATOR: &str = " | ";
 /// Fewest cells worth a text on the left of a bottom border; with less room it is left out.
 const BORDER_TEXT_MIN: u16 = 8;
@@ -29,6 +29,11 @@ const BORDER_TEXT_MIN: u16 = 8;
 /// Temperature position on the load gradient: 30 °C is cool, 100 °C is hot.
 fn temp_ratio(celsius: f32) -> f64 {
   (f64::from(celsius) - 30.0) / 70.0
+}
+
+/// `45°C`, colored by the temperature, when the sensor exists.
+fn temp(celsius: Option<f32>) -> Option<Span<'static>> {
+  celsius.map(|c| Span::styled(format!("{c:.0}°C"), gradient(temp_ratio(c))))
 }
 
 /// `width` cells as `u16`, the type of screen coordinates; saturating, as no text on screen is
@@ -316,8 +321,8 @@ impl App {
     hints
   }
 
-  /// Metrics box: chip and version in the title, the metric boxes inside and the power summary on
-  /// the bottom border, with the key hints when it is the lowest box.
+  /// Metrics box: chip and version in the title, the metric boxes inside and the key hints on the
+  /// bottom border when it is the lowest box.
   pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
     let Some(area) = plan.top else { return };
     draw_box(f, area, self.metrics_titles());
@@ -336,7 +341,7 @@ impl App {
     }
 
     let hints = if plan.proc.is_none() { self.footer_hints() } else { vec![] };
-    render_bottom_border(f, area, hints, |_| self.power_summary());
+    render_bottom_border(f, area, hints, |_| vec![]);
   }
 
   /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, `macmon vX` right; the
@@ -373,26 +378,6 @@ impl App {
     Line::from(spans)
   }
 
-  /// Power summary for the bottom border of the metrics box: `Power 6.60W (6.60, 6.60)` (CPU +
-  /// GPU + ANE: current, average, maximum), the fans (`Fan 1200 RPM`) and `Total 12.00W (12.00,
-  /// 12.00)` (the whole system). The fans and Total only when their sensors exist.
-  fn power_summary(&self) -> Vec<Span<'static>> {
-    let power = |name: &str, store: &PowerStore| {
-      let stats = format!(" ({:.2}, {:.2})", store.avg_value, store.max_value);
-      vec![text(format!("{name} {:.2}W", store.top_value)), dim(stats)]
-    };
-
-    let mut parts = vec![power("Power", &self.all_power)];
-    let fans = self.fans.label();
-    if !fans.is_empty() {
-      parts.push(vec![text(fans)]);
-    }
-    if self.sys_power.top_value > 0.0 {
-      parts.push(power("Total", &self.sys_power));
-    }
-    join(parts)
-  }
-
   /// Titles and history of `metric`; its cluster comes from the same list the layout counts.
   fn metric_box(&self, metric: Metric) -> MetricBox<'_> {
     match metric {
@@ -402,9 +387,10 @@ impl App {
       }
       Metric::Gpu => self.freq_box("GPU".to_string(), &self.igpu_freq),
       Metric::Ram => self.ram_box(),
-      Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
-      Metric::GpuPower => self.power_box("GPU", &self.gpu_power, self.gpu_temp.last()),
+      Metric::CpuPower => self.power_box("CPU", &self.cpu_power, temp(self.cpu_temp.last())),
+      Metric::GpuPower => self.power_box("GPU", &self.gpu_power, temp(self.gpu_temp.last())),
       Metric::AnePower => self.power_box("ANE", &self.ane_power, None),
+      Metric::TotalPower => self.total_power_box(),
     }
   }
 
@@ -455,14 +441,14 @@ impl App {
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
-  /// that doesn't fit, with the temperature (`45°C`) on the right when the sensor exists, over the
-  /// power history in the low load color, scaled to its largest visible sample. Always a graph,
-  /// as in the original.
+  /// that doesn't fit, with `right` (the temperature, the fans) on the right, over the power
+  /// history in the low load color, scaled to its largest visible sample. Always a graph, as in
+  /// the original.
   fn power_box<'a>(
     &self,
     label: &'static str,
     store: &'a PowerStore,
-    temp: Option<f32>,
+    right: Option<Span<'static>>,
   ) -> MetricBox<'a> {
     let short = vec![heading(label), text(format!(" {:.2}W", store.top_value))];
     let mut full = short.clone();
@@ -470,15 +456,25 @@ impl App {
 
     let titles = [full, short].map(|left| {
       let titles = Titles::new(left);
-      match temp {
-        Some(temp) => {
-          titles.right(Span::styled(format!("{temp:.0}°C"), gradient(temp_ratio(temp))))
-        }
+      match &right {
+        Some(right) => titles.right(right.clone()),
         None => titles,
       }
     });
 
     MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power }
+  }
+
+  /// `Total 12.00W (12.00, 12.00)`, the whole system, or `Power 6.60W (6.60, 6.60)`, CPU + GPU +
+  /// ANE, without the system power sensor; the fans (`Fan 1200 RPM`) on the right when they exist.
+  fn total_power_box(&self) -> MetricBox<'_> {
+    let fans = self.fans.label();
+    let fans = (!fans.is_empty()).then(|| text(fans));
+    if self.sys_power.top_value > 0.0 {
+      self.power_box("Total", &self.sys_power, fans)
+    } else {
+      self.power_box("Power", &self.all_power, fans)
+    }
   }
 }
 

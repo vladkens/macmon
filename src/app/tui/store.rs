@@ -5,7 +5,7 @@ use macmon::{CpuTierInfo, FanMetric, MemMetrics, Metrics, SocInfo};
 use crate::config::RatioMode;
 
 /// Samples kept for the history graphs, newest first: one per column, enough to fill the widest
-/// box (CPU power, a third of the width) of a terminal about 3000 columns wide.
+/// box (a power box, a quarter of the width) of a terminal about 4000 columns wide.
 const HISTORY_LEN: usize = 1024;
 /// Latest samples behind the power average and maximum.
 const STATS_LEN: usize = 128;
