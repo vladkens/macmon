@@ -41,7 +41,7 @@ fn leave_term() {
 
 // MARK: Storage
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct FreqStore {
   items: Vec<u64>, // from 0 to 100
   top_value: u64,
@@ -238,8 +238,8 @@ pub struct App {
   cpu_temp: TempStore,
   gpu_temp: TempStore,
 
-  ecpu_freq: FreqStore,
-  pcpu_freq: FreqStore,
+  ecpu_freq: Vec<FreqStore>,
+  pcpu_freq: Vec<FreqStore>,
   igpu_freq: FreqStore,
 }
 
@@ -247,7 +247,9 @@ impl App {
   pub fn new() -> WithError<Self> {
     let soc = SocInfo::new()?;
     let cfg = Config::load();
-    Ok(Self { cfg, soc, ..Default::default() })
+    let ecpu_freq = vec![FreqStore::default(); soc.ecpu_cores as usize];
+    let pcpu_freq = vec![FreqStore::default(); soc.pcpu_cores as usize];
+    Ok(Self { cfg, soc, ecpu_freq, pcpu_freq, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -256,8 +258,21 @@ impl App {
     self.ane_power.push(data.ane_power as f64);
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
-    self.ecpu_freq.push(data.ecpu_usage.0 as u64, data.ecpu_usage.1 as f64);
-    self.pcpu_freq.push(data.pcpu_usage.0 as u64, data.pcpu_usage.1 as f64);
+    
+    // Update per-core E-CPU frequencies
+    for (i, &(freq, usage)) in data.ecpu_usage.iter().enumerate() {
+      if i < self.ecpu_freq.len() {
+        self.ecpu_freq[i].push(freq as u64, usage as f64);
+      }
+    }
+    
+    // Update per-core P-CPU frequencies
+    for (i, &(freq, usage)) in data.pcpu_usage.iter().enumerate() {
+      if i < self.pcpu_freq.len() {
+        self.pcpu_freq[i].push(freq as u64, usage as f64);
+      }
+    }
+    
     self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
@@ -331,6 +346,74 @@ impl App {
     }
   }
 
+  fn render_multi_core_block(&self, f: &mut Frame, r: Rect, label: &str, cores: &[FreqStore]) {
+    if cores.is_empty() {
+      return;
+    }
+
+    // Calculate average usage and frequency across all cores
+    let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
+    let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
+    
+    let title = format!("{} {:3.0}% @ {:4.0} MHz ({} cores)", 
+                       label, avg_usage * 100.0, avg_freq, cores.len());
+    let block = self.title_block(title.as_str(), "");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    // Create vertical layout for each core
+    let constraints: Vec<Constraint> = (0..cores.len())
+      .map(|_| Constraint::Fill(1))
+      .collect();
+    
+    let core_areas = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints(constraints)
+      .split(inner);
+
+    // Render each core
+    for (i, core) in cores.iter().enumerate() {
+      if i >= core_areas.len() {
+        break;
+      }
+      
+      let core_label = format!("Core {} {:3.0}%", i, core.usage * 100.0);
+      
+      match self.cfg.view_type {
+        ViewType::Sparkline => {
+          let w = Sparkline::default()
+            .direction(RenderDirection::RightToLeft)
+            .data(&core.items)
+            .max(100)
+            .style(self.cfg.color);
+          
+          // Add a small label for the core
+          let label_len = core_label.len();
+          let label_span = Span::raw(core_label);
+          let mut area = core_areas[i];
+          
+          // Render core label at the start
+          if area.width > label_len as u16 {
+            let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+            f.render_widget(Paragraph::new(label_span), label_area);
+            area.x += label_len as u16 + 1;
+            area.width = area.width.saturating_sub(label_len as u16 + 1);
+          }
+          
+          f.render_widget(w, area);
+        }
+        ViewType::Gauge => {
+          let w = Gauge::default()
+            .gauge_style(self.cfg.color)
+            .style(self.cfg.color)
+            .label(core_label)
+            .ratio(core.usage);
+          f.render_widget(w, core_areas[i]);
+        }
+      }
+    }
+  }
+
   fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
@@ -396,8 +479,8 @@ impl App {
     let (c1, c2) = h_stack(iarea[0]);
     let ecpu_block_label = format!("{}-CPU", self.soc.ecpu_label);
     let pcpu_block_label = format!("{}-CPU", self.soc.pcpu_label);
-    self.render_freq_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
-    self.render_freq_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
+    self.render_multi_core_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
+    self.render_multi_core_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);

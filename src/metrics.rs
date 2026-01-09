@@ -31,8 +31,8 @@ pub struct MemMetrics {
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,
-  pub ecpu_usage: (u32, f32), // freq, percent_from_max
-  pub pcpu_usage: (u32, f32), // freq, percent_from_max
+  pub ecpu_usage: Vec<(u32, f32)>, // per-core: freq, percent_from_max
+  pub pcpu_usage: Vec<(u32, f32)>, // per-core: freq, percent_from_max
   pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
   pub gpu_usage: (u32, f32),  // freq, percent_from_max
   pub cpu_power: f32,         // Watts
@@ -75,14 +75,6 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
 
   (avg_freq as u32, from_max as f32)
-}
-
-fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
-  let avg_freq = zero_div(items.iter().map(|x| x.0 as f32).sum(), items.len() as f32);
-  let avg_perc = zero_div(items.iter().map(|x| x.1).sum(), items.len() as f32);
-  let min_freq = *freqs.first().unwrap() as f32;
-
-  (avg_freq.max(min_freq) as u32, avg_perc)
 }
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
@@ -287,21 +279,55 @@ impl Sampler {
 
       // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
       ecpu_usages.retain(|&(_, pct)| pct > 0.0);
-      rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
-      rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+      pcpu_usages.retain(|&(_, pct)| pct > 0.0);
+      
+      rs.ecpu_usage = ecpu_usages;
+      rs.pcpu_usage = pcpu_usages;
       results.push(rs);
     }
 
-    let ecores = self.soc.ecpu_cores as f32;
-    let pcores = self.soc.pcpu_cores as f32;
+    // Average across samples for each core
+    let ecpu_core_count = results.first().map(|r| r.ecpu_usage.len()).unwrap_or(0);
+    let pcpu_core_count = results.first().map(|r| r.pcpu_usage.len()).unwrap_or(0);
+    
+    let mut ecpu_avg = Vec::with_capacity(ecpu_core_count);
+    for core_idx in 0..ecpu_core_count {
+      let avg_freq = zero_div(
+        results.iter().map(|r| r.ecpu_usage.get(core_idx).map(|x| x.0).unwrap_or(0)).sum::<u32>(),
+        measures as u32
+      );
+      let avg_perc = zero_div(
+        results.iter().map(|r| r.ecpu_usage.get(core_idx).map(|x| x.1).unwrap_or(0.0)).sum::<f32>(),
+        measures as f32
+      );
+      ecpu_avg.push((avg_freq, avg_perc));
+    }
+    
+    let mut pcpu_avg = Vec::with_capacity(pcpu_core_count);
+    for core_idx in 0..pcpu_core_count {
+      let avg_freq = zero_div(
+        results.iter().map(|r| r.pcpu_usage.get(core_idx).map(|x| x.0).unwrap_or(0)).sum::<u32>(),
+        measures as u32
+      );
+      let avg_perc = zero_div(
+        results.iter().map(|r| r.pcpu_usage.get(core_idx).map(|x| x.1).unwrap_or(0.0)).sum::<f32>(),
+        measures as f32
+      );
+      pcpu_avg.push((avg_freq, avg_perc));
+    }
+
+    // Calculate combined CPU usage percentage weighted by core count
+    let ecpu_total_pct: f32 = ecpu_avg.iter().map(|&(_, pct)| pct).sum();
+    let pcpu_total_pct: f32 = pcpu_avg.iter().map(|&(_, pct)| pct).sum();
+    let ecores = ecpu_avg.len() as f32;
+    let pcores = pcpu_avg.len() as f32;
     let tcores = ecores + pcores;
+    let cpu_usage_pct = zero_div(ecpu_total_pct + pcpu_total_pct, tcores);
 
     let mut rs = Metrics::default();
-    rs.ecpu_usage.0 = zero_div(results.iter().map(|x| x.ecpu_usage.0).sum(), measures as _);
-    rs.ecpu_usage.1 = zero_div(results.iter().map(|x| x.ecpu_usage.1).sum(), measures as _);
-    rs.pcpu_usage.0 = zero_div(results.iter().map(|x| x.pcpu_usage.0).sum(), measures as _);
-    rs.pcpu_usage.1 = zero_div(results.iter().map(|x| x.pcpu_usage.1).sum(), measures as _);
-    rs.cpu_usage_pct = zero_div(rs.ecpu_usage.1 * ecores + rs.pcpu_usage.1 * pcores, tcores);
+    rs.ecpu_usage = ecpu_avg;
+    rs.pcpu_usage = pcpu_avg;
+    rs.cpu_usage_pct = cpu_usage_pct;
     rs.gpu_usage.0 = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
     rs.gpu_usage.1 = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
     rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
