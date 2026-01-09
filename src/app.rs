@@ -82,23 +82,29 @@ impl PowerStore {
 #[derive(Debug, Default)]
 struct MemoryStore {
   items: Vec<u64>,
+  swap_items: Vec<u64>,
   ram_usage: u64,
   ram_total: u64,
   swap_usage: u64,
   swap_total: u64,
   max_ram: u64,
+  max_swap: u64,
 }
 
 impl MemoryStore {
   fn push(&mut self, value: MemMetrics) {
     self.items.insert(0, value.ram_usage);
     self.items.truncate(MAX_SPARKLINE);
+    
+    self.swap_items.insert(0, value.swap_usage);
+    self.swap_items.truncate(MAX_SPARKLINE);
 
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
     self.max_ram = self.items.iter().max().map_or(0, |v| *v);
+    self.max_swap = self.swap_items.iter().max().map_or(0, |v| *v);
   }
 }
 
@@ -205,7 +211,7 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
-    KeyCode::Char('p') => Ok(tx.send(Event::TogglePerCore)?),
+    KeyCode::Char('d') => Ok(tx.send(Event::TogglePerCore)?),
     KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
     KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
     KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
@@ -424,7 +430,7 @@ impl App {
           
           // Add a small label for the core
           let label_len = core_label.len();
-          let label_span = Span::raw(core_label);
+          let label_span = Span::styled(core_label, Style::default().fg(self.cfg.color));
           let mut area = core_areas[i];
           
           // Render core label at the start
@@ -483,6 +489,90 @@ impl App {
     }
   }
 
+  fn render_split_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
+    let ram_usage_gb = val.ram_usage as f64 / GB as f64;
+    let ram_total_gb = val.ram_total as f64 / GB as f64;
+    let swap_usage_gb = val.swap_usage as f64 / GB as f64;
+    let swap_total_gb = val.swap_total as f64 / GB as f64;
+
+    let title = "Memory";
+    let block = self.title_block(title, "");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    // Split into RAM and SWAP sections
+    let sections = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Fill(1), Constraint::Fill(1)])
+      .split(inner);
+
+    // RAM section
+    let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
+    match self.cfg.view_type {
+      ViewType::Sparkline => {
+        let w = Sparkline::default()
+          .direction(RenderDirection::RightToLeft)
+          .data(&val.items)
+          .max(val.ram_total)
+          .style(self.cfg.color);
+        
+        let label_len = ram_label.len();
+        let label_span = Span::styled(ram_label, Style::default().fg(self.cfg.color));
+        let mut area = sections[0];
+        
+        if area.width > label_len as u16 {
+          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+          f.render_widget(Paragraph::new(label_span), label_area);
+          area.x += label_len as u16 + 1;
+          area.width = area.width.saturating_sub(label_len as u16 + 1);
+        }
+        
+        f.render_widget(w, area);
+      }
+      ViewType::Gauge => {
+        let w = Gauge::default()
+          .gauge_style(self.cfg.color)
+          .style(self.cfg.color)
+          .label(ram_label)
+          .ratio(zero_div(ram_usage_gb, ram_total_gb));
+        f.render_widget(w, sections[0]);
+      }
+    }
+
+    // SWAP section
+    let swap_label = format!("SWAP {:4.2}/{:4.1} GB", swap_usage_gb, swap_total_gb);
+    match self.cfg.view_type {
+      ViewType::Sparkline => {
+        let w = Sparkline::default()
+          .direction(RenderDirection::RightToLeft)
+          .data(&val.swap_items)
+          .max(val.swap_total.max(1)) // Avoid division by zero if no swap
+          .style(self.cfg.color);
+        
+        let label_len = swap_label.len();
+        let label_span = Span::styled(swap_label, Style::default().fg(self.cfg.color));
+        let mut area = sections[1];
+        
+        if area.width > label_len as u16 {
+          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+          f.render_widget(Paragraph::new(label_span), label_area);
+          area.x += label_len as u16 + 1;
+          area.width = area.width.saturating_sub(label_len as u16 + 1);
+        }
+        
+        f.render_widget(w, area);
+      }
+      ViewType::Gauge => {
+        let w = Gauge::default()
+          .gauge_style(self.cfg.color)
+          .style(self.cfg.color)
+          .label(swap_label)
+          .ratio(zero_div(swap_usage_gb, swap_total_gb));
+        f.render_widget(w, sections[1]);
+      }
+    }
+  }
+
   fn render(&mut self, f: &mut Frame) {
     let label_l = format!(
       "{} ({}{}+{}{}+{}GPU {}GB)",
@@ -526,9 +616,12 @@ impl App {
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
-    self.render_mem_block(f, c1, &self.mem);
-    let gpu_block_label = format!("{}-GPU", self.soc.gpu_label);
-    self.render_freq_block(f, c2, &gpu_block_label, &self.igpu_freq);
+    if self.cfg.per_core_view {
+      self.render_split_mem_block(f, c1, &self.mem);
+    } else {
+      self.render_mem_block(f, c1, &self.mem);
+    }
+    self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
 
     // 3rd row
     let label_l = format!(
@@ -547,7 +640,7 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view, 'p' – per-core | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view, 'd' – detailed | -/+ {}ms ", self.cfg.interval);
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
