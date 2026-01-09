@@ -144,6 +144,39 @@ impl TempStore {
 
 // MARK: Components
 
+fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
+  if cores.is_empty() {
+    return FreqStore::default();
+  }
+  
+  let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
+  let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
+  
+  // Aggregate sparkline data by averaging across cores
+  let max_len = cores.iter().map(|c| c.items.len()).max().unwrap_or(0);
+  let mut aggregated_items = Vec::with_capacity(max_len);
+  
+  for i in 0..max_len {
+    let mut sum = 0u64;
+    let mut count = 0;
+    for core in cores {
+      if let Some(&val) = core.items.get(i) {
+        sum += val;
+        count += 1;
+      }
+    }
+    if count > 0 {
+      aggregated_items.push(sum / count as u64);
+    }
+  }
+  
+  FreqStore {
+    items: aggregated_items,
+    top_value: avg_freq,
+    usage: avg_usage,
+  }
+}
+
 fn h_stack(area: Rect) -> (Rect, Rect) {
   let ha = Layout::default()
     .direction(Direction::Horizontal)
@@ -159,6 +192,7 @@ enum Event {
   Update(Metrics),
   ChangeColor,
   ChangeView,
+  TogglePerCore,
   IncInterval,
   DecInterval,
   Tick,
@@ -171,6 +205,7 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
+    KeyCode::Char('p') => Ok(tx.send(Event::TogglePerCore)?),
     KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
     KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
     KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
@@ -479,13 +514,21 @@ impl App {
     let (c1, c2) = h_stack(iarea[0]);
     let ecpu_block_label = format!("{}-CPU", self.soc.ecpu_label);
     let pcpu_block_label = format!("{}-CPU", self.soc.pcpu_label);
-    self.render_multi_core_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
-    self.render_multi_core_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
+    if self.cfg.per_core_view {
+      self.render_multi_core_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
+      self.render_multi_core_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
+    } else {
+      let ecpu_agg = compute_aggregate_freq(&self.ecpu_freq);
+      let pcpu_agg = compute_aggregate_freq(&self.pcpu_freq);
+      self.render_freq_block(f, c1, &ecpu_block_label, &ecpu_agg);
+      self.render_freq_block(f, c2, &pcpu_block_label, &pcpu_agg);
+    }
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
     self.render_mem_block(f, c1, &self.mem);
-    self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
+    let gpu_block_label = format!("{}-GPU", self.soc.gpu_label);
+    self.render_freq_block(f, c2, &gpu_block_label, &self.igpu_freq);
 
     // 3rd row
     let label_l = format!(
@@ -504,7 +547,7 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view, 'p' – per-core | -/+ {}ms ", self.cfg.interval);
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -538,6 +581,7 @@ impl App {
         Event::Update(data) => self.update_metrics(data),
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
+        Event::TogglePerCore => self.cfg.toggle_per_core_view(),
         Event::IncInterval => {
           self.cfg.inc_interval();
           *msec.write().unwrap() = self.cfg.interval;
