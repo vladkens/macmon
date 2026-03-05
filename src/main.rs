@@ -3,6 +3,7 @@ mod config;
 mod debug;
 mod metrics;
 mod sources;
+mod tray;
 
 use app::App;
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
@@ -25,6 +26,9 @@ enum Commands {
 
   /// Print debug information
   Debug,
+
+  /// Run as a menu bar icon with a native terminal window
+  Tray,
 }
 
 /// Sudoless performance monitoring CLI tool for Apple Silicon processors
@@ -69,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => debug::print_debug()?,
+    Some(Commands::Tray) => tray::run_tray()?,
     _ => {
       let mut app = App::new()?;
 
