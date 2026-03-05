@@ -8,9 +8,10 @@ use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
   NSApplication, NSApplicationActivationPolicy, NSBackgroundColorAttributeName, NSBackingStoreType,
-  NSBezierPath, NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
-  NSMenu, NSMenuItem, NSPopUpMenuWindowLevel, NSScreen, NSStatusBar, NSStatusItem, NSStringDrawing,
-  NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+  NSBezierPath, NSColor, NSEvent, NSEventMask, NSFont, NSFontAttributeName,
+  NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem, NSPopUpMenuWindowLevel, NSScreen,
+  NSStatusBar, NSStatusItem, NSStringDrawing, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
+  NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSDictionary, NSNotification, NSPoint, NSRect, NSSize, NSString};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -33,6 +34,8 @@ struct TrayState {
   window: *mut NSWindow,
   view: *mut AnyObject,
   button: *mut AnyObject,
+  menu: *mut NSMenu,
+  status_item: *mut NSStatusItem,
 }
 unsafe impl Send for TrayState {}
 unsafe impl Sync for TrayState {}
@@ -672,6 +675,8 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
       window: std::ptr::null_mut(),
       view: std::ptr::null_mut(),
       button: std::ptr::null_mut(),
+      menu: std::ptr::null_mut(),
+      status_item: std::ptr::null_mut(),
     })
   });
   TERM_STATE.get_or_init(|| Mutex::new(vt100::Parser::new(24, 80, 0)));
@@ -683,7 +688,7 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
   app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
   let status_bar = NSStatusBar::systemStatusBar();
-  let status_item: Retained<NSStatusItem> = status_bar.statusItemWithLength(-1.0);
+  let status_item: Retained<NSStatusItem> = status_bar.statusItemWithLength(-1.0); // NSVariableStatusItemLength
 
   if let Some(button) = status_item.button(mtm) {
     let icon_name = NSString::from_str("chart.bar.xaxis");
@@ -703,22 +708,20 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
     }
   }
 
+  // Left-click: toggle window via button action
   let delegate = TrayDelegate::new();
   let target: &AnyObject =
     unsafe { &*(delegate.as_ref() as *const TrayDelegate as *const AnyObject) };
 
-  let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
+  if let Some(button) = status_item.button(mtm) {
+    unsafe {
+      button.setTarget(Some(target));
+      button.setAction(Some(sel!(toggleTerminal:)));
+    }
+  }
 
-  let toggle_item = unsafe {
-    NSMenuItem::initWithTitle_action_keyEquivalent(
-      mtm.alloc(),
-      &NSString::from_str("Toggle Terminal"),
-      Some(sel!(toggleTerminal:)),
-      &NSString::from_str("t"),
-    )
-  };
-  unsafe { toggle_item.setTarget(Some(target)) };
-  menu.addItem(&toggle_item);
+  // Build right-click menu (Quit only — toggle is handled by left-click)
+  let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
 
   let quit_item = unsafe {
     NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -731,13 +734,42 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
   unsafe { quit_item.setTarget(Some(target)) };
   menu.addItem(&quit_item);
 
-  unsafe {
-    let _: () = msg_send![&*status_item, setMenu: &*menu];
+  // Store pointers for right-click handler
+  {
+    let mut tray = TRAY.get().unwrap().lock().unwrap();
+    tray.menu = Retained::as_ptr(&menu) as *mut NSMenu;
+    tray.status_item = Retained::as_ptr(&status_item) as *mut NSStatusItem;
   }
+
+  // Right-click event monitor: temporarily set the menu on the status item
+  // so macOS shows it, then remove it so left-click fires the action again.
+  let monitor = unsafe {
+    let block = block2::RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+      let (menu_ptr, si_ptr) = {
+        let t = TRAY.get().unwrap().lock().unwrap();
+        (t.menu, t.status_item)
+      };
+      if menu_ptr.is_null() || si_ptr.is_null() {
+        return event.as_ptr();
+      }
+
+      // Temporarily set the menu so macOS shows it on this click
+      let _: () = msg_send![si_ptr, setMenu: menu_ptr];
+
+      // After the menu closes, remove it so left-click works again.
+      // performSelector:withObject:afterDelay: runs after the current
+      // event cycle (menu tracking) completes.
+      let _: () = msg_send![si_ptr, performSelector: sel!(setMenu:), withObject: std::ptr::null::<AnyObject>(), afterDelay: 0.0f64];
+
+      event.as_ptr()
+    });
+    NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::RightMouseDown, &block)
+  };
 
   std::mem::forget(delegate);
   std::mem::forget(status_item);
   std::mem::forget(menu);
+  std::mem::forget(monitor);
 
   app.run();
 
