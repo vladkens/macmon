@@ -389,7 +389,7 @@ impl SocInfo {
     get_soc_info()
   }
 
-  /// Returns true if this is an M5 or later chip with super cores instead of efficiency cores
+  // true if M5+ chip with super cores instead of efficiency cores
   pub fn has_mcpu(&self) -> bool {
     self.mcpu_cores > 0
   }
@@ -433,6 +433,35 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
+// parse number_processors string into (ecpu_cores, pcpu_cores, mcpu_cores)
+// M1-M4: "proc T:P:E" (3 fields) -> (E, P, 0)
+// M5+:   "proc T:S:E:M" (4 fields) -> (E, S, M)
+fn parse_cpu_cores(number_processors: &str) -> (u64, u64, u64) {
+  let cpu_cores = number_processors
+    .strip_prefix("proc ")
+    .unwrap_or("")
+    .split(':')
+    .map(|x| x.parse::<u64>().unwrap_or(0))
+    .collect::<Vec<_>>();
+
+  match cpu_cores.len() {
+    4 => (cpu_cores[2], cpu_cores[1], cpu_cores[3]), // M5+: total:S:E:M
+    3 => (cpu_cores[2], cpu_cores[1], 0),             // M1-M4: total:P:E
+    _ => (0, 0, 0),
+  }
+}
+
+// M1-M3: MHz scale (1_000_000), M4+: KHz scale (1_000)
+fn cpu_freq_scale(chip_name: &str) -> u32 {
+  let before_m4 =
+    chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
+  if before_m4 { 1000 * 1000 } else { 1000 }
+}
+
+fn is_m5_chip(chip_name: &str) -> bool {
+  chip_name.contains("M5")
+}
+
 pub fn get_soc_info() -> WithError<SocInfo> {
   let out = run_system_profiler()?;
   let mut info = SocInfo::default();
@@ -453,29 +482,18 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .parse::<u64>()
     .unwrap_or(0);
 
-  // SPHardwareDataType.0.number_processors -> "proc x:y:z"
-  let cpu_cores = out["SPHardwareDataType"][0]["number_processors"]
-    .as_str()
-    .and_then(|cores| cores.strip_prefix("proc "))
-    .unwrap_or("")
-    .split(':')
-    .map(|x| x.parse::<u64>().unwrap_or(0))
-    .collect::<Vec<_>>();
-  // "proc 18:6:0:12" on M5 (total:S:E:M) or "proc 10:4:6" on M1-M4 (total:P:E)
-  let (ecpu_cores, pcpu_cores, mcpu_cores) = match cpu_cores.len() {
-    4 => (cpu_cores[2], cpu_cores[1], cpu_cores[3]), // M5+: total:S:E:M
-    3 => (cpu_cores[2], cpu_cores[1], 0),             // M1-M4: total:P:E
-    _ => (0, 0, 0),
-  };
+  // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc w:x:y:z"
+  let number_processors =
+    out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap_or("");
+  let (ecpu_cores, pcpu_cores, mcpu_cores) = parse_cpu_cores(number_processors);
 
   // SPDisplaysDataType.0.sppci_cores
   let gpu_cores =
     out["SPDisplaysDataType"][0]["sppci_cores"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
 
   // Determine scaling based on chip type
-  let is_m5 = chip_name.contains("M5");
-  let before_m4 = chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
-  let cpu_scale: u32 = if before_m4 { 1000 * 1000 } else { 1000 }; // MHz before M4, KHz after
+  let is_m5 = is_m5_chip(&chip_name);
+  let cpu_scale = cpu_freq_scale(&chip_name);
   let gpu_scale: u32 = 1000 * 1000; // MHz
 
   // Assign parsed values to info
@@ -939,5 +957,115 @@ impl Drop for SMC {
     unsafe {
       IOServiceClose(self.conn);
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_parse_cpu_cores_m1_m4() {
+    // M1 Pro: "proc 10:8:2" -> 2 ecpu, 8 pcpu, 0 mcpu
+    assert_eq!(parse_cpu_cores("proc 10:8:2"), (2, 8, 0));
+    // M4: "proc 10:4:6" -> 6 ecpu, 4 pcpu, 0 mcpu
+    assert_eq!(parse_cpu_cores("proc 10:4:6"), (6, 4, 0));
+    // M3 Max: "proc 16:12:4" -> 4 ecpu, 12 pcpu, 0 mcpu
+    assert_eq!(parse_cpu_cores("proc 16:12:4"), (4, 12, 0));
+  }
+
+  #[test]
+  fn test_parse_cpu_cores_m5() {
+    // M5 Max: "proc 18:6:0:12" -> 0 ecpu, 6 pcpu(super), 12 mcpu(perf)
+    assert_eq!(parse_cpu_cores("proc 18:6:0:12"), (0, 6, 12));
+    // M5 Pro: "proc 14:4:0:10" (hypothetical)
+    assert_eq!(parse_cpu_cores("proc 14:4:0:10"), (0, 4, 10));
+  }
+
+  #[test]
+  fn test_parse_cpu_cores_invalid() {
+    assert_eq!(parse_cpu_cores(""), (0, 0, 0));
+    assert_eq!(parse_cpu_cores("proc"), (0, 0, 0));
+    assert_eq!(parse_cpu_cores("garbage"), (0, 0, 0));
+  }
+
+  #[test]
+  fn test_has_mcpu() {
+    let mut soc = SocInfo::default();
+    assert!(!soc.has_mcpu());
+
+    soc.mcpu_cores = 12;
+    assert!(soc.has_mcpu());
+  }
+
+  #[test]
+  fn test_to_mhz() {
+    // KHz scale (M4/M5): raw values in KHz, divide by 1000 to get MHz
+    assert_eq!(to_mhz(vec![4608000, 3000000], 1000), vec![4608, 3000]);
+    // MHz scale (M1-M3): raw values in Hz, divide by 1_000_000 to get MHz
+    // Use 3_000_000 (3 MHz) as a small representative value that fits in u32
+    assert_eq!(to_mhz(vec![3_000_000, 2_000_000], 1000 * 1000), vec![3, 2]);
+    // Empty input
+    assert_eq!(to_mhz(vec![], 1000), Vec::<u32>::new());
+  }
+
+  // -- is_m5_chip tests --
+
+  #[test]
+  fn test_is_m5_chip() {
+    assert!(is_m5_chip("Apple M5 Max"));
+    assert!(is_m5_chip("Apple M5 Pro"));
+    assert!(is_m5_chip("Apple M5"));
+    assert!(!is_m5_chip("Apple M4 Max"));
+    assert!(!is_m5_chip("Apple M4"));
+    assert!(!is_m5_chip("Apple M3 Pro"));
+    assert!(!is_m5_chip("Apple M1"));
+    assert!(!is_m5_chip("Unknown chip"));
+  }
+
+  // -- cpu_freq_scale tests --
+
+  #[test]
+  fn test_cpu_freq_scale_before_m4() {
+    // M1-M3 use MHz scale (1_000_000)
+    assert_eq!(cpu_freq_scale("Apple M1"), 1_000_000);
+    assert_eq!(cpu_freq_scale("Apple M2 Pro"), 1_000_000);
+    assert_eq!(cpu_freq_scale("Apple M3 Max"), 1_000_000);
+  }
+
+  #[test]
+  fn test_cpu_freq_scale_m4_and_later() {
+    // M4+ use KHz scale (1_000)
+    assert_eq!(cpu_freq_scale("Apple M4"), 1_000);
+    assert_eq!(cpu_freq_scale("Apple M4 Pro"), 1_000);
+    assert_eq!(cpu_freq_scale("Apple M5 Max"), 1_000);
+  }
+
+  // -- SocInfo default state --
+
+  #[test]
+  fn test_soc_info_default_mcpu_fields() {
+    let info = SocInfo::default();
+    assert_eq!(info.mcpu_cores, 0);
+    assert!(info.mcpu_freqs.is_empty());
+    assert!(!info.has_mcpu());
+  }
+
+  // -- parse_cpu_cores edge cases --
+
+  #[test]
+  fn test_parse_cpu_cores_no_proc_prefix() {
+    assert_eq!(parse_cpu_cores("10:8:2"), (0, 0, 0));
+  }
+
+  #[test]
+  fn test_parse_cpu_cores_single_field() {
+    assert_eq!(parse_cpu_cores("proc 8"), (0, 0, 0));
+  }
+
+  #[test]
+  fn test_parse_cpu_cores_five_fields() {
+    // Hypothetical future format with 5 fields -> unknown, fallback
+    assert_eq!(parse_cpu_cores("proc 24:6:0:12:6"), (0, 0, 0));
   }
 }

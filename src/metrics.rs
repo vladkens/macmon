@@ -33,6 +33,7 @@ pub struct Metrics {
   pub memory: MemMetrics,
   pub ecpu_usage: (u32, f32), // freq, percent_from_max
   pub pcpu_usage: (u32, f32), // freq, percent_from_max
+  pub mcpu_usage: (u32, f32), // freq, percent_from_max
   pub gpu_usage: (u32, f32),  // freq, percent_from_max
   pub cpu_power: f32,         // Watts
   pub gpu_power: f32,         // Watts
@@ -231,6 +232,7 @@ impl Sampler {
     for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
       let mut ecpu_usages = Vec::new();
       let mut pcpu_usages = Vec::new();
+      let mut mcpu_usages = Vec::new();
       let mut rs = Metrics::default();
 
       for x in sample {
@@ -242,6 +244,11 @@ impl Sampler {
 
           if x.channel.contains("PCPU") {
             pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
+            continue;
+          }
+
+          if x.channel.contains("MCPU") {
+            mcpu_usages.push(calc_freq(x.item, &self.soc.mcpu_freqs));
             continue;
           }
         }
@@ -267,8 +274,15 @@ impl Sampler {
         }
       }
 
-      rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
-      rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+      if !self.soc.ecpu_freqs.is_empty() {
+        rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
+      }
+      if !self.soc.pcpu_freqs.is_empty() {
+        rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+      }
+      if !self.soc.mcpu_freqs.is_empty() {
+        rs.mcpu_usage = calc_freq_final(&mcpu_usages, &self.soc.mcpu_freqs);
+      }
       results.push(rs);
     }
 
@@ -277,6 +291,8 @@ impl Sampler {
     rs.ecpu_usage.1 = zero_div(results.iter().map(|x| x.ecpu_usage.1).sum(), measures as _);
     rs.pcpu_usage.0 = zero_div(results.iter().map(|x| x.pcpu_usage.0).sum(), measures as _);
     rs.pcpu_usage.1 = zero_div(results.iter().map(|x| x.pcpu_usage.1).sum(), measures as _);
+    rs.mcpu_usage.0 = zero_div(results.iter().map(|x| x.mcpu_usage.0).sum(), measures as _);
+    rs.mcpu_usage.1 = zero_div(results.iter().map(|x| x.mcpu_usage.1).sum(), measures as _);
     rs.gpu_usage.0 = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
     rs.gpu_usage.1 = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
     rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
