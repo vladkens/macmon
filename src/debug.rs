@@ -44,7 +44,10 @@ pub fn print_debug() -> WithError<()> {
           continue;
         }
 
-        let (volts, freqs) = get_dvfs_mhz(item, &key);
+        let Some((volts, freqs)) = get_dvfs_mhz(item, &key) else {
+          println!("{:>32}: (not found)", key);
+          continue;
+        };
         let volts = volts.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(" ");
         let freqs = freqs.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(" ");
         println!("{:>32}: (v) {}", key, volts);

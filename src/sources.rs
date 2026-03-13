@@ -389,9 +389,9 @@ impl SocInfo {
 }
 
 // dynamic voltage and frequency scaling
-pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
+pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> Option<(Vec<u32>, Vec<u32>)> {
   unsafe {
-    let obj = cfdict_get_val(dict, key).unwrap() as CFDataRef;
+    let obj = cfdict_get_val(dict, key)? as CFDataRef;
     let obj_len = CFDataGetLength(obj);
     let obj_val = vec![0u8; obj_len as usize];
     CFDataGetBytes(obj, CFRange::init(0, obj_len), obj_val.as_ptr() as *mut u8);
@@ -404,8 +404,38 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
       freqs[i] = u32::from_le_bytes([x[0], x[1], x[2], x[3]]);
     }
 
-    (volts, freqs)
+    Some((volts, freqs))
   }
+}
+
+// Parse acc-clusters bytes into (ecpu_key, pcpu_key) voltage-states key names.
+// Each 8-byte entry: byte 0 = voltage-states index, byte 1 = cluster type
+// (0 = efficiency/lowest tier, higher = higher perf tier).
+// Picks highest type as pcpu, second-highest as ecpu — handles M5 Max where
+// type 0 (E-core cluster) is absent and the two active tiers are 1 and 2.
+fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
+  let mut clusters: Vec<(u8, String)> = Vec::new();
+  for chunk in data.chunks_exact(8) {
+    clusters.push((chunk[1], format!("voltage-states{}-sram", chunk[0])));
+  }
+  clusters.sort_by_key(|c| c.0);
+  if clusters.len() < 2 { return None; }
+  let ecpu_key = clusters[clusters.len() - 2].1.clone();
+  let pcpu_key = clusters.last()?.1.clone();
+  Some((ecpu_key, pcpu_key))
+}
+
+// Read acc-clusters from pmgr dict and parse into (ecpu_key, pcpu_key).
+fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
+  let obj = cfdict_get_val(dict, "acc-clusters")? as CFDataRef;
+
+  let len = unsafe { CFDataGetLength(obj) } as usize;
+  if len < 8 { return None; }
+
+  let mut data = vec![0u8; len];
+  unsafe { CFDataGetBytes(obj, CFRange::init(0, len as _), data.as_mut_ptr()) };
+
+  parse_acc_clusters(&data)
 }
 
 pub fn run_system_profiler() -> WithError<serde_json::Value> {
@@ -443,7 +473,7 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .parse::<u64>()
     .unwrap_or(0);
 
-  // SPHardwareDataType.0.number_processors -> "proc x:y:z"
+  // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc x:y:z:w"
   let cpu_cores = out["SPHardwareDataType"][0]["number_processors"]
     .as_str()
     .and_then(|cores| cores.strip_prefix("proc "))
@@ -452,7 +482,9 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .map(|x| x.parse::<u64>().unwrap_or(0))
     .collect::<Vec<_>>();
   let (ecpu_cores, pcpu_cores) = if cpu_cores.len() == 3 {
-    (cpu_cores[2], cpu_cores[1])
+    (cpu_cores[2], cpu_cores[1])              // M1-M4: total:pcpu:ecpu
+  } else if cpu_cores.len() == 4 {
+    (cpu_cores[3], cpu_cores[1])              // M5+:   total:super:ecpu:perf
   } else {
     (0, 0) // Fallback in case of invalid data
   };
@@ -481,9 +513,24 @@ pub fn get_soc_info() -> WithError<SocInfo> {
       // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
       //    but their values are zero, so sram used here; it looks valid.
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
-      info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, cpu_scale);
-      info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
-      info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, gpu_scale);
+      // Try legacy keys first (M1-M4), fall back to acc-clusters discovery (M5+)
+      if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states1-sram") {
+        info.ecpu_freqs = to_mhz(freqs, cpu_scale);
+      } else if let Some((ecpu_key, _)) = parse_acc_clusters_from(item) {
+        if let Some((_, freqs)) = get_dvfs_mhz(item, &ecpu_key) {
+          info.ecpu_freqs = to_mhz(freqs, cpu_scale);
+        }
+      }
+      if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states5-sram") {
+        info.pcpu_freqs = to_mhz(freqs, cpu_scale);
+      } else if let Some((_, pcpu_key)) = parse_acc_clusters_from(item) {
+        if let Some((_, freqs)) = get_dvfs_mhz(item, &pcpu_key) {
+          info.pcpu_freqs = to_mhz(freqs, cpu_scale);
+        }
+      }
+      if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states9") {
+        info.gpu_freqs = to_mhz(freqs, gpu_scale);
+      }
       unsafe { CFRelease(item as _) }
     }
   }
@@ -913,5 +960,31 @@ impl Drop for SMC {
     unsafe {
       IOServiceClose(self.conn);
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn parse_acc_clusters_m5_max() {
+    // Real acc-clusters bytes captured from M5 Max via ioreg
+    let data = [
+      0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x05, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let (e, p) = parse_acc_clusters(&data).unwrap();
+    // Second-highest type (1 = Performance) as ecpu, highest (2 = Super) as pcpu
+    assert_eq!(e, "voltage-states23-sram");
+    assert_eq!(p, "voltage-states5-sram");
+  }
+
+  #[test]
+  fn parse_acc_clusters_incomplete() {
+    assert!(parse_acc_clusters(&[]).is_none());
+    // Single cluster – need both ecpu and pcpu
+    assert!(parse_acc_clusters(&[1, 0, 0, 0, 0, 0, 0, 0]).is_none());
   }
 }
