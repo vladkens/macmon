@@ -376,8 +376,10 @@ pub struct SocInfo {
   pub memory_gb: u8,
   pub ecpu_cores: u8,
   pub pcpu_cores: u8,
+  pub mcpu_cores: u8,
   pub ecpu_freqs: Vec<u32>,
   pub pcpu_freqs: Vec<u32>,
+  pub mcpu_freqs: Vec<u32>,
   pub gpu_cores: u8,
   pub gpu_freqs: Vec<u32>,
 }
@@ -386,12 +388,20 @@ impl SocInfo {
   pub fn new() -> WithError<Self> {
     get_soc_info()
   }
+
+  /// Returns true if this is an M5 or later chip with super cores instead of efficiency cores
+  pub fn has_mcpu(&self) -> bool {
+    self.mcpu_cores > 0
+  }
 }
 
 // dynamic voltage and frequency scaling
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
   unsafe {
-    let obj = cfdict_get_val(dict, key).unwrap() as CFDataRef;
+    let obj = match cfdict_get_val(dict, key) {
+      Some(obj) => obj as CFDataRef,
+      None => return (vec![], vec![]),
+    };
     let obj_len = CFDataGetLength(obj);
     let obj_val = vec![0u8; obj_len as usize];
     CFDataGetBytes(obj, CFRange::init(0, obj_len), obj_val.as_ptr() as *mut u8);
@@ -451,10 +461,11 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .split(':')
     .map(|x| x.parse::<u64>().unwrap_or(0))
     .collect::<Vec<_>>();
-  let (ecpu_cores, pcpu_cores) = if cpu_cores.len() == 3 {
-    (cpu_cores[2], cpu_cores[1])
-  } else {
-    (0, 0) // Fallback in case of invalid data
+  // "proc 18:6:0:12" on M5 (total:S:E:M) or "proc 10:4:6" on M1-M4 (total:P:E)
+  let (ecpu_cores, pcpu_cores, mcpu_cores) = match cpu_cores.len() {
+    4 => (cpu_cores[2], cpu_cores[1], cpu_cores[3]), // M5+: total:S:E:M
+    3 => (cpu_cores[2], cpu_cores[1], 0),             // M1-M4: total:P:E
+    _ => (0, 0, 0),
   };
 
   // SPDisplaysDataType.0.sppci_cores
@@ -462,6 +473,7 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     out["SPDisplaysDataType"][0]["sppci_cores"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
 
   // Determine scaling based on chip type
+  let is_m5 = chip_name.contains("M5");
   let before_m4 = chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
   let cpu_scale: u32 = if before_m4 { 1000 * 1000 } else { 1000 }; // MHz before M4, KHz after
   let gpu_scale: u32 = 1000 * 1000; // MHz
@@ -473,22 +485,36 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   info.gpu_cores = gpu_cores as u8;
   info.ecpu_cores = ecpu_cores as u8;
   info.pcpu_cores = pcpu_cores as u8;
+  info.mcpu_cores = mcpu_cores as u8;
 
   // CPU frequencies
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
-      // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
-      //    but their values are zero, so sram used here; it looks valid.
-      // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
-      info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, cpu_scale);
-      info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
+
+      if is_m5 {
+        // M5: no E-cores, super cores via PCPU channels, perf cores via MCPU channels
+        // voltage-states5-sram = super/PCPU cores
+        // voltage-states22-sram = perf/MCPU cores
+        info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
+        info.mcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states22-sram").1, cpu_scale);
+        // ecpu_freqs stays empty — no E-cores on M5
+      } else {
+        info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, cpu_scale);
+        info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
+      }
+
       info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, gpu_scale);
       unsafe { CFRelease(item as _) }
     }
   }
 
-  if info.ecpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
+  // Validate: M5 has no E-cores, check mcpu instead
+  if is_m5 {
+    if info.mcpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
+      return Err("No CPU frequencies found".into());
+    }
+  } else if info.ecpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
     return Err("No CPU frequencies found".into());
   }
 
