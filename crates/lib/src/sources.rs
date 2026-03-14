@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use core_foundation::{
   base::{CFRange, CFRelease},
   data::{CFDataGetBytes, CFDataGetLength, CFDataRef},
@@ -29,6 +31,8 @@ const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 2] = [
     pmgr_key: "voltage-states5-sram",
   },
 ];
+
+static SOC_INFO_CACHE: OnceLock<SocInfo> = OnceLock::new();
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuDomainInfo {
@@ -160,7 +164,7 @@ fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
   domains.retain(|domain| domain.units > 0 || !domain.freqs.is_empty());
 }
 
-pub fn get_soc_info() -> WithError<SocInfo> {
+fn load_soc_info() -> WithError<SocInfo> {
   let out = run_system_profiler()?;
   let mut info = SocInfo::default();
 
@@ -209,6 +213,16 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     return Err("No CPU frequencies found".into());
   }
 
+  Ok(info)
+}
+
+pub fn get_soc_info() -> WithError<SocInfo> {
+  if let Some(info) = SOC_INFO_CACHE.get() {
+    return Ok(info.clone());
+  }
+
+  let info = load_soc_info()?;
+  let _ = SOC_INFO_CACHE.set(info.clone());
   Ok(info)
 }
 

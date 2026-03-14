@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeMap};
 use std::error::Error;
 use std::ffi::{CStr, c_char};
 use std::fmt::{Display, Formatter};
@@ -14,10 +14,37 @@ pub struct UsageEntry {
   pub units: u32,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone)]
 pub struct UsageMetrics {
   pub cpu: Vec<UsageEntry>,
   pub gpu: Vec<UsageEntry>,
+}
+
+struct UsageEntriesAsMap<'a>(&'a [UsageEntry]);
+
+impl Serialize for UsageEntriesAsMap<'_> {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map = serializer.serialize_map(Some(self.0.len()))?;
+    for entry in self.0 {
+      map.serialize_entry(&entry.name, &(entry.units, entry.freq_mhz, entry.usage))?;
+    }
+    map.end()
+  }
+}
+
+impl Serialize for UsageMetrics {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("cpu", &UsageEntriesAsMap(&self.cpu))?;
+    map.serialize_entry("gpu", &UsageEntriesAsMap(&self.gpu))?;
+    map.end()
+  }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]

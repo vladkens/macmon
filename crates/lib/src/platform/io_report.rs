@@ -199,25 +199,35 @@ fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscription
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
+  sample: CFDictionaryRef,
 }
 
 impl IOReport {
   pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
     let chan = cfio_get_chan(channels)?;
     let subs = cfio_get_subs(chan)?;
-    Ok(Self { subs, chan })
+    let sample = unsafe { IOReportCreateSamples(subs, chan, null()) };
+    if sample.is_null() {
+      unsafe {
+        CFRelease(chan as _);
+        CFRelease(subs as _);
+      }
+      return Err("Failed to create initial sample".into());
+    }
+
+    Ok(Self { subs, chan, sample })
   }
 
-  pub fn get_sample(&self, duration: u64) -> IOReportIterator {
+  pub fn get_sample(&mut self, duration: u64) -> IOReportIterator {
     unsafe {
-      let sample1 = IOReportCreateSamples(self.subs, self.chan, null());
       std::thread::sleep(std::time::Duration::from_millis(duration));
-      let sample2 = IOReportCreateSamples(self.subs, self.chan, null());
+      let next_sample = IOReportCreateSamples(self.subs, self.chan, null());
 
-      let sample3 = IOReportCreateSamplesDelta(sample1, sample2, null());
-      CFRelease(sample1 as _);
-      CFRelease(sample2 as _);
-      IOReportIterator::new(sample3)
+      let delta = IOReportCreateSamplesDelta(self.sample, next_sample, null());
+      CFRelease(self.sample as _);
+      self.sample = next_sample;
+
+      IOReportIterator::new(delta)
     }
   }
 }
@@ -225,6 +235,7 @@ impl IOReport {
 impl Drop for IOReport {
   fn drop(&mut self) {
     unsafe {
+      CFRelease(self.sample as _);
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
     }

@@ -95,6 +95,12 @@ fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f
   } else {
     // On some chips/clusters residency state count differs from pmgr DVFS table length.
     // Interpolate across known min/max to avoid silently dropping tail states.
+    eprintln!(
+      "macmon: residency state count ({}) does not match DVFS table length ({}) for states {:?}",
+      active.len(),
+      freqs.len(),
+      items.iter().map(|(name, _)| name).collect::<Vec<_>>()
+    );
     let steps = active.len().saturating_sub(1) as f64;
     for (idx, residency) in active.iter().enumerate() {
       let percent = zero_div(*residency, usage);
