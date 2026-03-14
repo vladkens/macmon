@@ -142,7 +142,7 @@ fn metrics_serialize_with_expected_shape() {
       all: 0.321,
     },
     memory: super::MemMetrics { ram_total: 1, ram_usage: 2, swap_total: 3, swap_usage: 4 },
-    temp: super::TempMetrics { cpu_temp_avg: 42.0, gpu_temp_avg: 36.0 },
+    temp: super::TempMetrics { cpu_avg: 42.0, gpu_avg: 36.0 },
   };
 
   let value = serde_json::to_value(&metrics).unwrap();
@@ -158,7 +158,7 @@ fn metrics_serialize_with_expected_shape() {
   assert!((value["power"]["cpu"].as_f64().unwrap() - 0.2).abs() < 1e-6);
   assert!((value["power"]["all"].as_f64().unwrap() - (0.2 + 0.01 + 0.11 + 0.001)).abs() < 1e-6);
   assert_eq!(value["memory"]["swap_usage"], serde_json::json!(4));
-  assert!((value["temp"]["cpu_temp_avg"].as_f64().unwrap() - 42.0).abs() < 1e-6);
+  assert!((value["temp"]["cpu_avg"].as_f64().unwrap() - 42.0).abs() < 1e-6);
 }
 
 #[test]

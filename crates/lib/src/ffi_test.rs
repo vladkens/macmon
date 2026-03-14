@@ -19,7 +19,7 @@ fn test_metrics() -> Metrics {
     },
     power: PowerMetrics { cpu: 1.0, gpu: 2.0, ram: 3.0, sys: 4.0, gpu_ram: 5.0, ane: 6.0, all: 17.0 },
     memory: MemMetrics { ram_total: 10, ram_usage: 11, swap_total: 12, swap_usage: 13 },
-    temp: TempMetrics { cpu_temp_avg: 50.0, gpu_temp_avg: 51.0 },
+    temp: TempMetrics { cpu_avg: 50.0, gpu_avg: 51.0 },
   }
 }
 
@@ -66,7 +66,7 @@ fn metrics_conversion_preserves_names_and_values() {
   assert_eq!(read_c_str(gpu[0].name), "GFX0");
   assert_eq!(ffi.power.all, 17.0);
   assert_eq!(ffi.memory.swap_usage, 13);
-  assert_eq!(ffi.temp.gpu_temp_avg, 51.0);
+  assert_eq!(ffi.temp.gpu_avg, 51.0);
 
   macmon_metrics_free(&mut ffi);
   assert!(ffi.cpu.ptr.is_null());

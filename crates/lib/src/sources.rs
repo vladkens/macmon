@@ -7,6 +7,7 @@ use core_foundation::{
 };
 use serde::Serialize;
 
+use crate::diag::startup_log;
 use crate::platform::{IOServiceIterator, WithError, cfdict_get_val, cfio_get_props};
 
 struct CpuDomainBinding {
@@ -165,7 +166,9 @@ fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
 }
 
 fn load_soc_info() -> WithError<SocInfo> {
+  startup_log("lib soc: load start");
   let out = run_system_profiler()?;
+  startup_log("lib soc: system_profiler complete");
   let mut info = SocInfo::default();
 
   let chip_name =
@@ -194,6 +197,7 @@ fn load_soc_info() -> WithError<SocInfo> {
   info.memory_gb = mem_gb as u8;
   info.gpu_cores = gpu_cores as u8;
 
+  startup_log("lib soc: scanning AppleARMIODevice for pmgr");
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
@@ -213,14 +217,23 @@ fn load_soc_info() -> WithError<SocInfo> {
     return Err("No CPU frequencies found".into());
   }
 
+  startup_log(format!(
+    "lib soc: load complete (model={}, chip={}, cpu_domains={}, gpu_freqs={})",
+    info.mac_model,
+    info.chip_name,
+    info.cpu_domains.len(),
+    info.gpu_freqs.len()
+  ));
   Ok(info)
 }
 
 pub fn get_soc_info() -> WithError<SocInfo> {
   if let Some(info) = SOC_INFO_CACHE.get() {
+    startup_log("lib soc: cache hit");
     return Ok(info.clone());
   }
 
+  startup_log("lib soc: cache miss");
   let info = load_soc_info()?;
   let _ = SOC_INFO_CACHE.set(info.clone());
   Ok(info)

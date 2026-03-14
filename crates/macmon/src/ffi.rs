@@ -68,8 +68,8 @@ pub struct MemMetrics {
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct TempMetrics {
-  pub cpu_temp_avg: f32,
-  pub gpu_temp_avg: f32,
+  pub cpu_avg: f32,
+  pub gpu_avg: f32,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -153,8 +153,8 @@ struct macmon_mem_metrics_t {
 #[repr(C)]
 #[derive(Default)]
 struct macmon_temp_metrics_t {
-  cpu_temp_avg: f32,
-  gpu_temp_avg: f32,
+  cpu_avg: f32,
+  gpu_avg: f32,
 }
 
 #[repr(C)]
@@ -312,8 +312,8 @@ fn copy_metrics(raw: &macmon_metrics_t) -> Metrics {
       swap_usage: raw.memory.swap_usage,
     },
     temp: TempMetrics {
-      cpu_temp_avg: raw.temp.cpu_temp_avg,
-      gpu_temp_avg: raw.temp.gpu_temp_avg,
+      cpu_avg: raw.temp.cpu_avg,
+      gpu_avg: raw.temp.gpu_avg,
     },
   }
 }

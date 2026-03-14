@@ -48,8 +48,8 @@ typedef struct macmon_mem_metrics_t {
 } macmon_mem_metrics_t;
 
 typedef struct macmon_temp_metrics_t {
-  float cpu_temp_avg;
-  float gpu_temp_avg;
+  float cpu_avg;
+  float gpu_avg;
 } macmon_temp_metrics_t;
 
 typedef struct macmon_metrics_t {

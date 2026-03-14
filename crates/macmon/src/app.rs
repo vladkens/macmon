@@ -272,8 +272,8 @@ impl App {
         .push(entry.freq_mhz as u64, entry.usage as f64, entry.units);
     }
 
-    self.cpu_temp.push(data.temp.cpu_temp_avg);
-    self.gpu_temp.push(data.temp.gpu_temp_avg);
+    self.cpu_temp.push(data.temp.cpu_avg);
+    self.gpu_temp.push(data.temp.gpu_avg);
 
     self.mem.push(data.memory);
   }

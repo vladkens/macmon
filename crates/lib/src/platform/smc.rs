@@ -150,19 +150,20 @@ impl SMC {
     })
   }
 
-  pub fn read_all_keys(&mut self) -> WithError<Vec<String>> {
+  pub fn key_count(&mut self) -> WithError<u32> {
     let val = self.read_val("#KEY")?;
-    let val = u32::from_be_bytes(val.data[0..4].try_into().unwrap());
+    Ok(u32::from_be_bytes(val.data[0..4].try_into().unwrap()))
+  }
+
+  pub fn read_all_keys(&mut self) -> WithError<Vec<String>> {
+    let count = self.key_count()?;
 
     let mut keys = Vec::new();
-    for i in 0..val {
-      let key = self.key_by_index(i)?;
-      let val = self.read_val(&key);
-      if val.is_err() {
-        continue;
+    for i in 0..count {
+      match self.key_by_index(i) {
+        Ok(key) => keys.push(key),
+        Err(_) => continue,
       }
-
-      keys.push(val.unwrap().name);
     }
 
     Ok(keys)

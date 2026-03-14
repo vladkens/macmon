@@ -1,7 +1,9 @@
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
+use std::time::Instant;
 
-use crate::platform::{IOHIDSensors, IOReport, SMC, cfio_get_residencies, cfio_watts, libc_ram, libc_swap};
+use crate::diag::startup_log;
+use crate::platform::{IOReport, SMC, cfio_get_residencies, cfio_watts, libc_ram, libc_swap};
 use crate::sources::{CpuDomainInfo, SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -14,8 +16,8 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct TempMetrics {
-  pub cpu_temp_avg: f32, // Celsius
-  pub gpu_temp_avg: f32, // Celsius
+  pub cpu_avg: f32, // Celsius
+  pub gpu_avg: f32, // Celsius
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -261,16 +263,33 @@ fn cpu_domain_for_channel<'a>(
   cpu_domains.iter().find(|domain| channel.contains(domain.name.as_str()))
 }
 
-fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
-  let mut smc = SMC::new()?;
+#[derive(Debug, Default)]
+struct SmcSensors {
+  cpu_keys: Vec<String>,
+  gpu_keys: Vec<String>,
+}
+
+fn init_smc() -> WithError<(SMC, SmcSensors)> {
   const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
+  startup_log("lib smc: connection start");
+  let mut smc = SMC::new()?;
+  startup_log("lib smc: connection ready");
 
-  let mut cpu_sensors = Vec::new();
-  let mut gpu_sensors = Vec::new();
+  startup_log("lib smc: sensor discovery start");
+  let total_start = Instant::now();
 
-  let names = smc.read_all_keys().unwrap_or(vec![]);
+  let read_start = Instant::now();
+  let names = smc.read_all_keys()?;
+  let read_elapsed = read_start.elapsed();
+
+  let filter_start = Instant::now();
+  let mut sensors = SmcSensors::default();
   for name in &names {
-    // eprintln!("init_smc found key: {}", name);
+    let is_cpu = name.starts_with("Tp") || name.starts_with("Te");
+    let is_gpu = name.starts_with("Tg");
+    if !is_cpu && !is_gpu {
+      continue;
+    }
 
     let key = match smc.read_key_info(name) {
       Ok(key) => key,
@@ -281,24 +300,25 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
       continue;
     }
 
-    let _ = match smc.read_val(name) {
-      Ok(val) => val,
-      Err(_) => continue,
-    };
-
-    // Unfortunately, it is not known which keys are responsible for what.
-    // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
-
-    match name {
-      // "Tp" – performance cores, "Te" – efficiency cores
-      name if name.starts_with("Tp") || name.starts_with("Te") => cpu_sensors.push(name.clone()),
-      name if name.starts_with("Tg") => gpu_sensors.push(name.clone()),
-      _ => (),
+    if is_cpu {
+      sensors.cpu_keys.push(name.clone());
+    } else if is_gpu {
+      sensors.gpu_keys.push(name.clone());
     }
   }
+  let filter_elapsed = filter_start.elapsed();
 
-  // println!("{} {}", cpu_sensors.len(), gpu_sensors.len());
-  Ok((smc, cpu_sensors, gpu_sensors))
+  startup_log(format!(
+    "lib smc: sensor discovery complete (indexed_keys={}, cpu_sensors={}, gpu_sensors={}, read_all_keys={:.3}s, filter={:.3}s, total={:.3}s)",
+    names.len(),
+    sensors.cpu_keys.len(),
+    sensors.gpu_keys.len(),
+    read_elapsed.as_secs_f64(),
+    filter_elapsed.as_secs_f64(),
+    total_start.elapsed().as_secs_f64()
+  ));
+
+  Ok((smc, sensors))
 }
 
 // MARK: Sampler
@@ -306,7 +326,6 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
 pub struct Sampler {
   soc: SocInfo,
   ior: IOReport,
-  hid: IOHIDSensors,
   smc: SMC,
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
@@ -314,6 +333,7 @@ pub struct Sampler {
 
 impl Sampler {
   pub fn new() -> WithError<Self> {
+    startup_log("lib sampler: init start");
     let channels = vec![
       ("Energy Model", None),                  // cpu/gpu/ane power
       ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
@@ -322,11 +342,29 @@ impl Sampler {
     ];
 
     let soc = SocInfo::new()?;
+    startup_log(format!(
+      "lib sampler: soc info ready (chip={}, cpu_domains={}, gpu_cores={})",
+      soc.chip_name,
+      soc.cpu_domains.len(),
+      soc.gpu_cores
+    ));
     let ior = IOReport::new(channels)?;
-    let hid = IOHIDSensors::new()?;
-    let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
+    startup_log("lib sampler: IOReport subscription ready");
+    let (smc, smc_sensors) = init_smc()?;
+    startup_log(format!(
+      "lib sampler: SMC ready (cpu_sensors={}, gpu_sensors={})",
+      smc_sensors.cpu_keys.len(),
+      smc_sensors.gpu_keys.len()
+    ));
 
-    Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys })
+    startup_log("lib sampler: init complete");
+    Ok(Sampler {
+      soc,
+      ior,
+      smc,
+      smc_cpu_keys: smc_sensors.cpu_keys,
+      smc_gpu_keys: smc_sensors.gpu_keys,
+    })
   }
 
   fn gpu_freqs(&self) -> &[u32] {
@@ -339,7 +377,10 @@ impl Sampler {
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = self.smc.read_val(sensor)?;
+      let val = match self.smc.read_val(sensor) {
+        Ok(val) => val,
+        Err(_) => continue,
+      };
       let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
       if val != 0.0 {
         cpu_metrics.push(val);
@@ -348,54 +389,25 @@ impl Sampler {
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = self.smc.read_val(sensor)?;
+      let val = match self.smc.read_val(sensor) {
+        Ok(val) => val,
+        Err(_) => continue,
+      };
       let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
       if val != 0.0 {
         gpu_metrics.push(val);
       }
     }
 
-    let cpu_temp_avg = zero_div(cpu_metrics.iter().sum::<f32>(), cpu_metrics.len() as f32);
-    let gpu_temp_avg = zero_div(gpu_metrics.iter().sum::<f32>(), gpu_metrics.len() as f32);
+    let cpu_avg = zero_div(cpu_metrics.iter().sum::<f32>(), cpu_metrics.len() as f32);
+    let gpu_avg = zero_div(gpu_metrics.iter().sum::<f32>(), gpu_metrics.len() as f32);
 
-    Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
-  }
-
-  fn get_temp_hid(&mut self) -> WithError<TempMetrics> {
-    let metrics = self.hid.get_metrics();
-
-    let mut cpu_values = Vec::new();
-    let mut gpu_values = Vec::new();
-
-    for (name, value) in &metrics {
-      if name.starts_with("pACC MTR Temp Sensor") || name.starts_with("eACC MTR Temp Sensor") {
-        // println!("{}: {}", name, value);
-        cpu_values.push(*value);
-        continue;
-      }
-
-      if name.starts_with("GPU MTR Temp Sensor") {
-        // println!("{}: {}", name, value);
-        gpu_values.push(*value);
-        continue;
-      }
-    }
-
-    let cpu_temp_avg = zero_div(cpu_values.iter().sum(), cpu_values.len() as f32);
-    let gpu_temp_avg = zero_div(gpu_values.iter().sum(), gpu_values.len() as f32);
-
-    Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
+    Ok(TempMetrics { cpu_avg, gpu_avg })
   }
 
   fn get_temp(&mut self) -> WithError<TempMetrics> {
-    // HID for M1, SMC for M2/M3
-    // UPD: Looks like HID/SMC related to OS version, not to the chip (SMC available from macOS 14)
-    match !self.smc_cpu_keys.is_empty() {
-      true => self.get_temp_smc(),
-      false => self.get_temp_hid(),
-    }
+    self.get_temp_smc()
   }
-
   fn get_mem(&mut self) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;

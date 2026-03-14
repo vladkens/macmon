@@ -64,8 +64,8 @@ pub struct macmon_mem_metrics_t {
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct macmon_temp_metrics_t {
-  pub cpu_temp_avg: f32,
-  pub gpu_temp_avg: f32,
+  pub cpu_avg: f32,
+  pub gpu_avg: f32,
 }
 
 #[repr(C)]
@@ -178,8 +178,8 @@ fn ffi_metrics(metrics: Metrics) -> macmon_metrics_t {
       swap_usage: metrics.memory.swap_usage,
     },
     temp: macmon_temp_metrics_t {
-      cpu_temp_avg: metrics.temp.cpu_temp_avg,
-      gpu_temp_avg: metrics.temp.gpu_temp_avg,
+      cpu_avg: metrics.temp.cpu_avg,
+      gpu_avg: metrics.temp.gpu_avg,
     },
   }
 }
