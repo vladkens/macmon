@@ -7,23 +7,59 @@ use serde::Serialize;
 
 use crate::platform::{IOServiceIterator, WithError, cfdict_get_val, cfio_get_props};
 
+struct CpuDomainBinding {
+  channel_prefix: &'static str,
+  core_prefix: &'static str,
+  pmgr_key: &'static str,
+}
+
+// Apple APIs expose CPU cluster/core channels and pmgr DVFS tables as separate islands
+// of data. This table is the manual bridge between them: it tells the library which
+// channel prefixes belong to the same CPU domain and which pmgr key provides that
+// domain's frequency table.
+const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 2] = [
+  CpuDomainBinding {
+    channel_prefix: "ECPU",
+    core_prefix: "ECPU",
+    pmgr_key: "voltage-states1-sram",
+  },
+  CpuDomainBinding {
+    channel_prefix: "PCPU",
+    core_prefix: "PCPU",
+    pmgr_key: "voltage-states5-sram",
+  },
+];
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuDomainInfo {
-  pub id: String,
+  /// Stable public name for this CPU domain or cluster, for example `ECPU` or `PCPU`.
+  pub name: String,
+  /// Number of CPU units (cores) that belong to this domain.
   pub units: u32,
+  /// Available DVFS operating points for this domain in MHz, in the order reported by pmgr.
+  /// This is not a `{base, max}` pair: it is the full frequency table used to interpret
+  /// residency counters and derive the current estimated frequency.
   pub freqs: Vec<u32>,
-  pub channel_prefix: String,
-  pub core_prefix: String,
+  /// Internal prefix used to match per-core IOReport channels to this domain.
+  #[serde(skip)]
+  pub(crate) core_prefix: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct SocInfo {
+  /// Machine model identifier reported by macOS, for example `Mac15,6`.
   pub mac_model: String,
+  /// Marketing chip name reported by macOS, for example `Apple M3 Pro`.
   pub chip_name: String,
+  /// Installed unified memory capacity in gigabytes.
   pub memory_gb: u8,
+  /// Sum of `units` across all discovered CPU domains.
   pub cpu_cores_total: u16,
+  /// CPU frequency domains discovered for this SoC.
   pub cpu_domains: Vec<CpuDomainInfo>,
+  /// GPU core count reported by macOS.
   pub gpu_cores: u8,
+  /// Available GPU DVFS operating points in MHz, in the order reported by pmgr.
   pub gpu_freqs: Vec<u32>,
 }
 
@@ -68,25 +104,6 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
-struct CpuDomainBinding {
-  channel_prefix: &'static str,
-  core_prefix: &'static str,
-  pmgr_key: &'static str,
-}
-
-const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 2] = [
-  CpuDomainBinding {
-    channel_prefix: "ECPU",
-    core_prefix: "ECPU",
-    pmgr_key: "voltage-states1-sram",
-  },
-  CpuDomainBinding {
-    channel_prefix: "PCPU",
-    core_prefix: "PCPU",
-    pmgr_key: "voltage-states5-sram",
-  },
-];
-
 fn parse_cpu_domain_units(number_processors: Option<&str>) -> Vec<u32> {
   let parts = number_processors
     .and_then(|value| value.strip_prefix("proc "))
@@ -106,10 +123,9 @@ fn init_cpu_freq_domains(units: Vec<u32>) -> Vec<CpuDomainInfo> {
     .iter()
     .enumerate()
     .map(|(idx, binding)| CpuDomainInfo {
-      id: format!("cpu{idx}"),
+      name: binding.channel_prefix.to_string(),
       units: units.get(idx).copied().unwrap_or(0),
       freqs: Vec::new(),
-      channel_prefix: binding.channel_prefix.to_string(),
       core_prefix: binding.core_prefix.to_string(),
     })
     .collect()
@@ -142,9 +158,6 @@ fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
   }
 
   domains.retain(|domain| domain.units > 0 || !domain.freqs.is_empty());
-  for (idx, domain) in domains.iter_mut().enumerate() {
-    domain.id = format!("cpu{idx}");
-  }
 }
 
 pub fn get_soc_info() -> WithError<SocInfo> {
@@ -200,109 +213,5 @@ pub fn get_soc_info() -> WithError<SocInfo> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::{CpuDomainInfo, finalize_cpu_freq_domains, init_cpu_freq_domains, parse_cpu_domain_units};
-  use crate::platform::smc::KeyInfo;
-
-  fn cached_key_info(cache: &[(u32, KeyInfo)], key: u32) -> Option<KeyInfo> {
-    cache.iter().find(|(cached_key, _)| *cached_key == key).map(|(_, info)| *info)
-  }
-
-  #[test]
-  fn parse_cpu_domain_units_returns_generic_domain_order() {
-    assert_eq!(parse_cpu_domain_units(Some("proc 0:8:4")), vec![4, 8]);
-    assert_eq!(parse_cpu_domain_units(Some("invalid")), Vec::<u32>::new());
-  }
-
-  #[test]
-  fn init_cpu_freq_domains_uses_binding_slots() {
-    let domains = init_cpu_freq_domains(vec![4, 8]);
-
-    assert_eq!(domains.len(), 2);
-    assert_eq!(domains[0].id, "cpu0");
-    assert_eq!(domains[0].units, 4);
-    assert_eq!(domains[0].channel_prefix, "ECPU");
-    assert_eq!(domains[1].id, "cpu1");
-    assert_eq!(domains[1].units, 8);
-    assert_eq!(domains[1].channel_prefix, "PCPU");
-  }
-
-  #[test]
-  fn finalize_cpu_freq_domains_assigns_stable_ids_after_filtering() {
-    let mut domains = vec![
-      CpuDomainInfo {
-        units: 4,
-        freqs: vec![1000, 2000],
-        id: "stale0".to_string(),
-        channel_prefix: "CPUCL0".to_string(),
-        core_prefix: "CPUCORE0".to_string(),
-      },
-      CpuDomainInfo {
-        units: 8,
-        freqs: vec![2000, 3000],
-        id: "stale1".to_string(),
-        channel_prefix: "CPUCL1".to_string(),
-        core_prefix: "CPUCORE1".to_string(),
-      },
-      CpuDomainInfo {
-        units: 0,
-        freqs: vec![],
-        id: "stale2".to_string(),
-        channel_prefix: "CPUCL2".to_string(),
-        core_prefix: "CPUCORE2".to_string(),
-      },
-    ];
-
-    finalize_cpu_freq_domains(&mut domains);
-
-    assert_eq!(domains.len(), 2);
-    assert_eq!(domains[0].id, "cpu0");
-    assert_eq!(domains[0].units, 4);
-    assert_eq!(domains[0].channel_prefix, "CPUCL0");
-    assert_eq!(domains[1].id, "cpu1");
-    assert_eq!(domains[1].units, 8);
-    assert_eq!(domains[1].channel_prefix, "CPUCL1");
-  }
-
-  #[test]
-  fn finalize_cpu_freq_domains_moves_single_freq_table_to_single_domain_with_units() {
-    let mut domains = vec![
-      CpuDomainInfo {
-        units: 0,
-        freqs: vec![1000, 2000],
-        id: "stale0".to_string(),
-        channel_prefix: "CPUCL0".to_string(),
-        core_prefix: "CPUCORE0".to_string(),
-      },
-      CpuDomainInfo {
-        units: 10,
-        freqs: vec![],
-        id: "stale1".to_string(),
-        channel_prefix: "CPUCL1".to_string(),
-        core_prefix: "CPUCORE1".to_string(),
-      },
-    ];
-
-    finalize_cpu_freq_domains(&mut domains);
-
-    assert_eq!(domains.len(), 1);
-    assert_eq!(domains[0].id, "cpu0");
-    assert_eq!(domains[0].units, 10);
-    assert_eq!(domains[0].freqs, vec![1000, 2000]);
-    assert_eq!(domains[0].channel_prefix, "CPUCL1");
-  }
-
-  #[test]
-  fn smc_vec_cache_returns_inserted_key_info() {
-    let key = u32::from_be_bytes(*b"TEST");
-    let info = KeyInfo { data_size: 4, data_type: 0x666c7420, data_attributes: 0 };
-    let mut cache = Vec::new();
-
-    assert_eq!(cached_key_info(&cache, key), None);
-
-    cache.push((key, info));
-
-    assert_eq!(cached_key_info(&cache, key), Some(info));
-    assert_eq!(cached_key_info(&cache, key), Some(info));
-  }
-}
+#[path = "sources_test.rs"]
+mod tests;

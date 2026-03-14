@@ -61,21 +61,34 @@ typedef struct macmon_metrics_t {
 } macmon_metrics_t;
 
 typedef struct macmon_cpu_domain_t {
+  /* Domain/channel prefix such as `ECPU` or `PCPU`. */
   const char *name;
+  /* Number of CPU units (cores) in this domain. */
   uint32_t units;
+  /* Length of `freqs_mhz`. */
   size_t freqs_len;
+  /* Full DVFS frequency table for this domain in MHz, in pmgr order. */
   uint32_t *freqs_mhz;
 } macmon_cpu_domain_t;
 
 typedef struct macmon_soc_info_t {
+  /* Machine model identifier reported by macOS, for example `Mac15,6`. */
   const char *mac_model;
+  /* Marketing chip name reported by macOS, for example `Apple M3 Pro`. */
   const char *chip_name;
+  /* Installed unified memory capacity in gigabytes. */
   uint8_t memory_gb;
+  /* Sum of CPU units across all discovered CPU domains. */
   uint16_t cpu_cores_total;
+  /* Length of `cpu_domains`. */
   size_t cpu_domains_len;
+  /* CPU frequency domains discovered for this SoC. */
   macmon_cpu_domain_t *cpu_domains;
+  /* GPU core count reported by macOS. */
   uint8_t gpu_cores;
+  /* Length of `gpu_freqs_mhz`. */
   size_t gpu_freqs_len;
+  /* Full GPU DVFS frequency table in MHz, in pmgr order. */
   uint32_t *gpu_freqs_mhz;
 } macmon_soc_info_t;
 
