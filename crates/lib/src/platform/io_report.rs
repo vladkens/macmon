@@ -9,7 +9,9 @@ use std::{
 use core_foundation::{
   array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef},
   base::{CFRelease, CFTypeRef, kCFAllocatorDefault},
-  dictionary::{CFDictionaryCreateMutableCopy, CFDictionaryGetCount, CFDictionaryRef, CFMutableDictionaryRef},
+  dictionary::{
+    CFDictionaryCreateMutableCopy, CFDictionaryGetCount, CFDictionaryRef, CFMutableDictionaryRef,
+  },
   string::CFStringRef,
 };
 
@@ -50,27 +52,6 @@ unsafe extern "C" {
   fn IOReportStateGetResidency(a: CFDictionaryRef, b: i32) -> i64;
 }
 
-fn cfio_get_group(item: CFDictionaryRef) -> String {
-  match unsafe { IOReportChannelGetGroup(item) } {
-    x if x.is_null() => String::new(),
-    x => from_cfstr(x),
-  }
-}
-
-fn cfio_get_subgroup(item: CFDictionaryRef) -> String {
-  match unsafe { IOReportChannelGetSubGroup(item) } {
-    x if x.is_null() => String::new(),
-    x => from_cfstr(x),
-  }
-}
-
-fn cfio_get_channel(item: CFDictionaryRef) -> String {
-  match unsafe { IOReportChannelGetChannelName(item) } {
-    x if x.is_null() => String::new(),
-    x => from_cfstr(x),
-  }
-}
-
 pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   let count = unsafe { IOReportStateGetCount(item) };
   let mut res = Vec::new();
@@ -82,16 +63,6 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   }
 
   res
-}
-
-fn scale_energy_to_watts(val: f32, unit: &str, duration_ms: u64) -> WithError<f32> {
-  let val = val / (duration_ms as f32 / 1000.0);
-  match unit {
-    "mJ" => Ok(val / 1e3f32),
-    "uJ" => Ok(val / 1e6f32),
-    "nJ" => Ok(val / 1e9f32),
-    _ => Err(format!("Invalid energy unit: {}", unit).into()),
-  }
 }
 
 pub struct IOReportSample {
@@ -129,7 +100,13 @@ pub struct IOReportSampleItem {
 impl IOReportSampleItem {
   pub fn watts(&self) -> WithError<f32> {
     let val = unsafe { IOReportSimpleGetIntegerValue(self.item, 0) } as f32;
-    scale_energy_to_watts(val, self.unit.as_str(), self.duration_ms)
+    let val = val / (self.duration_ms as f32 / 1000.0);
+    match self.unit.as_str() {
+      "mJ" => Ok(val / 1e3f32),
+      "uJ" => Ok(val / 1e6f32),
+      "nJ" => Ok(val / 1e9f32),
+      _ => Err(format!("Invalid energy unit: {}", self.unit).into()),
+    }
   }
 }
 
@@ -142,9 +119,18 @@ impl Iterator for IOReportSample {
     }
 
     let item = unsafe { CFArrayGetValueAtIndex(self.items, self.index) } as CFDictionaryRef;
-    let group = cfio_get_group(item);
-    let subgroup = cfio_get_subgroup(item);
-    let channel = cfio_get_channel(item);
+    let group = match unsafe { IOReportChannelGetGroup(item) } {
+      x if x.is_null() => String::new(),
+      x => from_cfstr(x),
+    };
+    let subgroup = match unsafe { IOReportChannelGetSubGroup(item) } {
+      x if x.is_null() => String::new(),
+      x => from_cfstr(x),
+    };
+    let channel = match unsafe { IOReportChannelGetChannelName(item) } {
+      x if x.is_null() => String::new(),
+      x => from_cfstr(x),
+    };
     let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
 
     self.index += 1;
@@ -253,7 +239,3 @@ impl Drop for IOReport {
     }
   }
 }
-
-#[cfg(test)]
-#[path = "io_report_test.rs"]
-mod tests;

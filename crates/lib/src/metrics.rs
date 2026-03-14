@@ -132,17 +132,6 @@ fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
   calc_freq_avg(items, *freqs.first().unwrap_or(&0))
 }
 
-fn calc_freq_avg_weighted(items: &[(u32, f32, u32)], min_freq: u32) -> (u32, f32) {
-  let total_units = items.iter().map(|x| x.2).sum::<u32>() as f32;
-  if total_units == 0.0 {
-    return (min_freq, 0.0);
-  }
-
-  let avg_freq = items.iter().map(|x| x.0 as f32 * x.2 as f32).sum::<f32>() / total_units;
-  let avg_perc = items.iter().map(|x| x.1 * x.2 as f32).sum::<f32>() / total_units;
-  (avg_freq.max(min_freq as f32) as u32, avg_perc)
-}
-
 fn find_named<'a, T>(items: &'a [(String, T)], name: &str) -> Option<&'a T> {
   items.iter().find(|(item_name, _)| item_name == name).map(|(_, value)| value)
 }
@@ -177,10 +166,6 @@ fn push_or_replace_usage(items: &mut Vec<UsageEntry>, entry: UsageEntry) {
   } else {
     items.push(entry);
   }
-}
-
-fn sort_usage_entries_by_name(items: &mut [UsageEntry]) {
-  items.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
 fn cpu_core_index(channel: &str, prefix: &str) -> Option<u32> {
@@ -325,7 +310,7 @@ fn init_smc() -> WithError<(SMC, SmcSensors)> {
 
 pub struct Sampler {
   soc: SocInfo,
-  ior: IOReport,
+  io_report: IOReport,
   smc: SMC,
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
@@ -348,7 +333,7 @@ impl Sampler {
       soc.cpu_domains.len(),
       soc.gpu_cores
     ));
-    let ior = IOReport::new(channels)?;
+    let io_report = IOReport::new(channels)?;
     startup_log("lib sampler: IOReport subscription ready");
     let (smc, smc_sensors) = init_smc()?;
     startup_log(format!(
@@ -360,7 +345,7 @@ impl Sampler {
     startup_log("lib sampler: init complete");
     Ok(Sampler {
       soc,
-      ior,
+      io_report,
       smc,
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
@@ -405,9 +390,6 @@ impl Sampler {
     Ok(TempMetrics { cpu_avg, gpu_avg })
   }
 
-  fn get_temp(&mut self) -> WithError<TempMetrics> {
-    self.get_temp_smc()
-  }
   fn get_mem(&mut self) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
@@ -429,12 +411,10 @@ impl Sampler {
     let mut cpu_cluster_domains: Vec<(String, String)> = Vec::new();
     let mut gpu_clusters: Vec<(String, Vec<(u32, f32)>)> = Vec::new();
     let mut rs = Metrics::default();
-    let mut gpu_usage = (0, 0.0);
     let mut cpu_usage = Vec::new();
-    let mut gpu_usage_entries = Vec::new();
+    let mut gpu_usage = Vec::new();
 
-    let sample = self.ior.get_sample();
-    for x in sample {
+    for x in self.io_report.get_sample() {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
         if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
           let usage = calc_freq(x.item, &domain.freqs);
@@ -536,13 +516,13 @@ impl Sampler {
       for (name, items) in &gpu_clusters {
         let (freq, usage) = calc_freq_final(items, &gpu_freqs);
         push_or_replace_usage(
-          &mut gpu_usage_entries,
+          &mut gpu_usage,
           UsageEntry { name: name.clone(), freq_mhz: freq, usage, units: 0 },
         );
       }
-      let names = gpu_usage_entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>();
+      let names = gpu_usage.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>();
       for (name, units) in distribute_units(&names, self.soc.gpu_cores as u32) {
-        if let Some(entry) = gpu_usage_entries.iter_mut().find(|entry| entry.name == name) {
+        if let Some(entry) = gpu_usage.iter_mut().find(|entry| entry.name == name) {
           entry.units = units;
         }
       }
@@ -572,31 +552,24 @@ impl Sampler {
       );
     }
 
-    let gpu_cluster_values =
-      gpu_usage_entries.iter().map(|entry| (entry.freq_mhz, entry.usage, entry.units)).collect::<Vec<_>>();
-    if !gpu_cluster_values.is_empty() {
-      gpu_usage = calc_freq_avg_weighted(&gpu_cluster_values, *gpu_freqs.first().unwrap_or(&0));
-    }
-
-    if gpu_usage_entries.is_empty() {
-      gpu_usage_entries.push(UsageEntry {
+    if gpu_usage.is_empty() {
+      gpu_usage.push(UsageEntry {
         name: "GPU".to_string(),
-        freq_mhz: gpu_usage.0,
-        usage: gpu_usage.1,
+        freq_mhz: 0,
+        usage: 0.0,
         units: self.soc.gpu_cores as u32,
       });
     }
 
-    sort_usage_entries_by_name(&mut cpu_usage);
-    sort_usage_entries_by_name(&mut gpu_usage_entries);
+    cpu_usage.sort_by(|a, b| a.name.cmp(&b.name));
     rs.usage.cpu = cpu_usage;
-    rs.usage.gpu = gpu_usage_entries;
-
-    rs.power.all = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
+    gpu_usage.sort_by(|a, b| a.name.cmp(&b.name));
+    rs.usage.gpu = gpu_usage;
 
     rs.memory = self.get_mem()?;
-    rs.temp = self.get_temp()?;
+    rs.temp = self.get_temp_smc()?;
 
+    rs.power.all = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
     rs.power.sys = match self.get_sys_power() {
       Ok(val) => val.max(rs.power.all),
       Err(_) => 0.0,

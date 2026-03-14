@@ -155,7 +155,10 @@ fn ffi_usage_list(items: &[UsageEntry]) -> macmon_usage_list_t {
     .collect::<Vec<_>>()
     .into_boxed_slice();
 
-  macmon_usage_list_t { len: entries.len(), ptr: Box::into_raw(entries) as *mut macmon_usage_entry_t }
+  macmon_usage_list_t {
+    len: entries.len(),
+    ptr: Box::into_raw(entries) as *mut macmon_usage_entry_t,
+  }
 }
 
 fn ffi_metrics(metrics: Metrics) -> macmon_metrics_t {

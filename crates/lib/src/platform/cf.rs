@@ -1,6 +1,8 @@
 use core_foundation::{
   base::{CFRelease, CFTypeRef, kCFAllocatorDefault, kCFAllocatorNull},
-  dictionary::{CFDictionaryGetCount, CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef},
+  dictionary::{
+    CFDictionaryGetCount, CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef,
+  },
   number::{CFNumberCreate, CFNumberRef, kCFNumberSInt32Type},
   string::{CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
 };

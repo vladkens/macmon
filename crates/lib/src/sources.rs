@@ -74,7 +74,7 @@ impl SocInfo {
   }
 }
 
-pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
+pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str, scale: u32) -> (Vec<u32>, Vec<u32>) {
   unsafe {
     let Some(obj) = cfdict_get_val(dict, key) else {
       return (Vec::new(), Vec::new());
@@ -88,7 +88,7 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
     let [mut freqs, mut volts] = [vec![0u32; items_count], vec![0u32; items_count]];
     for (i, x) in obj_val.chunks_exact(8).enumerate() {
       volts[i] = u32::from_le_bytes([x[4], x[5], x[6], x[7]]);
-      freqs[i] = u32::from_le_bytes([x[0], x[1], x[2], x[3]]);
+      freqs[i] = u32::from_le_bytes([x[0], x[1], x[2], x[3]]) / scale;
     }
 
     (volts, freqs)
@@ -103,10 +103,6 @@ pub fn run_system_profiler() -> WithError<serde_json::Value> {
   let out = std::str::from_utf8(&out.stdout)?;
   let out = serde_json::from_str::<serde_json::Value>(out)?;
   Ok(out)
-}
-
-fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
-  vals.iter().map(|x| *x / scale).collect()
 }
 
 fn parse_cpu_domain_units(number_processors: Option<&str>) -> Vec<u32> {
@@ -137,10 +133,7 @@ fn init_cpu_freq_domains(units: Vec<u32>) -> Vec<CpuDomainInfo> {
 }
 
 fn cpu_freq_tables(item: CFDictionaryRef, scale: u32) -> Vec<Vec<u32>> {
-  CPU_DOMAIN_BINDINGS
-    .iter()
-    .map(|binding| to_mhz(get_dvfs_mhz(item, binding.pmgr_key).1, scale))
-    .collect()
+  CPU_DOMAIN_BINDINGS.iter().map(|binding| get_dvfs_mhz(item, binding.pmgr_key, scale).1).collect()
 }
 
 fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
@@ -204,7 +197,7 @@ fn load_soc_info() -> WithError<SocInfo> {
       for (domain, freqs) in cpu_freq_domains.iter_mut().zip(cpu_freq_tables(item, cpu_scale)) {
         domain.freqs = freqs;
       }
-      info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, gpu_scale);
+      info.gpu_freqs = get_dvfs_mhz(item, "voltage-states9", gpu_scale).1;
       unsafe { CFRelease(item as _) }
     }
   }
