@@ -1,12 +1,11 @@
 mod app;
 mod config;
 mod debug;
-mod metrics;
-mod sources;
+mod ffi;
 
 use app::App;
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
-use metrics::Sampler;
+use ffi::Sampler;
 use std::error::Error;
 
 #[derive(Debug, Subcommand)]
@@ -48,7 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let mut counter = 0u32;
 
-      let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
+      let soc_info_val = if *soc_info { Some(sampler.get_soc_info()?) } else { None };
 
       loop {
         let metrics = sampler.get_metrics(args.interval.max(100))?;

@@ -1,0 +1,24 @@
+[package]
+name = "macmon-lib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Sudoless performance monitoring library for Apple Silicon processors"
+keywords = ["macos", "monitoring", "performance", "ffi"]
+categories = ["hardware-support", "api-bindings"]
+
+[lib]
+name = "macmon"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+core-foundation.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true

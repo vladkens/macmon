@@ -11,8 +11,7 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::metrics::{Metrics, Sampler, zero_div};
-use crate::{metrics::MemMetrics, sources::SocInfo};
+use crate::ffi::{MemMetrics, Metrics, Sampler, SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -212,6 +211,11 @@ fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
   if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() }
 }
 
+fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T) -> T {
+  let zero: T = Default::default();
+  if b == zero { zero } else { a / b }
+}
+
 // MARK: App
 
 #[derive(Debug, Default)]
@@ -237,7 +241,8 @@ pub struct App {
 
 impl App {
   pub fn new() -> WithError<Self> {
-    let soc = SocInfo::new()?;
+    let mut sampler = Sampler::new()?;
+    let soc = sampler.get_soc_info()?;
     let cfg = Config::load();
     Ok(Self { cfg, soc, ..Default::default() })
   }
@@ -249,14 +254,22 @@ impl App {
     self.all_power.push(data.power.all as f64);
     self.sys_power.push(data.power.sys as f64);
     self.cpu_layout =
-      data.usage.cpu.values().map(|(_, _, units)| units.to_string()).collect::<Vec<_>>().join("+");
-    self.cpu_freqs.retain(|name, _| data.usage.cpu.contains_key(name));
-    self.gpu_freqs.retain(|name, _| data.usage.gpu.contains_key(name));
-    for (name, (freq, usage, units)) in &data.usage.cpu {
-      self.cpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64, *units);
+      data.usage.cpu.iter().map(|entry| entry.units.to_string()).collect::<Vec<_>>().join("+");
+    self.cpu_freqs.retain(|name, _| data.usage.cpu.iter().any(|entry| entry.name == *name));
+    self.gpu_freqs.retain(|name, _| data.usage.gpu.iter().any(|entry| entry.name == *name));
+    for entry in &data.usage.cpu {
+      self
+        .cpu_freqs
+        .entry(entry.name.clone())
+        .or_default()
+        .push(entry.freq_mhz as u64, entry.usage as f64, entry.units);
     }
-    for (name, (freq, usage, units)) in &data.usage.gpu {
-      self.gpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64, *units);
+    for entry in &data.usage.gpu {
+      self
+        .gpu_freqs
+        .entry(entry.name.clone())
+        .or_default()
+        .push(entry.freq_mhz as u64, entry.usage as f64, entry.units);
     }
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);

@@ -449,12 +449,20 @@ version = "0.6.1"
 dependencies = [
  "chrono",
  "clap",
- "core-foundation",
- "libc",
  "num-traits",
  "ratatui",
  "serde",
  "serde-inline-default",
+ "serde_json",
+]
+
+[[package]]
+name = "macmon-lib"
+version = "0.6.1"
+dependencies = [
+ "core-foundation",
+ "libc",
+ "serde",
  "serde_json",
 ]
 

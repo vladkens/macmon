@@ -1,31 +1,16 @@
-[package]
-name = "macmon"
+[workspace]
+members = ["crates/lib", "crates/macmon"]
+resolver = "2"
+
+[workspace.package]
 version = "0.6.1"
 edition = "2024"
-description = "Sudoless performance monitoring CLI tool for Apple Silicon processors"
 authors = ["vladkens"]
 license = "MIT"
 repository = "https://github.com/vladkens/macmon"
 readme = "readme.md"
-keywords = ["macos", "monitoring", "performance", "cli"]
-categories = ["command-line-utilities", "hardware-support"]
 
-[lints.rust]
-non_camel_case_types = "allow"
-unreachable_code = "allow"
-unused_assignments = "allow"
-unused_imports = "deny"
-
-[lints.clippy]
-needless_range_loop = "allow"
-single_match = "allow"
-
-[profile.release]
-panic = "abort"
-strip = false
-lto = false
-
-[dependencies]
+[workspace.dependencies]
 chrono = "0.4.41"
 clap = { version = "4.5.39", features = ["derive"] }
 core-foundation = "0.10.1"
@@ -35,3 +20,18 @@ ratatui = { version = "0.29.0", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde-inline-default = "0.2.3"
 serde_json = "1.0.140"
+
+[workspace.lints.rust]
+non_camel_case_types = "allow"
+unreachable_code = "allow"
+unused_assignments = "allow"
+unused_imports = "deny"
+
+[workspace.lints.clippy]
+needless_range_loop = "allow"
+single_match = "allow"
+
+[profile.release]
+panic = "abort"
+strip = false
+lto = false

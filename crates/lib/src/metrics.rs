@@ -29,10 +29,18 @@ pub struct MemMetrics {
   pub swap_usage: u64, // bytes
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct UsageEntry {
+  pub name: String,
+  pub freq_mhz: u32,
+  pub usage: f32,
+  pub units: u32,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct UsageMetrics {
-  pub cpu: BTreeMap<String, (u32, f32, u32)>,
-  pub gpu: BTreeMap<String, (u32, f32, u32)>,
+  pub cpu: Vec<UsageEntry>,
+  pub gpu: Vec<UsageEntry>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -128,6 +136,13 @@ fn calc_freq_avg_weighted(items: &[(u32, f32, u32)], min_freq: u32) -> (u32, f32
   let avg_freq = items.iter().map(|x| x.0 as f32 * x.2 as f32).sum::<f32>() / total_units;
   let avg_perc = items.iter().map(|x| x.1 * x.2 as f32).sum::<f32>() / total_units;
   (avg_freq.max(min_freq as f32) as u32, avg_perc)
+}
+
+fn usage_entries(items: BTreeMap<String, (u32, f32, u32)>) -> Vec<UsageEntry> {
+  items
+    .into_iter()
+    .map(|(name, (freq_mhz, usage, units))| UsageEntry { name, freq_mhz, usage, units })
+    .collect()
 }
 
 fn cpu_core_index(channel: &str, prefix: &str) -> Option<u32> {
@@ -367,6 +382,8 @@ impl Sampler {
     let mut gpu_clusters: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
     let mut rs = Metrics::default();
     let mut gpu_usage = (0, 0.0);
+    let mut cpu_usage = BTreeMap::new();
+    let mut gpu_usage_entries = BTreeMap::new();
 
     for x in self.ior.get_sample(duration as u64) {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
@@ -426,7 +443,7 @@ impl Sampler {
           continue;
         };
         let (freq, usage) = calc_freq_final(&items, &domain.freqs);
-        rs.usage.cpu.insert(name, (freq, usage, 0));
+        cpu_usage.insert(name, (freq, usage, 0));
       }
       for domain in &cpu_domains {
         let mut cluster_names = cpu_cluster_domains
@@ -438,7 +455,7 @@ impl Sampler {
         cpu_cluster_units.extend(distribute_units(&cluster_names, domain.units));
       }
       for (name, units) in &cpu_cluster_units {
-        if let Some((_, _, cluster_units)) = rs.usage.cpu.get_mut(name) {
+        if let Some((_, _, cluster_units)) = cpu_usage.get_mut(name) {
           *cluster_units = *units;
         }
       }
@@ -455,7 +472,7 @@ impl Sampler {
         for (name, usage) in
           cluster_usage_from_cores(&core_usages, &cluster_names, &cpu_cluster_units)
         {
-          if let Some((_, cluster_usage, _)) = rs.usage.cpu.get_mut(&name) {
+          if let Some((_, cluster_usage, _)) = cpu_usage.get_mut(&name) {
             *cluster_usage = usage;
           }
         }
@@ -465,11 +482,11 @@ impl Sampler {
     if !gpu_clusters.is_empty() {
       for (name, items) in gpu_clusters {
         let (freq, usage) = calc_freq_final(&items, &gpu_freqs);
-        rs.usage.gpu.insert(name, (freq, usage, 0));
+        gpu_usage_entries.insert(name, (freq, usage, 0));
       }
-      let names = rs.usage.gpu.keys().cloned().collect::<Vec<_>>();
+      let names = gpu_usage_entries.keys().cloned().collect::<Vec<_>>();
       for (name, units) in distribute_units(&names, self.soc.gpu_cores as u32) {
-        if let Some((_, _, cluster_units)) = rs.usage.gpu.get_mut(&name) {
+        if let Some((_, _, cluster_units)) = gpu_usage_entries.get_mut(&name) {
           *cluster_units = units;
         }
       }
@@ -488,17 +505,21 @@ impl Sampler {
       }
 
       let (freq, usage) = calc_freq_final(&usages, &domain.freqs);
-      rs.usage.cpu.insert(domain.channel_prefix.clone(), (freq, usage, domain.units));
+      cpu_usage.insert(domain.channel_prefix.clone(), (freq, usage, domain.units));
     }
 
-    let gpu_cluster_values = rs.usage.gpu.iter().map(|(_, usage)| *usage).collect::<Vec<_>>();
+    let gpu_cluster_values = gpu_usage_entries.values().copied().collect::<Vec<_>>();
     if !gpu_cluster_values.is_empty() {
       gpu_usage = calc_freq_avg_weighted(&gpu_cluster_values, *gpu_freqs.first().unwrap_or(&0));
     }
 
-    if rs.usage.gpu.is_empty() {
-      rs.usage.gpu.insert("GPU".to_string(), (gpu_usage.0, gpu_usage.1, self.soc.gpu_cores as u32));
+    if gpu_usage_entries.is_empty() {
+      gpu_usage_entries
+        .insert("GPU".to_string(), (gpu_usage.0, gpu_usage.1, self.soc.gpu_cores as u32));
     }
+
+    rs.usage.cpu = usage_entries(cpu_usage);
+    rs.usage.gpu = usage_entries(gpu_usage_entries);
 
     rs.power.all = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
 
@@ -522,11 +543,15 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
   use super::{
-    Metrics, UsageMetrics, calc_freq_from_residencies, cluster_key, cluster_usage_from_cores,
+    Metrics, UsageEntry, UsageMetrics, calc_freq_from_residencies, cluster_key, cluster_usage_from_cores,
     cpu_domain_for_channel, sort_cluster_names,
   };
   use crate::sources::CpuDomainInfo;
   use std::collections::BTreeMap;
+
+  fn usage_entry<'a>(items: &'a [UsageEntry], name: &str) -> Option<&'a UsageEntry> {
+    items.iter().find(|entry| entry.name == name)
+  }
 
   #[test]
   fn calc_freq_with_matching_states() {
@@ -602,42 +627,57 @@ mod tests {
   fn metrics_preserve_missing_cpu_clusters() {
     let metrics = Metrics {
       usage: UsageMetrics {
-        cpu: BTreeMap::from([("PCPU".to_string(), (3200, 0.42, 4))]),
-        gpu: BTreeMap::from([("GPU".to_string(), (800, 0.15, 10))]),
+        cpu: vec![UsageEntry { name: "PCPU".to_string(), freq_mhz: 3200, usage: 0.42, units: 4 }],
+        gpu: vec![UsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.15, units: 10 }],
       },
       ..Default::default()
     };
 
-    assert_eq!(metrics.usage.cpu.get("PCPU"), Some(&(3200, 0.42, 4)));
-    assert_eq!(metrics.usage.gpu.get("GPU"), Some(&(800, 0.15, 10)));
-    assert!(!metrics.usage.cpu.contains_key("ECPU"));
+    assert_eq!(
+      usage_entry(&metrics.usage.cpu, "PCPU"),
+      Some(&UsageEntry { name: "PCPU".to_string(), freq_mhz: 3200, usage: 0.42, units: 4 })
+    );
+    assert_eq!(
+      usage_entry(&metrics.usage.gpu, "GPU"),
+      Some(&UsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.15, units: 10 })
+    );
+    assert!(usage_entry(&metrics.usage.cpu, "ECPU").is_none());
   }
 
   #[test]
   fn metrics_preserve_dynamic_cluster_names() {
     let metrics = Metrics {
       usage: UsageMetrics {
-        cpu: BTreeMap::from([
-          ("PCPU".to_string(), (3030, 0.31, 4)),
-          ("PCPU1".to_string(), (3220, 0.44, 4)),
-        ]),
-        gpu: BTreeMap::from([("GPUPH".to_string(), (1296, 0.2, 16))]),
+        cpu: vec![
+          UsageEntry { name: "PCPU".to_string(), freq_mhz: 3030, usage: 0.31, units: 4 },
+          UsageEntry { name: "PCPU1".to_string(), freq_mhz: 3220, usage: 0.44, units: 4 },
+        ],
+        gpu: vec![UsageEntry { name: "GPUPH".to_string(), freq_mhz: 1296, usage: 0.2, units: 16 }],
       },
       ..Default::default()
     };
 
     assert_eq!(metrics.usage.cpu.len(), 2);
-    assert_eq!(metrics.usage.cpu.get("PCPU"), Some(&(3030, 0.31, 4)));
-    assert_eq!(metrics.usage.cpu.get("PCPU1"), Some(&(3220, 0.44, 4)));
-    assert_eq!(metrics.usage.gpu.get("GPUPH"), Some(&(1296, 0.2, 16)));
+    assert_eq!(
+      usage_entry(&metrics.usage.cpu, "PCPU"),
+      Some(&UsageEntry { name: "PCPU".to_string(), freq_mhz: 3030, usage: 0.31, units: 4 })
+    );
+    assert_eq!(
+      usage_entry(&metrics.usage.cpu, "PCPU1"),
+      Some(&UsageEntry { name: "PCPU1".to_string(), freq_mhz: 3220, usage: 0.44, units: 4 })
+    );
+    assert_eq!(
+      usage_entry(&metrics.usage.gpu, "GPUPH"),
+      Some(&UsageEntry { name: "GPUPH".to_string(), freq_mhz: 1296, usage: 0.2, units: 16 })
+    );
   }
 
   #[test]
   fn metrics_serialize_with_expected_shape() {
     let metrics = Metrics {
       usage: UsageMetrics {
-        cpu: BTreeMap::from([("ECPU".to_string(), (1181, 0.33, 4))]),
-        gpu: BTreeMap::from([("GPU".to_string(), (461, 0.21, 10))]),
+        cpu: vec![UsageEntry { name: "ECPU".to_string(), freq_mhz: 1181, usage: 0.33, units: 4 }],
+        gpu: vec![UsageEntry { name: "GPU".to_string(), freq_mhz: 461, usage: 0.21, units: 10 }],
       },
       power: super::PowerMetrics {
         cpu: 0.2,
@@ -654,12 +694,14 @@ mod tests {
 
     let value = serde_json::to_value(&metrics).unwrap();
 
-    assert_eq!(value["usage"]["cpu"]["ECPU"][0], serde_json::json!(1181));
-    assert!((value["usage"]["cpu"]["ECPU"][1].as_f64().unwrap() - 0.33).abs() < 1e-6);
-    assert_eq!(value["usage"]["cpu"]["ECPU"][2], serde_json::json!(4));
-    assert_eq!(value["usage"]["gpu"]["GPU"][0], serde_json::json!(461));
-    assert!((value["usage"]["gpu"]["GPU"][1].as_f64().unwrap() - 0.21).abs() < 1e-6);
-    assert_eq!(value["usage"]["gpu"]["GPU"][2], serde_json::json!(10));
+    assert_eq!(value["usage"]["cpu"][0]["name"], serde_json::json!("ECPU"));
+    assert_eq!(value["usage"]["cpu"][0]["freq_mhz"], serde_json::json!(1181));
+    assert!((value["usage"]["cpu"][0]["usage"].as_f64().unwrap() - 0.33).abs() < 1e-6);
+    assert_eq!(value["usage"]["cpu"][0]["units"], serde_json::json!(4));
+    assert_eq!(value["usage"]["gpu"][0]["name"], serde_json::json!("GPU"));
+    assert_eq!(value["usage"]["gpu"][0]["freq_mhz"], serde_json::json!(461));
+    assert!((value["usage"]["gpu"][0]["usage"].as_f64().unwrap() - 0.21).abs() < 1e-6);
+    assert_eq!(value["usage"]["gpu"][0]["units"], serde_json::json!(10));
     assert!((value["power"]["cpu"].as_f64().unwrap() - 0.2).abs() < 1e-6);
     assert!((value["power"]["all"].as_f64().unwrap() - (0.2 + 0.01 + 0.11 + 0.001)).abs() < 1e-6);
     assert_eq!(value["memory"]["swap_usage"], serde_json::json!(4));

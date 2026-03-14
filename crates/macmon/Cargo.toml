@@ -1,0 +1,28 @@
+[package]
+name = "macmon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Sudoless performance monitoring CLI tool for Apple Silicon processors"
+keywords = ["macos", "monitoring", "performance", "cli"]
+categories = ["command-line-utilities", "hardware-support"]
+build = "build.rs"
+
+[[bin]]
+name = "macmon"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+num-traits.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde-inline-default.workspace = true
+serde_json.workspace = true
