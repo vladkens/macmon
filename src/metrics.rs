@@ -3,7 +3,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 use crate::sources::{
-  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram, libc_swap,
+  CpuDomainInfo, IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram,
+  libc_swap,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -51,22 +52,6 @@ pub struct Metrics {
   pub power: PowerMetrics,
   pub memory: MemMetrics,
   pub temp: TempMetrics,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum CpuDomain {
-  Efficiency,
-  Performance,
-}
-
-#[derive(Debug, Clone)]
-struct CpuDomainSpec {
-  domain: CpuDomain,
-  channel_prefix: &'static str,
-  core_prefix: &'static str,
-  freqs: Vec<u32>,
-  total_units: u32,
-  fallback_name: &'static str,
 }
 
 // MARK: Helpers
@@ -218,6 +203,13 @@ fn sort_cluster_names(names: &mut [String]) {
   names.sort_by_key(|name| cluster_sort_key(name));
 }
 
+fn cpu_domain_for_channel<'a>(
+  cpu_domains: &'a [CpuDomainInfo],
+  channel: &str,
+) -> Option<&'a CpuDomainInfo> {
+  cpu_domains.iter().find(|domain| channel.contains(domain.channel_prefix.as_str()))
+}
+
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
   let mut smc = SMC::new()?;
   const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
@@ -293,35 +285,6 @@ impl Sampler {
     }
   }
 
-  fn cpu_domains(&self) -> Vec<CpuDomainSpec> {
-    let mut domains = Vec::new();
-    if !self.soc.ecpu_freqs.is_empty() || self.soc.ecpu_cores > 0 {
-      domains.push(CpuDomainSpec {
-        domain: CpuDomain::Efficiency,
-        channel_prefix: "ECPU",
-        core_prefix: "ECPU",
-        freqs: self.soc.ecpu_freqs.clone(),
-        total_units: self.soc.ecpu_cores as u32,
-        fallback_name: "ECPU",
-      });
-    }
-    if !self.soc.pcpu_freqs.is_empty() || self.soc.pcpu_cores > 0 {
-      domains.push(CpuDomainSpec {
-        domain: CpuDomain::Performance,
-        channel_prefix: "PCPU",
-        core_prefix: "PCPU",
-        freqs: self.soc.pcpu_freqs.clone(),
-        total_units: self.soc.pcpu_cores as u32,
-        fallback_name: "PCPU",
-      });
-    }
-    domains
-  }
-
-  fn cpu_domain_for_channel(&self, channel: &str) -> Option<CpuDomainSpec> {
-    self.cpu_domains().into_iter().find(|domain| channel.contains(domain.channel_prefix))
-  }
-
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
@@ -395,193 +358,140 @@ impl Sampler {
   }
 
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
-    let measures: usize = 4;
-    let mut results: Vec<Metrics> = Vec::with_capacity(measures);
-    let cpu_domains = self.cpu_domains();
+    let cpu_domains = self.soc.cpu_domains.clone();
+    let gpu_freqs = self.gpu_freqs().to_vec();
+    let mut cpu_group_usages: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
+    let mut cpu_group_core_usages: BTreeMap<String, BTreeMap<u32, (u32, f32)>> = BTreeMap::new();
+    let mut cpu_clusters: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
+    let mut cpu_cluster_domains: BTreeMap<String, String> = BTreeMap::new();
+    let mut gpu_clusters: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
+    let mut rs = Metrics::default();
+    let mut gpu_usage = (0, 0.0);
 
-    // do several samples to smooth metrics
-    // see: https://github.com/vladkens/macmon/issues/10
-    for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
-      let mut cpu_group_usages: BTreeMap<CpuDomain, Vec<(u32, f32)>> = BTreeMap::new();
-      let mut cpu_group_core_usages: BTreeMap<CpuDomain, BTreeMap<u32, (u32, f32)>> =
-        BTreeMap::new();
-      let mut cpu_clusters: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
-      let mut cpu_cluster_domains: BTreeMap<String, CpuDomain> = BTreeMap::new();
-      let mut gpu_clusters: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
-      let mut rs = Metrics::default();
-      let gpu_freqs = self.gpu_freqs();
-
-      for x in sample {
-        if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          if let Some(domain) = self.cpu_domain_for_channel(&x.channel) {
-            let usage = calc_freq(x.item, &domain.freqs);
-            cpu_group_usages.entry(domain.domain).or_default().push(usage);
-            if let Some(idx) = cpu_core_index(&x.channel, domain.core_prefix) {
-              cpu_group_core_usages.entry(domain.domain).or_default().insert(idx, usage);
-            }
-            continue;
+    for x in self.ior.get_sample(duration as u64) {
+      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
+        if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
+          let usage = calc_freq(x.item, &domain.freqs);
+          cpu_group_usages.entry(domain.id.clone()).or_default().push(usage);
+          if let Some(idx) = cpu_core_index(&x.channel, domain.core_prefix.as_str()) {
+            cpu_group_core_usages.entry(domain.id.clone()).or_default().insert(idx, usage);
           }
+          continue;
         }
+      }
 
-        if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_DICE_SUBG {
-          if let Some(domain) = self.cpu_domain_for_channel(&x.channel) {
-            if let Some(name) = cluster_key(&x.channel) {
-              cpu_clusters.entry(name.clone()).or_default().push(calc_freq(x.item, &domain.freqs));
-              cpu_cluster_domains.insert(name, domain.domain);
-            }
-            continue;
-          }
-        }
-
-        if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
+      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_DICE_SUBG {
+        if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
           if let Some(name) = cluster_key(&x.channel) {
-            gpu_clusters.entry(name).or_default().push(calc_freq(x.item, gpu_freqs));
+            cpu_clusters.entry(name.clone()).or_default().push(calc_freq(x.item, &domain.freqs));
+            cpu_cluster_domains.insert(name, domain.id.clone());
           }
-        }
-
-        if x.group == "Energy Model" {
-          match x.channel.as_str() {
-            "GPU Energy" => rs.power.gpu += cfio_watts(x.item, &x.unit, dt)?,
-            // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
-            c if c.ends_with("CPU Energy") => rs.power.cpu += cfio_watts(x.item, &x.unit, dt)?,
-            // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
-            c if c.starts_with("ANE") => rs.power.ane += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("DRAM") => rs.power.ram += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("GPU SRAM") => rs.power.gpu_ram += cfio_watts(x.item, &x.unit, dt)?,
-            _ => {}
-          }
+          continue;
         }
       }
 
-      let mut gpu_usage = (0, 0.0);
-
-      if !cpu_clusters.is_empty() {
-        let mut cpu_cluster_units = BTreeMap::new();
-        for (name, items) in cpu_clusters {
-          let Some(domain_id) = cpu_cluster_domains.get(&name).copied() else { continue };
-          let Some(domain) = cpu_domains.iter().find(|candidate| candidate.domain == domain_id)
-          else {
-            continue;
-          };
-          let (freq, usage) = calc_freq_final(&items, &domain.freqs);
-          rs.usage.cpu.insert(name, (freq, usage, 0));
-        }
-        for domain in &cpu_domains {
-          let mut cluster_names = cpu_cluster_domains
-            .iter()
-            .filter(|(_, domain_id)| **domain_id == domain.domain)
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-          sort_cluster_names(&mut cluster_names);
-          cpu_cluster_units.extend(distribute_units(&cluster_names, domain.total_units));
-        }
-        for (name, units) in &cpu_cluster_units {
-          if let Some((_, _, cluster_units)) = rs.usage.cpu.get_mut(name) {
-            *cluster_units = *units;
-          }
-        }
-
-        for domain in &cpu_domains {
-          let mut cluster_names = cpu_cluster_domains
-            .iter()
-            .filter(|(_, domain_id)| **domain_id == domain.domain)
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-          sort_cluster_names(&mut cluster_names);
-
-          let core_usages = cpu_group_core_usages.get(&domain.domain).cloned().unwrap_or_default();
-          for (name, usage) in
-            cluster_usage_from_cores(&core_usages, &cluster_names, &cpu_cluster_units)
-          {
-            if let Some((_, cluster_usage, _)) = rs.usage.cpu.get_mut(&name) {
-              *cluster_usage = usage;
-            }
-          }
+      if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
+        if let Some(name) = cluster_key(&x.channel) {
+          gpu_clusters.entry(name).or_default().push(calc_freq(x.item, &gpu_freqs));
         }
       }
 
-      if !gpu_clusters.is_empty() {
-        for (name, items) in gpu_clusters {
-          let (freq, usage) = calc_freq_final(&items, gpu_freqs);
-          rs.usage.gpu.insert(name, (freq, usage, 0));
-        }
-        let names = rs.usage.gpu.keys().cloned().collect::<Vec<_>>();
-        for (name, units) in distribute_units(&names, self.soc.gpu_cores as u32) {
-          if let Some((_, _, cluster_units)) = rs.usage.gpu.get_mut(&name) {
-            *cluster_units = units;
+      if x.group == "Energy Model" {
+        match x.channel.as_str() {
+          "GPU Energy" => rs.power.gpu += cfio_watts(x.item, &x.unit, duration as u64)?,
+          // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
+          c if c.ends_with("CPU Energy") => {
+            rs.power.cpu += cfio_watts(x.item, &x.unit, duration as u64)?
           }
+          // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
+          c if c.starts_with("ANE") => {
+            rs.power.ane += cfio_watts(x.item, &x.unit, duration as u64)?
+          }
+          c if c.starts_with("DRAM") => {
+            rs.power.ram += cfio_watts(x.item, &x.unit, duration as u64)?
+          }
+          c if c.starts_with("GPU SRAM") => {
+            rs.power.gpu_ram += cfio_watts(x.item, &x.unit, duration as u64)?
+          }
+          _ => {}
+        }
+      }
+    }
+
+    if !cpu_clusters.is_empty() {
+      let mut cpu_cluster_units = BTreeMap::new();
+      for (name, items) in cpu_clusters {
+        let Some(domain_id) = cpu_cluster_domains.get(&name).cloned() else { continue };
+        let Some(domain) = cpu_domains.iter().find(|candidate| candidate.id == domain_id) else {
+          continue;
+        };
+        let (freq, usage) = calc_freq_final(&items, &domain.freqs);
+        rs.usage.cpu.insert(name, (freq, usage, 0));
+      }
+      for domain in &cpu_domains {
+        let mut cluster_names = cpu_cluster_domains
+          .iter()
+          .filter(|(_, domain_id)| domain_id.as_str() == domain.id.as_str())
+          .map(|(name, _)| name.clone())
+          .collect::<Vec<_>>();
+        sort_cluster_names(&mut cluster_names);
+        cpu_cluster_units.extend(distribute_units(&cluster_names, domain.units));
+      }
+      for (name, units) in &cpu_cluster_units {
+        if let Some((_, _, cluster_units)) = rs.usage.cpu.get_mut(name) {
+          *cluster_units = *units;
         }
       }
 
       for domain in &cpu_domains {
-        let has_clusters =
-          cpu_cluster_domains.values().any(|domain_id| *domain_id == domain.domain);
-        if has_clusters {
-          continue;
+        let mut cluster_names = cpu_cluster_domains
+          .iter()
+          .filter(|(_, domain_id)| domain_id.as_str() == domain.id.as_str())
+          .map(|(name, _)| name.clone())
+          .collect::<Vec<_>>();
+        sort_cluster_names(&mut cluster_names);
+
+        let core_usages = cpu_group_core_usages.get(&domain.id).cloned().unwrap_or_default();
+        for (name, usage) in
+          cluster_usage_from_cores(&core_usages, &cluster_names, &cpu_cluster_units)
+        {
+          if let Some((_, cluster_usage, _)) = rs.usage.cpu.get_mut(&name) {
+            *cluster_usage = usage;
+          }
         }
+      }
+    }
 
-        let usages = cpu_group_usages.get(&domain.domain).cloned().unwrap_or_default();
-        if usages.is_empty() {
-          continue;
+    if !gpu_clusters.is_empty() {
+      for (name, items) in gpu_clusters {
+        let (freq, usage) = calc_freq_final(&items, &gpu_freqs);
+        rs.usage.gpu.insert(name, (freq, usage, 0));
+      }
+      let names = rs.usage.gpu.keys().cloned().collect::<Vec<_>>();
+      for (name, units) in distribute_units(&names, self.soc.gpu_cores as u32) {
+        if let Some((_, _, cluster_units)) = rs.usage.gpu.get_mut(&name) {
+          *cluster_units = units;
         }
-
-        let (freq, usage) = calc_freq_final(&usages, &domain.freqs);
-        rs.usage.cpu.insert(domain.fallback_name.to_string(), (freq, usage, domain.total_units));
-      }
-
-      let gpu_cluster_values = rs.usage.gpu.iter().map(|(_, usage)| *usage).collect::<Vec<_>>();
-      if !gpu_cluster_values.is_empty() {
-        gpu_usage = calc_freq_avg_weighted(&gpu_cluster_values, *gpu_freqs.first().unwrap_or(&0));
-      }
-
-      if rs.usage.gpu.is_empty() {
-        rs.usage
-          .gpu
-          .insert("GPU".to_string(), (gpu_usage.0, gpu_usage.1, self.soc.gpu_cores as u32));
-      }
-
-      results.push(rs);
-    }
-
-    let mut rs = Metrics::default();
-    let measures = results.len() as u32;
-    rs.power.cpu = zero_div(results.iter().map(|x| x.power.cpu).sum(), measures as f32);
-    rs.power.gpu = zero_div(results.iter().map(|x| x.power.gpu).sum(), measures as f32);
-    rs.power.ane = zero_div(results.iter().map(|x| x.power.ane).sum(), measures as f32);
-    rs.power.ram = zero_div(results.iter().map(|x| x.power.ram).sum(), measures as f32);
-    rs.power.gpu_ram = zero_div(results.iter().map(|x| x.power.gpu_ram).sum(), measures as f32);
-
-    let mut cpu_cluster_items: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
-    let mut gpu_cluster_items: BTreeMap<String, Vec<(u32, f32)>> = BTreeMap::new();
-    let mut cpu_cluster_units: BTreeMap<String, u32> = BTreeMap::new();
-    let mut gpu_cluster_units: BTreeMap<String, u32> = BTreeMap::new();
-    for sample in &results {
-      for (name, (freq, usage, units)) in &sample.usage.cpu {
-        cpu_cluster_items.entry(name.clone()).or_default().push((*freq, *usage));
-        cpu_cluster_units.entry(name.clone()).or_insert(*units);
-      }
-      for (name, (freq, usage, units)) in &sample.usage.gpu {
-        gpu_cluster_items.entry(name.clone()).or_default().push((*freq, *usage));
-        gpu_cluster_units.entry(name.clone()).or_insert(*units);
       }
     }
 
-    let gpu_freqs = self.gpu_freqs();
-    for (name, items) in cpu_cluster_items {
-      let min_freq = items.iter().map(|(freq, _)| *freq).min().unwrap_or(0);
-      let (freq, usage) = calc_freq_avg(&items, min_freq);
-      let units = *cpu_cluster_units.get(&name).unwrap_or(&0);
-      rs.usage.cpu.insert(name, (freq, usage, units));
-    }
+    for domain in &cpu_domains {
+      let has_clusters =
+        cpu_cluster_domains.values().any(|domain_id| domain_id.as_str() == domain.id.as_str());
+      if has_clusters {
+        continue;
+      }
 
-    for (name, items) in gpu_cluster_items {
-      let (freq, usage) = calc_freq_avg(&items, *gpu_freqs.first().unwrap_or(&0));
-      let units = *gpu_cluster_units.get(&name).unwrap_or(&0);
-      rs.usage.gpu.insert(name, (freq, usage, units));
+      let usages = cpu_group_usages.get(&domain.id).cloned().unwrap_or_default();
+      if usages.is_empty() {
+        continue;
+      }
+
+      let (freq, usage) = calc_freq_final(&usages, &domain.freqs);
+      rs.usage.cpu.insert(domain.channel_prefix.clone(), (freq, usage, domain.units));
     }
 
     let gpu_cluster_values = rs.usage.gpu.iter().map(|(_, usage)| *usage).collect::<Vec<_>>();
-    let mut gpu_usage = (0, 0.0);
     if !gpu_cluster_values.is_empty() {
       gpu_usage = calc_freq_avg_weighted(&gpu_cluster_values, *gpu_freqs.first().unwrap_or(&0));
     }
@@ -590,7 +500,7 @@ impl Sampler {
       rs.usage.gpu.insert("GPU".to_string(), (gpu_usage.0, gpu_usage.1, self.soc.gpu_cores as u32));
     }
 
-    rs.power.all = rs.power.cpu + rs.power.gpu + rs.power.ane;
+    rs.power.all = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -603,7 +513,7 @@ impl Sampler {
     Ok(rs)
   }
 
-  /// Getter for the `soc` field
+  // Getter for the `soc` field
   pub fn get_soc_info(&self) -> &SocInfo {
     &self.soc
   }
@@ -613,8 +523,9 @@ impl Sampler {
 mod tests {
   use super::{
     Metrics, UsageMetrics, calc_freq_from_residencies, cluster_key, cluster_usage_from_cores,
-    sort_cluster_names,
+    cpu_domain_for_channel, sort_cluster_names,
   };
+  use crate::sources::CpuDomainInfo;
   use std::collections::BTreeMap;
 
   #[test]
@@ -656,6 +567,35 @@ mod tests {
     assert_eq!(cluster_key("PCPU1"), Some("PCPU1".to_string()));
     assert_eq!(cluster_key("GPUPH"), Some("GPUPH".to_string()));
     assert_eq!(cluster_key("GPU-2"), Some("GPU2".to_string()));
+  }
+
+  #[test]
+  fn cpu_domain_matching_uses_domain_metadata() {
+    let domains = vec![
+      CpuDomainInfo {
+        id: "cpu0".to_string(),
+        units: 4,
+        freqs: vec![1000, 2000],
+        channel_prefix: "ECPU".to_string(),
+        core_prefix: "ECPU".to_string(),
+      },
+      CpuDomainInfo {
+        id: "cpu1".to_string(),
+        units: 8,
+        freqs: vec![2000, 3000],
+        channel_prefix: "PCPU".to_string(),
+        core_prefix: "PCPU".to_string(),
+      },
+    ];
+
+    assert_eq!(
+      cpu_domain_for_channel(&domains, "PCPU1").map(|domain| domain.id.as_str()),
+      Some("cpu1")
+    );
+    assert_eq!(
+      cpu_domain_for_channel(&domains, "ECPU").map(|domain| domain.id.as_str()),
+      Some("cpu0")
+    );
   }
 
   #[test]
@@ -706,7 +646,7 @@ mod tests {
         sys: 5.8,
         gpu_ram: 0.001,
         ane: 0.0,
-        all: 0.21,
+        all: 0.321,
       },
       memory: super::MemMetrics { ram_total: 1, ram_usage: 2, swap_total: 3, swap_usage: 4 },
       temp: super::TempMetrics { cpu_temp_avg: 42.0, gpu_temp_avg: 36.0 },
@@ -721,6 +661,7 @@ mod tests {
     assert!((value["usage"]["gpu"]["GPU"][1].as_f64().unwrap() - 0.21).abs() < 1e-6);
     assert_eq!(value["usage"]["gpu"]["GPU"][2], serde_json::json!(10));
     assert!((value["power"]["cpu"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+    assert!((value["power"]["all"].as_f64().unwrap() - (0.2 + 0.01 + 0.11 + 0.001)).abs() < 1e-6);
     assert_eq!(value["memory"]["swap_usage"], serde_json::json!(4));
     assert!((value["temp"]["cpu_temp_avg"].as_f64().unwrap() - 42.0).abs() < 1e-6);
   }

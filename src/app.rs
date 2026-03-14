@@ -47,15 +47,17 @@ struct FreqStore {
   items: Vec<u64>, // from 0 to 100
   top_value: u64,
   usage: f64, // from 0.0 to 1.0
+  units: u32,
 }
 
 impl FreqStore {
-  fn push(&mut self, value: u64, usage: f64) {
+  fn push(&mut self, value: u64, usage: f64, units: u32) {
     self.items.insert(0, (usage * 100.0) as u64);
     self.items.truncate(MAX_SPARKLINE);
 
     self.top_value = value;
     self.usage = usage;
+    self.units = units;
   }
 }
 
@@ -230,6 +232,7 @@ pub struct App {
 
   cpu_freqs: BTreeMap<String, FreqStore>,
   gpu_freqs: BTreeMap<String, FreqStore>,
+  cpu_layout: String,
 }
 
 impl App {
@@ -245,13 +248,15 @@ impl App {
     self.ane_power.push(data.power.ane as f64);
     self.all_power.push(data.power.all as f64);
     self.sys_power.push(data.power.sys as f64);
+    self.cpu_layout =
+      data.usage.cpu.values().map(|(_, _, units)| units.to_string()).collect::<Vec<_>>().join("+");
     self.cpu_freqs.retain(|name, _| data.usage.cpu.contains_key(name));
     self.gpu_freqs.retain(|name, _| data.usage.gpu.contains_key(name));
-    for (name, (freq, usage, _)) in &data.usage.cpu {
-      self.cpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64);
+    for (name, (freq, usage, units)) in &data.usage.cpu {
+      self.cpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64, *units);
     }
-    for (name, (freq, usage, _)) in &data.usage.gpu {
-      self.gpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64);
+    for (name, (freq, usage, units)) in &data.usage.gpu {
+      self.gpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64, *units);
     }
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
@@ -325,8 +330,11 @@ impl App {
     }
   }
 
-  fn format_cluster_label(name: &str) -> String {
-    name.to_string()
+  fn format_cluster_label(name: &str, units: u32) -> String {
+    match units > 0 {
+      true => format!("{name}({units})"),
+      false => name.to_string(),
+    }
   }
 
   fn render_empty_block(&self, f: &mut Frame, r: Rect, label: &str) {
@@ -350,7 +358,7 @@ impl App {
     let areas =
       Layout::default().direction(Direction::Horizontal).constraints(constraints).split(r);
     for (idx, (name, store)) in items.iter().enumerate() {
-      self.render_freq_block(f, areas[idx], &Self::format_cluster_label(name), store);
+      self.render_freq_block(f, areas[idx], &Self::format_cluster_label(name, store.units), store);
     }
   }
 
@@ -388,11 +396,20 @@ impl App {
   }
 
   fn render(&mut self, f: &mut Frame) {
-    let total_cpu_cores = self.soc.ecpu_cores as u16 + self.soc.pcpu_cores as u16;
-    let label_l = format!(
-      "{} ({}CPU+{}GPU {}GB)",
-      self.soc.chip_name, total_cpu_cores, self.soc.gpu_cores, self.soc.memory_gb,
-    );
+    let total_cpu_cores = self.soc.cpu_cores_total;
+    let label_l = if self.cpu_layout.is_empty() {
+      format!("{} ({}GB)", self.soc.chip_name, self.soc.memory_gb)
+    } else {
+      let cpu_layout = if self.cpu_layout.is_empty() {
+        total_cpu_cores.to_string()
+      } else {
+        self.cpu_layout.clone()
+      };
+      format!(
+        "{} ({}CPU+{}GPU {}GB)",
+        self.soc.chip_name, cpu_layout, self.soc.gpu_cores, self.soc.memory_gb
+      )
+    };
 
     let rows = Layout::default()
       .direction(Direction::Vertical)
@@ -428,7 +445,12 @@ impl App {
       }
     } else {
       for (idx, (name, store)) in gpu_items.iter().enumerate() {
-        self.render_freq_block(f, row2[idx + 1], &Self::format_cluster_label(name), store);
+        self.render_freq_block(
+          f,
+          row2[idx + 1],
+          &Self::format_cluster_label(name, store.units),
+          store,
+        );
       }
     }
 

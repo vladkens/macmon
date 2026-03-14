@@ -370,14 +370,21 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
 // MARK: SockInfo
 
 #[derive(Debug, Default, Clone, Serialize)]
+pub struct CpuDomainInfo {
+  pub id: String,
+  pub units: u32,
+  pub freqs: Vec<u32>,
+  pub channel_prefix: String,
+  pub core_prefix: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct SocInfo {
   pub mac_model: String,
   pub chip_name: String,
   pub memory_gb: u8,
-  pub ecpu_cores: u8,
-  pub pcpu_cores: u8,
-  pub ecpu_freqs: Vec<u32>,
-  pub pcpu_freqs: Vec<u32>,
+  pub cpu_cores_total: u16,
+  pub cpu_domains: Vec<CpuDomainInfo>,
   pub gpu_cores: u8,
   pub gpu_freqs: Vec<u32>,
 }
@@ -426,6 +433,99 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
+struct RawCpuDomain {
+  units: u32,
+  freqs: Vec<u32>,
+  channel_prefix: &'static str,
+  core_prefix: &'static str,
+}
+
+struct RawCpuDomainSource {
+  channel_prefix: &'static str,
+  core_prefix: &'static str,
+  pmgr_key: &'static str,
+}
+
+const CPU_DOMAIN_SOURCES: [RawCpuDomainSource; 2] = [
+  RawCpuDomainSource {
+    channel_prefix: "ECPU",
+    core_prefix: "ECPU",
+    pmgr_key: "voltage-states1-sram",
+  },
+  RawCpuDomainSource {
+    channel_prefix: "PCPU",
+    core_prefix: "PCPU",
+    pmgr_key: "voltage-states5-sram",
+  },
+];
+
+fn parse_cpu_domain_units(number_processors: Option<&str>) -> Vec<u32> {
+  let parts = number_processors
+    .and_then(|value| value.strip_prefix("proc "))
+    .unwrap_or("")
+    .split(':')
+    .map(|part| part.parse::<u32>().unwrap_or(0))
+    .collect::<Vec<_>>();
+
+  match parts.as_slice() {
+    [_, first_domain_units, second_domain_units] => vec![*second_domain_units, *first_domain_units],
+    _ => Vec::new(),
+  }
+}
+
+fn build_raw_cpu_domains(units: Vec<u32>) -> Vec<RawCpuDomain> {
+  CPU_DOMAIN_SOURCES
+    .iter()
+    .enumerate()
+    .map(|(idx, source)| RawCpuDomain {
+      units: units.get(idx).copied().unwrap_or(0),
+      freqs: Vec::new(),
+      channel_prefix: source.channel_prefix,
+      core_prefix: source.core_prefix,
+    })
+    .collect()
+}
+
+fn cpu_freq_tables(item: CFDictionaryRef, scale: u32) -> Vec<Vec<u32>> {
+  CPU_DOMAIN_SOURCES
+    .iter()
+    .map(|source| to_mhz(get_dvfs_mhz(item, source.pmgr_key).1, scale))
+    .collect()
+}
+
+fn build_cpu_domains(raw_domains: &mut Vec<RawCpuDomain>) -> Vec<CpuDomainInfo> {
+  let unit_indices = raw_domains
+    .iter()
+    .enumerate()
+    .filter(|(_, domain)| domain.units > 0)
+    .map(|(idx, _)| idx)
+    .collect::<Vec<_>>();
+  let freq_indices = raw_domains
+    .iter()
+    .enumerate()
+    .filter(|(_, domain)| !domain.freqs.is_empty())
+    .map(|(idx, _)| idx)
+    .collect::<Vec<_>>();
+
+  if unit_indices.len() == 1 && freq_indices.len() == 1 && unit_indices[0] != freq_indices[0] {
+    let freqs = std::mem::take(&mut raw_domains[freq_indices[0]].freqs);
+    raw_domains[unit_indices[0]].freqs = freqs;
+  }
+
+  raw_domains
+    .iter_mut()
+    .filter(|domain| domain.units > 0 || !domain.freqs.is_empty())
+    .enumerate()
+    .map(|(idx, domain)| CpuDomainInfo {
+      id: format!("cpu{idx}"),
+      units: domain.units,
+      freqs: std::mem::take(&mut domain.freqs),
+      channel_prefix: domain.channel_prefix.to_string(),
+      core_prefix: domain.core_prefix.to_string(),
+    })
+    .collect()
+}
+
 pub fn get_soc_info() -> WithError<SocInfo> {
   let out = run_system_profiler()?;
   let mut info = SocInfo::default();
@@ -447,18 +547,8 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .unwrap_or(0);
 
   // SPHardwareDataType.0.number_processors -> "proc x:y:z"
-  let cpu_cores = out["SPHardwareDataType"][0]["number_processors"]
-    .as_str()
-    .and_then(|cores| cores.strip_prefix("proc "))
-    .unwrap_or("")
-    .split(':')
-    .map(|x| x.parse::<u64>().unwrap_or(0))
-    .collect::<Vec<_>>();
-  let (ecpu_cores, pcpu_cores) = if cpu_cores.len() == 3 {
-    (cpu_cores[2], cpu_cores[1])
-  } else {
-    (0, 0) // Fallback in case of invalid data
-  };
+  let cpu_domain_units =
+    parse_cpu_domain_units(out["SPHardwareDataType"][0]["number_processors"].as_str());
 
   // SPDisplaysDataType.0.sppci_cores
   let gpu_cores =
@@ -469,13 +559,13 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   let cpu_scale: u32 = if before_m4 { 1000 * 1000 } else { 1000 }; // MHz before M4, KHz after
   let gpu_scale: u32 = 1000 * 1000; // MHz
 
+  let mut raw_cpu_domains = build_raw_cpu_domains(cpu_domain_units);
+
   // Assign parsed values to info
   info.chip_name = chip_name;
   info.mac_model = mac_model;
   info.memory_gb = mem_gb as u8;
   info.gpu_cores = gpu_cores as u8;
-  info.ecpu_cores = ecpu_cores as u8;
-  info.pcpu_cores = pcpu_cores as u8;
 
   // CPU frequencies
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
@@ -484,24 +574,18 @@ pub fn get_soc_info() -> WithError<SocInfo> {
       // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
       //    but their values are zero, so sram used here; it looks valid.
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
-      info.ecpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states1-sram").1, cpu_scale);
-      info.pcpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states5-sram").1, cpu_scale);
+      for (domain, freqs) in raw_cpu_domains.iter_mut().zip(cpu_freq_tables(item, cpu_scale)) {
+        domain.freqs = freqs;
+      }
       info.gpu_freqs = to_mhz(get_dvfs_mhz(item, "voltage-states9").1, gpu_scale);
       unsafe { CFRelease(item as _) }
     }
   }
 
-  if info.ecpu_cores == 0 && !info.ecpu_freqs.is_empty() && info.pcpu_freqs.is_empty() {
-    info.pcpu_freqs = info.ecpu_freqs.clone();
-    info.ecpu_freqs.clear();
-  }
+  info.cpu_domains = build_cpu_domains(&mut raw_cpu_domains);
+  info.cpu_cores_total = info.cpu_domains.iter().map(|domain| domain.units).sum::<u32>() as u16;
 
-  if info.pcpu_cores == 0 && !info.pcpu_freqs.is_empty() && info.ecpu_freqs.is_empty() {
-    info.ecpu_freqs = info.pcpu_freqs.clone();
-    info.pcpu_freqs.clear();
-  }
-
-  let has_any_cpu_freqs = !info.ecpu_freqs.is_empty() || !info.pcpu_freqs.is_empty();
+  let has_any_cpu_freqs = info.cpu_domains.iter().any(|domain| !domain.freqs.is_empty());
   if !has_any_cpu_freqs {
     return Err("No CPU frequencies found".into());
   }
@@ -568,14 +652,13 @@ fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscription
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
-  prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
   pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
     let chan = cfio_get_chan(channels)?;
     let subs = cfio_get_subs(chan)?;
-    Ok(Self { subs, chan, prev: None })
+    Ok(Self { subs, chan })
   }
 
   pub fn get_sample(&self, duration: u64) -> IOReportIterator {
@@ -590,37 +673,6 @@ impl IOReport {
       IOReportIterator::new(sample3)
     }
   }
-
-  fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant) {
-    (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
-  }
-
-  pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
-    let count = count.clamp(1, 32);
-    let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
-    let step_msec = duration / count as u64;
-
-    let mut prev = match self.prev {
-      Some(x) => x,
-      None => self.raw_sample(),
-    };
-
-    for _ in 0..count {
-      std::thread::sleep(std::time::Duration::from_millis(step_msec));
-
-      let next = self.raw_sample();
-      let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
-      unsafe { CFRelease(prev.0 as _) };
-
-      let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
-      prev = next;
-
-      samples.push((IOReportIterator::new(diff), elapsed.max(1)));
-    }
-
-    self.prev = Some(prev);
-    samples
-  }
 }
 
 impl Drop for IOReport {
@@ -628,9 +680,6 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      if self.prev.is_some() {
-        CFRelease(self.prev.unwrap().0 as _);
-      }
     }
   }
 }
@@ -741,6 +790,78 @@ impl IOHIDSensors {
 impl Drop for IOHIDSensors {
   fn drop(&mut self) {
     unsafe { CFRelease(self.sensors as _) };
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{RawCpuDomain, build_cpu_domains, build_raw_cpu_domains, parse_cpu_domain_units};
+
+  #[test]
+  fn parse_cpu_domain_units_returns_generic_domain_order() {
+    assert_eq!(parse_cpu_domain_units(Some("proc 0:8:4")), vec![4, 8]);
+    assert_eq!(parse_cpu_domain_units(Some("invalid")), Vec::<u32>::new());
+  }
+
+  #[test]
+  fn build_raw_cpu_domains_uses_source_slots_and_filters_missing_units_later() {
+    let raw = build_raw_cpu_domains(vec![4, 8]);
+
+    assert_eq!(raw.len(), 2);
+    assert_eq!(raw[0].units, 4);
+    assert_eq!(raw[0].channel_prefix, "ECPU");
+    assert_eq!(raw[1].units, 8);
+    assert_eq!(raw[1].channel_prefix, "PCPU");
+  }
+
+  #[test]
+  fn build_cpu_domains_assigns_stable_ids() {
+    let mut raw = vec![
+      RawCpuDomain {
+        units: 4,
+        freqs: vec![1000, 2000],
+        channel_prefix: "CPUCL0",
+        core_prefix: "CPUCORE0",
+      },
+      RawCpuDomain {
+        units: 8,
+        freqs: vec![2000, 3000],
+        channel_prefix: "CPUCL1",
+        core_prefix: "CPUCORE1",
+      },
+      RawCpuDomain { units: 0, freqs: vec![], channel_prefix: "CPUCL2", core_prefix: "CPUCORE2" },
+    ];
+
+    let domains = build_cpu_domains(&mut raw);
+
+    assert_eq!(domains.len(), 2);
+    assert_eq!(domains[0].id, "cpu0");
+    assert_eq!(domains[0].units, 4);
+    assert_eq!(domains[0].channel_prefix, "CPUCL0");
+    assert_eq!(domains[1].id, "cpu1");
+    assert_eq!(domains[1].units, 8);
+    assert_eq!(domains[1].channel_prefix, "CPUCL1");
+  }
+
+  #[test]
+  fn build_cpu_domains_moves_single_freq_table_to_single_domain_with_units() {
+    let mut raw = vec![
+      RawCpuDomain {
+        units: 0,
+        freqs: vec![1000, 2000],
+        channel_prefix: "CPUCL0",
+        core_prefix: "CPUCORE0",
+      },
+      RawCpuDomain { units: 10, freqs: vec![], channel_prefix: "CPUCL1", core_prefix: "CPUCORE1" },
+    ];
+
+    let domains = build_cpu_domains(&mut raw);
+
+    assert_eq!(domains.len(), 1);
+    assert_eq!(domains[0].id, "cpu0");
+    assert_eq!(domains[0].units, 10);
+    assert_eq!(domains[0].freqs, vec![1000, 2000]);
+    assert_eq!(domains[0].channel_prefix, "CPUCL1");
   }
 }
 
