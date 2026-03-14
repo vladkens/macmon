@@ -195,12 +195,10 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
 
-    // Send initial metrics
-    tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
-
     loop {
       let msec = *msec.read().unwrap();
-      tx.send(Event::Update(sampler.get_metrics(msec).unwrap())).unwrap();
+      std::thread::sleep(Duration::from_millis(msec.max(100) as u64));
+      tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
     }
   });
 }

@@ -374,7 +374,6 @@ pub extern "C" fn macmon_soc_info_free(info: *mut macmon_soc_info_t) {
 #[unsafe(no_mangle)]
 pub extern "C" fn macmon_sampler_get_metrics(
   sampler: *mut macmon_sampler_t,
-  duration_ms: u32,
   out_metrics: *mut macmon_metrics_t,
 ) -> macmon_status_t {
   ffi_status(|| {
@@ -390,9 +389,8 @@ pub extern "C" fn macmon_sampler_get_metrics(
     }
 
     let sampler = unsafe { sampler_mut(sampler)? };
-    let metrics = sampler.get_metrics(duration_ms.max(100)).map_err(|err| {
-      ffi_error(macmon_status_t::MACMON_STATUS_SAMPLE_FAILED, err.to_string())
-    })?;
+    let metrics =
+      sampler.get_metrics().map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_SAMPLE_FAILED, err.to_string()))?;
 
     unsafe {
       ptr::write(out_metrics, ffi_metrics(metrics));

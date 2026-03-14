@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::time::Instant;
 
 use crate::diag::startup_log;
-use crate::platform::{IOReport, SMC, cfio_get_residencies, cfio_watts, libc_ram, libc_swap};
+use crate::platform::{IOReport, SMC, cfio_get_residencies, libc_ram, libc_swap};
 use crate::sources::{CpuDomainInfo, SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -420,7 +420,7 @@ impl Sampler {
     Ok(val)
   }
 
-  pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
+  pub fn get_metrics(&mut self) -> WithError<Metrics> {
     let cpu_domains = self.soc.cpu_domains.clone();
     let gpu_freqs = self.gpu_freqs().to_vec();
     let mut cpu_group_usages: Vec<(String, Vec<(u32, f32)>)> = Vec::new();
@@ -433,7 +433,8 @@ impl Sampler {
     let mut cpu_usage = Vec::new();
     let mut gpu_usage_entries = Vec::new();
 
-    for x in self.ior.get_sample(duration as u64) {
+    let sample = self.ior.get_sample();
+    for x in sample {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
         if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
           let usage = calc_freq(x.item, &domain.freqs);
@@ -471,21 +472,13 @@ impl Sampler {
 
       if x.group == "Energy Model" {
         match x.channel.as_str() {
-          "GPU Energy" => rs.power.gpu += cfio_watts(x.item, &x.unit, duration as u64)?,
+          "GPU Energy" => rs.power.gpu += x.watts()?,
           // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
-          c if c.ends_with("CPU Energy") => {
-            rs.power.cpu += cfio_watts(x.item, &x.unit, duration as u64)?
-          }
+          c if c.ends_with("CPU Energy") => rs.power.cpu += x.watts()?,
           // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
-          c if c.starts_with("ANE") => {
-            rs.power.ane += cfio_watts(x.item, &x.unit, duration as u64)?
-          }
-          c if c.starts_with("DRAM") => {
-            rs.power.ram += cfio_watts(x.item, &x.unit, duration as u64)?
-          }
-          c if c.starts_with("GPU SRAM") => {
-            rs.power.gpu_ram += cfio_watts(x.item, &x.unit, duration as u64)?
-          }
+          c if c.starts_with("ANE") => rs.power.ane += x.watts()?,
+          c if c.starts_with("DRAM") => rs.power.ram += x.watts()?,
+          c if c.starts_with("GPU SRAM") => rs.power.gpu_ram += x.watts()?,
           _ => {}
         }
       }

@@ -201,7 +201,6 @@ unsafe extern "C" {
 
   fn macmon_sampler_get_metrics(
     sampler: *mut macmon_sampler_t,
-    duration_ms: u32,
     out_metrics: *mut macmon_metrics_t,
   ) -> macmon_status_t;
   fn macmon_metrics_free(metrics: *mut macmon_metrics_t);
@@ -343,10 +342,10 @@ impl Sampler {
     Ok(info)
   }
 
-  pub fn get_metrics(&mut self, duration_ms: u32) -> WithError<Metrics> {
+  pub fn get_metrics(&mut self) -> WithError<Metrics> {
     let mut raw = macmon_metrics_t::default();
     check_status(
-      unsafe { macmon_sampler_get_metrics(self.raw, duration_ms.max(100), &mut raw) },
+      unsafe { macmon_sampler_get_metrics(self.raw, &mut raw) },
       "failed to fetch metrics",
     )?;
     let metrics = copy_metrics(&raw);

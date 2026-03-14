@@ -103,7 +103,6 @@ void macmon_soc_info_free(macmon_soc_info_t *info);
 
 macmon_status_t macmon_sampler_get_metrics(
   macmon_sampler_t *sampler,
-  uint32_t duration_ms,
   macmon_metrics_t *out_metrics
 );
 void macmon_metrics_free(macmon_metrics_t *metrics);

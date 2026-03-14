@@ -113,14 +113,14 @@ fn null_out_arguments_return_invalid_argument() {
     macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
   );
   assert_eq!(
-    macmon_sampler_get_metrics(ptr::null_mut(), 0, ptr::null_mut()),
+    macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut()),
     macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
   );
 }
 
 #[test]
 fn last_error_message_updates_after_failure() {
-  let status = macmon_sampler_get_metrics(ptr::null_mut(), 0, ptr::null_mut());
+  let status = macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut());
   assert_eq!(status, macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT);
 
   let message = macmon_last_error_message();
@@ -175,7 +175,7 @@ fn smoke_sampler_roundtrip() {
 
   let mut metrics = macmon_metrics_t::default();
   assert_eq!(
-    macmon_sampler_get_metrics(sampler, 100, &mut metrics),
+    macmon_sampler_get_metrics(sampler, &mut metrics),
     macmon_status_t::MACMON_STATUS_OK
   );
 
