@@ -376,6 +376,8 @@ pub struct SocInfo {
   pub memory_gb: u8,
   pub ecpu_cores: u8,
   pub pcpu_cores: u8,
+  pub ecpu_label: String, // "E" on M1-M4, "P" on M5+
+  pub pcpu_label: String, // "P" on M1-M4, "S" on M5+
   pub ecpu_freqs: Vec<u32>,
   pub pcpu_freqs: Vec<u32>,
   pub gpu_cores: u8,
@@ -453,6 +455,29 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
+// Parse "proc T:P:E" (macOS 15) or "proc T:P_or_S:E:M" (macOS 26+) into (ecpu, pcpu, has_mcpu).
+// macOS 26 always uses 4 fields regardless of chip; the 4th field (M-cores) is >0 only on M5+.
+fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
+  let fields: Vec<u64> = s
+    .strip_prefix("proc ")
+    .unwrap_or("")
+    .split(':')
+    .map(|x| x.parse().unwrap_or(0))
+    .collect();
+
+  match fields.len() {
+    4 => {
+      // macOS 26+: "proc total:P_or_S:E:M"
+      // M5+:   E=0, M>0 → ecpu=M (Performance cores), pcpu=S (Super cores)
+      // M1-M4: M=0, E>0 → ecpu=E (Efficiency cores), pcpu=P (Performance cores)
+      let (e, m) = (fields[2], fields[3]);
+      if m > 0 { (m, fields[1], true) } else { (e, fields[1], false) }
+    }
+    3 => (fields[2], fields[1], false), // macOS 15: "proc total:P:E"
+    _ => (0, 0, false),
+  }
+}
+
 pub fn get_soc_info() -> WithError<SocInfo> {
   let out = run_system_profiler()?;
   let mut info = SocInfo::default();
@@ -474,20 +499,9 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .unwrap_or(0);
 
   // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc x:y:z:w"
-  let cpu_cores = out["SPHardwareDataType"][0]["number_processors"]
-    .as_str()
-    .and_then(|cores| cores.strip_prefix("proc "))
-    .unwrap_or("")
-    .split(':')
-    .map(|x| x.parse::<u64>().unwrap_or(0))
-    .collect::<Vec<_>>();
-  let (ecpu_cores, pcpu_cores) = if cpu_cores.len() == 3 {
-    (cpu_cores[2], cpu_cores[1])              // M1-M4: total:pcpu:ecpu
-  } else if cpu_cores.len() == 4 {
-    (cpu_cores[3], cpu_cores[1])              // M5+:   total:super:ecpu:perf
-  } else {
-    (0, 0) // Fallback in case of invalid data
-  };
+  let number_processors =
+    out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap_or("");
+  let (ecpu_cores, pcpu_cores, has_mcpu) = parse_cpu_cores(number_processors);
 
   // SPDisplaysDataType.0.sppci_cores
   let gpu_cores =
@@ -505,6 +519,8 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   info.gpu_cores = gpu_cores as u8;
   info.ecpu_cores = ecpu_cores as u8;
   info.pcpu_cores = pcpu_cores as u8;
+  info.ecpu_label = if has_mcpu { "P".into() } else { "E".into() };
+  info.pcpu_label = if has_mcpu { "S".into() } else { "P".into() };
 
   // CPU frequencies
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
@@ -986,5 +1002,41 @@ mod tests {
     assert!(parse_acc_clusters(&[]).is_none());
     // Single cluster – need both ecpu and pcpu
     assert!(parse_acc_clusters(&[1, 0, 0, 0, 0, 0, 0, 0]).is_none());
+  }
+
+  #[test]
+  fn parse_cpu_cores_macos26_4field() {
+    // Real data captured from macOS 26 machines
+    // M5 Max: 18 total, 6 super, 0 efficiency, 12 performance(M-cores)
+    assert_eq!(parse_cpu_cores("proc 18:6:0:12"), (12, 6, true));
+    // M4 Max: 16 total, 12 performance, 4 efficiency, 0 M-cores
+    assert_eq!(parse_cpu_cores("proc 16:12:4:0"), (4, 12, false));
+    // M3 Air: 8 total, 4 performance, 4 efficiency, 0 M-cores
+    assert_eq!(parse_cpu_cores("proc 8:4:4:0"), (4, 4, false));
+  }
+
+  #[test]
+  fn parse_cpu_cores_macos15_3field() {
+    // Real data: M3 Air on macOS 15.6.1
+    assert_eq!(parse_cpu_cores("proc 8:4:4"), (4, 4, false));
+  }
+
+  #[test]
+  fn parse_cpu_cores_invalid() {
+    assert_eq!(parse_cpu_cores(""), (0, 0, false));
+    assert_eq!(parse_cpu_cores("garbage"), (0, 0, false));
+    assert_eq!(parse_cpu_cores("10:8:2"), (0, 0, false)); // missing "proc " prefix
+    assert_eq!(parse_cpu_cores("proc 8"), (0, 0, false)); // too few fields
+    assert_eq!(parse_cpu_cores("proc 8:4"), (0, 0, false)); // 2 fields, unsupported
+    assert_eq!(parse_cpu_cores("proc 24:6:0:12:6"), (0, 0, false)); // unknown future format
+  }
+
+  #[test]
+  fn to_mhz_scales() {
+    // M4+: KHz scale
+    assert_eq!(to_mhz(vec![4608000, 3000000], 1000), vec![4608, 3000]);
+    // M1-M3: MHz scale
+    assert_eq!(to_mhz(vec![3_000_000_000, 2_000_000_000], 1000 * 1000), vec![3000, 2000]);
+    assert_eq!(to_mhz(vec![], 1000), Vec::<u32>::new());
   }
 }
