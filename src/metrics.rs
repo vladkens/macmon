@@ -190,7 +190,9 @@ impl Sampler {
 
       if name.starts_with("GPU MTR Temp Sensor") {
         // println!("{}: {}", name, value);
-        gpu_values.push(*value);
+        if *value > 0.0 && *value <= 150.0 {
+          gpu_values.push(*value);
+        }
         continue;
       }
     }
