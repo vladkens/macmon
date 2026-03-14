@@ -391,7 +391,10 @@ impl SocInfo {
 // dynamic voltage and frequency scaling
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> (Vec<u32>, Vec<u32>) {
   unsafe {
-    let obj = cfdict_get_val(dict, key).unwrap() as CFDataRef;
+    let Some(obj) = cfdict_get_val(dict, key) else {
+      return (Vec::new(), Vec::new());
+    };
+    let obj = obj as CFDataRef;
     let obj_len = CFDataGetLength(obj);
     let obj_val = vec![0u8; obj_len as usize];
     CFDataGetBytes(obj, CFRange::init(0, obj_len), obj_val.as_ptr() as *mut u8);
@@ -488,7 +491,18 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     }
   }
 
-  if info.ecpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
+  if info.ecpu_cores == 0 && !info.ecpu_freqs.is_empty() && info.pcpu_freqs.is_empty() {
+    info.pcpu_freqs = info.ecpu_freqs.clone();
+    info.ecpu_freqs.clear();
+  }
+
+  if info.pcpu_cores == 0 && !info.pcpu_freqs.is_empty() && info.ecpu_freqs.is_empty() {
+    info.ecpu_freqs = info.pcpu_freqs.clone();
+    info.pcpu_freqs.clear();
+  }
+
+  let has_any_cpu_freqs = !info.ecpu_freqs.is_empty() || !info.pcpu_freqs.is_empty();
+  if !has_any_cpu_freqs {
     return Err("No CPU frequencies found".into());
   }
 

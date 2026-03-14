@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
@@ -142,17 +143,6 @@ impl TempStore {
   }
 }
 
-// MARK: Components
-
-fn h_stack(area: Rect) -> (Rect, Rect) {
-  let ha = Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([Constraint::Fill(1), Constraint::Fill(1)].as_ref())
-    .split(area);
-
-  (ha[0], ha[1])
-}
-
 // MARK: Threads
 
 enum Event {
@@ -238,9 +228,8 @@ pub struct App {
   cpu_temp: TempStore,
   gpu_temp: TempStore,
 
-  ecpu_freq: FreqStore,
-  pcpu_freq: FreqStore,
-  igpu_freq: FreqStore,
+  cpu_freqs: BTreeMap<String, FreqStore>,
+  gpu_freqs: BTreeMap<String, FreqStore>,
 }
 
 impl App {
@@ -251,14 +240,19 @@ impl App {
   }
 
   fn update_metrics(&mut self, data: Metrics) {
-    self.cpu_power.push(data.cpu_power as f64);
-    self.gpu_power.push(data.gpu_power as f64);
-    self.ane_power.push(data.ane_power as f64);
-    self.all_power.push(data.all_power as f64);
-    self.sys_power.push(data.sys_power as f64);
-    self.ecpu_freq.push(data.ecpu_usage.0 as u64, data.ecpu_usage.1 as f64);
-    self.pcpu_freq.push(data.pcpu_usage.0 as u64, data.pcpu_usage.1 as f64);
-    self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
+    self.cpu_power.push(data.power.cpu as f64);
+    self.gpu_power.push(data.power.gpu as f64);
+    self.ane_power.push(data.power.ane as f64);
+    self.all_power.push(data.power.all as f64);
+    self.sys_power.push(data.power.sys as f64);
+    self.cpu_freqs.retain(|name, _| data.usage.cpu.contains_key(name));
+    self.gpu_freqs.retain(|name, _| data.usage.gpu.contains_key(name));
+    for (name, (freq, usage, _)) in &data.usage.cpu {
+      self.cpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64);
+    }
+    for (name, (freq, usage, _)) in &data.usage.gpu {
+      self.gpu_freqs.entry(name.clone()).or_default().push(*freq as u64, *usage as f64);
+    }
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
     self.gpu_temp.push(data.temp.gpu_temp_avg);
@@ -331,6 +325,35 @@ impl App {
     }
   }
 
+  fn format_cluster_label(name: &str) -> String {
+    name.to_string()
+  }
+
+  fn render_empty_block(&self, f: &mut Frame, r: Rect, label: &str) {
+    let block = self.title_block(label, "");
+    f.render_widget(block, r);
+  }
+
+  fn render_freq_row(
+    &self,
+    f: &mut Frame,
+    r: Rect,
+    items: Vec<(&str, &FreqStore)>,
+    empty_label: &str,
+  ) {
+    if items.is_empty() {
+      self.render_empty_block(f, r, empty_label);
+      return;
+    }
+
+    let constraints = vec![Constraint::Fill(1); items.len()];
+    let areas =
+      Layout::default().direction(Direction::Horizontal).constraints(constraints).split(r);
+    for (idx, (name, store)) in items.iter().enumerate() {
+      self.render_freq_block(f, areas[idx], &Self::format_cluster_label(name), store);
+    }
+  }
+
   fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
@@ -365,13 +388,10 @@ impl App {
   }
 
   fn render(&mut self, f: &mut Frame) {
+    let total_cpu_cores = self.soc.ecpu_cores as u16 + self.soc.pcpu_cores as u16;
     let label_l = format!(
-      "{} ({}E+{}P+{}GPU {}GB)",
-      self.soc.chip_name,
-      self.soc.ecpu_cores,
-      self.soc.pcpu_cores,
-      self.soc.gpu_cores,
-      self.soc.memory_gb,
+      "{} ({}CPU+{}GPU {}GB)",
+      self.soc.chip_name, total_cpu_cores, self.soc.gpu_cores, self.soc.memory_gb,
     );
 
     let rows = Layout::default()
@@ -390,14 +410,27 @@ impl App {
       .split(iarea);
 
     // 1st row
-    let (c1, c2) = h_stack(iarea[0]);
-    self.render_freq_block(f, c1, "E-CPU", &self.ecpu_freq);
-    self.render_freq_block(f, c2, "P-CPU", &self.pcpu_freq);
+    let cpu_items =
+      self.cpu_freqs.iter().map(|(name, store)| (name.as_str(), store)).collect::<Vec<_>>();
+    self.render_freq_row(f, iarea[0], cpu_items, "CPU");
 
     // 2nd row
-    let (c1, c2) = h_stack(iarea[1]);
-    self.render_mem_block(f, c1, &self.mem);
-    self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
+    let gpu_items =
+      self.gpu_freqs.iter().map(|(name, store)| (name.as_str(), store)).collect::<Vec<_>>();
+    let mut constraints = vec![Constraint::Fill(1)];
+    constraints.extend(vec![Constraint::Fill(1); gpu_items.len()]);
+    let row2 =
+      Layout::default().direction(Direction::Horizontal).constraints(constraints).split(iarea[1]);
+    self.render_mem_block(f, row2[0], &self.mem);
+    if gpu_items.is_empty() {
+      if row2.len() > 1 {
+        self.render_empty_block(f, row2[1], "GPU");
+      }
+    } else {
+      for (idx, (name, store)) in gpu_items.iter().enumerate() {
+        self.render_freq_block(f, row2[idx + 1], &Self::format_cluster_label(name), store);
+      }
+    }
 
     // 3rd row
     let label_l = format!(

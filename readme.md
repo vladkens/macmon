@@ -23,7 +23,7 @@ Apple Silicon processors don't provide an easy way to view live power consumptio
 
 - 🚫 Runs without sudo
 - ⚡ Real-time CPU / GPU / ANE power usage
-- 📊 CPU utilization per cluster
+- 📊 CPU utilization per reported CPU/GPU cluster
 - 💾 RAM / Swap usage
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
@@ -96,11 +96,32 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
+Cluster keys in the JSON output are now derived directly from the reported channel names, for example `ECPU`, `PCPU1`, `GPUPH`, or `GPU`.
+
 ### Output
 
 ```jsonc
 {
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
+  "usage": {
+    "cpu": {
+      "ECPU": [1181, 0.33062646, 4],   // (Frequency MHz, Cluster Load, Cores)
+      "PCPU": [1974, 0.06072718, 4],   // (Frequency MHz, Cluster Load, Cores)
+      "PCPU1": [2055, 0.1648863, 4]    // (Frequency MHz, Cluster Load, Cores)
+    },
+    "gpu": {
+      "GPUPH": [461, 0.21497859, 10]   // (Frequency MHz, Cluster Load, GPU Units)
+    }
+  },
+  "power": {
+    "cpu": 0.20486385,                    // Watts
+    "gpu": 0.017451683,                   // Watts
+    "ram": 0.11635789,                    // Watts
+    "sys": 5.876533,                      // Watts
+    "gpu_ram": 0.0009615385,              // Watts
+    "ane": 0.0,                           // Watts
+    "all": 0.22231553                     // Watts
+  },
   "temp": {
     "cpu_temp_avg": 43.73614,         // Celsius
     "gpu_temp_avg": 36.95167          // Celsius
@@ -110,17 +131,7 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     "ram_usage": 20985479168,         // Bytes
     "swap_total": 4294967296,         // Bytes
     "swap_usage": 2602434560          // Bytes
-  },
-  "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %)
-  "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, Usage %)
-  "gpu_usage": [461, 0.021497859],    // (Frequency MHz, Usage %)
-  "cpu_power": 0.20486385,            // Watts
-  "gpu_power": 0.017451683,           // Watts
-  "ane_power": 0.0,                   // Watts
-  "all_power": 0.22231553,            // Watts
-  "sys_power": 5.876533,              // Watts
-  "ram_power": 0.11635789,            // Watts
-  "gpu_ram_power": 0.0009615385       // Watts (not sure what it means)
+  }
 }
 ```
 

@@ -51,9 +51,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
 
       loop {
-        let doc = sampler.get_metrics(args.interval.max(100))?;
-
-        let mut doc = serde_json::to_value(&doc)?;
+        let metrics = sampler.get_metrics(args.interval.max(100))?;
+        let mut doc = serde_json::to_value(&metrics)?;
         if let Some(ref soc) = soc_info_val {
           doc["soc"] = serde_json::to_value(soc)?;
         }
