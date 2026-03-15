@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::thread::JoinHandle;
 
 use core_foundation::dictionary::CFDictionaryRef;
-use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
 
 use crate::diag::startup_log;
 use crate::platform::{IOReport, SMC, cfio_collect_residencies, libc_ram, libc_swap};
@@ -29,13 +30,13 @@ pub struct MemMetrics {
   pub swap_usage: u64, // bytes
 }
 
-#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct CoreUsageEntry {
   pub freq_mhz: u32,
   pub usage: f32,
 }
 
-#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct CpuUsageEntry {
   pub name: String,
   pub freq_mhz: u32,
@@ -43,7 +44,7 @@ pub struct CpuUsageEntry {
   pub cores: Vec<CoreUsageEntry>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct GpuUsageEntry {
   pub name: String,
   pub freq_mhz: u32,
@@ -51,7 +52,7 @@ pub struct GpuUsageEntry {
   pub units: u32,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone)]
 pub struct UsageMetrics {
   pub cpu: Vec<CpuUsageEntry>,
   pub gpu: Vec<GpuUsageEntry>,
@@ -76,6 +77,82 @@ pub struct Metrics {
   pub power: PowerMetrics,
   pub memory: MemMetrics,
   pub temp: TempMetrics,
+}
+
+#[derive(Serialize)]
+struct CpuUsageValue<'a> {
+  units: u32,
+  freq_mhz: u32,
+  usage: f32,
+  cores: CorePairs<'a>,
+}
+
+#[derive(Serialize)]
+struct GpuUsageValue {
+  units: u32,
+  freq_mhz: u32,
+  usage: f32,
+}
+
+struct CorePairs<'a>(&'a [CoreUsageEntry]);
+
+impl Serialize for CorePairs<'_> {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+    for core in self.0 {
+      seq.serialize_element(&(core.freq_mhz, core.usage))?;
+    }
+    seq.end()
+  }
+}
+
+impl Serialize for UsageMetrics {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let extra_gpu = usize::from(!self.gpu.is_empty());
+    let mut map = serializer.serialize_map(Some(self.cpu.len() + extra_gpu))?;
+
+    for entry in &self.cpu {
+      map.serialize_entry(
+        &entry.name,
+        &CpuUsageValue {
+          units: entry.cores.len() as u32,
+          freq_mhz: entry.freq_mhz,
+          usage: entry.usage,
+          cores: CorePairs(&entry.cores),
+        },
+      )?;
+    }
+
+    if !self.gpu.is_empty() {
+      map.serialize_entry("gpu", &GpuUsageMap(&self.gpu))?;
+    }
+
+    map.end()
+  }
+}
+
+struct GpuUsageMap<'a>(&'a [GpuUsageEntry]);
+
+impl Serialize for GpuUsageMap<'_> {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map = serializer.serialize_map(Some(self.0.len()))?;
+    for entry in self.0 {
+      map.serialize_entry(
+        &entry.name,
+        &GpuUsageValue { units: entry.units, freq_mhz: entry.freq_mhz, usage: entry.usage },
+      )?;
+    }
+    map.end()
+  }
 }
 
 // MARK: Helpers
@@ -269,9 +346,9 @@ impl Sampler {
   }
 
   fn gpu_freqs(&self) -> &[u32] {
-    match self.soc.gpu_freqs.len() > 1 {
-      true => &self.soc.gpu_freqs[1..],
-      false => &self.soc.gpu_freqs,
+    match self.soc.gpu_freqs_mhz.len() > 1 {
+      true => &self.soc.gpu_freqs_mhz[1..],
+      false => &self.soc.gpu_freqs_mhz,
     }
   }
 
@@ -360,7 +437,7 @@ impl Sampler {
           cpu_domains.iter().position(|domain| x.channel.contains(domain.name.as_str()))
         {
           let domain = &cpu_domains[domain_idx];
-          let (freq_mhz, usage) = calc_freq(x.channel_item, &domain.freqs);
+          let (freq_mhz, usage) = calc_freq(x.channel_item, &domain.freqs_mhz);
           cpu_domain_cores[domain_idx].push(CoreUsageEntry { freq_mhz, usage });
           continue;
         }
@@ -407,7 +484,7 @@ impl Sampler {
         continue;
       }
 
-      let (freq, usage) = calc_core_freq_avg(cores, *domain.freqs.first().unwrap_or(&0));
+      let (freq, usage) = calc_core_freq_avg(cores, *domain.freqs_mhz.first().unwrap_or(&0));
       cpu_usage.push(CpuUsageEntry {
         name: domain.name.clone(),
         freq_mhz: freq,

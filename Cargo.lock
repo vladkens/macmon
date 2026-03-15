@@ -449,6 +449,7 @@ version = "0.6.1"
 dependencies = [
  "chrono",
  "clap",
+ "macmon-lib",
  "num-traits",
  "ratatui",
  "serde",

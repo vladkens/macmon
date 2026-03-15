@@ -97,7 +97,7 @@ fn core_usage_average_returns_domain_average() {
 }
 
 #[test]
-fn metrics_serialize_with_expected_shape() {
+fn metrics_serialize_with_cli_shape() {
   let metrics = Metrics {
     usage: UsageMetrics {
       cpu: vec![CpuUsageEntry {
@@ -128,20 +128,14 @@ fn metrics_serialize_with_expected_shape() {
 
   let value = serde_json::to_value(&metrics).unwrap();
 
-  assert_eq!(value["usage"]["cpu"][0]["name"], serde_json::json!("ECPU"));
-  assert_eq!(value["usage"]["cpu"][0]["freq_mhz"], serde_json::json!(1181));
-  assert!((value["usage"]["cpu"][0]["usage"].as_f64().unwrap() - 0.33).abs() < 1e-6);
-  assert_eq!(value["usage"]["cpu"][0]["cores"][0]["freq_mhz"], serde_json::json!(1100));
-  assert!((value["usage"]["cpu"][0]["cores"][0]["usage"].as_f64().unwrap() - 0.2).abs() < 1e-6);
-  assert_eq!(value["usage"]["gpu"][0]["name"], serde_json::json!("GPU"));
-  assert_eq!(value["usage"]["gpu"][0]["freq_mhz"], serde_json::json!(461));
-  assert!((value["usage"]["gpu"][0]["usage"].as_f64().unwrap() - 0.21).abs() < 1e-6);
-  assert_eq!(value["usage"]["gpu"][0]["units"], serde_json::json!(10));
-  assert!((value["power"]["cpu"].as_f64().unwrap() - 0.2).abs() < 1e-6);
+  assert_eq!(value["usage"]["ECPU"]["units"], serde_json::json!(2));
+  assert_eq!(value["usage"]["ECPU"]["freq_mhz"], serde_json::json!(1181));
+  assert!((value["usage"]["ECPU"]["usage"].as_f64().unwrap() - 0.33).abs() < 1e-6);
+  assert_eq!(value["usage"]["ECPU"]["cores"][0][0], serde_json::json!(1100));
+  assert!((value["usage"]["ECPU"]["cores"][0][1].as_f64().unwrap() - 0.2).abs() < 1e-6);
+  assert_eq!(value["usage"]["gpu"]["GPU"]["freq_mhz"], serde_json::json!(461));
+  assert_eq!(value["usage"]["gpu"]["GPU"]["units"], serde_json::json!(10));
   assert!((value["power"]["package"].as_f64().unwrap() - 0.321).abs() < 1e-6);
-  assert!((value["power"]["board"].as_f64().unwrap() - 5.8).abs() < 1e-6);
-  assert!((value["power"]["battery"].as_f64().unwrap() - 0.7).abs() < 1e-6);
-  assert!((value["power"]["dc_in"].as_f64().unwrap() - 0.8).abs() < 1e-6);
   assert_eq!(value["memory"]["swap_usage"], serde_json::json!(4));
   assert!((value["temp"]["cpu_avg"].as_f64().unwrap() - 42.0).abs() < 1e-6);
 }

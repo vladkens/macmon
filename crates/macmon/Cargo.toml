@@ -9,7 +9,6 @@ readme.workspace = true
 description = "Sudoless performance monitoring CLI tool for Apple Silicon processors"
 keywords = ["macos", "monitoring", "performance", "cli"]
 categories = ["command-line-utilities", "hardware-support"]
-build = "build.rs"
 
 [[bin]]
 name = "macmon"
@@ -21,6 +20,7 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
+macmon_lib = { package = "macmon-lib", path = "../lib" }
 num-traits.workspace = true
 ratatui.workspace = true
 serde.workspace = true

@@ -11,7 +11,8 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::ffi::{MemMetrics, Metrics, Sampler, SocInfo, get_soc_info};
+use macmon_lib::metrics::{MemMetrics, Metrics, Sampler};
+use macmon_lib::sources::{SocInfo, get_soc_info};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -255,23 +256,28 @@ impl App {
     self.ane_power.push(data.power.ane as f64);
     self.package_power.push(data.power.package as f64);
     self.board_power.push(data.power.board as f64);
-    self.cpu_layout =
-      data.usage.cpu.iter().map(|entry| entry.units.to_string()).collect::<Vec<_>>().join("+");
+    self.cpu_layout = data
+      .usage
+      .cpu
+      .iter()
+      .map(|entry| entry.cores.len().to_string())
+      .collect::<Vec<_>>()
+      .join("+");
     self.cpu_freqs.retain(|name, _| data.usage.cpu.iter().any(|entry| entry.name == *name));
     self.gpu_freqs.retain(|name, _| data.usage.gpu.iter().any(|entry| entry.name == *name));
     for entry in &data.usage.cpu {
-      self
-        .cpu_freqs
-        .entry(entry.name.clone())
-        .or_default()
-        .push(entry.freq_mhz as u64, entry.usage as f64, entry.units);
+      self.cpu_freqs.entry(entry.name.clone()).or_default().push(
+        entry.freq_mhz as u64,
+        entry.usage as f64,
+        entry.cores.len() as u32,
+      );
     }
     for entry in &data.usage.gpu {
-      self
-        .gpu_freqs
-        .entry(entry.name.clone())
-        .or_default()
-        .push(entry.freq_mhz as u64, entry.usage as f64, entry.units);
+      self.gpu_freqs.entry(entry.name.clone()).or_default().push(
+        entry.freq_mhz as u64,
+        entry.usage as f64,
+        entry.units,
+      );
     }
 
     self.cpu_temp.push(data.temp.cpu_avg);

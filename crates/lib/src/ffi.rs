@@ -237,7 +237,7 @@ fn ffi_soc_info(info: SocInfo) -> macmon_soc_info_t {
     .cpu_domains
     .into_iter()
     .map(|domain| {
-      let (freqs_mhz, freqs_len) = ffi_u32_array(&domain.freqs);
+      let (freqs_mhz, freqs_len) = ffi_u32_array(&domain.freqs_mhz);
       macmon_cpu_domain_t {
         name: ffi_string(&domain.name),
         units: domain.units,
@@ -247,7 +247,7 @@ fn ffi_soc_info(info: SocInfo) -> macmon_soc_info_t {
     })
     .collect::<Vec<_>>()
     .into_boxed_slice();
-  let (gpu_freqs_mhz, gpu_freqs_len) = ffi_u32_array(&info.gpu_freqs);
+  let (gpu_freqs_mhz, gpu_freqs_len) = ffi_u32_array(&info.gpu_freqs_mhz);
 
   macmon_soc_info_t {
     mac_model: ffi_string(&info.mac_model),

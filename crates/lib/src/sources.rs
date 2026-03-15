@@ -36,7 +36,7 @@ pub struct CpuDomainInfo {
   /// Available DVFS operating points for this domain in MHz, in the order reported by pmgr.
   /// This is not a `{base, max}` pair: it is the full frequency table used to interpret
   /// residency counters and derive the current estimated frequency.
-  pub freqs: Vec<u32>,
+  pub freqs_mhz: Vec<u32>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -54,7 +54,7 @@ pub struct SocInfo {
   /// GPU core count reported by macOS.
   pub gpu_cores: u8,
   /// Available GPU DVFS operating points in MHz, in the order reported by pmgr.
-  pub gpu_freqs: Vec<u32>,
+  pub gpu_freqs_mhz: Vec<u32>,
 }
 
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str, scale: u32) -> (Vec<u32>, Vec<u32>) {
@@ -109,7 +109,7 @@ fn init_cpu_freq_domains(units: Vec<u32>) -> Vec<CpuDomainInfo> {
     .map(|(idx, binding)| CpuDomainInfo {
       name: binding.channel_prefix.to_string(),
       units: units.get(idx).copied().unwrap_or(0),
-      freqs: Vec::new(),
+      freqs_mhz: Vec::new(),
     })
     .collect()
 }
@@ -128,13 +128,13 @@ fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
   let freq_indices = domains
     .iter()
     .enumerate()
-    .filter(|(_, domain)| !domain.freqs.is_empty())
+    .filter(|(_, domain)| !domain.freqs_mhz.is_empty())
     .map(|(idx, _)| idx)
     .collect::<Vec<_>>();
 
   if unit_indices.len() == 1 && freq_indices.len() == 1 && unit_indices[0] != freq_indices[0] {
-    let freqs = std::mem::take(&mut domains[freq_indices[0]].freqs);
-    domains[unit_indices[0]].freqs = freqs;
+    let freqs_mhz = std::mem::take(&mut domains[freq_indices[0]].freqs_mhz);
+    domains[unit_indices[0]].freqs_mhz = freqs_mhz;
   }
 
   // Keep only domains that have an actual core count. pmgr may expose extra DVFS
@@ -177,9 +177,9 @@ fn load_soc_info() -> WithError<SocInfo> {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
       for (domain, freqs) in cpu_freq_domains.iter_mut().zip(cpu_freq_tables(item, cpu_scale)) {
-        domain.freqs = freqs;
+        domain.freqs_mhz = freqs;
       }
-      info.gpu_freqs = get_dvfs_mhz(item, "voltage-states9", gpu_scale).1;
+      info.gpu_freqs_mhz = get_dvfs_mhz(item, "voltage-states9", gpu_scale).1;
       unsafe { CFRelease(item as _) }
     }
   }
@@ -188,7 +188,7 @@ fn load_soc_info() -> WithError<SocInfo> {
   info.cpu_domains = cpu_freq_domains;
   info.cpu_cores_total = info.cpu_domains.iter().map(|domain| domain.units).sum::<u32>() as u16;
 
-  if !info.cpu_domains.iter().any(|domain| !domain.freqs.is_empty()) {
+  if !info.cpu_domains.iter().any(|domain| !domain.freqs_mhz.is_empty()) {
     return Err("No CPU frequencies found".into());
   }
 

@@ -50,11 +50,11 @@ fn test_soc_info() -> SocInfo {
     memory_gb: 24,
     cpu_cores_total: 10,
     cpu_domains: vec![
-      CpuDomainInfo { name: "ECPU".to_string(), units: 4, freqs: vec![1000, 2000] },
-      CpuDomainInfo { name: "PCPU".to_string(), units: 6, freqs: vec![3000, 4000] },
+      CpuDomainInfo { name: "ECPU".to_string(), units: 4, freqs_mhz: vec![1000, 2000] },
+      CpuDomainInfo { name: "PCPU".to_string(), units: 6, freqs_mhz: vec![3000, 4000] },
     ],
     gpu_cores: 10,
-    gpu_freqs: vec![500, 1000],
+    gpu_freqs_mhz: vec![500, 1000],
   }
 }
 

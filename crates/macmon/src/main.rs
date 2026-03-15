@@ -1,13 +1,26 @@
 mod app;
 mod config;
 mod debug;
-mod ffi;
 
 use app::App;
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
-use ffi::{Sampler, get_soc_info};
+use macmon_lib::metrics::{Metrics, Sampler};
+use macmon_lib::sources::{SocInfo, get_soc_info};
+use serde::Serialize;
 use std::error::Error;
-use std::{thread, time::{Duration, Instant}};
+use std::{
+  thread,
+  time::{Duration, Instant},
+};
+
+#[derive(Serialize)]
+struct PipeSample<'a> {
+  timestamp: &'a str,
+  #[serde(flatten)]
+  metrics: &'a Metrics,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  soc: Option<&'a SocInfo>,
+}
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -60,12 +73,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         last_update_started = Instant::now();
 
         let metrics = sampler.get_metrics()?;
-        let mut doc = serde_json::to_value(&metrics)?;
-        if let Some(ref soc) = soc_info_val {
-          doc["soc"] = serde_json::to_value(soc)?;
-        }
-        doc["timestamp"] = serde_json::to_value(chrono::Utc::now().to_rfc3339())?;
-        let doc = serde_json::to_string(&doc)?;
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let doc = serde_json::to_string(&PipeSample {
+          metrics: &metrics,
+          soc: soc_info_val.as_ref(),
+          timestamp: &timestamp,
+        })?;
 
         println!("{}", doc);
 
@@ -91,3 +104,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;
