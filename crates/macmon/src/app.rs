@@ -194,17 +194,16 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
-    let mut last_update_started = Instant::now();
 
     loop {
+      let update_started = Instant::now();
       let interval = Duration::from_millis((*msec.read().unwrap()).max(100) as u64);
-      let elapsed = last_update_started.elapsed();
+      tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
+
+      let elapsed = update_started.elapsed();
       if elapsed < interval {
         std::thread::sleep(interval - elapsed);
       }
-      last_update_started = Instant::now();
-
-      tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
     }
   });
 }

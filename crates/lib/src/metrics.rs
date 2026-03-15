@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::thread::JoinHandle;
 
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
@@ -202,21 +203,31 @@ fn init_smc() -> WithError<(SMC, SmcSensors)> {
   Ok((smc, sensors))
 }
 
+type SmcInitResult = Result<(SMC, SmcSensors), String>;
+
 // MARK: Sampler
 
 pub struct Sampler {
   soc: SocInfo,
   io_report: IOReport,
-  smc: SMC,
+  smc_init: Option<JoinHandle<SmcInitResult>>,
+  smc: Option<SMC>,
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
 }
 
 impl Sampler {
   pub fn new() -> WithError<Self> {
-    startup_log("lib sampler: init start");
+    let smc_init = std::thread::spawn(|| init_smc().map_err(|err| err.to_string()));
+    startup_log("lib sampler: SMC init started in background");
 
-    let soc = get_soc_info()?;
+    let soc = match get_soc_info() {
+      Ok(soc) => soc,
+      Err(err) => {
+        let _ = smc_init.join();
+        return Err(err);
+      }
+    };
     startup_log(format!(
       "lib sampler: soc info ready (chip={}, cpu_domains={}, gpu_cores={})",
       soc.chip_name,
@@ -238,22 +249,22 @@ impl Sampler {
       }
       return group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
     };
-    let io_report = IOReport::new(Some(channels))?;
+    let io_report = match IOReport::new(Some(channels)) {
+      Ok(io_report) => io_report,
+      Err(err) => {
+        let _ = smc_init.join();
+        return Err(err);
+      }
+    };
     startup_log("lib sampler: IOReport subscription ready");
-
-    let (smc, smc_sensors) = init_smc()?;
-    startup_log(format!(
-      "lib sampler: SMC ready (cpu_sensors={}, gpu_sensors={})",
-      smc_sensors.cpu_keys.len(),
-      smc_sensors.gpu_keys.len()
-    ));
 
     Ok(Sampler {
       soc,
       io_report,
-      smc,
-      smc_cpu_keys: smc_sensors.cpu_keys,
-      smc_gpu_keys: smc_sensors.gpu_keys,
+      smc_init: Some(smc_init),
+      smc: None,
+      smc_cpu_keys: Vec::new(),
+      smc_gpu_keys: Vec::new(),
     })
   }
 
@@ -264,10 +275,43 @@ impl Sampler {
     }
   }
 
+  fn wait_for_smc(&mut self) -> WithError<()> {
+    if self.smc.is_some() {
+      return Ok(());
+    }
+
+    let Some(smc_init) = self.smc_init.take() else {
+      return Err("SMC initialization state is inconsistent".into());
+    };
+
+    startup_log("lib sampler: waiting for SMC initialization");
+    let (smc, smc_sensors) = match smc_init.join() {
+      Ok(Ok(result)) => result,
+      Ok(Err(err)) => return Err(err.into()),
+      Err(_) => return Err("SMC initialization thread panicked".into()),
+    };
+
+    startup_log(format!(
+      "lib sampler: SMC ready (cpu_sensors={}, gpu_sensors={})",
+      smc_sensors.cpu_keys.len(),
+      smc_sensors.gpu_keys.len()
+    ));
+
+    self.smc = Some(smc);
+    self.smc_cpu_keys = smc_sensors.cpu_keys;
+    self.smc_gpu_keys = smc_sensors.gpu_keys;
+
+    Ok(())
+  }
+
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
+    let Some(smc) = self.smc.as_mut() else {
+      return Err("SMC is not initialized".into());
+    };
+
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = match self.smc.read_float_val(sensor) {
+      let val = match smc.read_float_val(sensor) {
         Ok(val) => val,
         Err(_) => continue,
       };
@@ -278,7 +322,7 @@ impl Sampler {
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = match self.smc.read_float_val(sensor) {
+      let val = match smc.read_float_val(sensor) {
         Ok(val) => val,
         Err(_) => continue,
       };
@@ -307,6 +351,8 @@ impl Sampler {
     let mut rs = Metrics::default();
     let mut cpu_usage = Vec::new();
     let mut gpu_usage = Vec::new();
+
+    self.wait_for_smc()?;
 
     for x in self.io_report.next_sample() {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
@@ -373,10 +419,14 @@ impl Sampler {
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp_smc()?;
 
+    let Some(smc) = self.smc.as_mut() else {
+      return Err("SMC is not initialized".into());
+    };
+
     rs.power.package = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
-    rs.power.board = self.smc.read_float_val("PSTR").unwrap_or(0.0);
-    rs.power.battery = self.smc.read_float_val("PPBR").unwrap_or(0.0);
-    rs.power.dc_in = self.smc.read_float_val("PDTR").unwrap_or(0.0);
+    rs.power.board = smc.read_float_val("PSTR").unwrap_or(0.0);
+    rs.power.battery = smc.read_float_val("PPBR").unwrap_or(0.0);
+    rs.power.dc_in = smc.read_float_val("PDTR").unwrap_or(0.0);
 
     Ok(rs)
   }
