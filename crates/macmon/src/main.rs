@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info()?) } else { None };
-      let interval = Duration::from_millis(args.interval.max(100) as u64);
+      let interval = Duration::from_millis(args.interval as u64);
       let mut last_update_started = Instant::now();
 
       loop {
