@@ -86,7 +86,7 @@ impl Config {
 
   pub fn dec_interval(&mut self) {
     let step = 250;
-    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(step);
+    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(100);
     self.save();
   }
 

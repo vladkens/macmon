@@ -197,7 +197,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
 
     loop {
       let update_started = Instant::now();
-      let interval = Duration::from_millis((*msec.read().unwrap()).max(100) as u64);
+      let interval = Duration::from_millis((*msec.read().unwrap()) as u64);
       tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
 
       let elapsed = update_started.elapsed();
@@ -320,7 +320,7 @@ impl App {
   }
 
   fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
-    let label = format!("{} {:3.0}% @ {:4.0} MHz", label, val.usage * 100.0, val.top_value);
+    let label = format!("{} {:4.1}% @ {:4.0} MHz", label, val.usage * 100.0, val.top_value);
     let block = self.title_block(label.as_str(), "");
 
     match self.cfg.view_type {
@@ -346,9 +346,14 @@ impl App {
   }
 
   fn format_cluster_label(name: &str, units: u32) -> String {
+    let name = match name.ends_with("CPU") && !name.ends_with("-CPU") {
+      true => format!("{}-CPU", &name[..name.len() - 3]),
+      false => name.to_string(),
+    };
+
     match units > 0 {
       true => format!("{name}({units})"),
-      false => name.to_string(),
+      false => name,
     }
   }
 
