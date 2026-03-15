@@ -18,17 +18,34 @@ typedef enum macmon_status_t {
 
 typedef struct macmon_sampler macmon_sampler_t;
 
-typedef struct macmon_usage_entry_t {
+typedef struct macmon_cpu_usage_t {
+  /* Domain/channel prefix such as `ECPU` or `PCPU`. */
   const char *name;
+  /* Number of cores in this CPU domain and the length of `cores_freq_mhz` / `cores_usage`. */
+  uint32_t units;
   uint32_t freq_mhz;
   float usage;
-  uint32_t units;
-} macmon_usage_entry_t;
+  uint32_t *cores_freq_mhz;
+  float *cores_usage;
+} macmon_cpu_usage_t;
 
-typedef struct macmon_usage_list_t {
+typedef struct macmon_cpu_usage_list_t {
   size_t len;
-  macmon_usage_entry_t *ptr;
-} macmon_usage_list_t;
+  macmon_cpu_usage_t *ptr;
+} macmon_cpu_usage_list_t;
+
+typedef struct macmon_gpu_usage_t {
+  /* Domain/channel name as reported by the sampler, for example `GPUPH`. */
+  const char *name;
+  uint32_t units;
+  uint32_t freq_mhz;
+  float usage;
+} macmon_gpu_usage_t;
+
+typedef struct macmon_gpu_usage_list_t {
+  size_t len;
+  macmon_gpu_usage_t *ptr;
+} macmon_gpu_usage_list_t;
 
 typedef struct macmon_power_metrics_t {
   /* SoC/package power reported by the sampler. */
@@ -64,8 +81,8 @@ typedef struct macmon_temp_metrics_t {
 } macmon_temp_metrics_t;
 
 typedef struct macmon_metrics_t {
-  macmon_usage_list_t cpu;
-  macmon_usage_list_t gpu;
+  macmon_cpu_usage_list_t cpu;
+  macmon_gpu_usage_list_t gpu;
   macmon_power_metrics_t power;
   macmon_mem_metrics_t memory;
   macmon_temp_metrics_t temp;

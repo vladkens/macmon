@@ -96,7 +96,7 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
-In `pipe` mode, `usage.cpu` and `usage.gpu` are objects keyed by reported channel name, for example `ECPU`, `PCPU1`, `GPUPH`, or `GPU`. Each value is an array in the form `[units, freq_mhz, usage]`.
+In `pipe` mode, CPU domains are emitted directly under `usage`. Each CPU domain is an object with `units`, `freq_mhz`, `usage`, and `cores`, where `cores` is an array of `[freq_mhz, usage]` pairs for the cores that belong to that domain. GPU usage remains under `usage.gpu`, but its entries now use the same object style with `units`, `freq_mhz`, and `usage`.
 
 ### Output
 
@@ -104,13 +104,24 @@ In `pipe` mode, `usage.cpu` and `usage.gpu` are objects keyed by reported channe
 {
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
   "usage": {
-    "cpu": {
-      "ECPU": [4, 1181, 0.33062646],     // (Units, Frequency MHz, Cluster Load 0..1)
-      "PCPU": [5, 1974, 0.06072718],     // (Units, Frequency MHz, Cluster Load 0..1)
-      "PCPU1": [5, 2055, 0.1648863]      // (Units, Frequency MHz, Cluster Load 0..1)
+    "ECPU": {
+      "units": 4,
+      "freq_mhz": 1181,
+      "usage": 0.33062646,
+      "cores": [[1134, 0.21], [1228, 0.45], [1187, 0.31], [1175, 0.35]]
+    },
+    "PCPU": {
+      "units": 4,
+      "freq_mhz": 2014,
+      "usage": 0.11280674,
+      "cores": [[1987, 0.08], [2041, 0.14], [2013, 0.10], [2015, 0.12]]
     },
     "gpu": {
-      "GPUPH": [10, 461, 0.21497859]     // (Units, Frequency MHz, Cluster Load 0..1)
+      "GPU": {
+        "units": 10,
+        "freq_mhz": 461,
+        "usage": 0.21497859
+      }
     }
   },
   "power": {

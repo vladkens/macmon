@@ -1,4 +1,4 @@
-use crate::metrics::{Metrics, Sampler, UsageEntry};
+use crate::metrics::{CpuUsageEntry, GpuUsageEntry, Metrics, Sampler};
 use crate::sources::{SocInfo, get_soc_info};
 use std::cell::RefCell;
 use std::ffi::{CString, c_char};
@@ -26,18 +26,36 @@ pub struct macmon_sampler_t {
 
 #[repr(C)]
 #[derive(Debug, Default)]
-pub struct macmon_usage_entry_t {
+pub struct macmon_cpu_usage_t {
   pub name: *const c_char,
+  pub units: u32,
   pub freq_mhz: u32,
   pub usage: f32,
-  pub units: u32,
+  pub cores_freq_mhz: *mut u32,
+  pub cores_usage: *mut f32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default)]
-pub struct macmon_usage_list_t {
+pub struct macmon_cpu_usage_list_t {
   pub len: usize,
-  pub ptr: *mut macmon_usage_entry_t,
+  pub ptr: *mut macmon_cpu_usage_t,
+}
+
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct macmon_gpu_usage_t {
+  pub name: *const c_char,
+  pub units: u32,
+  pub freq_mhz: u32,
+  pub usage: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct macmon_gpu_usage_list_t {
+  pub len: usize,
+  pub ptr: *mut macmon_gpu_usage_t,
 }
 
 #[repr(C)]
@@ -73,8 +91,8 @@ pub struct macmon_temp_metrics_t {
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct macmon_metrics_t {
-  pub cpu: macmon_usage_list_t,
-  pub gpu: macmon_usage_list_t,
+  pub cpu: macmon_cpu_usage_list_t,
+  pub gpu: macmon_gpu_usage_list_t,
   pub power: macmon_power_metrics_t,
   pub memory: macmon_mem_metrics_t,
   pub temp: macmon_temp_metrics_t,
@@ -145,28 +163,52 @@ fn ffi_u32_array(values: &[u32]) -> (*mut u32, usize) {
   (ptr, len)
 }
 
-fn ffi_usage_list(items: &[UsageEntry]) -> macmon_usage_list_t {
+fn ffi_cpu_usage_list(items: &[CpuUsageEntry]) -> macmon_cpu_usage_list_t {
   let entries = items
     .iter()
-    .map(|entry| macmon_usage_entry_t {
-      name: ffi_string(&entry.name),
-      freq_mhz: entry.freq_mhz,
-      usage: entry.usage,
-      units: entry.units,
+    .map(|entry| {
+      let core_freqs = entry.cores.iter().map(|core| core.freq_mhz).collect::<Vec<_>>().into_boxed_slice();
+      let core_usages = entry.cores.iter().map(|core| core.usage).collect::<Vec<_>>().into_boxed_slice();
+      macmon_cpu_usage_t {
+        name: ffi_string(&entry.name),
+        units: entry.cores.len() as u32,
+        freq_mhz: entry.freq_mhz,
+        usage: entry.usage,
+        cores_freq_mhz: Box::into_raw(core_freqs) as *mut u32,
+        cores_usage: Box::into_raw(core_usages) as *mut f32,
+      }
     })
     .collect::<Vec<_>>()
     .into_boxed_slice();
 
-  macmon_usage_list_t {
+  macmon_cpu_usage_list_t {
     len: entries.len(),
-    ptr: Box::into_raw(entries) as *mut macmon_usage_entry_t,
+    ptr: Box::into_raw(entries) as *mut macmon_cpu_usage_t,
+  }
+}
+
+fn ffi_gpu_usage_list(items: &[GpuUsageEntry]) -> macmon_gpu_usage_list_t {
+  let entries = items
+    .iter()
+    .map(|entry| macmon_gpu_usage_t {
+      name: ffi_string(&entry.name),
+      units: entry.units,
+      freq_mhz: entry.freq_mhz,
+      usage: entry.usage,
+    })
+    .collect::<Vec<_>>()
+    .into_boxed_slice();
+
+  macmon_gpu_usage_list_t {
+    len: entries.len(),
+    ptr: Box::into_raw(entries) as *mut macmon_gpu_usage_t,
   }
 }
 
 fn ffi_metrics(metrics: Metrics) -> macmon_metrics_t {
   macmon_metrics_t {
-    cpu: ffi_usage_list(&metrics.usage.cpu),
-    gpu: ffi_usage_list(&metrics.usage.gpu),
+    cpu: ffi_cpu_usage_list(&metrics.usage.cpu),
+    gpu: ffi_gpu_usage_list(&metrics.usage.gpu),
     power: macmon_power_metrics_t {
       package: metrics.power.package,
       cpu: metrics.power.cpu,
@@ -265,7 +307,24 @@ unsafe fn free_u32_array(ptr: *mut u32, len: usize) {
   }
 }
 
-unsafe fn free_usage_list(list: &mut macmon_usage_list_t) {
+unsafe fn free_cpu_usage_list(list: &mut macmon_cpu_usage_list_t) {
+  if !list.ptr.is_null() {
+    let slice_ptr = ptr::slice_from_raw_parts_mut(list.ptr, list.len);
+    let entries = unsafe { Box::from_raw(slice_ptr) };
+    for entry in entries.iter() {
+      unsafe { free_c_string(entry.name) };
+      unsafe { free_u32_array(entry.cores_freq_mhz, entry.units as usize) };
+      if !entry.cores_usage.is_null() {
+        let raw = ptr::slice_from_raw_parts_mut(entry.cores_usage, entry.units as usize);
+        unsafe { drop(Box::from_raw(raw)) };
+      }
+    }
+  }
+
+  *list = macmon_cpu_usage_list_t::default();
+}
+
+unsafe fn free_gpu_usage_list(list: &mut macmon_gpu_usage_list_t) {
   if !list.ptr.is_null() {
     let slice_ptr = ptr::slice_from_raw_parts_mut(list.ptr, list.len);
     let entries = unsafe { Box::from_raw(slice_ptr) };
@@ -274,7 +333,7 @@ unsafe fn free_usage_list(list: &mut macmon_usage_list_t) {
     }
   }
 
-  *list = macmon_usage_list_t::default();
+  *list = macmon_gpu_usage_list_t::default();
 }
 
 #[unsafe(no_mangle)]
@@ -413,8 +472,8 @@ pub extern "C" fn macmon_metrics_free(metrics: *mut macmon_metrics_t) {
 
     let metrics = unsafe { &mut *metrics };
     unsafe {
-      free_usage_list(&mut metrics.cpu);
-      free_usage_list(&mut metrics.gpu);
+      free_cpu_usage_list(&mut metrics.cpu);
+      free_gpu_usage_list(&mut metrics.gpu);
     }
     *metrics = macmon_metrics_t::default();
   }));

@@ -7,7 +7,22 @@ use std::ptr;
 type WithError<T> = Result<T, Box<dyn Error>>;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct UsageEntry {
+pub struct CpuUsageEntry {
+  pub name: String,
+  pub freq_mhz: u32,
+  pub usage: f32,
+  pub units: u32,
+  pub cores: Vec<CoreUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoreUsageEntry {
+  pub freq_mhz: u32,
+  pub usage: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GpuUsageEntry {
   pub name: String,
   pub freq_mhz: u32,
   pub usage: f32,
@@ -16,20 +31,37 @@ pub struct UsageEntry {
 
 #[derive(Debug, Default, Clone)]
 pub struct UsageMetrics {
-  pub cpu: Vec<UsageEntry>,
-  pub gpu: Vec<UsageEntry>,
+  pub cpu: Vec<CpuUsageEntry>,
+  pub gpu: Vec<GpuUsageEntry>,
 }
 
-struct UsageEntriesAsMap<'a>(&'a [UsageEntry]);
+struct GpuUsageEntriesAsObjects<'a>(&'a [GpuUsageEntry]);
+#[derive(Serialize)]
+struct DomainUsageValue {
+  units: u32,
+  freq_mhz: u32,
+  usage: f32,
+  cores: Vec<(u32, f32)>,
+}
 
-impl Serialize for UsageEntriesAsMap<'_> {
+#[derive(Serialize)]
+struct UsageValue {
+  units: u32,
+  freq_mhz: u32,
+  usage: f32,
+}
+
+impl Serialize for GpuUsageEntriesAsObjects<'_> {
   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
   where
     S: Serializer,
   {
     let mut map = serializer.serialize_map(Some(self.0.len()))?;
     for entry in self.0 {
-      map.serialize_entry(&entry.name, &(entry.units, entry.freq_mhz, entry.usage))?;
+      map.serialize_entry(
+        &entry.name,
+        &UsageValue { units: entry.units, freq_mhz: entry.freq_mhz, usage: entry.usage },
+      )?;
     }
     map.end()
   }
@@ -40,9 +72,23 @@ impl Serialize for UsageMetrics {
   where
     S: Serializer,
   {
-    let mut map = serializer.serialize_map(Some(2))?;
-    map.serialize_entry("cpu", &UsageEntriesAsMap(&self.cpu))?;
-    map.serialize_entry("gpu", &UsageEntriesAsMap(&self.gpu))?;
+    let extra_gpu = usize::from(!self.gpu.is_empty());
+    let mut map = serializer.serialize_map(Some(self.cpu.len() + extra_gpu))?;
+    for entry in &self.cpu {
+      let cores = entry.cores.iter().map(|core| (core.freq_mhz, core.usage)).collect::<Vec<_>>();
+      map.serialize_entry(
+        &entry.name,
+        &DomainUsageValue {
+          units: entry.units,
+          freq_mhz: entry.freq_mhz,
+          usage: entry.usage,
+          cores,
+        },
+      )?;
+    }
+    if !self.gpu.is_empty() {
+      map.serialize_entry("gpu", &GpuUsageEntriesAsObjects(&self.gpu))?;
+    }
     map.end()
   }
 }
@@ -117,18 +163,37 @@ struct macmon_sampler_t {
 }
 
 #[repr(C)]
-struct macmon_usage_entry_t {
+#[derive(Default)]
+struct macmon_cpu_usage_t {
   name: *const c_char,
+  units: u32,
   freq_mhz: u32,
   usage: f32,
-  units: u32,
+  cores_freq_mhz: *mut u32,
+  cores_usage: *mut f32,
 }
 
 #[repr(C)]
 #[derive(Default)]
-struct macmon_usage_list_t {
+struct macmon_cpu_usage_list_t {
   len: usize,
-  ptr: *mut macmon_usage_entry_t,
+  ptr: *mut macmon_cpu_usage_t,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct macmon_gpu_usage_t {
+  name: *const c_char,
+  units: u32,
+  freq_mhz: u32,
+  usage: f32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct macmon_gpu_usage_list_t {
+  len: usize,
+  ptr: *mut macmon_gpu_usage_t,
 }
 
 #[repr(C)]
@@ -164,8 +229,8 @@ struct macmon_temp_metrics_t {
 #[repr(C)]
 #[derive(Default)]
 struct macmon_metrics_t {
-  cpu: macmon_usage_list_t,
-  gpu: macmon_usage_list_t,
+  cpu: macmon_cpu_usage_list_t,
+  gpu: macmon_gpu_usage_list_t,
   power: macmon_power_metrics_t,
   memory: macmon_mem_metrics_t,
   temp: macmon_temp_metrics_t,
@@ -194,11 +259,11 @@ struct macmon_soc_info_t {
 }
 
 unsafe extern "C" {
-  fn macmon_sampler_new(out_sampler: *mut *mut macmon_sampler_t) -> macmon_status_t;
-  fn macmon_sampler_free(sampler: *mut macmon_sampler_t);
-
   fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmon_status_t;
   fn macmon_soc_info_free(info: *mut macmon_soc_info_t);
+
+  fn macmon_sampler_new(out_sampler: *mut *mut macmon_sampler_t) -> macmon_status_t;
+  fn macmon_sampler_free(sampler: *mut macmon_sampler_t);
 
   fn macmon_sampler_get_metrics(
     sampler: *mut macmon_sampler_t,
@@ -242,18 +307,53 @@ fn check_status(status: macmon_status_t, fallback: &str) -> WithError<()> {
   Err(Box::new(FfiError(message)))
 }
 
-fn copy_usage_list(list: &macmon_usage_list_t) -> Vec<UsageEntry> {
+fn copy_core_usage_arrays(freqs: *mut u32, usages: *mut f32, len: usize) -> Vec<CoreUsageEntry> {
+  if freqs.is_null() || usages.is_null() || len == 0 {
+    return Vec::new();
+  }
+
+  let freqs = unsafe { std::slice::from_raw_parts(freqs, len) };
+  let usages = unsafe { std::slice::from_raw_parts(usages, len) };
+
+  freqs
+    .iter()
+    .zip(usages.iter())
+    .map(|(freq_mhz, usage)| CoreUsageEntry {
+      freq_mhz: *freq_mhz,
+      usage: *usage,
+    })
+    .collect()
+}
+
+fn copy_cpu_usage_list(list: &macmon_cpu_usage_list_t) -> Vec<CpuUsageEntry> {
   if list.ptr.is_null() || list.len == 0 {
     return Vec::new();
   }
 
   unsafe { std::slice::from_raw_parts(list.ptr, list.len) }
     .iter()
-    .map(|entry| UsageEntry {
+    .map(|entry| CpuUsageEntry {
       name: cstr_to_string(entry.name),
+      units: entry.units,
       freq_mhz: entry.freq_mhz,
       usage: entry.usage,
+      cores: copy_core_usage_arrays(entry.cores_freq_mhz, entry.cores_usage, entry.units as usize),
+    })
+    .collect()
+}
+
+fn copy_gpu_usage_list(list: &macmon_gpu_usage_list_t) -> Vec<GpuUsageEntry> {
+  if list.ptr.is_null() || list.len == 0 {
+    return Vec::new();
+  }
+
+  unsafe { std::slice::from_raw_parts(list.ptr, list.len) }
+    .iter()
+    .map(|entry| GpuUsageEntry {
+      name: cstr_to_string(entry.name),
       units: entry.units,
+      freq_mhz: entry.freq_mhz,
+      usage: entry.usage,
     })
     .collect()
 }
@@ -295,7 +395,10 @@ fn copy_soc_info(raw: &macmon_soc_info_t) -> SocInfo {
 
 fn copy_metrics(raw: &macmon_metrics_t) -> Metrics {
   Metrics {
-    usage: UsageMetrics { cpu: copy_usage_list(&raw.cpu), gpu: copy_usage_list(&raw.gpu) },
+    usage: UsageMetrics {
+      cpu: copy_cpu_usage_list(&raw.cpu),
+      gpu: copy_gpu_usage_list(&raw.gpu),
+    },
     power: PowerMetrics {
       package: raw.power.package,
       cpu: raw.power.cpu,
@@ -364,3 +467,7 @@ impl Drop for Sampler {
     self.raw = ptr::null_mut();
   }
 }
+
+#[cfg(test)]
+#[path = "ffi_test.rs"]
+mod tests;

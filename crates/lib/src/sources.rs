@@ -12,7 +12,6 @@ use crate::platform::{IOServiceIterator, WithError, cfdict_get_val, cfio_get_pro
 
 struct CpuDomainBinding {
   channel_prefix: &'static str,
-  core_prefix: &'static str,
   pmgr_key: &'static str,
 }
 
@@ -23,17 +22,14 @@ struct CpuDomainBinding {
 const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 3] = [
   CpuDomainBinding {
     channel_prefix: "ECPU",
-    core_prefix: "ECPU",
     pmgr_key: "voltage-states1-sram",
   },
   CpuDomainBinding {
     channel_prefix: "PCPU",
-    core_prefix: "PCPU",
     pmgr_key: "voltage-states5-sram",
   },
   CpuDomainBinding {
     channel_prefix: "MCPU",
-    core_prefix: "MCPU",
     pmgr_key: "voltage-states1-sram",
   },
 ];
@@ -50,9 +46,6 @@ pub struct CpuDomainInfo {
   /// This is not a `{base, max}` pair: it is the full frequency table used to interpret
   /// residency counters and derive the current estimated frequency.
   pub freqs: Vec<u32>,
-  /// Internal prefix used to match per-core IOReport channels to this domain.
-  #[serde(skip)]
-  pub(crate) core_prefix: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -126,7 +119,6 @@ fn init_cpu_freq_domains(units: Vec<u32>) -> Vec<CpuDomainInfo> {
       name: binding.channel_prefix.to_string(),
       units: units.get(idx).copied().unwrap_or(0),
       freqs: Vec::new(),
-      core_prefix: binding.core_prefix.to_string(),
     })
     .collect()
 }
@@ -154,7 +146,9 @@ fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
     domains[unit_indices[0]].freqs = freqs;
   }
 
-  domains.retain(|domain| domain.units > 0 || !domain.freqs.is_empty());
+  // Keep only domains that have an actual core count. pmgr may expose extra DVFS
+  // tables for bindings that are not present on the current SoC.
+  domains.retain(|domain| domain.units > 0);
 }
 
 fn load_soc_info() -> WithError<SocInfo> {

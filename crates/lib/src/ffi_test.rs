@@ -1,5 +1,5 @@
 use super::*;
-use crate::metrics::{MemMetrics, PowerMetrics, TempMetrics, UsageMetrics};
+use crate::metrics::{CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, MemMetrics, PowerMetrics, TempMetrics, UsageMetrics};
 use crate::sources::CpuDomainInfo;
 use std::ffi::CStr;
 use std::mem;
@@ -12,10 +12,23 @@ fn test_metrics() -> Metrics {
   Metrics {
     usage: UsageMetrics {
       cpu: vec![
-        UsageEntry { name: "ECPU0".to_string(), freq_mhz: 1200, usage: 0.25, units: 4 },
-        UsageEntry { name: "PCPU0".to_string(), freq_mhz: 3200, usage: 0.75, units: 8 },
+        CpuUsageEntry {
+          name: "ECPU".to_string(),
+          freq_mhz: 1200,
+          usage: 0.25,
+          cores: vec![
+            CoreUsageEntry { freq_mhz: 1100, usage: 0.2 },
+            CoreUsageEntry { freq_mhz: 1300, usage: 0.3 },
+          ],
+        },
+        CpuUsageEntry {
+          name: "PCPU".to_string(),
+          freq_mhz: 3200,
+          usage: 0.75,
+          cores: Vec::new(),
+        },
       ],
-      gpu: vec![UsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
+      gpu: vec![GpuUsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
     },
     power: PowerMetrics {
       package: 17.0,
@@ -44,13 +57,11 @@ fn test_soc_info() -> SocInfo {
         name: "ECPU".to_string(),
         units: 4,
         freqs: vec![1000, 2000],
-        core_prefix: "ECPU".to_string(),
       },
       CpuDomainInfo {
         name: "PCPU".to_string(),
         units: 6,
         freqs: vec![3000, 4000],
-        core_prefix: "PCPU".to_string(),
       },
     ],
     gpu_cores: 10,
@@ -66,14 +77,23 @@ fn metrics_conversion_preserves_names_and_values() {
   assert_eq!(ffi.gpu.len, 1);
 
   let cpu = unsafe { std::slice::from_raw_parts(ffi.cpu.ptr, ffi.cpu.len) };
-  assert_eq!(read_c_str(cpu[0].name), "ECPU0");
+  assert_eq!(read_c_str(cpu[0].name), "ECPU");
+  assert_eq!(cpu[0].units, 2);
   assert_eq!(cpu[0].freq_mhz, 1200);
   assert_eq!(cpu[0].usage, 0.25);
-  assert_eq!(cpu[0].units, 4);
-  assert_eq!(read_c_str(cpu[1].name), "PCPU0");
+  assert_eq!(read_c_str(cpu[1].name), "PCPU");
+  assert_eq!(cpu[1].units, 0);
+
+  let cpu_core_freqs = unsafe { std::slice::from_raw_parts(cpu[0].cores_freq_mhz, cpu[0].units as usize) };
+  let cpu_core_usages = unsafe { std::slice::from_raw_parts(cpu[0].cores_usage, cpu[0].units as usize) };
+  assert_eq!(cpu_core_freqs[0], 1100);
+  assert_eq!(cpu_core_usages[0], 0.2);
+  assert_eq!(cpu_core_freqs[1], 1300);
 
   let gpu = unsafe { std::slice::from_raw_parts(ffi.gpu.ptr, ffi.gpu.len) };
   assert_eq!(read_c_str(gpu[0].name), "GFX0");
+  assert_eq!(gpu[0].units, 10);
+  assert_eq!(gpu[0].freq_mhz, 900);
   assert_eq!(ffi.power.package, 17.0);
   assert_eq!(ffi.power.board, 4.0);
   assert_eq!(ffi.power.battery, 7.0);
@@ -175,9 +195,7 @@ fn default_ffi_structs_match_zeroed_layout() {
   assert!(zeroed_info.cpu_domains.is_null());
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-#[ignore = "requires access to macOS sensor APIs"]
 fn smoke_sampler_roundtrip() {
   let mut sampler = ptr::null_mut();
   assert_eq!(macmon_sampler_new(&mut sampler), macmon_status_t::MACMON_STATUS_OK);
