@@ -1,8 +1,9 @@
 use super::{
-  Metrics, UsageEntry, UsageMetrics, calc_freq_from_residencies, cluster_key, cluster_usage_from_cores,
-  cpu_domain_for_channel, distribute_units, sort_cluster_names, sort_indexed_samples_by_core,
+  Metrics, UsageEntry, UsageMetrics, calc_freq_from_residencies, cluster_usage_from_cores,
+  cpu_domain_for_channel, distribute_units,
 };
 use crate::sources::CpuDomainInfo;
+use std::collections::HashMap;
 
 fn usage_entry<'a>(items: &'a [UsageEntry], name: &str) -> Option<&'a UsageEntry> {
   items.iter().find(|entry| entry.name == name)
@@ -39,14 +40,6 @@ fn calc_freq_with_only_idle_returns_zero_usage() {
 
   assert_eq!(freq, 1200);
   assert_eq!(usage, 0.0);
-}
-
-#[test]
-fn cluster_keys_are_raw_and_stable() {
-  assert_eq!(cluster_key("ECPU"), Some("ECPU".to_string()));
-  assert_eq!(cluster_key("PCPU1"), Some("PCPU1".to_string()));
-  assert_eq!(cluster_key("GPUPH"), Some("GPUPH".to_string()));
-  assert_eq!(cluster_key("GPU-2"), Some("GPU2".to_string()));
 }
 
 #[test]
@@ -180,22 +173,13 @@ fn cluster_usage_is_averaged_across_cluster_units() {
     (8, (1260, 0.0)),
     (9, (1260, 0.0)),
   ];
-  let cluster_units = vec![("PCPU".to_string(), 5), ("PCPU1".to_string(), 5)];
+  let cluster_units = HashMap::from([("PCPU".to_string(), 5), ("PCPU1".to_string(), 5)]);
   let cluster_names = vec!["PCPU".to_string(), "PCPU1".to_string()];
 
   let usage = cluster_usage_from_cores(&cores, &cluster_names, &cluster_units);
 
   assert_eq!(usage.iter().find(|(name, _)| name == "PCPU").map(|(_, usage)| *usage), Some(0.2));
   assert_eq!(usage.iter().find(|(name, _)| name == "PCPU1").map(|(_, usage)| *usage), Some(0.0));
-}
-
-#[test]
-fn cluster_names_are_sorted_naturally() {
-  let mut clusters = vec!["PCPU10".to_string(), "PCPU2".to_string(), "PCPU".to_string()];
-
-  sort_cluster_names(&mut clusters);
-
-  assert_eq!(clusters, vec!["PCPU".to_string(), "PCPU2".to_string(), "PCPU10".to_string()]);
 }
 
 #[test]
@@ -210,12 +194,4 @@ fn distribute_units_preserves_input_order() {
       ("PCPU1".to_string(), 3),
     ]
   );
-}
-
-#[test]
-fn core_samples_are_sorted_before_cluster_aggregation() {
-  let mut cores = vec![(5, (1260, 0.0)), (0, (4512, 1.0)), (1, (1260, 0.0))];
-  sort_indexed_samples_by_core(&mut cores);
-
-  assert_eq!(cores.iter().map(|(idx, _)| *idx).collect::<Vec<_>>(), vec![0, 1, 5]);
 }

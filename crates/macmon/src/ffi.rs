@@ -197,10 +197,7 @@ unsafe extern "C" {
   fn macmon_sampler_new(out_sampler: *mut *mut macmon_sampler_t) -> macmon_status_t;
   fn macmon_sampler_free(sampler: *mut macmon_sampler_t);
 
-  fn macmon_sampler_get_soc_info(
-    sampler: *mut macmon_sampler_t,
-    out_info: *mut macmon_soc_info_t,
-  ) -> macmon_status_t;
+  fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmon_status_t;
   fn macmon_soc_info_free(info: *mut macmon_soc_info_t);
 
   fn macmon_sampler_get_metrics(
@@ -337,17 +334,6 @@ impl Sampler {
     Ok(Self { raw })
   }
 
-  pub fn get_soc_info(&mut self) -> WithError<SocInfo> {
-    let mut raw = macmon_soc_info_t::default();
-    check_status(
-      unsafe { macmon_sampler_get_soc_info(self.raw, &mut raw) },
-      "failed to fetch soc info",
-    )?;
-    let info = copy_soc_info(&raw);
-    unsafe { macmon_soc_info_free(&mut raw) };
-    Ok(info)
-  }
-
   pub fn get_metrics(&mut self) -> WithError<Metrics> {
     let mut raw = macmon_metrics_t::default();
     check_status(
@@ -358,6 +344,14 @@ impl Sampler {
     unsafe { macmon_metrics_free(&mut raw) };
     Ok(metrics)
   }
+}
+
+pub fn get_soc_info() -> WithError<SocInfo> {
+  let mut raw = macmon_soc_info_t::default();
+  check_status(unsafe { macmon_get_soc_info(&mut raw) }, "failed to fetch soc info")?;
+  let info = copy_soc_info(&raw);
+  unsafe { macmon_soc_info_free(&mut raw) };
+  Ok(info)
 }
 
 impl Drop for Sampler {

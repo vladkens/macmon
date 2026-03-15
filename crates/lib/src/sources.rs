@@ -73,12 +73,6 @@ pub struct SocInfo {
   pub gpu_freqs: Vec<u32>,
 }
 
-impl SocInfo {
-  pub fn new() -> WithError<Self> {
-    get_soc_info()
-  }
-}
-
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str, scale: u32) -> (Vec<u32>, Vec<u32>) {
   unsafe {
     let Some(obj) = cfdict_get_val(dict, key) else {

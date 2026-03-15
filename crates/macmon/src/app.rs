@@ -11,7 +11,7 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::ffi::{MemMetrics, Metrics, Sampler, SocInfo};
+use crate::ffi::{MemMetrics, Metrics, Sampler, SocInfo, get_soc_info};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -245,8 +245,7 @@ pub struct App {
 
 impl App {
   pub fn new() -> WithError<Self> {
-    let mut sampler = Sampler::new()?;
-    let soc = sampler.get_soc_info()?;
+    let soc = get_soc_info()?;
     let cfg = Config::load();
     Ok(Self { cfg, soc, ..Default::default() })
   }

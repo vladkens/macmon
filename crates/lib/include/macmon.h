@@ -103,14 +103,11 @@ typedef struct macmon_soc_info_t {
   uint32_t *gpu_freqs_mhz;
 } macmon_soc_info_t;
 
+macmon_status_t macmon_get_soc_info(macmon_soc_info_t *out_info);
+void macmon_soc_info_free(macmon_soc_info_t *info);
+
 macmon_status_t macmon_sampler_new(macmon_sampler_t **out_sampler);
 void macmon_sampler_free(macmon_sampler_t *sampler);
-
-macmon_status_t macmon_sampler_get_soc_info(
-  macmon_sampler_t *sampler,
-  macmon_soc_info_t *out_info
-);
-void macmon_soc_info_free(macmon_soc_info_t *info);
 
 macmon_status_t macmon_sampler_get_metrics(
   macmon_sampler_t *sampler,

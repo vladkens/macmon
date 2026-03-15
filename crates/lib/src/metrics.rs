@@ -1,9 +1,11 @@
+use std::collections::{BTreeMap, HashMap};
+
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::diag::startup_log;
 use crate::platform::{IOReport, SMC, cfio_collect_residencies, libc_ram, libc_swap};
-use crate::sources::{CpuDomainInfo, SocInfo};
+use crate::sources::{SocInfo, get_soc_info};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -129,46 +131,6 @@ fn calc_freq_avg(items: &[(u32, f32)], min_freq: u32) -> (u32, f32) {
   (avg_freq.max(min_freq as f32) as u32, avg_perc)
 }
 
-fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
-  calc_freq_avg(items, *freqs.first().unwrap_or(&0))
-}
-
-fn find_named<'a, T>(items: &'a [(String, T)], name: &str) -> Option<&'a T> {
-  items.iter().find(|(item_name, _)| item_name == name).map(|(_, value)| value)
-}
-
-fn find_named_mut<'a, T>(items: &'a mut [(String, T)], name: &str) -> Option<&'a mut T> {
-  items.iter_mut().find(|(item_name, _)| item_name == name).map(|(_, value)| value)
-}
-
-fn push_or_extend_named<T>(items: &mut Vec<(String, Vec<T>)>, name: &str, value: T) {
-  if let Some(values) = find_named_mut(items, name) {
-    values.push(value);
-  } else {
-    items.push((name.to_string(), vec![value]));
-  }
-}
-
-fn push_or_replace_indexed<T>(items: &mut Vec<(u32, T)>, index: u32, value: T) {
-  if let Some((_, existing)) = items.iter_mut().find(|(item_index, _)| *item_index == index) {
-    *existing = value;
-  } else {
-    items.push((index, value));
-  }
-}
-
-fn sort_indexed_samples_by_core<T>(items: &mut [(u32, T)]) {
-  items.sort_by_key(|(index, _)| *index);
-}
-
-fn push_or_replace_usage(items: &mut Vec<UsageEntry>, entry: UsageEntry) {
-  if let Some(existing) = items.iter_mut().find(|item| item.name == entry.name) {
-    *existing = entry;
-  } else {
-    items.push(entry);
-  }
-}
-
 fn cpu_core_index(channel: &str, prefix: &str) -> Option<u32> {
   let channel = channel.to_ascii_uppercase();
   let suffix = channel.strip_prefix(prefix)?;
@@ -182,13 +144,13 @@ fn cpu_core_index(channel: &str, prefix: &str) -> Option<u32> {
 fn cluster_usage_from_cores(
   cores: &[(u32, (u32, f32))],
   cluster_names: &[String],
-  cluster_units: &[(String, u32)],
+  cluster_units: &HashMap<String, u32>,
 ) -> Vec<(String, f32)> {
   let core_values = cores.iter().map(|(_, value)| *value).collect::<Vec<_>>();
   let mut usage_by_cluster = Vec::new();
   let mut offset = 0usize;
   for name in cluster_names {
-    let units = find_named(cluster_units, name).copied().unwrap_or(0);
+    let units = cluster_units.get(name).copied().unwrap_or(0);
     let end = (offset + units as usize).min(core_values.len());
     let usage =
       zero_div(core_values[offset..end].iter().map(|(_, usage)| *usage).sum::<f32>(), units as f32);
@@ -214,39 +176,6 @@ fn distribute_units(names: &[String], total_units: u32) -> Vec<(String, u32)> {
   }
 
   result
-}
-
-fn cluster_key(channel: &str) -> Option<String> {
-  let key = channel
-    .trim_matches(|c: char| c == '_' || c == '-' || c == ' ')
-    .chars()
-    .filter(|c| c.is_ascii_alphanumeric())
-    .collect::<String>()
-    .to_ascii_uppercase();
-  if key.is_empty() { None } else { Some(key) }
-}
-
-fn cluster_sort_key(name: &str) -> (String, bool, u32) {
-  let split_at = name.rfind(|c: char| !c.is_ascii_digit()).map(|idx| idx + 1).unwrap_or(0);
-  if split_at < name.len() {
-    let (base, suffix) = name.split_at(split_at);
-    if let Ok(index) = suffix.parse::<u32>() {
-      return (base.to_string(), true, index);
-    }
-  }
-
-  (name.to_string(), false, 0)
-}
-
-fn sort_cluster_names(names: &mut [String]) {
-  names.sort_by_key(|name| cluster_sort_key(name));
-}
-
-fn cpu_domain_for_channel<'a>(
-  cpu_domains: &'a [CpuDomainInfo],
-  channel: &str,
-) -> Option<&'a CpuDomainInfo> {
-  cpu_domains.iter().find(|domain| channel.contains(domain.name.as_str()))
 }
 
 #[derive(Debug, Default)]
@@ -299,7 +228,7 @@ impl Sampler {
   pub fn new() -> WithError<Self> {
     startup_log("lib sampler: init start");
 
-    let soc = SocInfo::new()?;
+    let soc = get_soc_info()?;
     startup_log(format!(
       "lib sampler: soc info ready (chip={}, cpu_domains={}, gpu_cores={})",
       soc.chip_name,
@@ -385,49 +314,42 @@ impl Sampler {
   pub fn get_metrics(&mut self) -> WithError<Metrics> {
     let cpu_domains = self.soc.cpu_domains.clone();
     let gpu_freqs = self.gpu_freqs().to_vec();
-    let mut cpu_group_usages: Vec<(String, Vec<(u32, f32)>)> = Vec::new();
-    let mut cpu_group_core_usages: Vec<(String, Vec<(u32, (u32, f32))>)> = Vec::new();
-    let mut cpu_clusters: Vec<(String, Vec<(u32, f32)>)> = Vec::new();
-    let mut cpu_cluster_domains: Vec<(String, String)> = Vec::new();
-    let mut gpu_clusters: Vec<(String, Vec<(u32, f32)>)> = Vec::new();
+    let mut cpu_group_usages = vec![Vec::new(); cpu_domains.len()];
+    let mut cpu_group_core_usages = vec![BTreeMap::new(); cpu_domains.len()];
+    let mut cpu_clusters: HashMap<String, Vec<(u32, f32)>> = HashMap::new();
+    let mut cpu_cluster_domains: HashMap<String, String> = HashMap::new();
+    let mut gpu_clusters: HashMap<String, Vec<(u32, f32)>> = HashMap::new();
     let mut rs = Metrics::default();
     let mut cpu_usage = Vec::new();
     let mut gpu_usage = Vec::new();
 
     for x in self.io_report.next_sample() {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-        if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
+        if let Some(domain_idx) =
+          cpu_domains.iter().position(|domain| x.channel.contains(domain.name.as_str()))
+        {
+          let domain = &cpu_domains[domain_idx];
           let usage = calc_freq(x.channel_item, &domain.freqs);
-          push_or_extend_named(&mut cpu_group_usages, &domain.name, usage);
+          cpu_group_usages[domain_idx].push(usage);
           if let Some(idx) = cpu_core_index(&x.channel, domain.core_prefix.as_str()) {
-            if let Some(samples) = find_named_mut(&mut cpu_group_core_usages, &domain.name) {
-              push_or_replace_indexed(samples, idx, usage);
-            } else {
-              cpu_group_core_usages.push((domain.name.clone(), vec![(idx, usage)]));
-            }
+            cpu_group_core_usages[domain_idx].insert(idx, usage);
           }
           continue;
         }
       }
 
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_DICE_SUBG {
-        if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
-          if let Some(name) = cluster_key(&x.channel) {
-            push_or_extend_named(&mut cpu_clusters, &name, calc_freq(x.channel_item, &domain.freqs));
-            if let Some(existing) = find_named_mut(&mut cpu_cluster_domains, &name) {
-              *existing = domain.name.clone();
-            } else {
-              cpu_cluster_domains.push((name, domain.name.clone()));
-            }
-          }
+        if let Some(domain) =
+          cpu_domains.iter().find(|domain| x.channel.contains(domain.name.as_str()))
+        {
+          cpu_clusters.entry(x.channel.clone()).or_default().push(calc_freq(x.channel_item, &domain.freqs));
+          cpu_cluster_domains.insert(x.channel.clone(), domain.name.clone());
           continue;
         }
       }
 
       if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
-        if let Some(name) = cluster_key(&x.channel) {
-          push_or_extend_named(&mut gpu_clusters, &name, calc_freq(x.channel_item, &gpu_freqs));
-        }
+        gpu_clusters.entry(x.channel.clone()).or_default().push(calc_freq(x.channel_item, &gpu_freqs));
       }
 
       if x.group == "Energy Model" {
@@ -445,25 +367,18 @@ impl Sampler {
     }
 
     if !cpu_clusters.is_empty() {
-      let mut cpu_cluster_units = Vec::new();
-      for (name, items) in &cpu_clusters {
-        let Some(domain_id) = find_named(&cpu_cluster_domains, name).cloned() else { continue };
-        let Some(domain) = cpu_domains.iter().find(|candidate| candidate.name == domain_id) else {
-          continue;
-        };
-        let (freq, usage) = calc_freq_final(items, &domain.freqs);
-        push_or_replace_usage(
-          &mut cpu_usage,
-          UsageEntry { name: name.clone(), freq_mhz: freq, usage, units: 0 },
-        );
-      }
+      let mut cpu_cluster_units = HashMap::new();
       for domain in &cpu_domains {
-        let mut cluster_names = cpu_cluster_domains
+        let cluster_names = cpu_cluster_domains
           .iter()
-          .filter(|(_, domain_id)| domain_id == &domain.name)
+          .filter(|(_, domain_id)| *domain_id == &domain.name)
           .map(|(name, _)| name.clone())
           .collect::<Vec<_>>();
-        sort_cluster_names(&mut cluster_names);
+        for name in &cluster_names {
+          let Some(items) = cpu_clusters.get(name) else { continue };
+          let (freq, usage) = calc_freq_avg(items, *domain.freqs.first().unwrap_or(&0));
+          cpu_usage.push(UsageEntry { name: name.clone(), freq_mhz: freq, usage, units: 0 });
+        }
         cpu_cluster_units.extend(distribute_units(&cluster_names, domain.units));
       }
       for (name, units) in &cpu_cluster_units {
@@ -472,16 +387,15 @@ impl Sampler {
         }
       }
 
-      for domain in &cpu_domains {
-        let mut cluster_names = cpu_cluster_domains
+      for (domain_idx, domain) in cpu_domains.iter().enumerate() {
+        let cluster_names = cpu_cluster_domains
           .iter()
-          .filter(|(_, domain_id)| domain_id == &domain.name)
+          .filter(|(_, domain_id)| *domain_id == &domain.name)
           .map(|(name, _)| name.clone())
           .collect::<Vec<_>>();
-        sort_cluster_names(&mut cluster_names);
 
-        let mut core_usages = find_named(&cpu_group_core_usages, &domain.name).cloned().unwrap_or_default();
-        sort_indexed_samples_by_core(&mut core_usages);
+        let core_usages =
+          cpu_group_core_usages[domain_idx].iter().map(|(index, value)| (*index, *value)).collect::<Vec<_>>();
         for (name, usage) in
           cluster_usage_from_cores(&core_usages, &cluster_names, &cpu_cluster_units)
         {
@@ -493,14 +407,12 @@ impl Sampler {
     }
 
     if !gpu_clusters.is_empty() {
-      for (name, items) in &gpu_clusters {
-        let (freq, usage) = calc_freq_final(items, &gpu_freqs);
-        push_or_replace_usage(
-          &mut gpu_usage,
-          UsageEntry { name: name.clone(), freq_mhz: freq, usage, units: 0 },
-        );
+      let names = gpu_clusters.keys().cloned().collect::<Vec<_>>();
+      for name in &names {
+        let Some(items) = gpu_clusters.get(name) else { continue };
+        let (freq, usage) = calc_freq_avg(items, *gpu_freqs.first().unwrap_or(&0));
+        gpu_usage.push(UsageEntry { name: name.clone(), freq_mhz: freq, usage, units: 0 });
       }
-      let names = gpu_usage.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>();
       for (name, units) in distribute_units(&names, self.soc.gpu_cores as u32) {
         if let Some(entry) = gpu_usage.iter_mut().find(|entry| entry.name == name) {
           entry.units = units;
@@ -508,28 +420,24 @@ impl Sampler {
       }
     }
 
-    for domain in &cpu_domains {
-      let has_clusters =
-        cpu_cluster_domains.iter().any(|(_, domain_id)| domain_id == &domain.name);
+    for (domain_idx, domain) in cpu_domains.iter().enumerate() {
+      let has_clusters = cpu_cluster_domains.values().any(|domain_id| domain_id == &domain.name);
       if has_clusters {
         continue;
       }
 
-      let usages = find_named(&cpu_group_usages, &domain.name).cloned().unwrap_or_default();
+      let usages = &cpu_group_usages[domain_idx];
       if usages.is_empty() {
         continue;
       }
 
-      let (freq, usage) = calc_freq_final(&usages, &domain.freqs);
-      push_or_replace_usage(
-        &mut cpu_usage,
-        UsageEntry {
-          name: domain.name.clone(),
-          freq_mhz: freq,
-          usage,
-          units: domain.units,
-        },
-      );
+      let (freq, usage) = calc_freq_avg(usages, *domain.freqs.first().unwrap_or(&0));
+      cpu_usage.push(UsageEntry {
+        name: domain.name.clone(),
+        freq_mhz: freq,
+        usage,
+        units: domain.units,
+      });
     }
 
     rs.usage.cpu = cpu_usage;
@@ -544,11 +452,6 @@ impl Sampler {
     rs.power.dc_in = self.smc.read_float_val("PDTR").unwrap_or(0.0);
 
     Ok(rs)
-  }
-
-  // Getter for the `soc` field
-  pub fn get_soc_info(&self) -> &SocInfo {
-    &self.soc
   }
 }
 

@@ -1,5 +1,5 @@
 use crate::metrics::{Metrics, Sampler, UsageEntry};
-use crate::sources::SocInfo;
+use crate::sources::{SocInfo, get_soc_info};
 use std::cell::RefCell;
 use std::ffi::{CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -320,10 +320,7 @@ pub extern "C" fn macmon_sampler_free(sampler: *mut macmon_sampler_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_sampler_get_soc_info(
-  sampler: *mut macmon_sampler_t,
-  out_info: *mut macmon_soc_info_t,
-) -> macmon_status_t {
+pub extern "C" fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmon_status_t {
   ffi_status(|| {
     if out_info.is_null() {
       return Err(ffi_error(
@@ -336,8 +333,9 @@ pub extern "C" fn macmon_sampler_get_soc_info(
       ptr::write(out_info, macmon_soc_info_t::default());
     }
 
-    let sampler = unsafe { sampler_mut(sampler)? };
-    let info = ffi_soc_info(sampler.get_soc_info().clone());
+    let info = ffi_soc_info(
+      get_soc_info().map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_INIT_FAILED, err.to_string()))?,
+    );
 
     unsafe {
       ptr::write(out_info, info);

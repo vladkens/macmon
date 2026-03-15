@@ -5,7 +5,7 @@ mod ffi;
 
 use app::App;
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
-use ffi::Sampler;
+use ffi::{Sampler, get_soc_info};
 use std::error::Error;
 use std::{thread, time::{Duration, Instant}};
 
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let mut counter = 0u32;
 
-      let soc_info_val = if *soc_info { Some(sampler.get_soc_info()?) } else { None };
+      let soc_info_val = if *soc_info { Some(get_soc_info()?) } else { None };
       let interval = Duration::from_millis(args.interval as u64);
       let mut last_update_started = Instant::now();
 

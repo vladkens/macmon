@@ -1,12 +1,12 @@
 use std::{thread, time::Duration};
 
-use crate::ffi::Sampler;
+use crate::ffi::{Sampler, get_soc_info};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 pub fn print_debug() -> WithError<()> {
   let mut sampler = Sampler::new()?;
-  let soc = sampler.get_soc_info()?;
+  let soc = get_soc_info()?;
   thread::sleep(Duration::from_millis(100));
   let metrics = sampler.get_metrics()?;
 
