@@ -7,7 +7,7 @@ use app::App;
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
 use ffi::Sampler;
 use std::error::Error;
-use std::{thread, time::Duration};
+use std::{thread, time::{Duration, Instant}};
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -49,10 +49,16 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info()?) } else { None };
-      let interval_ms = args.interval.max(100) as u64;
+      let interval = Duration::from_millis(args.interval.max(100) as u64);
+      let mut last_update_started = Instant::now();
 
       loop {
-        thread::sleep(Duration::from_millis(interval_ms));
+        let elapsed = last_update_started.elapsed();
+        if elapsed < interval {
+          thread::sleep(interval - elapsed);
+        }
+        last_update_started = Instant::now();
+
         let metrics = sampler.get_metrics()?;
         let mut doc = serde_json::to_value(&metrics)?;
         if let Some(ref soc) = soc_info_val {

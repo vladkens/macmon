@@ -43,13 +43,15 @@ pub struct macmon_usage_list_t {
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct macmon_power_metrics_t {
-  pub cpu: f32,
-  pub gpu: f32,
-  pub ram: f32,
-  pub sys: f32,
-  pub gpu_ram: f32,
-  pub ane: f32,
-  pub all: f32,
+  pub package: f32, // SoC/package power.
+  pub cpu: f32,     // CPU power within `package`.
+  pub gpu: f32,     // GPU power within `package`.
+  pub ram: f32,     // DRAM power within `package`.
+  pub gpu_ram: f32, // GPU SRAM power within `package`.
+  pub ane: f32,     // ANE power within `package`.
+  pub board: f32,   // System Total (`PSTR`).
+  pub battery: f32, // Battery rail power (`PPBR`).
+  pub dc_in: f32,   // DC input power (`PDTR`).
 }
 
 #[repr(C)]
@@ -166,13 +168,15 @@ fn ffi_metrics(metrics: Metrics) -> macmon_metrics_t {
     cpu: ffi_usage_list(&metrics.usage.cpu),
     gpu: ffi_usage_list(&metrics.usage.gpu),
     power: macmon_power_metrics_t {
+      package: metrics.power.package,
       cpu: metrics.power.cpu,
       gpu: metrics.power.gpu,
       ram: metrics.power.ram,
-      sys: metrics.power.sys,
       gpu_ram: metrics.power.gpu_ram,
       ane: metrics.power.ane,
-      all: metrics.power.all,
+      board: metrics.power.board,
+      battery: metrics.power.battery,
+      dc_in: metrics.power.dc_in,
     },
     memory: macmon_mem_metrics_t {
       ram_total: metrics.memory.ram_total,

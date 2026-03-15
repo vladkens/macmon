@@ -20,7 +20,7 @@ struct CpuDomainBinding {
 // of data. This table is the manual bridge between them: it tells the library which
 // channel prefixes belong to the same CPU domain and which pmgr key provides that
 // domain's frequency table.
-const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 2] = [
+const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 3] = [
   CpuDomainBinding {
     channel_prefix: "ECPU",
     core_prefix: "ECPU",
@@ -30,6 +30,11 @@ const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 2] = [
     channel_prefix: "PCPU",
     core_prefix: "PCPU",
     pmgr_key: "voltage-states5-sram",
+  },
+  CpuDomainBinding {
+    channel_prefix: "MCPU",
+    core_prefix: "MCPU",
+    pmgr_key: "voltage-states1-sram",
   },
 ];
 
@@ -159,10 +164,9 @@ fn finalize_cpu_freq_domains(domains: &mut Vec<CpuDomainInfo>) {
 }
 
 fn load_soc_info() -> WithError<SocInfo> {
-  startup_log("lib soc: load start");
+  let mut info = SocInfo::default();
   let out = run_system_profiler()?;
   startup_log("lib soc: system_profiler complete");
-  let mut info = SocInfo::default();
 
   let chip_name =
     out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap_or("Unknown chip").to_string();
@@ -190,7 +194,6 @@ fn load_soc_info() -> WithError<SocInfo> {
   info.memory_gb = mem_gb as u8;
   info.gpu_cores = gpu_cores as u8;
 
-  startup_log("lib soc: scanning AppleARMIODevice for pmgr");
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
@@ -210,13 +213,6 @@ fn load_soc_info() -> WithError<SocInfo> {
     return Err("No CPU frequencies found".into());
   }
 
-  startup_log(format!(
-    "lib soc: load complete (model={}, chip={}, cpu_domains={}, gpu_freqs={})",
-    info.mac_model,
-    info.chip_name,
-    info.cpu_domains.len(),
-    info.gpu_freqs.len()
-  ));
   Ok(info)
 }
 

@@ -1,9 +1,8 @@
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
-use std::time::Instant;
 
 use crate::diag::startup_log;
-use crate::platform::{IOReport, SMC, cfio_get_residencies, libc_ram, libc_swap};
+use crate::platform::{IOReport, SMC, cfio_collect_residencies, libc_ram, libc_swap};
 use crate::sources::{CpuDomainInfo, SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -44,13 +43,15 @@ pub struct UsageMetrics {
 
 #[derive(Debug, Default, Serialize)]
 pub struct PowerMetrics {
-  pub cpu: f32,
-  pub gpu: f32,
-  pub ram: f32,
-  pub sys: f32,
-  pub gpu_ram: f32,
-  pub ane: f32,
-  pub all: f32,
+  pub package: f32, // SoC/package power reported by the sampler.
+  pub cpu: f32,     // CPU power included in `package`.
+  pub gpu: f32,     // GPU core power included in `package`.
+  pub ram: f32,     // DRAM power included in `package`.
+  pub gpu_ram: f32, // GPU SRAM power included in `package`.
+  pub ane: f32,     // ANE power included in `package`.
+  pub board: f32,   // System Total (`PSTR`), independent from battery/DC-in readings.
+  pub battery: f32, // Battery rail power (`PPBR`).
+  pub dc_in: f32,   // External DC input power (`PDTR`).
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -118,7 +119,7 @@ fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f
 }
 
 fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
-  let items = cfio_get_residencies(item); // (ns, freq)
+  let items = cfio_collect_residencies(item); // (ns, freq)
   calc_freq_from_residencies(&items, freqs)
 }
 
@@ -255,33 +256,22 @@ struct SmcSensors {
 }
 
 fn init_smc() -> WithError<(SMC, SmcSensors)> {
-  const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
-  startup_log("lib smc: connection start");
   let mut smc = SMC::new()?;
   startup_log("lib smc: connection ready");
 
-  startup_log("lib smc: sensor discovery start");
-  let total_start = Instant::now();
-
-  let read_start = Instant::now();
   let names = smc.read_all_keys()?;
-  let read_elapsed = read_start.elapsed();
+  startup_log(format!("lib smc: sensors discovered (indexed_keys={})", names.len()));
 
-  let filter_start = Instant::now();
   let mut sensors = SmcSensors::default();
+
   for name in &names {
-    let is_cpu = name.starts_with("Tp") || name.starts_with("Te");
-    let is_gpu = name.starts_with("Tg");
+    let is_cpu = name.starts_with("Tp0") || name.starts_with("Tp1");
+    let is_gpu = name.starts_with("Tg0");
     if !is_cpu && !is_gpu {
       continue;
     }
 
-    let key = match smc.read_key_info(name) {
-      Ok(key) => key,
-      Err(_) => continue,
-    };
-
-    if key.data_size != 4 || key.data_type != FLOAT_TYPE {
+    if smc.read_float_val(name).is_err() {
       continue;
     }
 
@@ -291,17 +281,6 @@ fn init_smc() -> WithError<(SMC, SmcSensors)> {
       sensors.gpu_keys.push(name.clone());
     }
   }
-  let filter_elapsed = filter_start.elapsed();
-
-  startup_log(format!(
-    "lib smc: sensor discovery complete (indexed_keys={}, cpu_sensors={}, gpu_sensors={}, read_all_keys={:.3}s, filter={:.3}s, total={:.3}s)",
-    names.len(),
-    sensors.cpu_keys.len(),
-    sensors.gpu_keys.len(),
-    read_elapsed.as_secs_f64(),
-    filter_elapsed.as_secs_f64(),
-    total_start.elapsed().as_secs_f64()
-  ));
 
   Ok((smc, sensors))
 }
@@ -319,12 +298,6 @@ pub struct Sampler {
 impl Sampler {
   pub fn new() -> WithError<Self> {
     startup_log("lib sampler: init start");
-    let channels = vec![
-      ("Energy Model", None),                  // cpu/gpu/ane power
-      ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
-      ("CPU Stats", Some(CPU_FREQ_CORE_SUBG)), // cpu freq per core
-      ("GPU Stats", Some(GPU_FREQ_DICE_SUBG)), // gpu freq
-    ];
 
     let soc = SocInfo::new()?;
     startup_log(format!(
@@ -333,8 +306,24 @@ impl Sampler {
       soc.cpu_domains.len(),
       soc.gpu_cores
     ));
-    let io_report = IOReport::new(channels)?;
+
+    let channels = |group: &str, subgroup: &str, channel: &str, _unit: &str| {
+      if group == "Energy Model" {
+        return channel == "GPU Energy"
+          || channel.ends_with("CPU Energy")
+          || channel.starts_with("ANE")
+          || channel.starts_with("DRAM")
+          || channel.starts_with("GPU SRAM")
+          || channel.starts_with("DISP");
+      }
+      if group == "CPU Stats" {
+        return subgroup == CPU_FREQ_DICE_SUBG || subgroup == CPU_FREQ_CORE_SUBG;
+      }
+      return group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
+    };
+    let io_report = IOReport::new(Some(channels))?;
     startup_log("lib sampler: IOReport subscription ready");
+
     let (smc, smc_sensors) = init_smc()?;
     startup_log(format!(
       "lib sampler: SMC ready (cpu_sensors={}, gpu_sensors={})",
@@ -342,7 +331,6 @@ impl Sampler {
       smc_sensors.gpu_keys.len()
     ));
 
-    startup_log("lib sampler: init complete");
     Ok(Sampler {
       soc,
       io_report,
@@ -362,11 +350,10 @@ impl Sampler {
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = match self.smc.read_val(sensor) {
+      let val = match self.smc.read_float_val(sensor) {
         Ok(val) => val,
         Err(_) => continue,
       };
-      let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
       if val != 0.0 {
         cpu_metrics.push(val);
       }
@@ -374,11 +361,10 @@ impl Sampler {
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = match self.smc.read_val(sensor) {
+      let val = match self.smc.read_float_val(sensor) {
         Ok(val) => val,
         Err(_) => continue,
       };
-      let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
       if val != 0.0 {
         gpu_metrics.push(val);
       }
@@ -396,12 +382,6 @@ impl Sampler {
     Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
   }
 
-  fn get_sys_power(&mut self) -> WithError<f32> {
-    let val = self.smc.read_val("PSTR")?;
-    let val = f32::from_le_bytes(val.data.clone().try_into().unwrap());
-    Ok(val)
-  }
-
   pub fn get_metrics(&mut self) -> WithError<Metrics> {
     let cpu_domains = self.soc.cpu_domains.clone();
     let gpu_freqs = self.gpu_freqs().to_vec();
@@ -414,10 +394,10 @@ impl Sampler {
     let mut cpu_usage = Vec::new();
     let mut gpu_usage = Vec::new();
 
-    for x in self.io_report.get_sample() {
+    for x in self.io_report.next_sample() {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
         if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
-          let usage = calc_freq(x.item, &domain.freqs);
+          let usage = calc_freq(x.channel_item, &domain.freqs);
           push_or_extend_named(&mut cpu_group_usages, &domain.name, usage);
           if let Some(idx) = cpu_core_index(&x.channel, domain.core_prefix.as_str()) {
             if let Some(samples) = find_named_mut(&mut cpu_group_core_usages, &domain.name) {
@@ -433,7 +413,7 @@ impl Sampler {
       if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_DICE_SUBG {
         if let Some(domain) = cpu_domain_for_channel(&cpu_domains, &x.channel) {
           if let Some(name) = cluster_key(&x.channel) {
-            push_or_extend_named(&mut cpu_clusters, &name, calc_freq(x.item, &domain.freqs));
+            push_or_extend_named(&mut cpu_clusters, &name, calc_freq(x.channel_item, &domain.freqs));
             if let Some(existing) = find_named_mut(&mut cpu_cluster_domains, &name) {
               *existing = domain.name.clone();
             } else {
@@ -446,7 +426,7 @@ impl Sampler {
 
       if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
         if let Some(name) = cluster_key(&x.channel) {
-          push_or_extend_named(&mut gpu_clusters, &name, calc_freq(x.item, &gpu_freqs));
+          push_or_extend_named(&mut gpu_clusters, &name, calc_freq(x.channel_item, &gpu_freqs));
         }
       }
 
@@ -552,28 +532,16 @@ impl Sampler {
       );
     }
 
-    if gpu_usage.is_empty() {
-      gpu_usage.push(UsageEntry {
-        name: "GPU".to_string(),
-        freq_mhz: 0,
-        usage: 0.0,
-        units: self.soc.gpu_cores as u32,
-      });
-    }
-
-    cpu_usage.sort_by(|a, b| a.name.cmp(&b.name));
     rs.usage.cpu = cpu_usage;
-    gpu_usage.sort_by(|a, b| a.name.cmp(&b.name));
     rs.usage.gpu = gpu_usage;
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp_smc()?;
 
-    rs.power.all = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
-    rs.power.sys = match self.get_sys_power() {
-      Ok(val) => val.max(rs.power.all),
-      Err(_) => 0.0,
-    };
+    rs.power.package = rs.power.cpu + rs.power.gpu + rs.power.ane + rs.power.ram + rs.power.gpu_ram;
+    rs.power.board = self.smc.read_float_val("PSTR").unwrap_or(0.0);
+    rs.power.battery = self.smc.read_float_val("PPBR").unwrap_or(0.0);
+    rs.power.dc_in = self.smc.read_float_val("PDTR").unwrap_or(0.0);
 
     Ok(rs)
   }

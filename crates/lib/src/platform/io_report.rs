@@ -7,14 +7,19 @@ use std::{
 };
 
 use core_foundation::{
-  array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef},
+  array::{
+    CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef,
+    kCFTypeArrayCallBacks,
+  },
   base::{CFRelease, CFTypeRef, kCFAllocatorDefault},
   dictionary::{
-    CFDictionaryCreateMutableCopy, CFDictionaryGetCount, CFDictionaryRef, CFMutableDictionaryRef,
+    CFDictionaryCreateMutableCopy, CFDictionaryGetCount, CFDictionaryRef, CFDictionarySetValue,
+    CFMutableDictionaryRef,
   },
   string::CFStringRef,
 };
 
+use crate::diag::startup_log;
 use super::{WithError, cfdict_get_val, cfstr, from_cfstr};
 
 type CVoidRef = *const c_void;
@@ -26,12 +31,12 @@ struct IOReportSubscription {
 }
 
 type IOReportSubscriptionRef = *const IOReportSubscription;
+// Arguments: (group, subgroup, channel, unit)
+pub type ChannelFilter = fn(&str, &str, &str, &str) -> bool;
 
 #[link(name = "IOReport", kind = "dylib")]
 unsafe extern "C" {
   fn IOReportCopyAllChannels(a: u64, b: u64) -> CFDictionaryRef;
-  fn IOReportCopyChannelsInGroup(a: CFStringRef, b: CFStringRef, c: u64, d: u64, e: u64) -> CFDictionaryRef;
-  fn IOReportMergeChannels(a: CFDictionaryRef, b: CFDictionaryRef, nil: CFTypeRef);
   fn IOReportCreateSubscription(
     a: CVoidRef,
     b: CFMutableDictionaryRef,
@@ -52,38 +57,63 @@ unsafe extern "C" {
   fn IOReportStateGetResidency(a: CFDictionaryRef, b: i32) -> i64;
 }
 
-pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
-  let count = unsafe { IOReportStateGetCount(item) };
-  let mut res = Vec::new();
+pub fn cfio_collect_residencies(channel_item: CFDictionaryRef) -> Vec<(String, i64)> {
+  let count = unsafe { IOReportStateGetCount(channel_item) };
+  let mut residencies = Vec::new();
 
   for i in 0..count {
-    let name = unsafe { IOReportStateGetNameForIndex(item, i) };
-    let val = unsafe { IOReportStateGetResidency(item, i) };
-    res.push((from_cfstr(name), val));
+    let name = unsafe { IOReportStateGetNameForIndex(channel_item, i) };
+    let residency = unsafe { IOReportStateGetResidency(channel_item, i) };
+    residencies.push((from_cfstr(name), residency));
   }
 
-  res
+  residencies
+}
+
+fn channel_group(channel_item: CFDictionaryRef) -> String {
+  match unsafe { IOReportChannelGetGroup(channel_item) } {
+    x if x.is_null() => String::new(),
+    x => from_cfstr(x),
+  }
+}
+
+fn channel_subgroup(channel_item: CFDictionaryRef) -> String {
+  match unsafe { IOReportChannelGetSubGroup(channel_item) } {
+    x if x.is_null() => String::new(),
+    x => from_cfstr(x),
+  }
+}
+
+fn channel_name(channel_item: CFDictionaryRef) -> String {
+  match unsafe { IOReportChannelGetChannelName(channel_item) } {
+    x if x.is_null() => String::new(),
+    x => from_cfstr(x),
+  }
+}
+
+fn channel_unit(channel_item: CFDictionaryRef) -> String {
+  from_cfstr(unsafe { IOReportChannelGetUnitLabel(channel_item) }).trim().to_string()
 }
 
 pub struct IOReportSample {
-  sample: CFDictionaryRef,
+  sample_delta: CFDictionaryRef,
   duration_ms: u64,
-  index: isize,
-  items: CFArrayRef,
-  items_size: isize,
+  next_index: isize,
+  channel_items: CFArrayRef,
+  channel_count: isize,
 }
 
 impl IOReportSample {
-  fn new(data: CFDictionaryRef, duration_ms: u64) -> Self {
-    let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
-    let items_size = unsafe { CFArrayGetCount(items) } as isize;
-    Self { sample: data, duration_ms, items, items_size, index: 0 }
+  fn new(sample_delta: CFDictionaryRef, duration_ms: u64) -> Self {
+    let channel_items = cfdict_get_val(sample_delta, "IOReportChannels").unwrap() as CFArrayRef;
+    let channel_count = unsafe { CFArrayGetCount(channel_items) } as isize;
+    Self { sample_delta, duration_ms, channel_items, channel_count, next_index: 0 }
   }
 }
 
 impl Drop for IOReportSample {
   fn drop(&mut self) {
-    unsafe { CFRelease(self.sample as _) };
+    unsafe { CFRelease(self.sample_delta as _) };
   }
 }
 
@@ -93,18 +123,18 @@ pub struct IOReportSampleItem {
   pub subgroup: String,
   pub channel: String,
   pub unit: String,
-  pub item: CFDictionaryRef,
+  pub channel_item: CFDictionaryRef,
   duration_ms: u64,
 }
 
 impl IOReportSampleItem {
   pub fn watts(&self) -> WithError<f32> {
-    let val = unsafe { IOReportSimpleGetIntegerValue(self.item, 0) } as f32;
-    let val = val / (self.duration_ms as f32 / 1000.0);
+    let energy_value = unsafe { IOReportSimpleGetIntegerValue(self.channel_item, 0) } as f32;
+    let power_watts = energy_value / (self.duration_ms as f32 / 1000.0);
     match self.unit.as_str() {
-      "mJ" => Ok(val / 1e3f32),
-      "uJ" => Ok(val / 1e6f32),
-      "nJ" => Ok(val / 1e9f32),
+      "mJ" => Ok(power_watts / 1e3f32),
+      "uJ" => Ok(power_watts / 1e6f32),
+      "nJ" => Ok(power_watts / 1e9f32),
       _ => Err(format!("Invalid energy unit: {}", self.unit).into()),
     }
   }
@@ -114,118 +144,140 @@ impl Iterator for IOReportSample {
   type Item = IOReportSampleItem;
 
   fn next(&mut self) -> Option<Self::Item> {
-    if self.index >= self.items_size {
+    if self.next_index >= self.channel_count {
       return None;
     }
 
-    let item = unsafe { CFArrayGetValueAtIndex(self.items, self.index) } as CFDictionaryRef;
-    let group = match unsafe { IOReportChannelGetGroup(item) } {
-      x if x.is_null() => String::new(),
-      x => from_cfstr(x),
-    };
-    let subgroup = match unsafe { IOReportChannelGetSubGroup(item) } {
-      x if x.is_null() => String::new(),
-      x => from_cfstr(x),
-    };
-    let channel = match unsafe { IOReportChannelGetChannelName(item) } {
-      x if x.is_null() => String::new(),
-      x => from_cfstr(x),
-    };
-    let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
+    let channel_item =
+      unsafe { CFArrayGetValueAtIndex(self.channel_items, self.next_index) } as CFDictionaryRef;
+    let group = channel_group(channel_item);
+    let subgroup = channel_subgroup(channel_item);
+    let channel = channel_name(channel_item);
+    let unit = channel_unit(channel_item);
 
-    self.index += 1;
-    Some(IOReportSampleItem { group, subgroup, channel, unit, item, duration_ms: self.duration_ms })
+    self.next_index += 1;
+    Some(IOReportSampleItem {
+      group,
+      subgroup,
+      channel,
+      unit,
+      channel_item,
+      duration_ms: self.duration_ms,
+    })
   }
 }
 
-fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutableDictionaryRef> {
-  if items.is_empty() {
-    unsafe {
-      let c = IOReportCopyAllChannels(0, 0);
-      let r = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(c), c);
-      CFRelease(c as _);
-      return Ok(r);
-    }
-  }
-
-  let mut channels = Vec::new();
-  for (group, subgroup) in items {
-    let gname = cfstr(group);
-    let sname = subgroup.map_or(null(), cfstr);
-    let chan = unsafe { IOReportCopyChannelsInGroup(gname, sname, 0, 0, 0) };
-    channels.push(chan);
-
-    unsafe { CFRelease(gname as _) };
-    if subgroup.is_some() {
-      unsafe { CFRelease(sname as _) };
-    }
-  }
-
-  let chan = channels[0];
-  for channel in channels.iter().skip(1) {
-    unsafe { IOReportMergeChannels(chan, *channel, null()) };
-  }
-
-  let size = unsafe { CFDictionaryGetCount(chan) };
-  let chan = unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, chan) };
-
-  for channel in channels {
-    unsafe { CFRelease(channel as _) };
-  }
-
-  if cfdict_get_val(chan, "IOReportChannels").is_none() {
+fn cfio_copy_filtered_channels(filter: Option<ChannelFilter>) -> WithError<CFMutableDictionaryRef> {
+  let all_channels = unsafe { IOReportCopyAllChannels(0, 0) };
+  let Some(channel_array) = cfdict_get_val(all_channels, "IOReportChannels") else {
+    unsafe { CFRelease(all_channels as _) };
     return Err("Failed to get channels".into());
+  };
+  let channel_array = channel_array as CFArrayRef;
+
+  startup_log(format!(
+    "lib io_report: collected {} channels",
+    unsafe { CFArrayGetCount(channel_array) }
+  ));
+
+  let size = unsafe { CFDictionaryGetCount(all_channels) };
+  let selected_channels =
+    unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, all_channels) };
+
+  let count = unsafe { CFArrayGetCount(channel_array) };
+  let selected_channel_array =
+    unsafe { CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks) };
+
+  for idx in 0..count {
+    let channel_item = unsafe { CFArrayGetValueAtIndex(channel_array, idx) } as CFDictionaryRef;
+    let group = channel_group(channel_item);
+    let subgroup = channel_subgroup(channel_item);
+    let channel = channel_name(channel_item);
+    let unit = channel_unit(channel_item);
+    let keep = filter.is_none_or(|filter| filter(&group, &subgroup, &channel, &unit));
+    if keep {
+      unsafe { CFArrayAppendValue(selected_channel_array, channel_item as _) };
+    }
   }
 
-  Ok(chan)
+  let channels_key = cfstr("IOReportChannels");
+  let selected_channel_count = unsafe { CFArrayGetCount(selected_channel_array) };
+  for idx in 0..selected_channel_count {
+    let channel_item =
+      unsafe { CFArrayGetValueAtIndex(selected_channel_array, idx) } as CFDictionaryRef;
+    startup_log(format!(
+      "lib io_report: [{}] group='{}' subgroup='{}' channel='{}' unit='{}'",
+      idx,
+      channel_group(channel_item),
+      channel_subgroup(channel_item),
+      channel_name(channel_item),
+      channel_unit(channel_item)
+    ));
+  }
+  unsafe {
+    CFDictionarySetValue(selected_channels, channels_key as _, selected_channel_array as _);
+    CFRelease(channels_key as _);
+    CFRelease(selected_channel_array as _);
+    CFRelease(all_channels as _);
+  }
+
+  startup_log(format!("lib io_report: subscribing to {} channels", selected_channel_count));
+
+  Ok(selected_channels)
 }
 
-fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
-  let mut s: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
-  let rs = unsafe { IOReportCreateSubscription(null(), chan, s.as_mut_ptr(), 0, null()) };
-  if rs.is_null() {
+fn cfio_create_subscription(channels: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
+  let mut subscription_output: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
+  let subscription =
+    unsafe { IOReportCreateSubscription(null(), channels, subscription_output.as_mut_ptr(), 0, null()) };
+  if subscription.is_null() {
     return Err("Failed to create subscription".into());
   }
 
-  unsafe { s.assume_init() };
-  Ok(rs)
+  unsafe { subscription_output.assume_init() };
+  Ok(subscription)
 }
 
 pub struct IOReport {
-  subs: IOReportSubscriptionRef,
-  chan: CFMutableDictionaryRef,
-  sample: CFDictionaryRef,
-  sampled_at: Instant,
+  subscription: IOReportSubscriptionRef,
+  channels: CFMutableDictionaryRef,
+  previous_sample: CFDictionaryRef,
+  last_sampled_at: Instant,
 }
 
 impl IOReport {
-  pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
-    let chan = cfio_get_chan(channels)?;
-    let subs = cfio_get_subs(chan)?;
-    let sample = unsafe { IOReportCreateSamples(subs, chan, null()) };
-    if sample.is_null() {
+  pub fn new(filter: Option<ChannelFilter>) -> WithError<Self> {
+    let channels = cfio_copy_filtered_channels(filter)?;
+    let subscription = cfio_create_subscription(channels)?;
+    let previous_sample = unsafe { IOReportCreateSamples(subscription, channels, null()) };
+    if previous_sample.is_null() {
       unsafe {
-        CFRelease(chan as _);
-        CFRelease(subs as _);
+        CFRelease(channels as _);
+        CFRelease(subscription as _);
       }
       return Err("Failed to create initial sample".into());
     }
 
-    Ok(Self { subs, chan, sample, sampled_at: Instant::now() })
+    Ok(Self {
+      subscription,
+      channels,
+      previous_sample,
+      last_sampled_at: Instant::now(),
+    })
   }
 
-  pub fn get_sample(&mut self) -> IOReportSample {
+  pub fn next_sample(&mut self) -> IOReportSample {
     unsafe {
-      let next_sample = IOReportCreateSamples(self.subs, self.chan, null());
+      let next_sample = IOReportCreateSamples(self.subscription, self.channels, null());
       let sampled_at = Instant::now();
-      let elapsed_ms = sampled_at.duration_since(self.sampled_at).as_millis() as u64;
+      let elapsed_ms = sampled_at.duration_since(self.last_sampled_at).as_millis() as u64;
 
-      let delta = IOReportCreateSamplesDelta(self.sample, next_sample, null());
-      CFRelease(self.sample as _);
-      self.sample = next_sample;
-      self.sampled_at = sampled_at;
+      let sample_delta = IOReportCreateSamplesDelta(self.previous_sample, next_sample, null());
+      CFRelease(self.previous_sample as _);
+      self.previous_sample = next_sample;
+      self.last_sampled_at = sampled_at;
 
-      IOReportSample::new(delta, elapsed_ms.max(1))
+      IOReportSample::new(sample_delta, elapsed_ms.max(1))
     }
   }
 }
@@ -233,9 +285,9 @@ impl IOReport {
 impl Drop for IOReport {
   fn drop(&mut self) {
     unsafe {
-      CFRelease(self.sample as _);
-      CFRelease(self.chan as _);
-      CFRelease(self.subs as _);
+      CFRelease(self.previous_sample as _);
+      CFRelease(self.channels as _);
+      CFRelease(self.subscription as _);
     }
   }
 }

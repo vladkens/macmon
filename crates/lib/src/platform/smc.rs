@@ -1,4 +1,4 @@
-use std::{mem::size_of, os::raw::c_void};
+use std::{collections::HashMap, mem::size_of, os::raw::c_void};
 
 use super::{IOServiceIterator, WithError};
 
@@ -59,17 +59,10 @@ pub struct KeyData {
   pub bytes: [u8; 32],
 }
 
-#[derive(Debug, Clone)]
-pub struct SensorVal {
-  pub name: String,
-  pub unit: String,
-  pub data: Vec<u8>,
-}
-
 #[allow(clippy::upper_case_acronyms)]
 pub struct SMC {
   conn: u32,
-  keys: Vec<(u32, KeyInfo)>,
+  keys: HashMap<u32, KeyInfo>,
 }
 
 impl SMC {
@@ -85,7 +78,7 @@ impl SMC {
       }
     }
 
-    Ok(Self { conn, keys: Vec::new() })
+    Ok(Self { conn, keys: HashMap::new() })
   }
 
   fn read(&self, input: &KeyData) -> WithError<KeyData> {
@@ -113,46 +106,51 @@ impl SMC {
     Ok(oval)
   }
 
-  pub fn key_by_index(&self, index: u32) -> WithError<String> {
-    let ival = KeyData { data8: 8, data32: index, ..Default::default() };
-    let oval = self.read(&ival)?;
-    Ok(std::str::from_utf8(&oval.key.to_be_bytes()).unwrap().to_string())
-  }
-
-  pub fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
+  fn parse_key(key: &str) -> WithError<u32> {
     if key.len() != 4 {
       return Err("SMC key must be 4 bytes long".into());
     }
 
-    let key = key.bytes().fold(0, |acc, x| (acc << 8) + x as u32);
-    if let Some((_, ki)) = self.keys.iter().find(|(cached_key, _)| *cached_key == key) {
+    Ok(key.bytes().fold(0, |acc, x| (acc << 8) + x as u32))
+  }
+
+  pub fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
+    let key = Self::parse_key(key)?;
+    if let Some(ki) = self.keys.get(&key) {
       return Ok(*ki);
     }
 
     let ival = KeyData { data8: 9, key, ..Default::default() };
     let oval = self.read(&ival)?;
-    self.keys.push((key, oval.key_info));
+    self.keys.insert(key, oval.key_info);
     Ok(oval.key_info)
   }
 
-  pub fn read_val(&mut self, key: &str) -> WithError<SensorVal> {
-    let name = key.to_string();
-    let key_info = self.read_key_info(key)?;
-    let key = key.bytes().fold(0, |acc, x| (acc << 8) + x as u32);
+  pub fn read_float_val(&mut self, key: &str) -> WithError<f32> {
+    const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
+    let key_info = self.read_key_info(key)?;
+    if key_info.data_size != 4 || key_info.data_type != FLOAT_TYPE {
+      return Err(format!(
+        "SMC key '{}' is not a 4-byte float (size={}, type={})",
+        key, key_info.data_size, key_info.data_type
+      )
+      .into());
+    }
+
+    let key = Self::parse_key(key)?;
     let ival = KeyData { data8: 5, key, key_info, ..Default::default() };
     let oval = self.read(&ival)?;
 
-    Ok(SensorVal {
-      name,
-      unit: std::str::from_utf8(&key_info.data_type.to_be_bytes()).unwrap().to_string(),
-      data: oval.bytes[0..key_info.data_size as usize].to_vec(),
-    })
+    Ok(f32::from_le_bytes(oval.bytes[0..4].try_into().unwrap()))
   }
 
   pub fn key_count(&mut self) -> WithError<u32> {
-    let val = self.read_val("#KEY")?;
-    Ok(u32::from_be_bytes(val.data[0..4].try_into().unwrap()))
+    let key_info = self.read_key_info("#KEY")?;
+    let key = Self::parse_key("#KEY")?;
+    let ival = KeyData { data8: 5, key, key_info, ..Default::default() };
+    let oval = self.read(&ival)?;
+    Ok(u32::from_be_bytes(oval.bytes[0..4].try_into().unwrap()))
   }
 
   pub fn read_all_keys(&mut self) -> WithError<Vec<String>> {
@@ -160,8 +158,9 @@ impl SMC {
 
     let mut keys = Vec::new();
     for i in 0..count {
-      match self.key_by_index(i) {
-        Ok(key) => keys.push(key),
+      let ival = KeyData { data8: 8, data32: i, ..Default::default() };
+      match self.read(&ival) {
+        Ok(oval) => keys.push(std::str::from_utf8(&oval.key.to_be_bytes()).unwrap().to_string()),
         Err(_) => continue,
       }
     }

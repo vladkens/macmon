@@ -133,13 +133,15 @@ fn metrics_serialize_with_expected_shape() {
       gpu: vec![UsageEntry { name: "GPU".to_string(), freq_mhz: 461, usage: 0.21, units: 10 }],
     },
     power: super::PowerMetrics {
+      package: 0.321,
       cpu: 0.2,
       gpu: 0.01,
       ram: 0.11,
-      sys: 5.8,
       gpu_ram: 0.001,
       ane: 0.0,
-      all: 0.321,
+      board: 5.8,
+      battery: 0.7,
+      dc_in: 0.8,
     },
     memory: super::MemMetrics { ram_total: 1, ram_usage: 2, swap_total: 3, swap_usage: 4 },
     temp: super::TempMetrics { cpu_avg: 42.0, gpu_avg: 36.0 },
@@ -156,7 +158,10 @@ fn metrics_serialize_with_expected_shape() {
   assert!((value["usage"]["gpu"][0]["usage"].as_f64().unwrap() - 0.21).abs() < 1e-6);
   assert_eq!(value["usage"]["gpu"][0]["units"], serde_json::json!(10));
   assert!((value["power"]["cpu"].as_f64().unwrap() - 0.2).abs() < 1e-6);
-  assert!((value["power"]["all"].as_f64().unwrap() - (0.2 + 0.01 + 0.11 + 0.001)).abs() < 1e-6);
+  assert!((value["power"]["package"].as_f64().unwrap() - 0.321).abs() < 1e-6);
+  assert!((value["power"]["board"].as_f64().unwrap() - 5.8).abs() < 1e-6);
+  assert!((value["power"]["battery"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+  assert!((value["power"]["dc_in"].as_f64().unwrap() - 0.8).abs() < 1e-6);
   assert_eq!(value["memory"]["swap_usage"], serde_json::json!(4));
   assert!((value["temp"]["cpu_avg"].as_f64().unwrap() - 42.0).abs() < 1e-6);
 }

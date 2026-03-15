@@ -49,13 +49,15 @@ impl Serialize for UsageMetrics {
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct PowerMetrics {
-  pub cpu: f32,
-  pub gpu: f32,
-  pub ram: f32,
-  pub sys: f32,
-  pub gpu_ram: f32,
-  pub ane: f32,
-  pub all: f32,
+  pub package: f32, // SoC/package power.
+  pub cpu: f32,     // CPU power within `package`.
+  pub gpu: f32,     // GPU power within `package`.
+  pub ram: f32,     // DRAM power within `package`.
+  pub gpu_ram: f32, // GPU SRAM power within `package`.
+  pub ane: f32,     // ANE power within `package`.
+  pub board: f32,   // System Total (`PSTR`).
+  pub battery: f32, // Battery rail power (`PPBR`).
+  pub dc_in: f32,   // DC input power (`PDTR`).
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -132,13 +134,15 @@ struct macmon_usage_list_t {
 #[repr(C)]
 #[derive(Default)]
 struct macmon_power_metrics_t {
+  package: f32,
   cpu: f32,
   gpu: f32,
   ram: f32,
-  sys: f32,
   gpu_ram: f32,
   ane: f32,
-  all: f32,
+  board: f32,
+  battery: f32,
+  dc_in: f32,
 }
 
 #[repr(C)]
@@ -296,13 +300,15 @@ fn copy_metrics(raw: &macmon_metrics_t) -> Metrics {
   Metrics {
     usage: UsageMetrics { cpu: copy_usage_list(&raw.cpu), gpu: copy_usage_list(&raw.gpu) },
     power: PowerMetrics {
+      package: raw.power.package,
       cpu: raw.power.cpu,
       gpu: raw.power.gpu,
       ram: raw.power.ram,
-      sys: raw.power.sys,
       gpu_ram: raw.power.gpu_ram,
       ane: raw.power.ane,
-      all: raw.power.all,
+      board: raw.power.board,
+      battery: raw.power.battery,
+      dc_in: raw.power.dc_in,
     },
     memory: MemMetrics {
       ram_total: raw.memory.ram_total,

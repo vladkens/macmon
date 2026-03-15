@@ -31,13 +31,24 @@ typedef struct macmon_usage_list_t {
 } macmon_usage_list_t;
 
 typedef struct macmon_power_metrics_t {
+  /* SoC/package power reported by the sampler. */
+  float package;
+  /* CPU power included in `package`. */
   float cpu;
+  /* GPU core power included in `package`. */
   float gpu;
+  /* DRAM power included in `package`. */
   float ram;
-  float sys;
+  /* GPU SRAM power included in `package`. */
   float gpu_ram;
+  /* ANE power included in `package`. */
   float ane;
-  float all;
+  /* System Total (`PSTR`), independent from battery/DC-in readings. */
+  float board;
+  /* Battery rail power (`PPBR`). */
+  float battery;
+  /* External DC input power (`PDTR`). */
+  float dc_in;
 } macmon_power_metrics_t;
 
 typedef struct macmon_mem_metrics_t {

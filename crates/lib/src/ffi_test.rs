@@ -17,7 +17,17 @@ fn test_metrics() -> Metrics {
       ],
       gpu: vec![UsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
     },
-    power: PowerMetrics { cpu: 1.0, gpu: 2.0, ram: 3.0, sys: 4.0, gpu_ram: 5.0, ane: 6.0, all: 17.0 },
+    power: PowerMetrics {
+      package: 17.0,
+      cpu: 1.0,
+      gpu: 2.0,
+      ram: 3.0,
+      gpu_ram: 5.0,
+      ane: 6.0,
+      board: 4.0,
+      battery: 7.0,
+      dc_in: 8.0,
+    },
     memory: MemMetrics { ram_total: 10, ram_usage: 11, swap_total: 12, swap_usage: 13 },
     temp: TempMetrics { cpu_avg: 50.0, gpu_avg: 51.0 },
   }
@@ -64,7 +74,10 @@ fn metrics_conversion_preserves_names_and_values() {
 
   let gpu = unsafe { std::slice::from_raw_parts(ffi.gpu.ptr, ffi.gpu.len) };
   assert_eq!(read_c_str(gpu[0].name), "GFX0");
-  assert_eq!(ffi.power.all, 17.0);
+  assert_eq!(ffi.power.package, 17.0);
+  assert_eq!(ffi.power.board, 4.0);
+  assert_eq!(ffi.power.battery, 7.0);
+  assert_eq!(ffi.power.dc_in, 8.0);
   assert_eq!(ffi.memory.swap_usage, 13);
   assert_eq!(ffi.temp.gpu_avg, 51.0);
 

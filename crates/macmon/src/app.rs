@@ -194,10 +194,16 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
+    let mut last_update_started = Instant::now();
 
     loop {
-      let msec = *msec.read().unwrap();
-      std::thread::sleep(Duration::from_millis(msec.max(100) as u64));
+      let interval = Duration::from_millis((*msec.read().unwrap()).max(100) as u64);
+      let elapsed = last_update_started.elapsed();
+      if elapsed < interval {
+        std::thread::sleep(interval - elapsed);
+      }
+      last_update_started = Instant::now();
+
       tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
     }
   });
@@ -226,8 +232,8 @@ pub struct App {
   cpu_power: PowerStore,
   gpu_power: PowerStore,
   ane_power: PowerStore,
-  all_power: PowerStore,
-  sys_power: PowerStore,
+  package_power: PowerStore,
+  board_power: PowerStore,
 
   cpu_temp: TempStore,
   gpu_temp: TempStore,
@@ -249,8 +255,8 @@ impl App {
     self.cpu_power.push(data.power.cpu as f64);
     self.gpu_power.push(data.power.gpu as f64);
     self.ane_power.push(data.power.ane as f64);
-    self.all_power.push(data.power.all as f64);
-    self.sys_power.push(data.power.sys as f64);
+    self.package_power.push(data.power.package as f64);
+    self.board_power.push(data.power.board as f64);
     self.cpu_layout =
       data.usage.cpu.iter().map(|entry| entry.units.to_string()).collect::<Vec<_>>().join("+");
     self.cpu_freqs.retain(|name, _| data.usage.cpu.iter().any(|entry| entry.name == *name));
@@ -468,14 +474,14 @@ impl App {
     // 3rd row
     let label_l = format!(
       "Power: {:.2}W (avg {:.2}W, max {:.2}W)",
-      self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
+      self.package_power.top_value, self.package_power.avg_value, self.package_power.max_value,
     );
 
     // Show label only if sensor is available
-    let label_r = if self.sys_power.top_value > 0.0 {
+    let label_r = if self.board_power.top_value > 0.0 {
       format!(
         "Total {:.2}W ({:.2}, {:.2})",
-        self.sys_power.top_value, self.sys_power.avg_value, self.sys_power.max_value
+        self.board_power.top_value, self.board_power.avg_value, self.board_power.max_value
       )
     } else {
       "".to_string()
