@@ -63,7 +63,7 @@ nix-env -i macmon
 Usage: macmon [OPTIONS] [COMMAND]
 
 Commands:
-  pipe   Output metrics in JSON format
+  pipe   Output metrics in JSON format (suitable for piping)
   debug  Print debug information
   help   Print this message or the help of the given subcommand(s)
 
@@ -80,7 +80,7 @@ Controls:
 
 ## 🚰 Piping
 
-You can use the `pipe` subcommand to output metrics in JSON format, which makes it suitable for piping into other tools or scripts. For example:
+You can use the `pipe` subcommand to print one compact JSON object per sample to stdout, which makes it suitable for piping into other tools or scripts. For example:
 
 ```sh
 macmon pipe | jq
@@ -96,7 +96,7 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
-Cluster keys in the JSON output are now derived directly from the reported channel names, for example `ECPU`, `PCPU1`, `GPUPH`, or `GPU`.
+In `pipe` mode, `usage.cpu` and `usage.gpu` are objects keyed by reported channel name, for example `ECPU`, `PCPU1`, `GPUPH`, or `GPU`. Each value is an array in the form `[units, freq_mhz, usage]`.
 
 ### Output
 
@@ -105,32 +105,37 @@ Cluster keys in the JSON output are now derived directly from the reported chann
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
   "usage": {
     "cpu": {
-      "ECPU": [1181, 0.33062646, 4],   // (Frequency MHz, Cluster Load, Cores)
-      "PCPU": [1974, 0.06072718, 4],   // (Frequency MHz, Cluster Load, Cores)
-      "PCPU1": [2055, 0.1648863, 4]    // (Frequency MHz, Cluster Load, Cores)
+      "ECPU": [4, 1181, 0.33062646],     // (Units, Frequency MHz, Cluster Load 0..1)
+      "PCPU": [5, 1974, 0.06072718],     // (Units, Frequency MHz, Cluster Load 0..1)
+      "PCPU1": [5, 2055, 0.1648863]      // (Units, Frequency MHz, Cluster Load 0..1)
     },
     "gpu": {
-      "GPUPH": [461, 0.21497859, 10]   // (Frequency MHz, Cluster Load, GPU Units)
+      "GPUPH": [10, 461, 0.21497859]     // (Units, Frequency MHz, Cluster Load 0..1)
     }
   },
   "power": {
+    "package": 0.22231553,                // SoC/package watts
     "cpu": 0.20486385,                    // Watts
     "gpu": 0.017451683,                   // Watts
     "ram": 0.11635789,                    // Watts
-    "sys": 5.876533,                      // Watts
     "gpu_ram": 0.0009615385,              // Watts
     "ane": 0.0,                           // Watts
-    "all": 0.22231553                     // Watts
+    "board": 5.876533,                    // System total watts
+    "battery": 0.0,                       // Battery rail watts
+    "dc_in": 0.0                          // External DC input watts
   },
   "temp": {
-    "cpu_temp_avg": 43.73614,         // Celsius
-    "gpu_temp_avg": 36.95167          // Celsius
+    "cpu_avg": 43.73614,                  // Celsius
+    "gpu_avg": 36.95167                   // Celsius
   },
   "memory": {
-    "ram_total": 25769803776,         // Bytes
-    "ram_usage": 20985479168,         // Bytes
-    "swap_total": 4294967296,         // Bytes
-    "swap_usage": 2602434560          // Bytes
+    "ram_total": 25769803776,             // Bytes
+    "ram_usage": 20985479168,             // Bytes
+    "swap_total": 4294967296,             // Bytes
+    "swap_usage": 2602434560              // Bytes
+  },
+  "soc": {
+    "...": "present only when --soc-info is passed"
   }
 }
 ```
