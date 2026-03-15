@@ -1,4 +1,6 @@
-use super::{CpuDomainInfo, finalize_cpu_freq_domains, init_cpu_freq_domains, parse_cpu_domain_units};
+use super::{
+  CpuDomainInfo, finalize_cpu_freq_domains, init_cpu_freq_domains, parse_cpu_domain_units,
+};
 use crate::platform::smc::KeyInfo;
 
 fn cached_key_info(cache: &[(u32, KeyInfo)], key: u32) -> Option<KeyInfo> {
@@ -27,21 +29,9 @@ fn init_cpu_freq_domains_uses_binding_slots() {
 #[test]
 fn finalize_cpu_freq_domains_preserves_public_names_after_filtering() {
   let mut domains = vec![
-    CpuDomainInfo {
-      units: 4,
-      freqs: vec![1000, 2000],
-      name: "CPUCL0".to_string(),
-    },
-    CpuDomainInfo {
-      units: 8,
-      freqs: vec![2000, 3000],
-      name: "CPUCL1".to_string(),
-    },
-    CpuDomainInfo {
-      units: 0,
-      freqs: vec![],
-      name: "CPUCL2".to_string(),
-    },
+    CpuDomainInfo { units: 4, freqs: vec![1000, 2000], name: "CPUCL0".to_string() },
+    CpuDomainInfo { units: 8, freqs: vec![2000, 3000], name: "CPUCL1".to_string() },
+    CpuDomainInfo { units: 0, freqs: vec![], name: "CPUCL2".to_string() },
   ];
 
   finalize_cpu_freq_domains(&mut domains);
@@ -56,16 +46,8 @@ fn finalize_cpu_freq_domains_preserves_public_names_after_filtering() {
 #[test]
 fn finalize_cpu_freq_domains_moves_single_freq_table_without_renaming_domain() {
   let mut domains = vec![
-    CpuDomainInfo {
-      units: 0,
-      freqs: vec![1000, 2000],
-      name: "CPUCL0".to_string(),
-    },
-    CpuDomainInfo {
-      units: 10,
-      freqs: vec![],
-      name: "CPUCL1".to_string(),
-    },
+    CpuDomainInfo { units: 0, freqs: vec![1000, 2000], name: "CPUCL0".to_string() },
+    CpuDomainInfo { units: 10, freqs: vec![], name: "CPUCL1".to_string() },
   ];
 
   finalize_cpu_freq_domains(&mut domains);
@@ -79,16 +61,8 @@ fn finalize_cpu_freq_domains_moves_single_freq_table_without_renaming_domain() {
 #[test]
 fn finalize_cpu_freq_domains_drops_freq_only_domains() {
   let mut domains = vec![
-    CpuDomainInfo {
-      units: 4,
-      freqs: vec![1000, 2000],
-      name: "ECPU".to_string(),
-    },
-    CpuDomainInfo {
-      units: 0,
-      freqs: vec![3000, 4000],
-      name: "MCPU".to_string(),
-    },
+    CpuDomainInfo { units: 4, freqs: vec![1000, 2000], name: "ECPU".to_string() },
+    CpuDomainInfo { units: 0, freqs: vec![3000, 4000], name: "MCPU".to_string() },
   ];
 
   finalize_cpu_freq_domains(&mut domains);

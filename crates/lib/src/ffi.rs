@@ -167,8 +167,10 @@ fn ffi_cpu_usage_list(items: &[CpuUsageEntry]) -> macmon_cpu_usage_list_t {
   let entries = items
     .iter()
     .map(|entry| {
-      let core_freqs = entry.cores.iter().map(|core| core.freq_mhz).collect::<Vec<_>>().into_boxed_slice();
-      let core_usages = entry.cores.iter().map(|core| core.usage).collect::<Vec<_>>().into_boxed_slice();
+      let core_freqs =
+        entry.cores.iter().map(|core| core.freq_mhz).collect::<Vec<_>>().into_boxed_slice();
+      let core_usages =
+        entry.cores.iter().map(|core| core.usage).collect::<Vec<_>>().into_boxed_slice();
       macmon_cpu_usage_t {
         name: ffi_string(&entry.name),
         units: entry.cores.len() as u32,
@@ -226,10 +228,7 @@ fn ffi_metrics(metrics: Metrics) -> macmon_metrics_t {
       swap_total: metrics.memory.swap_total,
       swap_usage: metrics.memory.swap_usage,
     },
-    temp: macmon_temp_metrics_t {
-      cpu_avg: metrics.temp.cpu_avg,
-      gpu_avg: metrics.temp.gpu_avg,
-    },
+    temp: macmon_temp_metrics_t { cpu_avg: metrics.temp.cpu_avg, gpu_avg: metrics.temp.gpu_avg },
   }
 }
 
@@ -350,9 +349,10 @@ pub extern "C" fn macmon_sampler_new(out_sampler: *mut *mut macmon_sampler_t) ->
       *out_sampler = ptr::null_mut();
     }
 
-    let sampler = Box::new(Sampler::new().map_err(|err| {
-      ffi_error(macmon_status_t::MACMON_STATUS_INIT_FAILED, err.to_string())
-    })?);
+    let sampler = Box::new(
+      Sampler::new()
+        .map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_INIT_FAILED, err.to_string()))?,
+    );
 
     unsafe {
       *out_sampler = Box::into_raw(sampler) as *mut macmon_sampler_t;
@@ -393,7 +393,8 @@ pub extern "C" fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmo
     }
 
     let info = ffi_soc_info(
-      get_soc_info().map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_INIT_FAILED, err.to_string()))?,
+      get_soc_info()
+        .map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_INIT_FAILED, err.to_string()))?,
     );
 
     unsafe {
@@ -453,8 +454,9 @@ pub extern "C" fn macmon_sampler_get_metrics(
     }
 
     let sampler = unsafe { sampler_mut(sampler)? };
-    let metrics =
-      sampler.get_metrics().map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_SAMPLE_FAILED, err.to_string()))?;
+    let metrics = sampler
+      .get_metrics()
+      .map_err(|err| ffi_error(macmon_status_t::MACMON_STATUS_SAMPLE_FAILED, err.to_string()))?;
 
     unsafe {
       ptr::write(out_metrics, ffi_metrics(metrics));
@@ -485,9 +487,8 @@ pub extern "C" fn macmon_metrics_free(metrics: *mut macmon_metrics_t) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn macmon_last_error_message() -> *const c_char {
-  LAST_ERROR.with(|slot| {
-    slot.borrow().as_ref().map_or(ptr::null(), |msg| msg.as_ptr() as *const c_char)
-  })
+  LAST_ERROR
+    .with(|slot| slot.borrow().as_ref().map_or(ptr::null(), |msg| msg.as_ptr() as *const c_char))
 }
 
 #[cfg(test)]

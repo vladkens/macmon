@@ -19,8 +19,8 @@ use core_foundation::{
   string::CFStringRef,
 };
 
-use crate::diag::startup_log;
 use super::{WithError, cfdict_get_val, cfstr, from_cfstr};
+use crate::diag::startup_log;
 
 type CVoidRef = *const c_void;
 
@@ -44,9 +44,16 @@ unsafe extern "C" {
     d: u64,
     e: CFTypeRef,
   ) -> IOReportSubscriptionRef;
-  fn IOReportCreateSamples(a: IOReportSubscriptionRef, b: CFMutableDictionaryRef, c: CFTypeRef)
-    -> CFDictionaryRef;
-  fn IOReportCreateSamplesDelta(a: CFDictionaryRef, b: CFDictionaryRef, c: CFTypeRef) -> CFDictionaryRef;
+  fn IOReportCreateSamples(
+    a: IOReportSubscriptionRef,
+    b: CFMutableDictionaryRef,
+    c: CFTypeRef,
+  ) -> CFDictionaryRef;
+  fn IOReportCreateSamplesDelta(
+    a: CFDictionaryRef,
+    b: CFDictionaryRef,
+    c: CFTypeRef,
+  ) -> CFDictionaryRef;
   fn IOReportChannelGetGroup(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportChannelGetSubGroup(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportChannelGetChannelName(a: CFDictionaryRef) -> CFStringRef;
@@ -175,10 +182,9 @@ fn cfio_copy_filtered_channels(filter: Option<ChannelFilter>) -> WithError<CFMut
   };
   let channel_array = channel_array as CFArrayRef;
 
-  startup_log(format!(
-    "lib io_report: collected {} channels",
-    unsafe { CFArrayGetCount(channel_array) }
-  ));
+  startup_log(format!("lib io_report: collected {} channels", unsafe {
+    CFArrayGetCount(channel_array)
+  }));
 
   let size = unsafe { CFDictionaryGetCount(all_channels) };
   let selected_channels =
@@ -226,10 +232,13 @@ fn cfio_copy_filtered_channels(filter: Option<ChannelFilter>) -> WithError<CFMut
   Ok(selected_channels)
 }
 
-fn cfio_create_subscription(channels: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
+fn cfio_create_subscription(
+  channels: CFMutableDictionaryRef,
+) -> WithError<IOReportSubscriptionRef> {
   let mut subscription_output: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
-  let subscription =
-    unsafe { IOReportCreateSubscription(null(), channels, subscription_output.as_mut_ptr(), 0, null()) };
+  let subscription = unsafe {
+    IOReportCreateSubscription(null(), channels, subscription_output.as_mut_ptr(), 0, null())
+  };
   if subscription.is_null() {
     return Err("Failed to create subscription".into());
   }
@@ -258,12 +267,7 @@ impl IOReport {
       return Err("Failed to create initial sample".into());
     }
 
-    Ok(Self {
-      subscription,
-      channels,
-      previous_sample,
-      last_sampled_at: Instant::now(),
-    })
+    Ok(Self { subscription, channels, previous_sample, last_sampled_at: Instant::now() })
   }
 
   pub fn next_sample(&mut self) -> IOReportSample {

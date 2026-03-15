@@ -131,11 +131,13 @@ impl SMC {
 
     let key_info = self.read_key_info(key)?;
     if key_info.data_size != 4 || key_info.data_type != FLOAT_TYPE {
-      return Err(format!(
-        "SMC key '{}' is not a 4-byte float (size={}, type={})",
-        key, key_info.data_size, key_info.data_type
-      )
-      .into());
+      return Err(
+        format!(
+          "SMC key '{}' is not a 4-byte float (size={}, type={})",
+          key, key_info.data_size, key_info.data_type
+        )
+        .into(),
+      );
     }
 
     let key = Self::parse_key(key)?;

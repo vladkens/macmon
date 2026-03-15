@@ -247,7 +247,7 @@ impl Sampler {
       if group == "CPU Stats" {
         return subgroup == CPU_FREQ_CORE_SUBG;
       }
-      return group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
+      return group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG;
     };
     let io_report = match IOReport::new(Some(channels)) {
       Ok(io_report) => io_report,
@@ -367,7 +367,10 @@ impl Sampler {
       }
 
       if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
-        gpu_clusters.entry(x.channel.clone()).or_default().push(calc_freq(x.channel_item, &gpu_freqs));
+        gpu_clusters
+          .entry(x.channel.clone())
+          .or_default()
+          .push(calc_freq(x.channel_item, &gpu_freqs));
       }
 
       if x.group == "Energy Model" {

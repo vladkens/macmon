@@ -20,18 +20,9 @@ struct CpuDomainBinding {
 // channel prefixes belong to the same CPU domain and which pmgr key provides that
 // domain's frequency table.
 const CPU_DOMAIN_BINDINGS: [CpuDomainBinding; 3] = [
-  CpuDomainBinding {
-    channel_prefix: "ECPU",
-    pmgr_key: "voltage-states1-sram",
-  },
-  CpuDomainBinding {
-    channel_prefix: "PCPU",
-    pmgr_key: "voltage-states5-sram",
-  },
-  CpuDomainBinding {
-    channel_prefix: "MCPU",
-    pmgr_key: "voltage-states1-sram",
-  },
+  CpuDomainBinding { channel_prefix: "ECPU", pmgr_key: "voltage-states1-sram" },
+  CpuDomainBinding { channel_prefix: "PCPU", pmgr_key: "voltage-states5-sram" },
+  CpuDomainBinding { channel_prefix: "MCPU", pmgr_key: "voltage-states1-sram" },
 ];
 
 static SOC_INFO_CACHE: OnceLock<SocInfo> = OnceLock::new();

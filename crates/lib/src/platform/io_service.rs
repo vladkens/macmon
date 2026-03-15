@@ -10,7 +10,11 @@ use super::WithError;
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
   fn IOServiceMatching(name: *const i8) -> CFMutableDictionaryRef;
-  fn IOServiceGetMatchingServices(mainPort: u32, matching: CFDictionaryRef, existing: *mut u32) -> i32;
+  fn IOServiceGetMatchingServices(
+    mainPort: u32,
+    matching: CFDictionaryRef,
+    existing: *mut u32,
+  ) -> i32;
   fn IOIteratorNext(iterator: u32) -> u32;
   fn IORegistryEntryGetName(entry: u32, name: *mut i8) -> i32;
   fn IORegistryEntryCreateCFProperties(

@@ -152,10 +152,6 @@ fn distribute_units_preserves_input_order() {
 
   assert_eq!(
     units,
-    vec![
-      ("ECPU".to_string(), 4),
-      ("PCPU".to_string(), 3),
-      ("PCPU1".to_string(), 3),
-    ]
+    vec![("ECPU".to_string(), 4), ("PCPU".to_string(), 3), ("PCPU1".to_string(), 3),]
   );
 }

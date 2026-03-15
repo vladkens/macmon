@@ -1,5 +1,7 @@
 use super::*;
-use crate::metrics::{CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, MemMetrics, PowerMetrics, TempMetrics, UsageMetrics};
+use crate::metrics::{
+  CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, MemMetrics, PowerMetrics, TempMetrics, UsageMetrics,
+};
 use crate::sources::CpuDomainInfo;
 use std::ffi::CStr;
 use std::mem;
@@ -21,12 +23,7 @@ fn test_metrics() -> Metrics {
             CoreUsageEntry { freq_mhz: 1300, usage: 0.3 },
           ],
         },
-        CpuUsageEntry {
-          name: "PCPU".to_string(),
-          freq_mhz: 3200,
-          usage: 0.75,
-          cores: Vec::new(),
-        },
+        CpuUsageEntry { name: "PCPU".to_string(), freq_mhz: 3200, usage: 0.75, cores: Vec::new() },
       ],
       gpu: vec![GpuUsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
     },
@@ -53,16 +50,8 @@ fn test_soc_info() -> SocInfo {
     memory_gb: 24,
     cpu_cores_total: 10,
     cpu_domains: vec![
-      CpuDomainInfo {
-        name: "ECPU".to_string(),
-        units: 4,
-        freqs: vec![1000, 2000],
-      },
-      CpuDomainInfo {
-        name: "PCPU".to_string(),
-        units: 6,
-        freqs: vec![3000, 4000],
-      },
+      CpuDomainInfo { name: "ECPU".to_string(), units: 4, freqs: vec![1000, 2000] },
+      CpuDomainInfo { name: "PCPU".to_string(), units: 6, freqs: vec![3000, 4000] },
     ],
     gpu_cores: 10,
     gpu_freqs: vec![500, 1000],
@@ -84,8 +73,10 @@ fn metrics_conversion_preserves_names_and_values() {
   assert_eq!(read_c_str(cpu[1].name), "PCPU");
   assert_eq!(cpu[1].units, 0);
 
-  let cpu_core_freqs = unsafe { std::slice::from_raw_parts(cpu[0].cores_freq_mhz, cpu[0].units as usize) };
-  let cpu_core_usages = unsafe { std::slice::from_raw_parts(cpu[0].cores_usage, cpu[0].units as usize) };
+  let cpu_core_freqs =
+    unsafe { std::slice::from_raw_parts(cpu[0].cores_freq_mhz, cpu[0].units as usize) };
+  let cpu_core_usages =
+    unsafe { std::slice::from_raw_parts(cpu[0].cores_usage, cpu[0].units as usize) };
   assert_eq!(cpu_core_freqs[0], 1100);
   assert_eq!(cpu_core_usages[0], 0.2);
   assert_eq!(cpu_core_freqs[1], 1300);
@@ -137,14 +128,8 @@ fn free_functions_accept_zero_initialized_structs() {
 
 #[test]
 fn null_out_arguments_return_invalid_argument() {
-  assert_eq!(
-    macmon_sampler_new(ptr::null_mut()),
-    macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
-  );
-  assert_eq!(
-    macmon_get_soc_info(ptr::null_mut()),
-    macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
-  );
+  assert_eq!(macmon_sampler_new(ptr::null_mut()), macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT);
+  assert_eq!(macmon_get_soc_info(ptr::null_mut()), macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT);
   assert_eq!(
     macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut()),
     macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
@@ -205,10 +190,7 @@ fn smoke_sampler_roundtrip() {
   assert_eq!(macmon_get_soc_info(&mut info), macmon_status_t::MACMON_STATUS_OK);
 
   let mut metrics = macmon_metrics_t::default();
-  assert_eq!(
-    macmon_sampler_get_metrics(sampler, &mut metrics),
-    macmon_status_t::MACMON_STATUS_OK
-  );
+  assert_eq!(macmon_sampler_get_metrics(sampler, &mut metrics), macmon_status_t::MACMON_STATUS_OK);
 
   macmon_metrics_free(&mut metrics);
   macmon_soc_info_free(&mut info);
