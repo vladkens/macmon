@@ -91,8 +91,8 @@ pub struct macmon_temp_metrics_t {
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct macmon_metrics_t {
-  pub cpu: macmon_cpu_usage_list_t,
-  pub gpu: macmon_gpu_usage_list_t,
+  pub cpu_usage: macmon_cpu_usage_list_t,
+  pub gpu_usage: macmon_gpu_usage_list_t,
   pub power: macmon_power_metrics_t,
   pub memory: macmon_mem_metrics_t,
   pub temp: macmon_temp_metrics_t,
@@ -209,8 +209,8 @@ fn ffi_gpu_usage_list(items: &[GpuUsageEntry]) -> macmon_gpu_usage_list_t {
 
 fn ffi_metrics(metrics: Metrics) -> macmon_metrics_t {
   macmon_metrics_t {
-    cpu: ffi_cpu_usage_list(&metrics.usage.cpu),
-    gpu: ffi_gpu_usage_list(&metrics.usage.gpu),
+    cpu_usage: ffi_cpu_usage_list(&metrics.cpu_usage),
+    gpu_usage: ffi_gpu_usage_list(&metrics.gpu_usage),
     power: macmon_power_metrics_t {
       package: metrics.power.package,
       cpu: metrics.power.cpu,
@@ -474,8 +474,8 @@ pub extern "C" fn macmon_metrics_free(metrics: *mut macmon_metrics_t) {
 
     let metrics = unsafe { &mut *metrics };
     unsafe {
-      free_cpu_usage_list(&mut metrics.cpu);
-      free_gpu_usage_list(&mut metrics.gpu);
+      free_cpu_usage_list(&mut metrics.cpu_usage);
+      free_gpu_usage_list(&mut metrics.gpu_usage);
     }
     *metrics = macmon_metrics_t::default();
   }));

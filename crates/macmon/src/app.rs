@@ -257,22 +257,21 @@ impl App {
     self.package_power.push(data.power.package as f64);
     self.board_power.push(data.power.board as f64);
     self.cpu_layout = data
-      .usage
-      .cpu
+      .cpu_usage
       .iter()
       .map(|entry| entry.cores.len().to_string())
       .collect::<Vec<_>>()
       .join("+");
-    self.cpu_freqs.retain(|name, _| data.usage.cpu.iter().any(|entry| entry.name == *name));
-    self.gpu_freqs.retain(|name, _| data.usage.gpu.iter().any(|entry| entry.name == *name));
-    for entry in &data.usage.cpu {
+    self.cpu_freqs.retain(|name, _| data.cpu_usage.iter().any(|entry| entry.name == *name));
+    self.gpu_freqs.retain(|name, _| data.gpu_usage.iter().any(|entry| entry.name == *name));
+    for entry in &data.cpu_usage {
       self.cpu_freqs.entry(entry.name.clone()).or_default().push(
         entry.freq_mhz as u64,
         entry.usage as f64,
         entry.cores.len() as u32,
       );
     }
-    for entry in &data.usage.gpu {
+    for entry in &data.gpu_usage {
       self.gpu_freqs.entry(entry.name.clone()).or_default().push(
         entry.freq_mhz as u64,
         entry.usage as f64,

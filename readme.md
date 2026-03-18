@@ -96,14 +96,14 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
-In `pipe` mode, CPU domains are emitted directly under `usage`. Each CPU domain is an object with `units`, `freq_mhz`, `usage`, and `cores`, where `cores` is an array of `[freq_mhz, usage]` pairs for the cores that belong to that domain. GPU usage remains under `usage.gpu`, but its entries now use the same object style with `units`, `freq_mhz`, and `usage`.
+In `pipe` mode, CPU and GPU usage are emitted under `cpu_usage` and `gpu_usage`. CPU domains are keyed by domain name and include `units`, `freq_mhz`, `usage`, and `cores`, where `cores` is an array of `[freq_mhz, usage]` pairs for the cores that belong to that domain. GPU entries are keyed by cluster name and include `units`, `freq_mhz`, and `usage`.
 
 ### Output
 
 ```jsonc
 {
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
-  "usage": {
+  "cpu_usage": {
     "ECPU": {
       "units": 4,
       "freq_mhz": 1181,
@@ -116,14 +116,14 @@ In `pipe` mode, CPU domains are emitted directly under `usage`. Each CPU domain 
       "usage": 0.11280674,
       "cores": [[1987, 0.08], [2041, 0.14], [2013, 0.10], [2015, 0.12]]
     },
-    "gpu": {
-      "GPU": {
-        "units": 10,
-        "freq_mhz": 461,
-        "usage": 0.21497859
-      }
-    }
   },
+  "gpu_usage": {
+    "GPU": {
+      "units": 10,
+      "freq_mhz": 461,
+      "usage": 0.21497859
+    }
+  }
   "power": {
     "package": 0.22231553,                // SoC/package watts
     "cpu": 0.20486385,                    // Watts

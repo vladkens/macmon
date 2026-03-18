@@ -1,5 +1,5 @@
 use super::{
-  CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, Metrics, UsageMetrics, calc_core_freq_avg,
+  CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, Metrics, calc_core_freq_avg,
   calc_freq_from_residencies, distribute_units,
 };
 
@@ -13,11 +13,11 @@ fn gpu_usage_entry<'a>(items: &'a [GpuUsageEntry], name: &str) -> Option<&'a Gpu
 
 #[test]
 fn calc_freq_with_matching_states() {
-  let items = vec![("IDLE".to_string(), 50), ("F1".to_string(), 25), ("F2".to_string(), 25)];
+  let items = vec![("IDLE".to_string(), 50), ("F1".to_string(), 25), ("F2".to_string(), 15)];
   let (freq, usage) = calc_freq_from_residencies(&items, &[1000, 2000]);
 
-  assert_eq!(freq, 1500);
-  assert!((usage - 0.375f32).abs() < 1e-6f32);
+  assert_eq!(freq, 1375);
+  assert!((usage - 0.44444).abs() < 1e-4f32);
 }
 
 #[test]
@@ -47,23 +47,21 @@ fn calc_freq_with_only_idle_returns_zero_usage() {
 #[test]
 fn metrics_preserve_domain_and_core_cpu_usage() {
   let metrics = Metrics {
-    usage: UsageMetrics {
-      cpu: vec![CpuUsageEntry {
-        name: "PCPU".to_string(),
-        freq_mhz: 3200,
-        usage: 0.42,
-        cores: vec![
-          CoreUsageEntry { freq_mhz: 3100, usage: 0.4 },
-          CoreUsageEntry { freq_mhz: 3300, usage: 0.44 },
-        ],
-      }],
-      gpu: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.15, units: 10 }],
-    },
+    cpu_usage: vec![CpuUsageEntry {
+      name: "PCPU".to_string(),
+      freq_mhz: 3200,
+      usage: 0.42,
+      cores: vec![
+        CoreUsageEntry { freq_mhz: 3100, usage: 0.4 },
+        CoreUsageEntry { freq_mhz: 3300, usage: 0.44 },
+      ],
+    }],
+    gpu_usage: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.15, units: 10 }],
     ..Default::default()
   };
 
   assert_eq!(
-    cpu_usage_entry(&metrics.usage.cpu, "PCPU"),
+    cpu_usage_entry(&metrics.cpu_usage, "PCPU"),
     Some(&CpuUsageEntry {
       name: "PCPU".to_string(),
       freq_mhz: 3200,
@@ -75,12 +73,12 @@ fn metrics_preserve_domain_and_core_cpu_usage() {
     })
   );
   assert_eq!(
-    gpu_usage_entry(&metrics.usage.gpu, "GPU"),
+    gpu_usage_entry(&metrics.gpu_usage, "GPU"),
     Some(&GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.15, units: 10 })
   );
-  assert!(cpu_usage_entry(&metrics.usage.cpu, "ECPU").is_none());
-  assert_eq!(metrics.usage.cpu[0].cores.len(), 2);
-  assert_eq!(metrics.usage.cpu[0].cores[0].freq_mhz, 3100);
+  assert!(cpu_usage_entry(&metrics.cpu_usage, "ECPU").is_none());
+  assert_eq!(metrics.cpu_usage[0].cores.len(), 2);
+  assert_eq!(metrics.cpu_usage[0].cores[0].freq_mhz, 3100);
 }
 
 #[test]
@@ -99,18 +97,16 @@ fn core_usage_average_returns_domain_average() {
 #[test]
 fn metrics_serialize_with_cli_shape() {
   let metrics = Metrics {
-    usage: UsageMetrics {
-      cpu: vec![CpuUsageEntry {
-        name: "ECPU".to_string(),
-        freq_mhz: 1181,
-        usage: 0.33,
-        cores: vec![
-          CoreUsageEntry { freq_mhz: 1100, usage: 0.2 },
-          CoreUsageEntry { freq_mhz: 1262, usage: 0.46 },
-        ],
-      }],
-      gpu: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 461, usage: 0.21, units: 10 }],
-    },
+    cpu_usage: vec![CpuUsageEntry {
+      name: "ECPU".to_string(),
+      freq_mhz: 1181,
+      usage: 0.33,
+      cores: vec![
+        CoreUsageEntry { freq_mhz: 1100, usage: 0.2 },
+        CoreUsageEntry { freq_mhz: 1262, usage: 0.46 },
+      ],
+    }],
+    gpu_usage: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 461, usage: 0.21, units: 10 }],
     power: super::PowerMetrics {
       package: 0.321,
       cpu: 0.2,
@@ -128,13 +124,13 @@ fn metrics_serialize_with_cli_shape() {
 
   let value = serde_json::to_value(&metrics).unwrap();
 
-  assert_eq!(value["usage"]["ECPU"]["units"], serde_json::json!(2));
-  assert_eq!(value["usage"]["ECPU"]["freq_mhz"], serde_json::json!(1181));
-  assert!((value["usage"]["ECPU"]["usage"].as_f64().unwrap() - 0.33).abs() < 1e-6);
-  assert_eq!(value["usage"]["ECPU"]["cores"][0][0], serde_json::json!(1100));
-  assert!((value["usage"]["ECPU"]["cores"][0][1].as_f64().unwrap() - 0.2).abs() < 1e-6);
-  assert_eq!(value["usage"]["gpu"]["GPU"]["freq_mhz"], serde_json::json!(461));
-  assert_eq!(value["usage"]["gpu"]["GPU"]["units"], serde_json::json!(10));
+  assert_eq!(value["cpu_usage"]["ECPU"]["units"], serde_json::json!(2));
+  assert_eq!(value["cpu_usage"]["ECPU"]["freq_mhz"], serde_json::json!(1181));
+  assert!((value["cpu_usage"]["ECPU"]["usage"].as_f64().unwrap() - 0.33).abs() < 1e-6);
+  assert_eq!(value["cpu_usage"]["ECPU"]["cores"][0][0], serde_json::json!(1100));
+  assert!((value["cpu_usage"]["ECPU"]["cores"][0][1].as_f64().unwrap() - 0.2).abs() < 1e-6);
+  assert_eq!(value["gpu_usage"]["GPU"]["freq_mhz"], serde_json::json!(461));
+  assert_eq!(value["gpu_usage"]["GPU"]["units"], serde_json::json!(10));
   assert!((value["power"]["package"].as_f64().unwrap() - 0.321).abs() < 1e-6);
   assert_eq!(value["memory"]["swap_usage"], serde_json::json!(4));
   assert!((value["temp"]["cpu_avg"].as_f64().unwrap() - 42.0).abs() < 1e-6);

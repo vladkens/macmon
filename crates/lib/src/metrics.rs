@@ -52,12 +52,6 @@ pub struct GpuUsageEntry {
   pub units: u32,
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct UsageMetrics {
-  pub cpu: Vec<CpuUsageEntry>,
-  pub gpu: Vec<GpuUsageEntry>,
-}
-
 #[derive(Debug, Default, Serialize)]
 pub struct PowerMetrics {
   pub package: f32, // SoC/package power reported by the sampler.
@@ -71,9 +65,10 @@ pub struct PowerMetrics {
   pub dc_in: f32,   // External DC input power (`PDTR`).
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default)]
 pub struct Metrics {
-  pub usage: UsageMetrics,
+  pub cpu_usage: Vec<CpuUsageEntry>,
+  pub gpu_usage: Vec<GpuUsageEntry>,
   pub power: PowerMetrics,
   pub memory: MemMetrics,
   pub temp: TempMetrics,
@@ -109,15 +104,15 @@ impl Serialize for CorePairs<'_> {
   }
 }
 
-impl Serialize for UsageMetrics {
+struct CpuUsageMap<'a>(&'a [CpuUsageEntry]);
+
+impl Serialize for CpuUsageMap<'_> {
   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
   where
     S: Serializer,
   {
-    let extra_gpu = usize::from(!self.gpu.is_empty());
-    let mut map = serializer.serialize_map(Some(self.cpu.len() + extra_gpu))?;
-
-    for entry in &self.cpu {
+    let mut map = serializer.serialize_map(Some(self.0.len()))?;
+    for entry in self.0 {
       map.serialize_entry(
         &entry.name,
         &CpuUsageValue {
@@ -128,11 +123,6 @@ impl Serialize for UsageMetrics {
         },
       )?;
     }
-
-    if !self.gpu.is_empty() {
-      map.serialize_entry("gpu", &GpuUsageMap(&self.gpu))?;
-    }
-
     map.end()
   }
 }
@@ -151,6 +141,21 @@ impl Serialize for GpuUsageMap<'_> {
         &GpuUsageValue { units: entry.units, freq_mhz: entry.freq_mhz, usage: entry.usage },
       )?;
     }
+    map.end()
+  }
+}
+
+impl Serialize for Metrics {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    let mut map = serializer.serialize_map(Some(5))?;
+    map.serialize_entry("cpu_usage", &CpuUsageMap(&self.cpu_usage))?;
+    map.serialize_entry("gpu_usage", &GpuUsageMap(&self.gpu_usage))?;
+    map.serialize_entry("power", &self.power)?;
+    map.serialize_entry("memory", &self.memory)?;
+    map.serialize_entry("temp", &self.temp)?;
     map.end()
   }
 }
@@ -207,8 +212,7 @@ fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f
   }
 
   let usage_ratio = zero_div(usage, total);
-  let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
-  (avg_freq.max(min_freq) as u32, from_max as f32)
+  (avg_freq.max(min_freq) as u32, usage_ratio as f32)
 }
 
 fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
@@ -493,8 +497,8 @@ impl Sampler {
       });
     }
 
-    rs.usage.cpu = cpu_usage;
-    rs.usage.gpu = gpu_usage;
+    rs.cpu_usage = cpu_usage;
+    rs.gpu_usage = gpu_usage;
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp_smc()?;

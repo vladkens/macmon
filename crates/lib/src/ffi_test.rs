@@ -1,6 +1,6 @@
 use super::*;
 use crate::metrics::{
-  CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, MemMetrics, PowerMetrics, TempMetrics, UsageMetrics,
+  CoreUsageEntry, CpuUsageEntry, GpuUsageEntry, MemMetrics, PowerMetrics, TempMetrics,
 };
 use crate::sources::CpuDomainInfo;
 use std::ffi::CStr;
@@ -12,21 +12,19 @@ fn read_c_str(ptr: *const c_char) -> String {
 
 fn test_metrics() -> Metrics {
   Metrics {
-    usage: UsageMetrics {
-      cpu: vec![
-        CpuUsageEntry {
-          name: "ECPU".to_string(),
-          freq_mhz: 1200,
-          usage: 0.25,
-          cores: vec![
-            CoreUsageEntry { freq_mhz: 1100, usage: 0.2 },
-            CoreUsageEntry { freq_mhz: 1300, usage: 0.3 },
-          ],
-        },
-        CpuUsageEntry { name: "PCPU".to_string(), freq_mhz: 3200, usage: 0.75, cores: Vec::new() },
-      ],
-      gpu: vec![GpuUsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
-    },
+    cpu_usage: vec![
+      CpuUsageEntry {
+        name: "ECPU".to_string(),
+        freq_mhz: 1200,
+        usage: 0.25,
+        cores: vec![
+          CoreUsageEntry { freq_mhz: 1100, usage: 0.2 },
+          CoreUsageEntry { freq_mhz: 1300, usage: 0.3 },
+        ],
+      },
+      CpuUsageEntry { name: "PCPU".to_string(), freq_mhz: 3200, usage: 0.75, cores: Vec::new() },
+    ],
+    gpu_usage: vec![GpuUsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
     power: PowerMetrics {
       package: 17.0,
       cpu: 1.0,
@@ -62,10 +60,10 @@ fn test_soc_info() -> SocInfo {
 fn metrics_conversion_preserves_names_and_values() {
   let mut ffi = ffi_metrics(test_metrics());
 
-  assert_eq!(ffi.cpu.len, 2);
-  assert_eq!(ffi.gpu.len, 1);
+  assert_eq!(ffi.cpu_usage.len, 2);
+  assert_eq!(ffi.gpu_usage.len, 1);
 
-  let cpu = unsafe { std::slice::from_raw_parts(ffi.cpu.ptr, ffi.cpu.len) };
+  let cpu = unsafe { std::slice::from_raw_parts(ffi.cpu_usage.ptr, ffi.cpu_usage.len) };
   assert_eq!(read_c_str(cpu[0].name), "ECPU");
   assert_eq!(cpu[0].units, 2);
   assert_eq!(cpu[0].freq_mhz, 1200);
@@ -81,7 +79,7 @@ fn metrics_conversion_preserves_names_and_values() {
   assert_eq!(cpu_core_usages[0], 0.2);
   assert_eq!(cpu_core_freqs[1], 1300);
 
-  let gpu = unsafe { std::slice::from_raw_parts(ffi.gpu.ptr, ffi.gpu.len) };
+  let gpu = unsafe { std::slice::from_raw_parts(ffi.gpu_usage.ptr, ffi.gpu_usage.len) };
   assert_eq!(read_c_str(gpu[0].name), "GFX0");
   assert_eq!(gpu[0].units, 10);
   assert_eq!(gpu[0].freq_mhz, 900);
@@ -93,8 +91,8 @@ fn metrics_conversion_preserves_names_and_values() {
   assert_eq!(ffi.temp.gpu_avg, 51.0);
 
   macmon_metrics_free(&mut ffi);
-  assert!(ffi.cpu.ptr.is_null());
-  assert!(ffi.gpu.ptr.is_null());
+  assert!(ffi.cpu_usage.ptr.is_null());
+  assert!(ffi.gpu_usage.ptr.is_null());
 }
 
 #[test]
@@ -164,7 +162,7 @@ fn free_functions_zero_out_structs_after_owned_allocations() {
   macmon_metrics_free(&mut metrics);
   macmon_soc_info_free(&mut info);
 
-  assert_eq!(metrics.cpu.len, 0);
+  assert_eq!(metrics.cpu_usage.len, 0);
   assert_eq!(info.cpu_domains_len, 0);
   assert_eq!(info.gpu_freqs_len, 0);
 }
@@ -174,8 +172,8 @@ fn default_ffi_structs_match_zeroed_layout() {
   let zeroed_metrics: macmon_metrics_t = unsafe { mem::zeroed() };
   let zeroed_info: macmon_soc_info_t = unsafe { mem::zeroed() };
 
-  assert_eq!(zeroed_metrics.cpu.len, 0);
-  assert!(zeroed_metrics.cpu.ptr.is_null());
+  assert_eq!(zeroed_metrics.cpu_usage.len, 0);
+  assert!(zeroed_metrics.cpu_usage.ptr.is_null());
   assert_eq!(zeroed_info.cpu_domains_len, 0);
   assert!(zeroed_info.cpu_domains.is_null());
 }

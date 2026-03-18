@@ -81,8 +81,8 @@ typedef struct macmon_temp_metrics_t {
 } macmon_temp_metrics_t;
 
 typedef struct macmon_metrics_t {
-  macmon_cpu_usage_list_t cpu;
-  macmon_gpu_usage_list_t gpu;
+  macmon_cpu_usage_list_t cpu_usage;
+  macmon_gpu_usage_list_t gpu_usage;
   macmon_power_metrics_t power;
   macmon_mem_metrics_t memory;
   macmon_temp_metrics_t temp;
