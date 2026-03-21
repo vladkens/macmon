@@ -443,7 +443,8 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .parse::<u64>()
     .unwrap_or(0);
 
-  // SPHardwareDataType.0.number_processors -> "proc x:y:z"
+  // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc w:x:y:z"
+  // I believe this varies by version of binaries on system.
   let cpu_cores = out["SPHardwareDataType"][0]["number_processors"]
     .as_str()
     .and_then(|cores| cores.strip_prefix("proc "))
@@ -451,10 +452,10 @@ pub fn get_soc_info() -> WithError<SocInfo> {
     .split(':')
     .map(|x| x.parse::<u64>().unwrap_or(0))
     .collect::<Vec<_>>();
-  let (ecpu_cores, pcpu_cores) = if cpu_cores.len() == 3 {
-    (cpu_cores[2], cpu_cores[1])
-  } else {
-    (0, 0) // Fallback in case of invalid data
+  let (ecpu_cores, pcpu_cores) = match cpu_cores.len() {
+    3 => (cpu_cores[2], cpu_cores[1]),
+    4 => (cpu_cores[2], cpu_cores[1]),
+    _ => (0, 0), // Fallback in case of invalid data
   };
 
   // SPDisplaysDataType.0.sppci_cores
