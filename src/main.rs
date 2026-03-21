@@ -1,12 +1,5 @@
-mod app;
-mod config;
-mod debug;
-mod metrics;
-mod sources;
-
-use app::App;
+use macmon::{App, Sampler, debug};
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
-use metrics::Sampler;
 use std::error::Error;
 
 #[derive(Debug, Subcommand)]
