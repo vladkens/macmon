@@ -1,6 +1,7 @@
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;
+use std::path::PathBuf;
 
 const COLORS_OPTIONS: [Color; 7] =
   [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
@@ -31,15 +32,24 @@ impl Default for Config {
 }
 
 impl Config {
-  fn get_config_path() -> Option<String> {
+  fn get_config_dir() -> Option<PathBuf> {
     let home = match std::env::var("HOME") {
       Ok(home) => home,
       Err(_) => return None,
     };
 
-    let filepath = format!("{}/.config/macmon.json", home);
-    let _ = std::fs::create_dir_all(std::path::Path::new(&filepath).parent().unwrap());
-    Some(filepath)
+    let dir = PathBuf::from(home).join(".config");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+  }
+
+  fn get_config_path() -> Option<String> {
+    let path = Self::get_config_dir()?.join("macmon.json");
+    Some(path.to_string_lossy().to_string())
+  }
+
+  pub fn get_server_pid_path() -> Option<PathBuf> {
+    Some(Self::get_config_dir()?.join("macmon-server.pid"))
   }
 
   pub fn load() -> Self {

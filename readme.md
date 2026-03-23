@@ -65,6 +65,7 @@ Usage: macmon [OPTIONS] [COMMAND]
 Commands:
   pipe   Output metrics in JSON format
   debug  Print debug information
+  server Start or stop the HTTP API server
   help   Print this message or the help of the given subcommand(s)
 
 Options:
@@ -96,11 +97,59 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
+## HTTP API
+
+You can start `macmon` as a background API server instead of opening the TUI:
+
+```sh
+macmon server up
+```
+
+By default the server detaches and binds to `127.0.0.1:3939`. You can override the bind address and port:
+
+```sh
+macmon --interval 500 server up --bind-address 0.0.0.0 --port 8080
+```
+
+For development or debugging you can keep it attached to the terminal:
+
+```sh
+macmon server up --foreground
+```
+
+To stop the detached server:
+
+```sh
+macmon server down
+```
+
+Server startup options:
+
+```sh
+Usage: macmon server up [OPTIONS]
+
+Options:
+      --bind-address <BIND_ADDRESS>  Bind address for the API server [default: 127.0.0.1]
+      --port <PORT>                  TCP port to bind the API server to [default: 3939]
+      --foreground                   Keep the server attached to the current terminal
+  -h, --help                         Print help
+```
+
+Available endpoints:
+
+- `GET /health` returns a basic health check response
+- `GET /stats` returns the latest metrics snapshot in JSON
+- `GET /api/v1/stats` returns the same metrics payload as `/stats`
+
 ### Output
 
 ```jsonc
 {
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
+  "soc": {
+    "mac_model": "MacBook Pro",
+    "chip_name": "Apple M4 Pro"
+  },
   "temp": {
     "cpu_temp_avg": 43.73614,         // Celsius
     "gpu_temp_avg": 36.95167          // Celsius

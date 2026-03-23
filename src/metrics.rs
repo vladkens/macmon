@@ -13,13 +13,13 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 
 // MARK: Structs
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct TempMetrics {
   pub cpu_temp_avg: f32, // Celsius
   pub gpu_temp_avg: f32, // Celsius
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct MemMetrics {
   pub ram_total: u64,  // bytes
   pub ram_usage: u64,  // bytes
@@ -27,7 +27,7 @@ pub struct MemMetrics {
   pub swap_usage: u64, // bytes
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,
