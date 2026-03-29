@@ -248,6 +248,20 @@ fn distribute_units(names: &[String], total_units: u32) -> Vec<(String, u32)> {
   result
 }
 
+fn avg_in_range(values: &[f32], min: f32, max: f32) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut count = 0_usize;
+
+    for &value in values {
+        if value >= min && value <= max {
+            sum += value;
+            count += 1;
+        }
+    }
+
+    zero_div(sum, count as f32)
+}
+
 #[derive(Debug, Default)]
 struct SmcSensors {
   cpu_keys: Vec<String>,
@@ -412,10 +426,10 @@ impl Sampler {
       }
     }
 
-    let cpu_avg = zero_div(cpu_metrics.iter().sum::<f32>(), cpu_metrics.len() as f32);
-    let gpu_avg = zero_div(gpu_metrics.iter().sum::<f32>(), gpu_metrics.len() as f32);
+    let cpu_avg = avg_in_range(&cpu_metrics, 15.0, 150.0);
+    let gpu_avg = avg_in_range(&gpu_metrics, 15.0, 150.0);
 
-    Ok(TempMetrics { cpu_avg, gpu_avg })
+    Ok(TempMetrics {cpu_avg , gpu_avg})
   }
 
   fn get_mem(&mut self) -> WithError<MemMetrics> {
