@@ -9,7 +9,8 @@ on:
     paths:
       - .github/workflows/*.yml
       - Cargo.toml
-      - src/**
+      - Cargo.lock
+      - crates/**
 
 jobs:
   check:
@@ -28,9 +29,10 @@ jobs:
 
       - run: rustup update --no-self-update stable && rustup default stable
       - run: cargo fmt --check
-      - run: cargo check --release --locked
+      - run: cargo check --workspace --release --locked
+      - run: cargo test --workspace --locked
 
-      - run: cargo build --release --locked
+      - run: cargo build --workspace --release --locked
       - run: |
           cp target/release/macmon macmon
           tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon

@@ -191,7 +191,12 @@ fn default_ffi_structs_match_zeroed_layout() {
 #[test]
 fn smoke_sampler_roundtrip() {
   let mut sampler = ptr::null_mut();
-  assert_eq!(unsafe { macmon_sampler_new(&mut sampler) }, macmon_status_t::MACMON_STATUS_OK);
+  let status = unsafe { macmon_sampler_new(&mut sampler) };
+  if status == macmon_status_t::MACMON_STATUS_INIT_FAILED {
+    eprintln!("skipping env-dependent smoke test: sampler init failed on this host");
+    return;
+  }
+  assert_eq!(status, macmon_status_t::MACMON_STATUS_OK);
   assert!(!sampler.is_null());
 
   let mut info = macmon_soc_info_t::default();
