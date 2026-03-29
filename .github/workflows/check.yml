@@ -1,11 +1,7 @@
 name: check
 
 on:
-  push:
-    branches:
-      - '**'
-    tags-ignore:
-      - 'v*'
+  pull_request:
     paths:
       - .github/workflows/*.yml
       - Cargo.toml
@@ -35,12 +31,12 @@ jobs:
       - run: cargo build --workspace --release --locked
       - run: |
           cp target/release/macmon macmon
-          tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
+          tar czf macmon-pr-${{ github.event.pull_request.number }}.tar.gz readme.md LICENSE macmon
           ls -lah | grep macmon
         id: archive
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macmon-${{ github.ref_name }}.tar.gz
-          path: macmon-${{ github.ref_name }}.tar.gz
+          name: macmon-pr-${{ github.event.pull_request.number }}.tar.gz
+          path: macmon-pr-${{ github.event.pull_request.number }}.tar.gz
           retention-days: 7
