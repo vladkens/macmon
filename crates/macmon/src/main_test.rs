@@ -11,7 +11,12 @@ fn pipe_sample_flattens_metrics_and_optional_soc() {
       usage: 0.5,
       cores: vec![CoreUsageEntry { freq_mhz: 3100, usage: 0.4 }],
     }],
-    gpu_usage: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.2, units: 10 }],
+    gpu_usage: vec![GpuUsageEntry {
+      name: "GPU".to_string(),
+      freq_mhz: 800,
+      usage: 0.2,
+      units: 10,
+    }],
     ..Default::default()
   };
   let soc = SocInfo {

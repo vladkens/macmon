@@ -24,7 +24,12 @@ fn test_metrics() -> Metrics {
       },
       CpuUsageEntry { name: "PCPU".to_string(), freq_mhz: 3200, usage: 0.75, cores: Vec::new() },
     ],
-    gpu_usage: vec![GpuUsageEntry { name: "GFX0".to_string(), freq_mhz: 900, usage: 0.5, units: 10 }],
+    gpu_usage: vec![GpuUsageEntry {
+      name: "GFX0".to_string(),
+      freq_mhz: 900,
+      usage: 0.5,
+      units: 10,
+    }],
     power: PowerMetrics {
       package: 17.0,
       cpu: 1.0,
@@ -89,7 +94,7 @@ fn metrics_conversion_preserves_names_and_values() {
   assert_eq!(ffi.memory.swap_usage, 13);
   assert_eq!(ffi.temp.gpu_avg, 51.0);
 
-  macmon_metrics_free(&mut ffi);
+  unsafe { macmon_metrics_free(&mut ffi) };
   assert!(ffi.cpu_usage.ptr.is_null());
   assert!(ffi.gpu_usage.ptr.is_null());
 }
@@ -109,7 +114,7 @@ fn soc_info_conversion_preserves_layout() {
   let freqs = unsafe { std::slice::from_raw_parts(domains[1].freqs_mhz, domains[1].freqs_len) };
   assert_eq!(freqs, &[3000, 4000]);
 
-  macmon_soc_info_free(&mut ffi);
+  unsafe { macmon_soc_info_free(&mut ffi) };
   assert!(ffi.cpu_domains.is_null());
   assert!(ffi.gpu_freqs_mhz.is_null());
 }
@@ -119,23 +124,29 @@ fn free_functions_accept_zero_initialized_structs() {
   let mut metrics = macmon_metrics_t::default();
   let mut info = macmon_soc_info_t::default();
 
-  macmon_metrics_free(&mut metrics);
-  macmon_soc_info_free(&mut info);
+  unsafe { macmon_metrics_free(&mut metrics) };
+  unsafe { macmon_soc_info_free(&mut info) };
 }
 
 #[test]
 fn null_out_arguments_return_invalid_argument() {
-  assert_eq!(macmon_sampler_new(ptr::null_mut()), macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT);
-  assert_eq!(macmon_get_soc_info(ptr::null_mut()), macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT);
   assert_eq!(
-    macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut()),
+    unsafe { macmon_sampler_new(ptr::null_mut()) },
+    macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
+  );
+  assert_eq!(
+    unsafe { macmon_get_soc_info(ptr::null_mut()) },
+    macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
+  );
+  assert_eq!(
+    unsafe { macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut()) },
     macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT
   );
 }
 
 #[test]
 fn last_error_message_updates_after_failure() {
-  let status = macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut());
+  let status = unsafe { macmon_sampler_get_metrics(ptr::null_mut(), ptr::null_mut()) };
   assert_eq!(status, macmon_status_t::MACMON_STATUS_INVALID_ARGUMENT);
 
   let message = macmon_last_error_message();
@@ -158,8 +169,8 @@ fn free_functions_zero_out_structs_after_owned_allocations() {
   let mut metrics = ffi_metrics(test_metrics());
   let mut info = ffi_soc_info(test_soc_info());
 
-  macmon_metrics_free(&mut metrics);
-  macmon_soc_info_free(&mut info);
+  unsafe { macmon_metrics_free(&mut metrics) };
+  unsafe { macmon_soc_info_free(&mut info) };
 
   assert_eq!(metrics.cpu_usage.len, 0);
   assert_eq!(info.cpu_domains_len, 0);
@@ -180,16 +191,19 @@ fn default_ffi_structs_match_zeroed_layout() {
 #[test]
 fn smoke_sampler_roundtrip() {
   let mut sampler = ptr::null_mut();
-  assert_eq!(macmon_sampler_new(&mut sampler), macmon_status_t::MACMON_STATUS_OK);
+  assert_eq!(unsafe { macmon_sampler_new(&mut sampler) }, macmon_status_t::MACMON_STATUS_OK);
   assert!(!sampler.is_null());
 
   let mut info = macmon_soc_info_t::default();
-  assert_eq!(macmon_get_soc_info(&mut info), macmon_status_t::MACMON_STATUS_OK);
+  assert_eq!(unsafe { macmon_get_soc_info(&mut info) }, macmon_status_t::MACMON_STATUS_OK);
 
   let mut metrics = macmon_metrics_t::default();
-  assert_eq!(macmon_sampler_get_metrics(sampler, &mut metrics), macmon_status_t::MACMON_STATUS_OK);
+  assert_eq!(
+    unsafe { macmon_sampler_get_metrics(sampler, &mut metrics) },
+    macmon_status_t::MACMON_STATUS_OK
+  );
 
-  macmon_metrics_free(&mut metrics);
-  macmon_soc_info_free(&mut info);
-  macmon_sampler_free(sampler);
+  unsafe { macmon_metrics_free(&mut metrics) };
+  unsafe { macmon_soc_info_free(&mut info) };
+  unsafe { macmon_sampler_free(sampler) };
 }

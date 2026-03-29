@@ -56,7 +56,12 @@ fn metrics_preserve_domain_and_core_cpu_usage() {
         CoreUsageEntry { freq_mhz: 3300, usage: 0.44 },
       ],
     }],
-    gpu_usage: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.15, units: 10 }],
+    gpu_usage: vec![GpuUsageEntry {
+      name: "GPU".to_string(),
+      freq_mhz: 800,
+      usage: 0.15,
+      units: 10,
+    }],
     ..Default::default()
   };
 
@@ -106,7 +111,12 @@ fn metrics_serialize_with_cli_shape() {
         CoreUsageEntry { freq_mhz: 1262, usage: 0.46 },
       ],
     }],
-    gpu_usage: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 461, usage: 0.21, units: 10 }],
+    gpu_usage: vec![GpuUsageEntry {
+      name: "GPU".to_string(),
+      freq_mhz: 461,
+      usage: 0.21,
+      units: 10,
+    }],
     power: super::PowerMetrics {
       package: 0.321,
       cpu: 0.2,

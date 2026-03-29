@@ -324,7 +324,7 @@ impl Sampler {
       if group == "CPU Stats" {
         return subgroup == CPU_FREQ_CORE_SUBG;
       }
-      return group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG;
+      group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
     };
     let io_report = match IOReport::new(Some(channels)) {
       Ok(io_report) => io_report,
@@ -432,15 +432,15 @@ impl Sampler {
     self.wait_for_smc()?;
 
     for x in self.io_report.next_sample() {
-      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-        if let Some(domain_idx) =
+      if x.group == "CPU Stats"
+        && x.subgroup == CPU_FREQ_CORE_SUBG
+        && let Some(domain_idx) =
           cpu_domains.iter().position(|domain| x.channel.contains(domain.name.as_str()))
-        {
-          let domain = &cpu_domains[domain_idx];
-          let (freq_mhz, usage) = calc_freq(x.channel_item, &domain.freqs_mhz);
-          cpu_domain_cores[domain_idx].push(CoreUsageEntry { freq_mhz, usage });
-          continue;
-        }
+      {
+        let domain = &cpu_domains[domain_idx];
+        let (freq_mhz, usage) = calc_freq(x.channel_item, &domain.freqs_mhz);
+        cpu_domain_cores[domain_idx].push(CoreUsageEntry { freq_mhz, usage });
+        continue;
       }
 
       if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {

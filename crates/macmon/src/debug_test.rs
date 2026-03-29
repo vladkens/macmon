@@ -6,12 +6,17 @@ use macmon_lib::sources::{CpuDomainInfo, SocInfo};
 fn debug_output_nests_soc_and_metrics() {
   let metrics = Metrics {
     cpu_usage: vec![CpuUsageEntry {
-        name: "PCPU".to_string(),
-        freq_mhz: 3200,
-        usage: 0.5,
-        cores: vec![CoreUsageEntry { freq_mhz: 3100, usage: 0.4 }],
-      }],
-    gpu_usage: vec![GpuUsageEntry { name: "GPU".to_string(), freq_mhz: 800, usage: 0.2, units: 10 }],
+      name: "PCPU".to_string(),
+      freq_mhz: 3200,
+      usage: 0.5,
+      cores: vec![CoreUsageEntry { freq_mhz: 3100, usage: 0.4 }],
+    }],
+    gpu_usage: vec![GpuUsageEntry {
+      name: "GPU".to_string(),
+      freq_mhz: 800,
+      usage: 0.2,
+      units: 10,
+    }],
     ..Default::default()
   };
   let soc = SocInfo {

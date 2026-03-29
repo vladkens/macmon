@@ -334,7 +334,12 @@ unsafe fn free_gpu_usage_list(list: &mut macmon_gpu_usage_list_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_sampler_new(out_sampler: *mut *mut macmon_sampler_t) -> macmon_status_t {
+/// # Safety
+///
+/// `out_sampler` must be a valid, writable pointer to a `macmon_sampler_t*` slot.
+pub unsafe extern "C" fn macmon_sampler_new(
+  out_sampler: *mut *mut macmon_sampler_t,
+) -> macmon_status_t {
   ffi_status(|| {
     if out_sampler.is_null() {
       return Err(ffi_error(
@@ -360,7 +365,11 @@ pub extern "C" fn macmon_sampler_new(out_sampler: *mut *mut macmon_sampler_t) ->
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_sampler_free(sampler: *mut macmon_sampler_t) {
+/// # Safety
+///
+/// `sampler` must either be null or a pointer previously returned by
+/// `macmon_sampler_new` that has not already been freed.
+pub unsafe extern "C" fn macmon_sampler_free(sampler: *mut macmon_sampler_t) {
   let result = catch_unwind(AssertUnwindSafe(|| {
     if sampler.is_null() {
       return;
@@ -377,7 +386,11 @@ pub extern "C" fn macmon_sampler_free(sampler: *mut macmon_sampler_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmon_status_t {
+/// # Safety
+///
+/// `out_info` must be a valid, writable pointer to an initialized
+/// `macmon_soc_info_t` slot.
+pub unsafe extern "C" fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmon_status_t {
   ffi_status(|| {
     if out_info.is_null() {
       return Err(ffi_error(
@@ -403,7 +416,11 @@ pub extern "C" fn macmon_get_soc_info(out_info: *mut macmon_soc_info_t) -> macmo
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_soc_info_free(info: *mut macmon_soc_info_t) {
+/// # Safety
+///
+/// `info` must either be null or a pointer previously initialized by
+/// `macmon_get_soc_info` and not already freed with `macmon_soc_info_free`.
+pub unsafe extern "C" fn macmon_soc_info_free(info: *mut macmon_soc_info_t) {
   let result = catch_unwind(AssertUnwindSafe(|| {
     if info.is_null() {
       return;
@@ -435,7 +452,12 @@ pub extern "C" fn macmon_soc_info_free(info: *mut macmon_soc_info_t) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_sampler_get_metrics(
+/// # Safety
+///
+/// `sampler` must be a valid pointer returned by `macmon_sampler_new`.
+/// `out_metrics` must be a valid, writable pointer to an initialized
+/// `macmon_metrics_t` slot.
+pub unsafe extern "C" fn macmon_sampler_get_metrics(
   sampler: *mut macmon_sampler_t,
   out_metrics: *mut macmon_metrics_t,
 ) -> macmon_status_t {
@@ -464,7 +486,11 @@ pub extern "C" fn macmon_sampler_get_metrics(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn macmon_metrics_free(metrics: *mut macmon_metrics_t) {
+/// # Safety
+///
+/// `metrics` must either be null or a pointer previously initialized by
+/// `macmon_sampler_get_metrics` and not already freed with `macmon_metrics_free`.
+pub unsafe extern "C" fn macmon_metrics_free(metrics: *mut macmon_metrics_t) {
   let result = catch_unwind(AssertUnwindSafe(|| {
     if metrics.is_null() {
       return;
