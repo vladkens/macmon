@@ -46,7 +46,6 @@ fn test_soc_info() -> SocInfo {
     mac_model: "Mac16,1".to_string(),
     chip_name: "Apple M4".to_string(),
     memory_gb: 24,
-    cpu_cores_total: 10,
     cpu_domains: vec![
       CpuDomainInfo { name: "ECPU".to_string(), units: 4, freqs_mhz: vec![1000, 2000] },
       CpuDomainInfo { name: "PCPU".to_string(), units: 6, freqs_mhz: vec![3000, 4000] },

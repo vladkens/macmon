@@ -106,8 +106,6 @@ typedef struct macmon_soc_info_t {
   const char *chip_name;
   /* Installed unified memory capacity in gigabytes. */
   uint8_t memory_gb;
-  /* Sum of CPU units across all discovered CPU domains. */
-  uint16_t cpu_cores_total;
   /* Length of `cpu_domains`. */
   size_t cpu_domains_len;
   /* CPU frequency domains discovered for this SoC. */

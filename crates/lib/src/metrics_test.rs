@@ -21,7 +21,7 @@ fn calc_freq_with_matching_states() {
 }
 
 #[test]
-fn calc_freq_with_mismatched_states_uses_tail_activity() {
+fn calc_freq_with_mismatched_states_matches_legacy_mapping() {
   let items = vec![
     ("IDLE".to_string(), 50),
     ("S1".to_string(), 0),
@@ -31,7 +31,7 @@ fn calc_freq_with_mismatched_states_uses_tail_activity() {
   ];
   let (freq, usage) = calc_freq_from_residencies(&items, &[1000, 2000]);
 
-  assert_eq!(freq, 2000);
+  assert_eq!(freq, 1000);
   assert!((usage - 0.5f32).abs() < 1e-6f32);
 }
 

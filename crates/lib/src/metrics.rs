@@ -173,42 +173,24 @@ fn is_active_state(name: &str) -> bool {
 
 fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f32) {
   let min_freq = *freqs.first().unwrap_or(&0) as f64;
-  let max_freq = *freqs.last().unwrap_or(&0) as f64;
-  if max_freq == 0.0 {
+  if min_freq == 0.0 {
     return (0, 0.0);
   }
 
   let offset = items.iter().position(|x| is_active_state(x.0.as_str())).unwrap_or(items.len());
-  let active: Vec<f64> = items[offset..].iter().map(|x| x.1.max(0) as f64).collect();
-
-  let usage = active.iter().sum::<f64>();
+  let usage = items[offset..].iter().map(|x| x.1.max(0) as f64).sum::<f64>();
   let total = items.iter().map(|x| x.1.max(0) as f64).sum::<f64>();
-  if usage == 0.0 || total == 0.0 || active.is_empty() {
+  if usage == 0.0 || total == 0.0 {
     return (min_freq as u32, 0.0);
   }
 
+  assert!(items.len() > freqs.len(), "calc_freq invalid data: {} vs {}", items.len(), freqs.len());
+
   let mut avg_freq = 0f64;
-  if active.len() == freqs.len() {
-    for (residency, freq) in active.iter().zip(freqs.iter()) {
-      let percent = zero_div(*residency, usage);
-      avg_freq += percent * *freq as f64;
-    }
-  } else {
-    // On some chips/clusters residency state count differs from pmgr DVFS table length.
-    // Interpolate across known min/max to avoid silently dropping tail states.
-    eprintln!(
-      "macmon: residency state count ({}) does not match DVFS table length ({}) for states {:?}",
-      active.len(),
-      freqs.len(),
-      items.iter().map(|(name, _)| name).collect::<Vec<_>>()
-    );
-    let steps = active.len().saturating_sub(1) as f64;
-    for (idx, residency) in active.iter().enumerate() {
-      let percent = zero_div(*residency, usage);
-      let state_ratio = if steps == 0.0 { 0.0 } else { idx as f64 / steps };
-      let freq = min_freq + (max_freq - min_freq) * state_ratio;
-      avg_freq += percent * freq;
-    }
+  for i in 0..freqs.len() {
+    let residency = items.get(i + offset).map(|(_, val)| (*val).max(0) as f64).unwrap_or(0.0);
+    let percent = zero_div(residency, usage);
+    avg_freq += percent * freqs[i] as f64;
   }
 
   let usage_ratio = zero_div(usage, total);
@@ -249,17 +231,17 @@ fn distribute_units(names: &[String], total_units: u32) -> Vec<(String, u32)> {
 }
 
 fn avg_in_range(values: &[f32], min: f32, max: f32) -> f32 {
-    let mut sum = 0.0_f32;
-    let mut count = 0_usize;
+  let mut sum = 0.0_f32;
+  let mut count = 0_usize;
 
-    for &value in values {
-        if value >= min && value <= max {
-            sum += value;
-            count += 1;
-        }
+  for &value in values {
+    if value >= min && value <= max {
+      sum += value;
+      count += 1;
     }
+  }
 
-    zero_div(sum, count as f32)
+  zero_div(sum, count as f32)
 }
 
 #[derive(Debug, Default)]
@@ -429,7 +411,7 @@ impl Sampler {
     let cpu_avg = avg_in_range(&cpu_metrics, 15.0, 150.0);
     let gpu_avg = avg_in_range(&gpu_metrics, 15.0, 150.0);
 
-    Ok(TempMetrics {cpu_avg , gpu_avg})
+    Ok(TempMetrics { cpu_avg, gpu_avg })
   }
 
   fn get_mem(&mut self) -> WithError<MemMetrics> {

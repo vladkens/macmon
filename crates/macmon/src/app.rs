@@ -421,18 +421,12 @@ impl App {
   }
 
   fn render(&mut self, f: &mut Frame) {
-    let total_cpu_cores = self.soc.cpu_cores_total;
     let label_l = if self.cpu_layout.is_empty() {
       format!("{} ({}GB)", self.soc.chip_name, self.soc.memory_gb)
     } else {
-      let cpu_layout = if self.cpu_layout.is_empty() {
-        total_cpu_cores.to_string()
-      } else {
-        self.cpu_layout.clone()
-      };
       format!(
         "{} ({}CPU+{}GPU {}GB)",
-        self.soc.chip_name, cpu_layout, self.soc.gpu_cores, self.soc.memory_gb
+        self.soc.chip_name, self.cpu_layout, self.soc.gpu_cores, self.soc.memory_gb
       )
     };
 

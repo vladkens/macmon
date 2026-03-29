@@ -47,8 +47,6 @@ pub struct SocInfo {
   pub chip_name: String,
   /// Installed unified memory capacity in gigabytes.
   pub memory_gb: u8,
-  /// Sum of `units` across all discovered CPU domains.
-  pub cpu_cores_total: u16,
   /// CPU frequency domains discovered for this SoC.
   pub cpu_domains: Vec<CpuDomainInfo>,
   /// GPU core count reported by macOS.
@@ -80,7 +78,7 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str, scale: u32) -> (Vec<u32>, 
 
 pub fn run_system_profiler() -> WithError<serde_json::Value> {
   let out = std::process::Command::new("system_profiler")
-    .args(["SPHardwareDataType", "SPDisplaysDataType", "SPSoftwareDataType", "-json"])
+    .args(["SPHardwareDataType", "SPDisplaysDataType", "-json"])
     .output()?;
 
   let out = std::str::from_utf8(&out.stdout)?;
@@ -186,7 +184,6 @@ fn load_soc_info() -> WithError<SocInfo> {
 
   finalize_cpu_freq_domains(&mut cpu_freq_domains);
   info.cpu_domains = cpu_freq_domains;
-  info.cpu_cores_total = info.cpu_domains.iter().map(|domain| domain.units).sum::<u32>() as u16;
 
   if !info.cpu_domains.iter().any(|domain| !domain.freqs_mhz.is_empty()) {
     return Err("No CPU frequencies found".into());

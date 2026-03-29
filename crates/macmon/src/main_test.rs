@@ -18,7 +18,6 @@ fn pipe_sample_flattens_metrics_and_optional_soc() {
     mac_model: "Mac16,1".to_string(),
     chip_name: "Apple M4".to_string(),
     memory_gb: 24,
-    cpu_cores_total: 10,
     cpu_domains: vec![CpuDomainInfo {
       name: "PCPU".to_string(),
       units: 10,
