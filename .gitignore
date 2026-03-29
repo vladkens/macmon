@@ -1,5 +1,6 @@
 .DS_Store
 /target
 /internal
+/dist
 __handlers__/
 samples/

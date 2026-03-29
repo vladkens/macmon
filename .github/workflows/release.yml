@@ -2,7 +2,7 @@ name: release
 
 on:
   push:
-    tags: 'v*'
+    tags: "v*"
 
 permissions:
   contents: write
@@ -25,6 +25,7 @@ jobs:
       - run: rustup update --no-self-update stable && rustup default stable
       - run: cargo fmt --check
       - run: cargo build --release --locked
+      - run: make xcframework
 
       - name: check version
         run: ./target/release/macmon -V | grep "${GITHUB_REF_NAME#v}" || exit 1
@@ -34,6 +35,7 @@ jobs:
         run: |
           cp target/release/macmon macmon
           tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
+          ditto -c -k --sequesterRsrc --keepParent dist/CMacmon.xcframework CMacmon.xcframework-${{ github.ref_name }}.zip
           ls -lah | grep macmon
 
       - name: Generate a changelog
@@ -46,7 +48,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.git-cliff.outputs.content }}
-          files: macmon-${{ github.ref_name }}.tar.gz
+          files: |
+            macmon-${{ github.ref_name }}.tar.gz
+            CMacmon.xcframework-${{ github.ref_name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

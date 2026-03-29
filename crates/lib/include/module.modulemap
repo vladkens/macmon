@@ -1,0 +1,4 @@
+module CMacmon {
+  header "macmon.h"
+  export *
+}
