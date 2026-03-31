@@ -775,6 +775,9 @@ impl IOHIDSensors {
 
         let temp = IOHIDEventGetFloatValue(event, kIOHIDEventTypeTemperature << 16);
         CFRelease(event as _);
+        if temp <= 0.0 || temp > 150.0 {
+          continue;
+        }
         items.push((name, temp as f32));
       }
 
