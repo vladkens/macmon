@@ -64,6 +64,7 @@ Usage: macmon [OPTIONS] [COMMAND]
 
 Commands:
   pipe   Output metrics in JSON format
+  serve  Serve metrics over HTTP
   debug  Print debug information
   help   Print this message or the help of the given subcommand(s)
 
@@ -122,6 +123,59 @@ This will collect 10 samples with an update interval of 500 milliseconds.
   "ram_power": 0.11635789,            // Watts
   "gpu_ram_power": 0.0009615385       // Watts (not sure what it means)
 }
+```
+
+## 🌐 HTTP Server
+
+You can use the `serve` subcommand to expose metrics over HTTP. This is useful for integrating with monitoring systems like [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/).
+
+```sh
+macmon serve            # default port 9090, interval 1000ms
+macmon serve -p 8080    # custom port
+macmon serve -i 500     # sampling interval 500ms
+macmon serve &          # run in background
+```
+
+Two endpoints are available:
+
+| Endpoint | Format | Description |
+|---|---|---|
+| `GET /json` | JSON | Current metrics snapshot (same format as `pipe --soc-info`) |
+| `GET /metrics` | Prometheus | Metrics in [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/) |
+
+### Prometheus / Grafana setup
+
+Add a scrape target to your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: macmon
+    static_configs:
+      - targets: ["localhost:9090"]
+```
+
+Then import or build a Grafana dashboard querying metrics such as:
+
+```
+macmon_cpu_power_watts{chip="Apple M3 Pro"}
+macmon_ecpu_usage_ratio{chip="Apple M3 Pro"}
+macmon_memory_ram_used_bytes{chip="Apple M3 Pro"}
+```
+
+### Prometheus output example
+
+```
+# HELP macmon_cpu_temp_celsius Average CPU temperature in Celsius
+# TYPE macmon_cpu_temp_celsius gauge
+macmon_cpu_temp_celsius{chip="Apple M3 Pro"} 47.3
+
+# HELP macmon_cpu_power_watts CPU power consumption in Watts
+# TYPE macmon_cpu_power_watts gauge
+macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
+
+# HELP macmon_ecpu_usage_ratio Efficiency CPU cluster utilization (0–1)
+# TYPE macmon_ecpu_usage_ratio gauge
+macmon_ecpu_usage_ratio{chip="Apple M3 Pro"} 0.083
 ```
 
 ## 📦 Build from Source

@@ -1,6 +1,10 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
 use macmon::{App, Sampler, debug};
 use std::error::Error;
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+mod serve;
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -14,6 +18,13 @@ enum Commands {
     /// Include SoC information in the output
     #[arg(long, default_value_t = false)]
     soc_info: bool,
+  },
+
+  /// Serve metrics over HTTP (JSON at / and Prometheus at /metrics)
+  Serve {
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 9090)]
+    port: u16,
   },
 
   /// Print debug information
@@ -58,6 +69,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         counter += 1;
         if *samples > 0 && counter >= *samples {
           break;
+        }
+      }
+    }
+    Some(Commands::Serve { port }) => {
+      let mut sampler = Sampler::new()?;
+      let soc = Arc::new(sampler.get_soc_info().clone());
+      let shared: serve::SharedMetrics = Arc::new(Mutex::new(None));
+
+      let shared_http = Arc::clone(&shared);
+      let soc_http = Arc::clone(&soc);
+      let port = *port;
+      thread::spawn(move || {
+        if let Err(e) = serve::run(port, shared_http, soc_http) {
+          eprintln!("server error: {e}");
+        }
+      });
+
+      loop {
+        match sampler.get_metrics(args.interval.max(100)) {
+          Ok(m) => *shared.lock().unwrap() = Some(m),
+          Err(e) => eprintln!("sampling error: {e}"),
         }
       }
     }
