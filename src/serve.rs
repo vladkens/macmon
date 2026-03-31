@@ -107,6 +107,64 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
+pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
+  let home = std::env::var("HOME")?;
+  let plist_path = format!("{home}/Library/LaunchAgents/com.macmon.plist");
+
+  if !install {
+    let _ = std::process::Command::new("launchctl")
+      .args(["unload", &plist_path])
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status();
+    std::fs::remove_file(&plist_path)?;
+    eprintln!("macmon service uninstalled");
+    return Ok(());
+  }
+
+  let bin = std::env::current_exe()?;
+  let bin = bin.to_string_lossy();
+  let plist = format!(
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.macmon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{bin}</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>{port}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+"#
+  );
+
+  let agents_dir = format!("{home}/Library/LaunchAgents");
+  std::fs::create_dir_all(&agents_dir)?;
+
+  // unload silently in case it's already running
+  let _ = std::process::Command::new("launchctl")
+    .args(["unload", &plist_path])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status();
+
+  std::fs::write(&plist_path, plist)?;
+  std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
+  eprintln!("macmon service installed: {plist_path}");
+  eprintln!("serving on http://localhost:{port}");
+
+  Ok(())
+}
+
 pub fn run(
   port: u16,
   shared: SharedMetrics,

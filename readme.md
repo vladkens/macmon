@@ -143,6 +143,18 @@ Two endpoints are available:
 | `GET /json` | JSON | Current metrics snapshot (same format as `pipe --soc-info`) |
 | `GET /metrics` | Prometheus | Metrics in [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/) |
 
+### Running as a background service (launchd)
+
+To start `macmon serve` automatically on login and keep it running:
+
+```sh
+macmon serve --install              # install and start (default port 9090)
+macmon serve --port 8080 --install  # with custom port
+macmon serve --uninstall            # stop and remove
+```
+
+This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that auto-starts on login and restarts on crash.
+
 ### Prometheus / Grafana setup
 
 Add a scrape target to your `prometheus.yml`:

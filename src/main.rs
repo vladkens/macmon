@@ -20,11 +20,19 @@ enum Commands {
     soc_info: bool,
   },
 
-  /// Serve metrics over HTTP (JSON at / and Prometheus at /metrics)
+  /// Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
   Serve {
     /// Port to listen on
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
+
+    /// Install as a launchd service (auto-start on login)
+    #[arg(long, default_value_t = false)]
+    install: bool,
+
+    /// Uninstall the launchd service
+    #[arg(long, default_value_t = false)]
+    uninstall: bool,
   },
 
   /// Print debug information
@@ -72,7 +80,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { port }) => {
+    Some(Commands::Serve { port, install, uninstall }) => {
+      if *install || *uninstall {
+        serve::launchd(*port, *install)?;
+        return Ok(());
+      }
       let mut sampler = Sampler::new()?;
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(Mutex::new(None));
