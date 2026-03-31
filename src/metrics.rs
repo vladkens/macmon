@@ -111,8 +111,8 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
     // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
     match name {
-      // "Tp" – performance cores, "Te" – efficiency cores
-      name if name.starts_with("Tp") || name.starts_with("Te") => cpu_sensors.push(name.clone()),
+      // "Tp" – performance cores, "Te" – efficiency cores, "Ts" – super cores (M5+)
+      name if name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts") => cpu_sensors.push(name.clone()),
       name if name.starts_with("Tg") => gpu_sensors.push(name.clone()),
       _ => (),
     }
@@ -235,13 +235,14 @@ impl Sampler {
 
       for x in sample {
         if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          if x.channel.contains("ECPU") {
-            ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
+          if x.channel.starts_with("PCPU") {
+            pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
             continue;
           }
 
-          if x.channel.contains("PCPU") {
-            pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
+          // ECPU on M1-M4, MCPU on M5+ (Performance cores)
+          if x.channel.starts_with("ECPU") || x.channel.starts_with("MCPU") {
+            ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
             continue;
           }
         }
@@ -267,6 +268,8 @@ impl Sampler {
         }
       }
 
+      // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
+      ecpu_usages.retain(|&(_, pct)| pct > 0.0);
       rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
       rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
       results.push(rs);

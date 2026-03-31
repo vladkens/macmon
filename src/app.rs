@@ -366,10 +366,10 @@ impl App {
 
   fn render(&mut self, f: &mut Frame) {
     let label_l = format!(
-      "{} ({}E+{}P+{}GPU {}GB)",
+      "{} ({}{}+{}{}+{}GPU {}GB)",
       self.soc.chip_name,
-      self.soc.ecpu_cores,
-      self.soc.pcpu_cores,
+      self.soc.ecpu_cores, self.soc.ecpu_label,
+      self.soc.pcpu_cores, self.soc.pcpu_label,
       self.soc.gpu_cores,
       self.soc.memory_gb,
     );
@@ -391,8 +391,10 @@ impl App {
 
     // 1st row
     let (c1, c2) = h_stack(iarea[0]);
-    self.render_freq_block(f, c1, "E-CPU", &self.ecpu_freq);
-    self.render_freq_block(f, c2, "P-CPU", &self.pcpu_freq);
+    let ecpu_block_label = format!("{}-CPU", self.soc.ecpu_label);
+    let pcpu_block_label = format!("{}-CPU", self.soc.pcpu_label);
+    self.render_freq_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
+    self.render_freq_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
