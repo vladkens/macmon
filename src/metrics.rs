@@ -33,6 +33,7 @@ pub struct Metrics {
   pub memory: MemMetrics,
   pub ecpu_usage: (u32, f32), // freq, percent_from_max
   pub pcpu_usage: (u32, f32), // freq, percent_from_max
+  pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
   pub gpu_usage: (u32, f32),  // freq, percent_from_max
   pub cpu_power: f32,         // Watts
   pub gpu_power: f32,         // Watts
@@ -279,11 +280,16 @@ impl Sampler {
       results.push(rs);
     }
 
+    let ecores = self.soc.ecpu_cores as f32;
+    let pcores = self.soc.pcpu_cores as f32;
+    let tcores = ecores + pcores;
+
     let mut rs = Metrics::default();
     rs.ecpu_usage.0 = zero_div(results.iter().map(|x| x.ecpu_usage.0).sum(), measures as _);
     rs.ecpu_usage.1 = zero_div(results.iter().map(|x| x.ecpu_usage.1).sum(), measures as _);
     rs.pcpu_usage.0 = zero_div(results.iter().map(|x| x.pcpu_usage.0).sum(), measures as _);
     rs.pcpu_usage.1 = zero_div(results.iter().map(|x| x.pcpu_usage.1).sum(), measures as _);
+    rs.cpu_usage_pct = zero_div(rs.ecpu_usage.1 * ecores + rs.pcpu_usage.1 * pcores, tcores);
     rs.gpu_usage.0 = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
     rs.gpu_usage.1 = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
     rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
