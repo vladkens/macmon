@@ -1,5 +1,5 @@
-use macmon::{App, Sampler, debug};
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
+use macmon::{App, Sampler, debug};
 use std::error::Error;
 
 #[derive(Debug, Subcommand)]

@@ -49,6 +49,7 @@ pub fn cfstr(val: &str) -> CFStringRef {
   }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn from_cfstr(val: CFStringRef) -> String {
   unsafe {
     let mut buf = Vec::with_capacity(128);
@@ -59,6 +60,7 @@ pub fn from_cfstr(val: CFStringRef) -> String {
   }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn cfdict_keys(dict: CFDictionaryRef) -> Vec<String> {
   unsafe {
     let count = CFDictionaryGetCount(dict) as usize;
@@ -72,6 +74,7 @@ pub fn cfdict_keys(dict: CFDictionaryRef) -> Vec<String> {
   }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn cfdict_get_val(dict: CFDictionaryRef, key: &str) -> Option<CFTypeRef> {
   unsafe {
     let key = cfstr(key);
@@ -159,6 +162,7 @@ pub fn cfio_get_props(entry: u32, name: String) -> WithError<CFDictionaryRef> {
   }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   let count = unsafe { IOReportStateGetCount(item) };
   let mut res = vec![];
@@ -172,6 +176,7 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   res
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithError<f32> {
   let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f32;
   let val = val / (duration as f32 / 1000.0);
@@ -421,7 +426,9 @@ fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
     clusters.push((chunk[1], format!("voltage-states{}-sram", chunk[0])));
   }
   clusters.sort_by_key(|c| c.0);
-  if clusters.len() < 2 { return None; }
+  if clusters.len() < 2 {
+    return None;
+  }
   let ecpu_key = clusters[clusters.len() - 2].1.clone();
   let pcpu_key = clusters.last()?.1.clone();
   Some((ecpu_key, pcpu_key))
@@ -432,7 +439,9 @@ fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
   let obj = cfdict_get_val(dict, "acc-clusters")? as CFDataRef;
 
   let len = unsafe { CFDataGetLength(obj) } as usize;
-  if len < 8 { return None; }
+  if len < 8 {
+    return None;
+  }
 
   let mut data = vec![0u8; len];
   unsafe { CFDataGetBytes(obj, CFRange::init(0, len as _), data.as_mut_ptr()) };
@@ -455,25 +464,29 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
-// Parse "proc T:P:E" (macOS 15) or "proc T:P_or_S:E:M" (macOS 26+) into (ecpu, pcpu, has_mcpu).
-// macOS 26 always uses 4 fields regardless of chip; the 4th field (M-cores) is >0 only on M5+.
-fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
-  let fields: Vec<u64> = s
-    .strip_prefix("proc ")
-    .unwrap_or("")
-    .split(':')
-    .map(|x| x.parse().unwrap_or(0))
-    .collect();
+// Try known voltage-states key (M1-M4) first, fall back to acc-clusters discovery (M5+).
+fn cpu_freqs(item: CFDictionaryRef, key: &str, is_ecpu: bool, scale: u32) -> Option<Vec<u32>> {
+  if let Some((_, freqs)) = get_dvfs_mhz(item, key) {
+    return Some(to_mhz(freqs, scale));
+  }
+  let (ecpu_key, pcpu_key) = parse_acc_clusters_from(item)?;
+  let key = if is_ecpu { ecpu_key } else { pcpu_key };
+  let (_, freqs) = get_dvfs_mhz(item, &key)?;
+  Some(to_mhz(freqs, scale))
+}
 
-  match fields.len() {
+// Parse "proc T:P:E" (macOS 15) or "proc T:P_or_S:E:M" (macOS 26+) into (ecpu, pcpu, has_mcpu).
+// macOS 26 always uses 4 fields; M5+ has M>0 (ecpu=M, pcpu=S), M1-M4 has M=0 (ecpu=E, pcpu=P).
+fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
+  let procs = s.strip_prefix("proc ").unwrap_or("");
+  let parts: Vec<u64> = procs.split(':').map(|x| x.parse().unwrap_or(0)).collect();
+
+  match parts.len() {
     4 => {
-      // macOS 26+: "proc total:P_or_S:E:M"
-      // M5+:   E=0, M>0 → ecpu=M (Performance cores), pcpu=S (Super cores)
-      // M1-M4: M=0, E>0 → ecpu=E (Efficiency cores), pcpu=P (Performance cores)
-      let (e, m) = (fields[2], fields[3]);
-      if m > 0 { (m, fields[1], true) } else { (e, fields[1], false) }
+      let (e, m) = (parts[2], parts[3]);
+      if m > 0 { (m, parts[1], true) } else { (e, parts[1], false) }
     }
-    3 => (fields[2], fields[1], false), // macOS 15: "proc total:P:E"
+    3 => (parts[2], parts[1], false), // macOS 15: "proc total:P:E"
     _ => (0, 0, false),
   }
 }
@@ -483,29 +496,25 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   let mut info = SocInfo::default();
 
   // SPHardwareDataType.0.chip_type
-  let chip_name =
-    out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap_or("Unknown chip").to_string();
+  let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str();
+  let chip_name = chip_name.unwrap_or("Unknown chip").to_string();
 
   // SPHardwareDataType.0.machine_model
-  let mac_model =
-    out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap_or("Unknown model").to_string();
+  let mac_model = out["SPHardwareDataType"][0]["machine_model"].as_str();
+  let mac_model = mac_model.unwrap_or("Unknown model").to_string();
 
   // SPHardwareDataType.0.physical_memory -> "x GB"
-  let mem_gb = out["SPHardwareDataType"][0]["physical_memory"]
-    .as_str()
-    .and_then(|mem| mem.strip_suffix(" GB"))
-    .unwrap_or("0")
-    .parse::<u64>()
-    .unwrap_or(0);
+  let mem_gb = out["SPHardwareDataType"][0]["physical_memory"].as_str();
+  let mem_gb = mem_gb.and_then(|x| x.strip_suffix(" GB")).and_then(|x| x.parse::<u64>().ok());
+  let mem_gb = mem_gb.unwrap_or(0);
 
   // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc x:y:z:w"
-  let number_processors =
-    out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap_or("");
+  let number_processors = out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap_or("");
   let (ecpu_cores, pcpu_cores, has_mcpu) = parse_cpu_cores(number_processors);
 
   // SPDisplaysDataType.0.sppci_cores
-  let gpu_cores =
-    out["SPDisplaysDataType"][0]["sppci_cores"].as_str().unwrap_or("0").parse::<u64>().unwrap_or(0);
+  let gpu_cores = out["SPDisplaysDataType"][0]["sppci_cores"].as_str();
+  let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
   // Determine scaling based on chip type
   let before_m4 = chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
@@ -529,21 +538,13 @@ pub fn get_soc_info() -> WithError<SocInfo> {
       // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
       //    but their values are zero, so sram used here; it looks valid.
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
-      // Try legacy keys first (M1-M4), fall back to acc-clusters discovery (M5+)
-      if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states1-sram") {
-        info.ecpu_freqs = to_mhz(freqs, cpu_scale);
-      } else if let Some((ecpu_key, _)) = parse_acc_clusters_from(item) {
-        if let Some((_, freqs)) = get_dvfs_mhz(item, &ecpu_key) {
-          info.ecpu_freqs = to_mhz(freqs, cpu_scale);
-        }
+      if let Some(f) = cpu_freqs(item, "voltage-states1-sram", true, cpu_scale) {
+        info.ecpu_freqs = f;
       }
-      if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states5-sram") {
-        info.pcpu_freqs = to_mhz(freqs, cpu_scale);
-      } else if let Some((_, pcpu_key)) = parse_acc_clusters_from(item) {
-        if let Some((_, freqs)) = get_dvfs_mhz(item, &pcpu_key) {
-          info.pcpu_freqs = to_mhz(freqs, cpu_scale);
-        }
+      if let Some(f) = cpu_freqs(item, "voltage-states5-sram", false, cpu_scale) {
+        info.pcpu_freqs = f;
       }
+
       if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states9") {
         info.gpu_freqs = to_mhz(freqs, gpu_scale);
       }
@@ -677,8 +678,8 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      if self.prev.is_some() {
-        CFRelease(self.prev.unwrap().0 as _);
+      if let Some(prev) = self.prev {
+        CFRelease(prev.0 as _);
       }
     }
   }
@@ -989,6 +990,7 @@ mod tests {
   #[test]
   fn parse_acc_clusters_m5_max() {
     // Real acc-clusters bytes captured from M5 Max via ioreg
+    #[rustfmt::skip]
     let data = [
       0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
       0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

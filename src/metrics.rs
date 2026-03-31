@@ -112,7 +112,9 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
 
     match name {
       // "Tp" – performance cores, "Te" – efficiency cores, "Ts" – super cores (M5+)
-      name if name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts") => cpu_sensors.push(name.clone()),
+      name if name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts") => {
+        cpu_sensors.push(name.clone())
+      }
       name if name.starts_with("Tg") => gpu_sensors.push(name.clone()),
       _ => (),
     }

@@ -368,8 +368,10 @@ impl App {
     let label_l = format!(
       "{} ({}{}+{}{}+{}GPU {}GB)",
       self.soc.chip_name,
-      self.soc.ecpu_cores, self.soc.ecpu_label,
-      self.soc.pcpu_cores, self.soc.pcpu_label,
+      self.soc.ecpu_cores,
+      self.soc.ecpu_label,
+      self.soc.pcpu_cores,
+      self.soc.pcpu_label,
       self.soc.gpu_cores,
       self.soc.memory_gb,
     );
