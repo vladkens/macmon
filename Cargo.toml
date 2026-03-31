@@ -10,6 +10,14 @@ readme = "readme.md"
 keywords = ["macos", "monitoring", "performance", "cli"]
 categories = ["command-line-utilities", "hardware-support"]
 
+[lib]
+name = "macmon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "macmon"
+path = "src/main.rs"
+
 [lints.rust]
 non_camel_case_types = "allow"
 unreachable_code = "allow"
