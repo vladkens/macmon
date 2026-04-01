@@ -1,11 +1,11 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 
 use macmon::{Metrics, SocInfo};
 
-pub type SharedMetrics = Arc<Mutex<Option<Metrics>>>;
+pub type SharedMetrics = Arc<RwLock<Option<Metrics>>>;
 
 #[rustfmt::skip]
 fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
@@ -82,7 +82,12 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
     None => return,
   };
 
-  let lock = shared.lock().unwrap();
+  if path == "/" {
+    write_response(&mut stream, 200, "application/json", r#"{}"#.to_string());
+    return;
+  }
+
+  let lock = shared.read().unwrap();
 
   let Some(m) = lock.as_ref() else {
     drop(lock);

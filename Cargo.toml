@@ -9,6 +9,7 @@ repository = "https://github.com/vladkens/macmon"
 homepage = "https://github.com/vladkens/macmon"
 documentation = "https://docs.rs/macmon"
 readme = "readme.md"
+include = ["src/**", "Cargo.toml", "Cargo.lock", "LICENSE", "readme.md"]
 keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
 categories = ["command-line-utilities", "hardware-support", "visualization"]
 [package.metadata.docs.rs]

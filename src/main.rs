@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
 use macmon::{App, Sampler, debug};
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 
 mod serve;
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
       let mut sampler = Sampler::new()?;
       let soc = Arc::new(sampler.get_soc_info().clone());
-      let shared: serve::SharedMetrics = Arc::new(Mutex::new(None));
+      let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
 
       let shared_http = Arc::clone(&shared);
       let soc_http = Arc::clone(&soc);
@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
       loop {
         match sampler.get_metrics(args.interval.max(100)) {
-          Ok(m) => *shared.lock().unwrap() = Some(m),
+          Ok(m) => *shared.write().unwrap() = Some(m),
           Err(e) => eprintln!("sampling error: {e}"),
         }
       }

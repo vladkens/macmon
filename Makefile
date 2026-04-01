@@ -1,4 +1,4 @@
-.PHONY: fmt lint build update
+.PHONY: fmt lint build update publish-check
 
 lint:
 	cargo fmt --check
@@ -15,3 +15,7 @@ build:
 update:
 	@# cargo install cargo-edit
 	cargo upgrade -i
+
+publish-check:
+	cargo package --list --allow-dirty
+	cargo publish --dry-run --allow-dirty
