@@ -1,0 +1,19 @@
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title format
+        run: |
+          title="${{ github.event.pull_request.title }}"
+          if ! echo "$title" | grep -qP '^(feat|fix|chore|docs|refactor|perf|test|ci)(\(.+\))?: .+'; then
+            echo "PR title must follow conventional commits format."
+            echo "Examples: 'feat: add new feature', 'fix: resolve crash'"
+            echo "Got: $title"
+            exit 1
+          fi
