@@ -12,6 +12,8 @@
   "editor.formatOnSave": true,
   "files.exclude": {
     ".claude": true,
-    "Cargo.lock": true
+    "Cargo.lock": true,
+    "LICENSE": true,
+    "target": true
   }
 }

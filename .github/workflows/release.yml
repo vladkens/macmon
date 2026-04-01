@@ -26,26 +26,37 @@ jobs:
       - run: cargo fmt --check
       - run: cargo build --release --locked
 
-      - name: check version
+      - name: Check Cargo.toml version matches tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          CARGO_VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "Error: tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}"
+            exit 1
+          fi
+
+      - name: Check binary version matches tag
         run: ./target/release/macmon -V | grep "${GITHUB_REF_NAME#v}" || exit 1
 
-      - name: archiving
-        id: archive
+      - name: Archiving
         run: |
           cp target/release/macmon macmon
           tar czf macmon-${{ github.ref_name }}.tar.gz readme.md LICENSE macmon
           ls -lah | grep macmon
 
-      - name: Generate a changelog
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        id: git-cliff
-        uses: orhun/git-cliff-action@v4
-        with:
-          args: --latest
+      - name: Extract changelog entry
+        run: |
+          VERSION="${{ github.ref_name }}"
+          NOTES=$(awk "/^## ${VERSION}/{found=1; next} /^## /{found=0} found" changelog.md | sed '/^---$/d')
+          if [ -z "$NOTES" ]; then
+            echo "Error: no changelog entry found for ${VERSION}"
+            exit 1
+          fi
+          echo "$NOTES" > release_notes.txt
 
       - uses: softprops/action-gh-release@v2
         with:
-          body: ${{ steps.git-cliff.outputs.content }}
+          body_path: release_notes.txt
           files: macmon-${{ github.ref_name }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

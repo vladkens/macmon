@@ -214,6 +214,41 @@ macmon_cpu_usage_ratio{chip="Apple M3 Pro"} 0.037
 macmon_ecpu_usage_ratio{chip="Apple M3 Pro"} 0.083
 ```
 
+## 📚 Library Usage
+
+`macmon` can be used as a Rust library to collect Apple Silicon metrics in your own applications.
+
+Add it to your `Cargo.toml`:
+
+```toml
+[dependencies]
+macmon = { git = "https://github.com/vladkens/macmon" }
+```
+
+Then use the `Sampler` to collect metrics:
+
+```rust
+use macmon::Sampler;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sampler = Sampler::new()?;
+
+    // collect metrics over a 1000ms window
+    let metrics = sampler.get_metrics(1000)?;
+
+    println!("CPU power:  {:.2} W", metrics.cpu_power);
+    println!("GPU power:  {:.2} W", metrics.gpu_power);
+    println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
+    println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
+    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_usage.0, metrics.ecpu_usage.1 * 100.0);
+    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_usage.0, metrics.pcpu_usage.1 * 100.0);
+
+    Ok(())
+}
+```
+
+The `get_metrics(duration_ms)` call blocks for `duration_ms` milliseconds while sampling the hardware counters and returns a single averaged [`Metrics`](src/metrics.rs) snapshot.
+
 ## 📦 Build from Source
 
 1. Install [Rust toolchain](https://www.rust-lang.org/tools/install)

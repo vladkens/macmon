@@ -1,14 +1,18 @@
 [package]
 name = "macmon"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
-description = "Sudoless performance monitoring CLI tool for Apple Silicon processors"
+description = "Apple Silicon system monitor & Rust library — CPU/GPU power, temperature, RAM. No sudo. TUI, JSON pipe, Prometheus exporter."
 authors = ["vladkens"]
 license = "MIT"
 repository = "https://github.com/vladkens/macmon"
+homepage = "https://github.com/vladkens/macmon"
+documentation = "https://docs.rs/macmon"
 readme = "readme.md"
-keywords = ["macos", "monitoring", "performance", "cli"]
-categories = ["command-line-utilities", "hardware-support"]
+keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
+categories = ["command-line-utilities", "hardware-support", "visualization"]
+[package.metadata.docs.rs]
+targets = ["aarch64-apple-darwin"]
 
 [lib]
 name = "macmon"

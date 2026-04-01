@@ -1,5 +1,6 @@
-.DS_Store
-/target
-/internal
 __handlers__/
+.claude/
+.DS_Store
+internal/
 samples/
+target/
