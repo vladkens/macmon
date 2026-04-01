@@ -167,6 +167,25 @@ scrape_configs:
       - targets: ["localhost:9090"]
 ```
 
+For a ready-to-run local example with Prometheus + Grafana, see [`example-grafana`](example-grafana):
+
+```sh
+macmon serve --port 9090
+cd example-grafana
+docker compose up -d
+```
+
+This example provisions:
+
+- Prometheus on `http://localhost:9091`
+- Grafana on `http://localhost:9000`
+- a prebuilt `Macmon Overview` dashboard
+
+Grafana login:
+
+- username: `macmon`
+- password: `macmon`
+
 Then import or build a Grafana dashboard querying metrics such as:
 
 ```

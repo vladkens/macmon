@@ -1,0 +1,26 @@
+name: macmon
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "9000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: macmon
+      GF_SECURITY_ADMIN_PASSWORD: macmon
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/macmon-overview.json
+    volumes:
+      - ./grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yaml:ro
+      - ./grafana-dashboard-provider.yml:/etc/grafana/provisioning/dashboards/macmon.yaml:ro
+      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/macmon-overview.json:ro
+    restart: unless-stopped
