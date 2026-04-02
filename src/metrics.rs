@@ -34,8 +34,8 @@ pub struct Metrics {
   pub memory: MemMetrics,
   pub ecpu_usage: (u32, f32), // cluster aggregate: freq, percent_from_max
   pub pcpu_usage: (u32, f32), // cluster aggregate: freq, percent_from_max
-  pub ecpu_cores: Vec<(u32, f32)>, // per-core: freq, percent_from_max
-  pub pcpu_cores: Vec<(u32, f32)>, // per-core: freq, percent_from_max
+  pub ecpu_core_usages: Vec<(u32, f32)>, // per-core: freq, percent_from_max
+  pub pcpu_core_usages: Vec<(u32, f32)>, // per-core: freq, percent_from_max
   pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
   pub gpu_usage: (u32, f32),  // freq, percent_from_max
   pub cpu_power: f32,         // Watts
@@ -310,27 +310,33 @@ impl Sampler {
       // Convert HashMap to Vec, sorted by core ID for consistent ordering
       let mut ecpu_usages: Vec<(usize, (u32, f32))> = ecpu_map.into_iter().collect();
       ecpu_usages.sort_by_key(|&(id, _)| id);
-      rs.ecpu_cores = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+      rs.ecpu_core_usages = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
 
       let mut pcpu_usages: Vec<(usize, (u32, f32))> = pcpu_map.into_iter().collect();
       pcpu_usages.sort_by_key(|&(id, _)| id);
-      rs.pcpu_cores = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+      rs.pcpu_core_usages = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
 
       results.push(rs);
     }
 
     // Average across samples for each core
-    let ecpu_core_count = results.first().map(|r| r.ecpu_cores.len()).unwrap_or(0);
-    let pcpu_core_count = results.first().map(|r| r.pcpu_cores.len()).unwrap_or(0);
+    let ecpu_core_count = results.first().map(|r| r.ecpu_core_usages.len()).unwrap_or(0);
+    let pcpu_core_count = results.first().map(|r| r.pcpu_core_usages.len()).unwrap_or(0);
 
     let mut ecpu_avg = Vec::with_capacity(ecpu_core_count);
     for core_idx in 0..ecpu_core_count {
       let avg_freq = zero_div(
-        results.iter().map(|r| r.ecpu_cores.get(core_idx).map(|x| x.0).unwrap_or(0)).sum::<u32>(),
+        results
+          .iter()
+          .map(|r| r.ecpu_core_usages.get(core_idx).map(|x| x.0).unwrap_or(0))
+          .sum::<u32>(),
         measures as u32,
       );
       let avg_perc = zero_div(
-        results.iter().map(|r| r.ecpu_cores.get(core_idx).map(|x| x.1).unwrap_or(0.0)).sum::<f32>(),
+        results
+          .iter()
+          .map(|r| r.ecpu_core_usages.get(core_idx).map(|x| x.1).unwrap_or(0.0))
+          .sum::<f32>(),
         measures as f32,
       );
       ecpu_avg.push((avg_freq, avg_perc));
@@ -339,11 +345,17 @@ impl Sampler {
     let mut pcpu_avg = Vec::with_capacity(pcpu_core_count);
     for core_idx in 0..pcpu_core_count {
       let avg_freq = zero_div(
-        results.iter().map(|r| r.pcpu_cores.get(core_idx).map(|x| x.0).unwrap_or(0)).sum::<u32>(),
+        results
+          .iter()
+          .map(|r| r.pcpu_core_usages.get(core_idx).map(|x| x.0).unwrap_or(0))
+          .sum::<u32>(),
         measures as u32,
       );
       let avg_perc = zero_div(
-        results.iter().map(|r| r.pcpu_cores.get(core_idx).map(|x| x.1).unwrap_or(0.0)).sum::<f32>(),
+        results
+          .iter()
+          .map(|r| r.pcpu_core_usages.get(core_idx).map(|x| x.1).unwrap_or(0.0))
+          .sum::<f32>(),
         measures as f32,
       );
       pcpu_avg.push((avg_freq, avg_perc));
@@ -375,8 +387,8 @@ impl Sampler {
     let mut rs = Metrics {
       ecpu_usage: (ecpu_avg_freq, ecpu_avg_pct),
       pcpu_usage: (pcpu_avg_freq, pcpu_avg_pct),
-      ecpu_cores: ecpu_avg,
-      pcpu_cores: pcpu_avg,
+      ecpu_core_usages: ecpu_avg,
+      pcpu_core_usages: pcpu_avg,
       cpu_usage_pct,
       gpu_usage: (gpu_usage_freq, gpu_usage_pct),
       cpu_power,
