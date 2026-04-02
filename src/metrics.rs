@@ -1,5 +1,6 @@
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
+use std::collections::HashMap;
 
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram, libc_swap,
@@ -33,15 +34,15 @@ pub struct Metrics {
   pub memory: MemMetrics,
   pub ecpu_usage: Vec<(u32, f32)>, // per-core: freq, percent_from_max
   pub pcpu_usage: Vec<(u32, f32)>, // per-core: freq, percent_from_max
-  pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
-  pub gpu_usage: (u32, f32),  // freq, percent_from_max
-  pub cpu_power: f32,         // Watts
-  pub gpu_power: f32,         // Watts
-  pub ane_power: f32,         // Watts
-  pub all_power: f32,         // Watts
-  pub sys_power: f32,         // Watts
-  pub ram_power: f32,         // Watts
-  pub gpu_ram_power: f32,     // Watts
+  pub cpu_usage_pct: f32,          // combined ecpu+pcpu usage, weighted by core count
+  pub gpu_usage: (u32, f32),       // freq, percent_from_max
+  pub cpu_power: f32,              // Watts
+  pub gpu_power: f32,              // Watts
+  pub ane_power: f32,              // Watts
+  pub all_power: f32,              // Watts
+  pub sys_power: f32,              // Watts
+  pub ram_power: f32,              // Watts
+  pub gpu_ram_power: f32,          // Watts
 }
 
 // MARK: Helpers
@@ -75,6 +76,17 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
 
   (avg_freq as u32, from_max as f32)
+}
+
+// Extract core ID from channel name (e.g., "ECPU0" -> Some(0), "PCPU12" -> Some(12))
+fn parse_core_id(channel: &str) -> Option<usize> {
+  channel
+    .chars()
+    .skip_while(|c| !c.is_ascii_digit())
+    .take_while(|c| c.is_ascii_digit())
+    .collect::<String>()
+    .parse::<usize>()
+    .ok()
 }
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
@@ -239,19 +251,35 @@ impl Sampler {
     // do several samples to smooth metrics
     // see: https://github.com/vladkens/macmon/issues/10
     for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
-      let mut ecpu_usages = Vec::new();
-      let mut pcpu_usages = Vec::new();
+      // Use HashMap to explicitly map core ID -> metrics
+      let mut ecpu_map: HashMap<usize, (u32, f32)> = HashMap::new();
+      let mut pcpu_map: HashMap<usize, (u32, f32)> = HashMap::new();
       let mut rs = Metrics::default();
 
       for x in sample {
         if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          if x.channel.contains("PCPU") {
-            pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
+          // Parse core ID from channel name for robust indexing
+          let core_id = match parse_core_id(&x.channel) {
+            Some(id) => id,
+            None => continue, // Skip if we can't parse the core ID
+          };
+
+          if x.channel.starts_with("PCPU") {
+            let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
+            // Only include active cores (filter dead/disabled cores)
+            if metrics.1 > 0.0 {
+              pcpu_map.insert(core_id, metrics);
+            }
             continue;
           }
 
-          if x.channel.contains("ECPU") || x.channel.contains("MCPU") {
-            ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
+          // ECPU on M1-M4, MCPU on M5+ (Performance cores)
+          if x.channel.starts_with("ECPU") || x.channel.starts_with("MCPU") {
+            let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
+            // Only include active cores (filter dead/disabled cores)
+            if metrics.1 > 0.0 {
+              ecpu_map.insert(core_id, metrics);
+            }
             continue;
           }
         }
@@ -277,41 +305,44 @@ impl Sampler {
         }
       }
 
-      // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
-      ecpu_usages.retain(|&(_, pct)| pct > 0.0);
-      pcpu_usages.retain(|&(_, pct)| pct > 0.0);
-      
-      rs.ecpu_usage = ecpu_usages;
-      rs.pcpu_usage = pcpu_usages;
+      // Convert HashMap to Vec, sorted by core ID for consistent ordering
+      let mut ecpu_usages: Vec<(usize, (u32, f32))> = ecpu_map.into_iter().collect();
+      ecpu_usages.sort_by_key(|&(id, _)| id);
+      rs.ecpu_usage = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+
+      let mut pcpu_usages: Vec<(usize, (u32, f32))> = pcpu_map.into_iter().collect();
+      pcpu_usages.sort_by_key(|&(id, _)| id);
+      rs.pcpu_usage = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+
       results.push(rs);
     }
 
     // Average across samples for each core
     let ecpu_core_count = results.first().map(|r| r.ecpu_usage.len()).unwrap_or(0);
     let pcpu_core_count = results.first().map(|r| r.pcpu_usage.len()).unwrap_or(0);
-    
+
     let mut ecpu_avg = Vec::with_capacity(ecpu_core_count);
     for core_idx in 0..ecpu_core_count {
       let avg_freq = zero_div(
         results.iter().map(|r| r.ecpu_usage.get(core_idx).map(|x| x.0).unwrap_or(0)).sum::<u32>(),
-        measures as u32
+        measures as u32,
       );
       let avg_perc = zero_div(
         results.iter().map(|r| r.ecpu_usage.get(core_idx).map(|x| x.1).unwrap_or(0.0)).sum::<f32>(),
-        measures as f32
+        measures as f32,
       );
       ecpu_avg.push((avg_freq, avg_perc));
     }
-    
+
     let mut pcpu_avg = Vec::with_capacity(pcpu_core_count);
     for core_idx in 0..pcpu_core_count {
       let avg_freq = zero_div(
         results.iter().map(|r| r.pcpu_usage.get(core_idx).map(|x| x.0).unwrap_or(0)).sum::<u32>(),
-        measures as u32
+        measures as u32,
       );
       let avg_perc = zero_div(
         results.iter().map(|r| r.pcpu_usage.get(core_idx).map(|x| x.1).unwrap_or(0.0)).sum::<f32>(),
-        measures as f32
+        measures as f32,
       );
       pcpu_avg.push((avg_freq, avg_perc));
     }
@@ -324,18 +355,28 @@ impl Sampler {
     let tcores = ecores + pcores;
     let cpu_usage_pct = zero_div(ecpu_total_pct + pcpu_total_pct, tcores);
 
-    let mut rs = Metrics::default();
-    rs.ecpu_usage = ecpu_avg;
-    rs.pcpu_usage = pcpu_avg;
-    rs.cpu_usage_pct = cpu_usage_pct;
-    rs.gpu_usage.0 = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
-    rs.gpu_usage.1 = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
-    rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
-    rs.gpu_power = zero_div(results.iter().map(|x| x.gpu_power).sum(), measures as _);
-    rs.ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
-    rs.ram_power = zero_div(results.iter().map(|x| x.ram_power).sum(), measures as _);
-    rs.gpu_ram_power = zero_div(results.iter().map(|x| x.gpu_ram_power).sum(), measures as _);
-    rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
+    let gpu_usage_freq = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
+    let gpu_usage_pct = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
+    let cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
+    let gpu_power = zero_div(results.iter().map(|x| x.gpu_power).sum(), measures as _);
+    let ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
+    let ram_power = zero_div(results.iter().map(|x| x.ram_power).sum(), measures as _);
+    let gpu_ram_power = zero_div(results.iter().map(|x| x.gpu_ram_power).sum(), measures as _);
+    let all_power = cpu_power + gpu_power + ane_power;
+
+    let mut rs = Metrics {
+      ecpu_usage: ecpu_avg,
+      pcpu_usage: pcpu_avg,
+      cpu_usage_pct,
+      gpu_usage: (gpu_usage_freq, gpu_usage_pct),
+      cpu_power,
+      gpu_power,
+      ane_power,
+      ram_power,
+      gpu_ram_power,
+      all_power,
+      ..Default::default()
+    };
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
