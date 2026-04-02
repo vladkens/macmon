@@ -95,7 +95,7 @@ impl MemoryStore {
   fn push(&mut self, value: MemMetrics) {
     self.items.insert(0, value.ram_usage);
     self.items.truncate(MAX_SPARKLINE);
-    
+
     self.swap_items.insert(0, value.swap_usage);
     self.swap_items.truncate(MAX_SPARKLINE);
 
@@ -154,14 +154,14 @@ fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
   if cores.is_empty() {
     return FreqStore::default();
   }
-  
+
   let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
   let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
-  
+
   // Aggregate sparkline data by averaging across cores
   let max_len = cores.iter().map(|c| c.items.len()).max().unwrap_or(0);
   let mut aggregated_items = Vec::with_capacity(max_len);
-  
+
   for i in 0..max_len {
     let mut sum = 0u64;
     let mut count = 0;
@@ -175,12 +175,8 @@ fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
       aggregated_items.push(sum / count as u64);
     }
   }
-  
-  FreqStore {
-    items: aggregated_items,
-    top_value: avg_freq,
-    usage: avg_usage,
-  }
+
+  FreqStore { items: aggregated_items, top_value: avg_freq, usage: avg_usage }
 }
 
 fn h_stack(area: Rect) -> (Rect, Rect) {
@@ -299,21 +295,21 @@ impl App {
     self.ane_power.push(data.ane_power as f64);
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
-    
+
     // Update per-core E-CPU frequencies
     for (i, &(freq, usage)) in data.ecpu_usage.iter().enumerate() {
       if i < self.ecpu_freq.len() {
         self.ecpu_freq[i].push(freq as u64, usage as f64);
       }
     }
-    
+
     // Update per-core P-CPU frequencies
     for (i, &(freq, usage)) in data.pcpu_usage.iter().enumerate() {
       if i < self.pcpu_freq.len() {
         self.pcpu_freq[i].push(freq as u64, usage as f64);
       }
     }
-    
+
     self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
@@ -395,31 +391,32 @@ impl App {
     // Calculate average usage and frequency across all cores
     let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
     let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
-    
-    let title = format!("{} {:3.0}% @ {:4.0} MHz ({} cores)", 
-                       label, avg_usage * 100.0, avg_freq, cores.len());
+
+    let title = format!(
+      "{} {:3.0}% @ {:4.0} MHz ({} cores)",
+      label,
+      avg_usage * 100.0,
+      avg_freq,
+      cores.len()
+    );
     let block = self.title_block(title.as_str(), "");
     let inner = block.inner(r);
     f.render_widget(block, r);
 
     // Create vertical layout for each core
-    let constraints: Vec<Constraint> = (0..cores.len())
-      .map(|_| Constraint::Fill(1))
-      .collect();
-    
-    let core_areas = Layout::default()
-      .direction(Direction::Vertical)
-      .constraints(constraints)
-      .split(inner);
+    let constraints: Vec<Constraint> = (0..cores.len()).map(|_| Constraint::Fill(1)).collect();
+
+    let core_areas =
+      Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
 
     // Render each core
     for (i, core) in cores.iter().enumerate() {
       if i >= core_areas.len() {
         break;
       }
-      
+
       let core_label = format!("Core {} {:3.0}%", i, core.usage * 100.0);
-      
+
       match self.cfg.view_type {
         ViewType::Sparkline => {
           let w = Sparkline::default()
@@ -427,12 +424,12 @@ impl App {
             .data(&core.items)
             .max(100)
             .style(self.cfg.color);
-          
+
           // Add a small label for the core
           let label_len = core_label.len();
           let label_span = Span::styled(core_label, Style::default().fg(self.cfg.color));
           let mut area = core_areas[i];
-          
+
           // Render core label at the start
           if area.width > label_len as u16 {
             let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
@@ -440,7 +437,7 @@ impl App {
             area.x += label_len as u16 + 1;
             area.width = area.width.saturating_sub(label_len as u16 + 1);
           }
-          
+
           f.render_widget(w, area);
         }
         ViewType::Gauge => {
@@ -515,18 +512,18 @@ impl App {
           .data(&val.items)
           .max(val.ram_total)
           .style(self.cfg.color);
-        
+
         let label_len = ram_label.len();
         let label_span = Span::styled(ram_label, Style::default().fg(self.cfg.color));
         let mut area = sections[0];
-        
+
         if area.width > label_len as u16 {
           let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
           f.render_widget(Paragraph::new(label_span), label_area);
           area.x += label_len as u16 + 1;
           area.width = area.width.saturating_sub(label_len as u16 + 1);
         }
-        
+
         f.render_widget(w, area);
       }
       ViewType::Gauge => {
@@ -548,18 +545,18 @@ impl App {
           .data(&val.swap_items)
           .max(val.swap_total.max(1)) // Avoid division by zero if no swap
           .style(self.cfg.color);
-        
+
         let label_len = swap_label.len();
         let label_span = Span::styled(swap_label, Style::default().fg(self.cfg.color));
         let mut area = sections[1];
-        
+
         if area.width > label_len as u16 {
           let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
           f.render_widget(Paragraph::new(label_span), label_area);
           area.x += label_len as u16 + 1;
           area.width = area.width.saturating_sub(label_len as u16 + 1);
         }
-        
+
         f.render_widget(w, area);
       }
       ViewType::Gauge => {
@@ -640,7 +637,10 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view, 'd' – detailed | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(
+      " 'q' – quit, 'c' – color, 'v' – view, 'd' – detailed | -/+ {}ms ",
+      self.cfg.interval
+    );
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
