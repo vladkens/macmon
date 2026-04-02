@@ -297,14 +297,14 @@ impl App {
     self.sys_power.push(data.sys_power as f64);
 
     // Update per-core E-CPU frequencies
-    for (i, &(freq, usage)) in data.ecpu_usage.iter().enumerate() {
+    for (i, &(freq, usage)) in data.ecpu_cores.iter().enumerate() {
       if i < self.ecpu_freq.len() {
         self.ecpu_freq[i].push(freq as u64, usage as f64);
       }
     }
 
     // Update per-core P-CPU frequencies
-    for (i, &(freq, usage)) in data.pcpu_usage.iter().enumerate() {
+    for (i, &(freq, usage)) in data.pcpu_cores.iter().enumerate() {
       if i < self.pcpu_freq.len() {
         self.pcpu_freq[i].push(freq as u64, usage as f64);
       }
