@@ -167,7 +167,7 @@ impl Sampler {
     for sensor in &self.smc_gpu_keys {
       let val = self.smc.read_val(sensor)?;
       let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
-      if val != 0.0 {
+      if val > 0.0 && val <= 150.0 {
         gpu_metrics.push(val);
       }
     }
