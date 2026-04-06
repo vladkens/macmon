@@ -231,6 +231,19 @@ impl Sampler {
     let measures: usize = 4;
     let mut results: Vec<Metrics> = Vec::with_capacity(measures);
 
+    // CPU Stats channel naming by chip family (see: https://github.com/vladkens/macmon/issues/47)
+    //   M1-M4:  ECPU* = efficiency cores (lower tier)
+    //           PCPU* = performance cores (top tier)
+    //   M5:     Apple renamed ECPU → MCPU in IOReport and introduced a third core tier.
+    //           Three-tier architecture (sysctl hw.perflevel{N}.name):
+    //             perflevel0 = Super       (top tier,    ex-P, PCPU* in IOReport)
+    //             perflevel1 = Performance (mid tier,    Pro/Max only, MCPU* in IOReport)
+    //             perflevel2 = Efficiency  (base M5 only, absent on Pro/Max)
+    //           M5 Max example: 6 Super + 12 Performance + 0 Efficiency = 18 total.
+    //   Ultra:  Any-generation Ultra chips prefix channels with "DIE_N_"
+    //           (e.g. "DIE_0_ECPU0"), so use contains() not starts_with() — same
+    //           pattern as Energy Model's "DIE_{}_CPU Energy".
+
     // do several samples to smooth metrics
     // see: https://github.com/vladkens/macmon/issues/10
     for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
@@ -240,13 +253,12 @@ impl Sampler {
 
       for x in sample {
         if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          if x.channel.starts_with("PCPU") {
+          if x.channel.contains("PCPU") {
             pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
             continue;
           }
 
-          // ECPU on M1-M4, MCPU on M5+ (Performance cores)
-          if x.channel.starts_with("ECPU") || x.channel.starts_with("MCPU") {
+          if x.channel.contains("ECPU") || x.channel.contains("MCPU") {
             ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
             continue;
           }
@@ -313,5 +325,35 @@ impl Sampler {
   /// Getter for the `soc` field
   pub fn get_soc_info(&self) -> &SocInfo {
     &self.soc
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn ultra_cpu_channel_matching() {
+    // On Ultra chips (M1/M2/M3 Ultra) IOReport CPU Stats channels are prefixed "DIE_N_".
+    // These should be recognised; they were with contains() in v0.6.1 but broke when
+    // ff5f058 changed to starts_with().
+    let cases = [
+      ("DIE_0_ECPU0", "ecpu"),
+      ("DIE_1_ECPU0", "ecpu"),
+      ("DIE_0_PCPU0", "pcpu"),
+      ("DIE_1_PCPU0", "pcpu"),
+      // Standard (non-Ultra) channels must still work
+      ("ECPU0", "ecpu"),
+      ("PCPU0", "pcpu"),
+      ("MCPU0", "ecpu"), // M5+ performance cores map to ecpu slot
+    ];
+    for (ch, expected) in cases {
+      let matched = if ch.contains("PCPU") {
+        "pcpu"
+      } else if ch.contains("ECPU") || ch.contains("MCPU") {
+        "ecpu"
+      } else {
+        "none"
+      };
+      assert_eq!(matched, expected, "channel {ch}");
+    }
   }
 }
