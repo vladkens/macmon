@@ -268,17 +268,14 @@ impl Sampler {
 
           if x.channel.starts_with("PCPU") {
             let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
-            // Only include active cores (filter dead/disabled cores)
-            if metrics.1 > 0.0 {
-              pcpu_map.insert(core_id, metrics);
-            }
+            pcpu_map.insert(core_id, metrics);
             continue;
           }
 
           // ECPU on M1-M4, MCPU on M5+ (Performance cores)
-          if x.channel.starts_with("ECPU") || x.channel.starts_with("MCPU") {
+          if x.channel.contains("ECPU") || x.channel.contains("MCPU") {
             let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
-            // Only include active cores (filter dead/disabled cores)
+            // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
             if metrics.1 > 0.0 {
               ecpu_map.insert(core_id, metrics);
             }
