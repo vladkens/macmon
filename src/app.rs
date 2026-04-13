@@ -11,6 +11,7 @@ use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
 use crate::metrics::{Metrics, Sampler, zero_div};
+use crate::tokens::TokenMetrics;
 use crate::{metrics::MemMetrics, sources::SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -142,6 +143,42 @@ impl TempStore {
   }
 }
 
+#[derive(Debug, Default)]
+struct TokenStore {
+  items: Vec<u64>, // total tokens at each sample point
+  input_tokens: u64,
+  output_tokens: u64,
+  cache_read_tokens: u64,
+  cache_creation_tokens: u64,
+  session_count: u32,
+  prev_total: u64,
+  rate_items: Vec<u64>, // tokens per interval (delta)
+}
+
+impl TokenStore {
+  fn push(&mut self, value: TokenMetrics) {
+    let total = value.total();
+
+    self.items.insert(0, total);
+    self.items.truncate(MAX_SPARKLINE);
+
+    // Track delta (new tokens since last sample)
+    let delta = total.saturating_sub(self.prev_total);
+    // Skip first sample (delta from 0 is meaningless)
+    if self.prev_total > 0 || !self.rate_items.is_empty() {
+      self.rate_items.insert(0, delta);
+      self.rate_items.truncate(MAX_SPARKLINE);
+    }
+    self.prev_total = total;
+
+    self.input_tokens = value.input_tokens;
+    self.output_tokens = value.output_tokens;
+    self.cache_read_tokens = value.cache_read_tokens;
+    self.cache_creation_tokens = value.cache_creation_tokens;
+    self.session_count = value.session_count;
+  }
+}
+
 // MARK: Components
 
 fn h_stack(area: Rect) -> (Rect, Rect) {
@@ -220,6 +257,16 @@ fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
   if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() }
 }
 
+fn format_tokens(n: u64) -> String {
+  if n >= 1_000_000 {
+    format!("{:.1}M", n as f64 / 1_000_000.0)
+  } else if n >= 1_000 {
+    format!("{:.1}K", n as f64 / 1_000.0)
+  } else {
+    format!("{}", n)
+  }
+}
+
 // MARK: App
 
 #[derive(Debug, Default)]
@@ -241,6 +288,8 @@ pub struct App {
   ecpu_freq: FreqStore,
   pcpu_freq: FreqStore,
   igpu_freq: FreqStore,
+
+  tokens: TokenStore,
 }
 
 impl App {
@@ -264,14 +313,14 @@ impl App {
     self.gpu_temp.push(data.temp.gpu_temp_avg);
 
     self.mem.push(data.memory);
+    self.tokens.push(data.tokens);
   }
 
-  fn title_block<'a>(&self, label_l: &str, label_r: &str) -> Block<'a> {
+  fn title_block<'a>(&self, label_l: &str, label_r: &str, color: Color) -> Block<'a> {
     let mut block = Block::new()
       .borders(Borders::ALL)
       .border_type(BorderType::Rounded)
-      .border_style(self.cfg.color)
-      // .title_style(Style::default().gray())
+      .border_style(color)
       .padding(Padding::ZERO);
 
     if !label_l.is_empty() {
@@ -285,11 +334,9 @@ impl App {
     block
   }
 
-  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
+  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32, color: Color) -> Sparkline<'a> {
     let label_l = format!(
       "{} {:.2}W ({:.2}, {:.2})",
-      // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
-      // "{} {:.2}W (~{:.2}W ^{:.2}W)",
       label,
       val.top_value,
       val.avg_value,
@@ -299,15 +346,15 @@ impl App {
     let label_r = if temp > 0.0 { format!("{:.1}°C", temp) } else { "".to_string() };
 
     Sparkline::default()
-      .block(self.title_block(label_l.as_str(), label_r.as_str()))
+      .block(self.title_block(label_l.as_str(), label_r.as_str(), color))
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
-      .style(self.cfg.color)
+      .style(color)
   }
 
-  fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
+  fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore, color: Color) {
     let label = format!("{} {:3.0}% @ {:4.0} MHz", label, val.usage * 100.0, val.top_value);
-    let block = self.title_block(label.as_str(), "");
+    let block = self.title_block(label.as_str(), "", color);
 
     match self.cfg.view_type {
       ViewType::Sparkline => {
@@ -316,14 +363,14 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(100)
-          .style(self.cfg.color);
+          .style(color);
         f.render_widget(w, r);
       }
       ViewType::Gauge => {
         let w = Gauge::default()
           .block(block)
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
+          .gauge_style(color)
+          .style(color)
           .label("")
           .ratio(val.usage);
         f.render_widget(w, r);
@@ -331,7 +378,7 @@ impl App {
     }
   }
 
-  fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
+  fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore, color: Color) {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
 
@@ -341,7 +388,7 @@ impl App {
     let label_l = format!("RAM {:4.2} / {:4.1} GB", ram_usage_gb, ram_total_gb);
     let label_r = format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb);
 
-    let block = self.title_block(label_l.as_str(), label_r.as_str());
+    let block = self.title_block(label_l.as_str(), label_r.as_str(), color);
     match self.cfg.view_type {
       ViewType::Sparkline => {
         let w = Sparkline::default()
@@ -349,19 +396,54 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(val.ram_total)
-          .style(self.cfg.color);
+          .style(color);
         f.render_widget(w, r);
       }
       ViewType::Gauge => {
         let w = Gauge::default()
           .block(block)
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
+          .gauge_style(color)
+          .style(color)
           .label("")
           .ratio(zero_div(ram_usage_gb, ram_total_gb));
         f.render_widget(w, r);
       }
     }
+  }
+
+  fn render_token_footer(&self, f: &mut Frame, area: Rect) {
+    let t = &self.tokens;
+    let total = t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_creation_tokens;
+
+    let label_l = if t.session_count > 0 {
+      format!(
+        "Claude Tokens: {}  (in: {} out: {} cache: {})",
+        format_tokens(total),
+        format_tokens(t.input_tokens),
+        format_tokens(t.output_tokens),
+        format_tokens(t.cache_read_tokens + t.cache_creation_tokens),
+      )
+    } else {
+      "Claude Tokens: no active sessions".to_string()
+    };
+
+    let label_r = if t.session_count > 0 {
+      format!("{} session{}", t.session_count, if t.session_count == 1 { "" } else { "s" })
+    } else {
+      String::new()
+    };
+
+    let color = self.cfg.color_at(7);
+    let block = self.title_block(&label_l, &label_r, color);
+    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view | -/+ {}ms ", self.cfg.interval);
+    let block = block.title_bottom(Line::from(usage).right_aligned());
+
+    let w = Sparkline::default()
+      .block(block)
+      .direction(RenderDirection::RightToLeft)
+      .data(&t.rate_items)
+      .style(color);
+    f.render_widget(w, area);
   }
 
   fn render(&mut self, f: &mut Frame) {
@@ -376,11 +458,11 @@ impl App {
 
     let rows = Layout::default()
       .direction(Direction::Vertical)
-      .constraints([Constraint::Fill(2), Constraint::Fill(1)].as_ref())
+      .constraints([Constraint::Fill(2), Constraint::Fill(1), Constraint::Length(3)].as_ref())
       .split(f.area());
 
     let brand = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    let block = self.title_block(&label_l, &brand);
+    let block = self.title_block(&label_l, &brand, self.cfg.color);
     let iarea = block.inner(rows[0]);
     f.render_widget(block, rows[0]);
 
@@ -391,13 +473,13 @@ impl App {
 
     // 1st row
     let (c1, c2) = h_stack(iarea[0]);
-    self.render_freq_block(f, c1, "E-CPU", &self.ecpu_freq);
-    self.render_freq_block(f, c2, "P-CPU", &self.pcpu_freq);
+    self.render_freq_block(f, c1, "E-CPU", &self.ecpu_freq, self.cfg.color_at(0));
+    self.render_freq_block(f, c2, "P-CPU", &self.pcpu_freq, self.cfg.color_at(1));
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
-    self.render_mem_block(f, c1, &self.mem);
-    self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
+    self.render_mem_block(f, c1, &self.mem, self.cfg.color_at(2));
+    self.render_freq_block(f, c2, "GPU", &self.igpu_freq, self.cfg.color_at(3));
 
     // 3rd row
     let label_l = format!(
@@ -415,9 +497,7 @@ impl App {
       "".to_string()
     };
 
-    let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view | -/+ {}ms ", self.cfg.interval);
-    let block = block.title_bottom(Line::from(usage).right_aligned());
+    let block = self.title_block(&label_l, &label_r, self.cfg.color);
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
 
@@ -426,9 +506,12 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
-    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
-    f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
+    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last(), self.cfg.color_at(4)), ha[0]);
+    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last(), self.cfg.color_at(5)), ha[1]);
+    f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0, self.cfg.color_at(6)), ha[2]);
+
+    // 4th row: Token usage footer
+    self.render_token_footer(f, rows[2]);
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {

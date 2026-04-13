@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::ptr::NonNull;
 use std::sync::{Mutex, OnceLock};
 
@@ -16,11 +16,14 @@ use objc2_app_kit::{
 use objc2_foundation::{NSDictionary, NSNotification, NSPoint, NSRect, NSSize, NSString};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+use crate::updater;
+
 // MARK: Global state
 
 struct PtyHandle {
   master: Box<dyn portable_pty::MasterPty + Send>,
   child: Box<dyn portable_pty::Child + Send + Sync>,
+  writer: Box<dyn std::io::Write + Send>,
 }
 
 static TERM_STATE: OnceLock<Mutex<vt100::Parser>> = OnceLock::new();
@@ -36,6 +39,7 @@ struct TrayState {
   button: *mut AnyObject,
   menu: *mut NSMenu,
   status_item: *mut NSStatusItem,
+  update_item: *mut NSMenuItem,
 }
 unsafe impl Send for TrayState {}
 unsafe impl Sync for TrayState {}
@@ -368,10 +372,11 @@ fn spawn_pty_and_reader(rows: u16, cols: u16) {
   drop(pty_pair.slave);
 
   let mut reader = pty_pair.master.try_clone_reader().expect("Failed to clone PTY reader");
+  let writer = pty_pair.master.take_writer().expect("Failed to take PTY writer");
 
   {
     let mut handle = PTY_HANDLE.get().unwrap().lock().unwrap();
-    *handle = Some(PtyHandle { master: pty_pair.master, child });
+    *handle = Some(PtyHandle { master: pty_pair.master, child, writer });
   }
 
   // Reset parser state for fresh session
@@ -439,6 +444,15 @@ fn dispatch_hide_window() {
     unsafe {
       let _: () = msg_send![ptr, performSelectorOnMainThread: sel!(orderOut:), withObject: std::ptr::null::<AnyObject>(), waitUntilDone: false];
     }
+  }
+}
+
+// MARK: PTY input
+
+fn send_pty_key(key: u8) {
+  let mut handle = PTY_HANDLE.get().unwrap().lock().unwrap();
+  if let Some(ref mut h) = *handle {
+    let _ = h.writer.write_all(&[key]);
   }
 }
 
@@ -637,6 +651,104 @@ define_class!(
             toggle_window(mtm);
         }
 
+        #[unsafe(method(changeColor:))]
+        fn change_color(&self, _sender: *mut AnyObject) {
+            send_pty_key(b'c');
+        }
+
+        #[unsafe(method(changeView:))]
+        fn change_view(&self, _sender: *mut AnyObject) {
+            send_pty_key(b'v');
+        }
+
+        #[unsafe(method(incInterval:))]
+        fn inc_interval(&self, _sender: *mut AnyObject) {
+            send_pty_key(b'+');
+        }
+
+        #[unsafe(method(decInterval:))]
+        fn dec_interval(&self, _sender: *mut AnyObject) {
+            send_pty_key(b'-');
+        }
+
+        #[unsafe(method(applyUpdateMenu:))]
+        fn apply_update_menu(&self, _sender: *mut AnyObject) {
+            let pending = {
+                let mut p = get_pending_menu_update().lock().unwrap();
+                p.take()
+            };
+            if let Some((title, switch_action)) = pending {
+                let tray = TRAY.get().unwrap().lock().unwrap();
+                let item_ptr = tray.update_item;
+                if item_ptr.is_null() {
+                    return;
+                }
+                let ns_title = NSString::from_str(&title);
+                unsafe {
+                    let _: () = msg_send![item_ptr, setTitle: &*ns_title];
+                    if switch_action {
+                        let _: () = msg_send![item_ptr, setAction: sel!(installUpdate:)];
+                    }
+                }
+            }
+        }
+
+        #[unsafe(method(restartApp:))]
+        fn restart_app(&self, _sender: *mut AnyObject) {
+            kill_pty_child();
+            let exe = std::env::current_exe().expect("can't find current exe");
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.arg("tray");
+            cmd.env("_MACMON_TRAY_BG", "1");
+            cmd.stdin(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+            let _ = cmd.spawn();
+            let mtm = MainThreadMarker::new().expect("restart must be on main thread");
+            let app = NSApplication::sharedApplication(mtm);
+            app.terminate(None);
+        }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: *mut AnyObject) {
+            std::thread::spawn(|| {
+                match updater::check_for_update() {
+                    Some(info) => {
+                        {
+                            let mut state = updater::get_update_state().lock().unwrap();
+                            *state = Some(info);
+                        }
+                        update_menu_for_update();
+                    }
+                    None => {
+                        // No update — briefly show that in menu title
+                        set_update_menu_title("Up to Date");
+                    }
+                }
+            });
+        }
+
+        #[unsafe(method(installUpdate:))]
+        fn install_update(&self, _sender: *mut AnyObject) {
+            let info = {
+                let state = updater::get_update_state().lock().unwrap();
+                state.clone()
+            };
+            if let Some(info) = info {
+                set_update_menu_title("Updating...");
+                std::thread::spawn(move || {
+                    match updater::perform_update(&info) {
+                        Ok(()) => {
+                            set_update_menu_title("Updated! Restart to apply");
+                        }
+                        Err(e) => {
+                            set_update_menu_title(&format!("Update failed: {}", e));
+                        }
+                    }
+                });
+            }
+        }
+
         #[unsafe(method(quitApp:))]
         fn quit_app(&self, _sender: *mut AnyObject) {
             kill_pty_child();
@@ -651,6 +763,56 @@ impl TrayDelegate {
   fn new() -> Retained<Self> {
     let this = Self::alloc().set_ivars(());
     unsafe { msg_send![super(this), init] }
+  }
+}
+
+// MARK: Update menu helpers
+
+/// Pending update menu state, applied on the main thread.
+static PENDING_MENU_UPDATE: OnceLock<Mutex<Option<(String, bool)>>> = OnceLock::new();
+
+fn get_pending_menu_update() -> &'static Mutex<Option<(String, bool)>> {
+  PENDING_MENU_UPDATE.get_or_init(|| Mutex::new(None))
+}
+
+/// Store the delegate pointer (as usize) for main-thread callbacks.
+static DELEGATE_PTR: OnceLock<Mutex<usize>> = OnceLock::new();
+
+fn get_delegate_ptr() -> &'static Mutex<usize> {
+  DELEGATE_PTR.get_or_init(|| Mutex::new(0))
+}
+
+/// Queue a title change for the update menu item, dispatched to main thread.
+fn set_update_menu_title(title: &str) {
+  {
+    let mut pending = get_pending_menu_update().lock().unwrap();
+    *pending = Some((title.to_string(), false));
+  }
+  dispatch_apply_update_menu();
+}
+
+fn update_menu_for_update() {
+  let info = {
+    let state = updater::get_update_state().lock().unwrap();
+    state.clone()
+  };
+  if let Some(info) = info {
+    {
+      let mut pending = get_pending_menu_update().lock().unwrap();
+      *pending = Some((format!("Update to {} ...", info.latest_version), true));
+    }
+    dispatch_apply_update_menu();
+  }
+}
+
+fn dispatch_apply_update_menu() {
+  let addr = *get_delegate_ptr().lock().unwrap();
+  if addr == 0 {
+    return;
+  }
+  let ptr = addr as *mut AnyObject;
+  unsafe {
+    let _: () = msg_send![ptr, performSelectorOnMainThread: sel!(applyUpdateMenu:), withObject: std::ptr::null::<AnyObject>(), waitUntilDone: false];
   }
 }
 
@@ -677,6 +839,7 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
       button: std::ptr::null_mut(),
       menu: std::ptr::null_mut(),
       status_item: std::ptr::null_mut(),
+      update_item: std::ptr::null_mut(),
     })
   });
   TERM_STATE.get_or_init(|| Mutex::new(vt100::Parser::new(24, 80, 0)));
@@ -713,6 +876,12 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
   let target: &AnyObject =
     unsafe { &*(delegate.as_ref() as *const TrayDelegate as *const AnyObject) };
 
+  // Store delegate pointer for main-thread dispatch from background threads
+  {
+    let mut dp = get_delegate_ptr().lock().unwrap();
+    *dp = target as *const AnyObject as usize;
+  }
+
   if let Some(button) = status_item.button(mtm) {
     unsafe {
       button.setTarget(Some(target));
@@ -720,8 +889,78 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
     }
   }
 
-  // Build right-click menu (Quit only — toggle is handled by left-click)
+  // Build right-click menu with all controls
   let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(""));
+
+  let color_item = unsafe {
+    NSMenuItem::initWithTitle_action_keyEquivalent(
+      mtm.alloc(),
+      &NSString::from_str("Change Color"),
+      Some(sel!(changeColor:)),
+      &NSString::from_str("c"),
+    )
+  };
+  unsafe { color_item.setTarget(Some(target)) };
+  menu.addItem(&color_item);
+
+  let view_item = unsafe {
+    NSMenuItem::initWithTitle_action_keyEquivalent(
+      mtm.alloc(),
+      &NSString::from_str("Change View"),
+      Some(sel!(changeView:)),
+      &NSString::from_str("v"),
+    )
+  };
+  unsafe { view_item.setTarget(Some(target)) };
+  menu.addItem(&view_item);
+
+  menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+  let inc_item = unsafe {
+    NSMenuItem::initWithTitle_action_keyEquivalent(
+      mtm.alloc(),
+      &NSString::from_str("Increase Interval"),
+      Some(sel!(incInterval:)),
+      &NSString::from_str("+"),
+    )
+  };
+  unsafe { inc_item.setTarget(Some(target)) };
+  menu.addItem(&inc_item);
+
+  let dec_item = unsafe {
+    NSMenuItem::initWithTitle_action_keyEquivalent(
+      mtm.alloc(),
+      &NSString::from_str("Decrease Interval"),
+      Some(sel!(decInterval:)),
+      &NSString::from_str("-"),
+    )
+  };
+  unsafe { dec_item.setTarget(Some(target)) };
+  menu.addItem(&dec_item);
+
+  menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+  let update_item = unsafe {
+    NSMenuItem::initWithTitle_action_keyEquivalent(
+      mtm.alloc(),
+      &NSString::from_str("Check for Updates"),
+      Some(sel!(checkForUpdates:)),
+      &NSString::from_str(""),
+    )
+  };
+  unsafe { update_item.setTarget(Some(target)) };
+  menu.addItem(&update_item);
+
+  let restart_item = unsafe {
+    NSMenuItem::initWithTitle_action_keyEquivalent(
+      mtm.alloc(),
+      &NSString::from_str("Restart"),
+      Some(sel!(restartApp:)),
+      &NSString::from_str("r"),
+    )
+  };
+  unsafe { restart_item.setTarget(Some(target)) };
+  menu.addItem(&restart_item);
 
   let quit_item = unsafe {
     NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -739,7 +978,17 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
     let mut tray = TRAY.get().unwrap().lock().unwrap();
     tray.menu = Retained::as_ptr(&menu) as *mut NSMenu;
     tray.status_item = Retained::as_ptr(&status_item) as *mut NSStatusItem;
+    tray.update_item = Retained::as_ptr(&update_item) as *mut NSMenuItem;
   }
+
+  // Check for updates in background on launch
+  updater::check_in_background();
+  // After the check completes, the update menu item will be updated
+  std::thread::spawn(|| {
+    // Wait for the background check to finish, then update menu
+    std::thread::sleep(std::time::Duration::from_secs(12));
+    update_menu_for_update();
+  });
 
   // Right-click event monitor: temporarily set the menu on the status item
   // so macOS shows it, then remove it so left-click fires the action again.
@@ -769,6 +1018,7 @@ pub fn run_tray() -> Result<(), Box<dyn Error>> {
   std::mem::forget(delegate);
   std::mem::forget(status_item);
   std::mem::forget(menu);
+  std::mem::forget(update_item);
   std::mem::forget(monitor);
 
   app.run();

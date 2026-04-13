@@ -3,7 +3,9 @@ mod config;
 mod debug;
 mod metrics;
 mod sources;
+mod tokens;
 mod tray;
+mod updater;
 
 use app::App;
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};

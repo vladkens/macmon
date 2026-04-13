@@ -2,7 +2,7 @@ use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;
 
-const COLORS_OPTIONS: [Color; 7] =
+pub const COLORS: [Color; 7] =
   [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -17,7 +17,7 @@ pub struct Config {
   #[serde_inline_default(ViewType::Sparkline)]
   pub view_type: ViewType,
 
-  #[serde_inline_default(COLORS_OPTIONS[0])]
+  #[serde_inline_default(COLORS[0])]
   pub color: Color,
 
   #[serde_inline_default(1000)]
@@ -68,10 +68,18 @@ impl Config {
     }
   }
 
+  pub fn color_index(&self) -> usize {
+    COLORS.iter().position(|&c| c == self.color).unwrap_or(0)
+  }
+
+  pub fn color_at(&self, offset: usize) -> Color {
+    COLORS[(self.color_index() + offset) % COLORS.len()]
+  }
+
   pub fn next_color(&mut self) {
-    self.color = match COLORS_OPTIONS.iter().position(|&c| c == self.color) {
-      Some(idx) => COLORS_OPTIONS[(idx + 1) % COLORS_OPTIONS.len()],
-      None => COLORS_OPTIONS[0],
+    self.color = match COLORS.iter().position(|&c| c == self.color) {
+      Some(idx) => COLORS[(idx + 1) % COLORS.len()],
+      None => COLORS[0],
     };
     self.save();
   }

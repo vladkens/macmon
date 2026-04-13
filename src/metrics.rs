@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram, libc_swap,
 };
+use crate::tokens::{TokenMetrics, TokenReader};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -41,6 +42,8 @@ pub struct Metrics {
   pub sys_power: f32,         // Watts
   pub ram_power: f32,         // Watts
   pub gpu_ram_power: f32,     // Watts
+  #[serde(skip)]
+  pub tokens: TokenMetrics,
 }
 
 // MARK: Helpers
@@ -131,6 +134,7 @@ pub struct Sampler {
   smc: SMC,
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
+  token_reader: TokenReader,
 }
 
 impl Sampler {
@@ -147,7 +151,8 @@ impl Sampler {
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
 
-    Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys })
+    let token_reader = TokenReader::new();
+    Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys, token_reader })
   }
 
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
@@ -293,6 +298,8 @@ impl Sampler {
       Ok(val) => val.max(rs.all_power),
       Err(_) => 0.0,
     };
+
+    rs.tokens = self.token_reader.get_metrics();
 
     Ok(rs)
   }
