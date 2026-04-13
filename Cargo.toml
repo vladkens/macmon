@@ -1,6 +1,6 @@
 [package]
 name = "macmon"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "Sudoless performance monitoring CLI tool for Apple Silicon processors"
 authors = ["vladkens"]
