@@ -1,6 +1,6 @@
 [package]
 name = "macmon"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Apple Silicon system monitor & Rust library — CPU/GPU power, temperature, RAM. No sudo. TUI, JSON pipe, Prometheus exporter."
 authors = ["vladkens"]
@@ -40,9 +40,9 @@ lto = false
 
 [dependencies]
 chrono = "0.4.44"
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 core-foundation = "0.10.1"
-libc = "0.2.183"
+libc = "0.2.185"
 num-traits = "0.2.19"
 ratatui = { version = "0.30.0", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
