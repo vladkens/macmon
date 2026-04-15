@@ -378,7 +378,7 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
 pub struct SocInfo {
   pub mac_model: String,
   pub chip_name: String,
-  pub memory_gb: u8,
+  pub memory_gb: u16,
   pub ecpu_cores: u8,
   pub pcpu_cores: u8,
   pub ecpu_label: String, // "E" on M1-M4, "P" on M5+
@@ -524,7 +524,7 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   // Assign parsed values to info
   info.chip_name = chip_name;
   info.mac_model = mac_model;
-  info.memory_gb = mem_gb as u8;
+  info.memory_gb = mem_gb as u16;
   info.gpu_cores = gpu_cores as u8;
   info.ecpu_cores = ecpu_cores as u8;
   info.pcpu_cores = pcpu_cores as u8;
