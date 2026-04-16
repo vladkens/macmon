@@ -112,8 +112,20 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     "swap_total": 4294967296,         // Bytes
     "swap_usage": 2602434560          // Bytes
   },
-  "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %)
-  "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, Usage %)
+  "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %) - cluster aggregate
+  "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, Usage %) - cluster aggregate
+  "ecpu_core_usages": [               // (Frequency MHz, Usage %) for each efficiency core, experimental
+    [1600, 0.14],                     // ECPU0
+    [1700, 0.12],                     // ECPU1
+                                      // ...
+    [1650, 0.16]                      // ECPUn
+  ],
+  "pcpu_core_usages": [               // (Frequency MHz, Usage %) for each performance core, experimental
+    [2100, 0.05],                     // PCPU0
+    [2200, 0.07],                     // PCPU1
+                                      // ...
+    [2000, 0.03]                      // PCPUn
+  ],
   "cpu_usage_pct": 0.036854,          // Combined CPU usage (weighted by core count, 0–1)
   "gpu_usage": [461, 0.021497859],    // (Frequency MHz, Usage %)
   "cpu_power": 0.20486385,            // Watts
