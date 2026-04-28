@@ -200,16 +200,29 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   });
 }
 
+fn wait_until_next_sample(last_sampled_at: &mut Instant, interval: Duration) {
+  let mut now = Instant::now();
+  let elapsed = now.duration_since(*last_sampled_at);
+  if elapsed < interval {
+    std::thread::sleep(interval - elapsed);
+    now += interval - elapsed;
+  }
+  *last_sampled_at = now;
+}
+
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
 
-    // Send initial metrics
-    tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
+
+    let mut last_update_started = Instant::now();
 
     loop {
-      let msec = *msec.read().unwrap();
-      tx.send(Event::Update(sampler.get_metrics(msec).unwrap())).unwrap();
+      let interval = Duration::from_millis(*msec.read().unwrap() as u64);
+      wait_until_next_sample(&mut last_update_started, interval);
+      tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
     }
   });
 }
