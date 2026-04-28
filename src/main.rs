@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
+use macmon::config::INTERVAL_MIN;
 use macmon::{App, Sampler, debug};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
@@ -50,7 +51,7 @@ struct Cli {
   #[command(subcommand)]
   command: Option<Commands>,
 
-  /// Update interval in milliseconds
+  /// Update interval in milliseconds (minimum: 100)
   #[arg(short, long, global = true, default_value_t = 1000)]
   interval: u32,
 }
@@ -74,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
-      let interval = Duration::from_millis(args.interval.max(100) as u64);
+      let interval = Duration::from_millis(args.interval.max(INTERVAL_MIN) as u64);
       let mut last_update_started = Instant::now();
 
       loop {
@@ -104,7 +105,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
-      let interval = Duration::from_millis(args.interval.max(100) as u64);
+      let interval = Duration::from_millis(args.interval.max(INTERVAL_MIN) as u64);
       let mut last_update_started = Instant::now();
 
       let shared_http = Arc::clone(&shared);

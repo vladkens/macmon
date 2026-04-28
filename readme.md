@@ -69,13 +69,14 @@ Commands:
   help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
+  -i, --interval <INTERVAL>  Update interval in milliseconds (minimum: 100) [default: 1000]
   -h, --help                 Print help
   -V, --version              Print version
 
 Controls:
   c - change color
   v - switch charts view: gauge / sparkline
+  -/+ - change update interval in 250ms steps, from 100ms to 10000ms
   q - quit
 ```
 

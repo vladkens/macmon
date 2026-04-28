@@ -5,6 +5,11 @@ use serde_inline_default::serde_inline_default;
 const COLORS_OPTIONS: [Color; 7] =
   [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
+pub const INTERVAL_MIN: u32 = 100;
+pub const INTERVAL_TUI_MAX: u32 = 10_000;
+pub const INTERVAL_TUI_STEP: u32 = 250;
+pub const INTERVAL_INIT_SAMPLE: u32 = 100;
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum ViewType {
   Sparkline,
@@ -85,14 +90,14 @@ impl Config {
   }
 
   pub fn dec_interval(&mut self) {
-    let step = 250;
-    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(step);
+    let step = INTERVAL_TUI_STEP;
+    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(INTERVAL_MIN);
     self.save();
   }
 
   pub fn inc_interval(&mut self) {
-    let step = 250;
-    self.interval = (self.interval.saturating_add(step) / step * step).min(10_000);
+    let step = INTERVAL_TUI_STEP;
+    self.interval = (self.interval.saturating_add(step) / step * step).min(INTERVAL_TUI_MAX);
     self.save();
   }
 }

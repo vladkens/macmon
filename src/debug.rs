@@ -1,6 +1,7 @@
 use core_foundation::base::{CFRelease, CFShow};
 use std::{thread, time::Duration};
 
+use crate::config::INTERVAL_INIT_SAMPLE;
 use crate::sources::{
   IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
   cfio_get_residencies, get_dvfs_mhz, run_system_profiler,
@@ -68,7 +69,7 @@ pub fn print_debug() -> WithError<()> {
     // ("GPU Stats", Some("Temperature")), // have 256 bit values, doesn't look parseable to f32/f64
   ];
 
-  let dur = Duration::from_millis(100);
+  let dur = Duration::from_millis(INTERVAL_INIT_SAMPLE as u64);
   let mut ior = IOReport::new(channels)?;
   thread::sleep(dur);
   for x in ior.get_sample() {
