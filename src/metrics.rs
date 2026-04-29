@@ -55,13 +55,16 @@ fn is_valid_temp(val: f32) -> bool {
   val > 0.0 && val <= 150.0
 }
 
-fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
-  let items = cfio_get_residencies(item); // (ns, freq)
+fn is_active_state(name: &str) -> bool {
+  // IDLE / DOWN for CPU; OFF for GPU; DOWN only on M2?/M3 Max Chips
+  name != "IDLE" && name != "DOWN" && name != "OFF"
+}
+
+fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f32) {
   let (len1, len2) = (items.len(), freqs.len());
   assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
 
-  // IDLE / DOWN for CPU; OFF for GPU; DOWN only on M2?/M3 Max Chips
-  let offset = items.iter().position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF").unwrap();
+  let offset = items.iter().position(|x| is_active_state(x.0.as_str())).unwrap();
 
   let usage = items.iter().map(|x| x.1 as f64).skip(offset).sum::<f64>();
   let total = items.iter().map(|x| x.1 as f64).sum::<f64>();
@@ -75,6 +78,11 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
 
   let usage_ratio = zero_div(usage, total);
   (avg_freq as u32, usage_ratio as f32)
+}
+
+fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
+  let items = cfio_get_residencies(item); // (ns, freq)
+  calc_freq_from_residencies(&items, freqs)
 }
 
 fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
@@ -332,6 +340,37 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
+  use super::calc_freq_from_residencies;
+
+  #[test]
+  fn calc_freq_returns_raw_usage_ratio() {
+    let items = vec![
+      ("IDLE".to_string(), 50),
+      ("F1".to_string(), 25),
+      ("F2".to_string(), 15),
+      ("F3".to_string(), 10),
+    ];
+    let (freq, usage) = calc_freq_from_residencies(&items, &[1000, 2000, 3000]);
+
+    assert_eq!(freq, 1700);
+    assert_eq!(usage, 0.5);
+  }
+
+  #[test]
+  fn calc_freq_with_mismatched_states_matches_legacy_mapping() {
+    let items = vec![
+      ("IDLE".to_string(), 50),
+      ("S1".to_string(), 0),
+      ("S2".to_string(), 0),
+      ("S3".to_string(), 0),
+      ("S4".to_string(), 50),
+    ];
+    let (freq, usage) = calc_freq_from_residencies(&items, &[1000, 2000]);
+
+    assert_eq!(freq, 0);
+    assert!((usage - 0.5f32).abs() < 1e-6f32);
+  }
+
   #[test]
   fn ultra_cpu_channel_matching() {
     // On Ultra chips (M1/M2/M3 Ultra) IOReport CPU Stats channels are prefixed "DIE_N_".
