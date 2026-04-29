@@ -61,10 +61,14 @@ fn is_active_state(name: &str) -> bool {
 }
 
 fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f32) {
-  let (len1, len2) = (items.len(), freqs.len());
-  assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
-
   let offset = items.iter().position(|x| is_active_state(x.0.as_str())).unwrap();
+  assert!(
+    items.len() >= offset + freqs.len(),
+    "calc_freq invalid data: items={}, offset={}, freqs={}",
+    items.len(),
+    offset,
+    freqs.len()
+  );
 
   let usage = items.iter().map(|x| x.1 as f64).skip(offset).sum::<f64>();
   let total = items.iter().map(|x| x.1 as f64).sum::<f64>();
@@ -369,6 +373,14 @@ mod tests {
 
     assert_eq!(freq, 0);
     assert!((usage - 0.5f32).abs() < 1e-6f32);
+  }
+
+  #[test]
+  #[should_panic(expected = "calc_freq invalid data")]
+  fn calc_freq_panics_when_frequency_table_outruns_active_states() {
+    let items = vec![("IDLE".to_string(), 50), ("F1".to_string(), 50)];
+
+    calc_freq_from_residencies(&items, &[1000, 2000]);
   }
 
   #[test]
