@@ -89,12 +89,11 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   calc_freq_from_residencies(&items, freqs)
 }
 
-fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
+fn calc_cluster_usage(items: &[(u32, f32)]) -> (u32, f32) {
   let avg_freq = zero_div(items.iter().map(|x| x.0 as f32).sum(), items.len() as f32);
   let avg_perc = zero_div(items.iter().map(|x| x.1).sum(), items.len() as f32);
-  let min_freq = *freqs.first().unwrap() as f32;
 
-  (avg_freq.max(min_freq) as u32, avg_perc)
+  (avg_freq as u32, avg_perc)
 }
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
@@ -301,8 +300,8 @@ impl Sampler {
 
       // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
       ecpu_usages.retain(|&(_, pct)| pct > 0.0);
-      rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
-      rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+      rs.ecpu_usage = calc_cluster_usage(&ecpu_usages);
+      rs.pcpu_usage = calc_cluster_usage(&pcpu_usages);
       results.push(rs);
     }
 
@@ -344,7 +343,7 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
-  use super::calc_freq_from_residencies;
+  use super::{calc_cluster_usage, calc_freq_from_residencies};
 
   #[test]
   fn calc_freq_returns_raw_usage_ratio() {
@@ -381,6 +380,14 @@ mod tests {
     let items = vec![("IDLE".to_string(), 50), ("F1".to_string(), 50)];
 
     calc_freq_from_residencies(&items, &[1000, 2000]);
+  }
+
+  #[test]
+  fn calc_cluster_usage_preserves_idle_frequency() {
+    let (freq, usage) = calc_cluster_usage(&[(0, 0.0), (0, 0.0)]);
+
+    assert_eq!(freq, 0);
+    assert_eq!(usage, 0.0);
   }
 
   #[test]
