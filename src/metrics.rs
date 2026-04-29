@@ -2,7 +2,8 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::sources::{
-  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram, libc_swap,
+  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
+  libc_swap,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -153,7 +154,7 @@ pub struct Sampler {
 
 impl Sampler {
   pub fn new() -> WithError<Self> {
-    let soc = SocInfo::new()?;
+    let soc = get_soc_info()?;
     let ior = init_ioreport()?;
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
@@ -330,11 +331,6 @@ impl Sampler {
     };
 
     Ok(rs)
-  }
-
-  /// Getter for the `soc` field
-  pub fn get_soc_info(&self) -> &SocInfo {
-    &self.soc
   }
 }
 

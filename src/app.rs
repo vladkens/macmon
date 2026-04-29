@@ -11,7 +11,10 @@ use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
 use crate::metrics::{Metrics, Sampler, zero_div};
-use crate::{metrics::MemMetrics, sources::SocInfo};
+use crate::{
+  metrics::MemMetrics,
+  sources::{SocInfo, get_soc_info},
+};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -252,7 +255,7 @@ pub struct App {
 
 impl App {
   pub fn new() -> WithError<Self> {
-    let soc = SocInfo::new()?;
+    let soc = get_soc_info()?;
     let cfg = Config::load();
     Ok(Self { cfg, soc, ..Default::default() })
   }

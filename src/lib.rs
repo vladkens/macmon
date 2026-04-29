@@ -27,4 +27,4 @@ pub mod bench {
 pub use app::App;
 pub use config::{Config, ViewType};
 pub use metrics::{MemMetrics, Metrics, Sampler, TempMetrics, zero_div};
-pub use sources::SocInfo;
+pub use sources::{SocInfo, get_soc_info};

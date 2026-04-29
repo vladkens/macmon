@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
-use macmon::{App, Sampler, debug};
+use macmon::{App, Sampler, debug, get_soc_info};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let mut counter = 0u32;
 
-      let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
+      let soc_info_val = if *soc_info { Some(get_soc_info()?) } else { None };
 
       loop {
         let doc = sampler.get_metrics(args.interval.max(100))?;
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
       }
       let mut sampler = Sampler::new()?;
-      let soc = Arc::new(sampler.get_soc_info().clone());
+      let soc = Arc::new(get_soc_info()?);
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
 
       let shared_http = Arc::clone(&shared);

@@ -7,6 +7,7 @@ use std::{
   mem::{MaybeUninit, size_of},
   os::raw::c_void,
   ptr::null,
+  sync::OnceLock,
 };
 
 use core_foundation::{
@@ -25,6 +26,8 @@ use serde::Serialize;
 
 pub type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 pub type CVoidRef = *const std::ffi::c_void;
+
+static SOC_INFO_CACHE: OnceLock<SocInfo> = OnceLock::new();
 
 // MARK: CFUtils
 
@@ -389,12 +392,6 @@ pub struct SocInfo {
   pub gpu_freqs: Vec<u32>,
 }
 
-impl SocInfo {
-  pub fn new() -> WithError<Self> {
-    get_soc_info()
-  }
-}
-
 // dynamic voltage and frequency scaling
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> Option<(Vec<u32>, Vec<u32>)> {
   unsafe {
@@ -501,6 +498,16 @@ fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
 }
 
 pub fn get_soc_info() -> WithError<SocInfo> {
+  if let Some(info) = SOC_INFO_CACHE.get() {
+    return Ok(info.clone());
+  }
+
+  let info = load_soc_info()?;
+  let _ = SOC_INFO_CACHE.set(info.clone());
+  Ok(info)
+}
+
+fn load_soc_info() -> WithError<SocInfo> {
   let out = run_system_profiler()?;
   let mut info = SocInfo::default();
 
