@@ -31,10 +31,10 @@ pub struct MemMetrics {
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,
-  pub ecpu_usage: (u32, f32), // freq, percent_from_max
-  pub pcpu_usage: (u32, f32), // freq, percent_from_max
+  pub ecpu_usage: (u32, f32), // freq MHz, usage ratio
+  pub pcpu_usage: (u32, f32), // freq MHz, usage ratio
   pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
-  pub gpu_usage: (u32, f32),  // freq, percent_from_max
+  pub gpu_usage: (u32, f32),  // freq MHz, usage ratio
   pub cpu_power: f32,         // Watts
   pub gpu_power: f32,         // Watts
   pub ane_power: f32,         // Watts
@@ -74,11 +74,7 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   }
 
   let usage_ratio = zero_div(usage, total);
-  let min_freq = *freqs.first().unwrap() as f64;
-  let max_freq = *freqs.last().unwrap() as f64;
-  let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
-
-  (avg_freq as u32, from_max as f32)
+  (avg_freq as u32, usage_ratio as f32)
 }
 
 fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
