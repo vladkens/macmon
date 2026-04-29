@@ -89,11 +89,17 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   calc_freq_from_residencies(&items, freqs)
 }
 
-fn calc_cluster_usage(items: &[(u32, f32)]) -> (u32, f32) {
-  let avg_freq = zero_div(items.iter().map(|x| x.0 as f32).sum(), items.len() as f32);
-  let avg_perc = zero_div(items.iter().map(|x| x.1).sum(), items.len() as f32);
+fn calc_cluster_usage_at_peak_freq(items: &[(u32, f32)]) -> (u32, f32) {
+  let peak_freq = items.iter().filter(|x| x.1 > 0.0).map(|x| x.0).max().unwrap_or(0);
+  if peak_freq == 0 {
+    return (0, 0.0);
+  }
 
-  (avg_freq as u32, avg_perc)
+  let peak_freq = peak_freq as f32;
+  let usage =
+    zero_div(items.iter().map(|x| x.1 * x.0 as f32 / peak_freq).sum(), items.len() as f32);
+
+  (peak_freq as u32, usage)
 }
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
@@ -300,8 +306,8 @@ impl Sampler {
 
       // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
       ecpu_usages.retain(|&(_, pct)| pct > 0.0);
-      rs.ecpu_usage = calc_cluster_usage(&ecpu_usages);
-      rs.pcpu_usage = calc_cluster_usage(&pcpu_usages);
+      rs.ecpu_usage = calc_cluster_usage_at_peak_freq(&ecpu_usages);
+      rs.pcpu_usage = calc_cluster_usage_at_peak_freq(&pcpu_usages);
       results.push(rs);
     }
 
@@ -343,7 +349,7 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
-  use super::{calc_cluster_usage, calc_freq_from_residencies};
+  use super::{calc_cluster_usage_at_peak_freq, calc_freq_from_residencies};
 
   #[test]
   fn calc_freq_returns_raw_usage_ratio() {
@@ -383,11 +389,31 @@ mod tests {
   }
 
   #[test]
-  fn calc_cluster_usage_preserves_idle_frequency() {
-    let (freq, usage) = calc_cluster_usage(&[(0, 0.0), (0, 0.0)]);
+  fn calc_cluster_usage_at_peak_freq_preserves_idle_frequency() {
+    let (freq, usage) = calc_cluster_usage_at_peak_freq(&[(0, 0.0), (0, 0.0)]);
 
     assert_eq!(freq, 0);
     assert_eq!(usage, 0.0);
+  }
+
+  #[test]
+  fn calc_cluster_usage_at_peak_freq_scales_usage_to_peak_frequency() {
+    let items = [
+      (4500, 1.0),
+      (1000, 0.3),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+    ];
+    let (freq, usage) = calc_cluster_usage_at_peak_freq(&items);
+
+    assert_eq!(freq, 4500);
+    assert!((usage - 0.10666).abs() < 1e-5);
   }
 
   #[test]
