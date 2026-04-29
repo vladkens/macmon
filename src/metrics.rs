@@ -150,9 +150,10 @@ impl Sampler {
     ];
 
     let soc = SocInfo::new()?;
-    let ior = IOReport::new(channels)?;
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
+    // Keep IOReport initialization last: it captures the baseline for the first timed sample.
+    let ior = IOReport::new(channels)?;
 
     Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys })
   }
