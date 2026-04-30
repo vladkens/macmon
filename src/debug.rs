@@ -82,7 +82,6 @@ pub fn print_debug() -> WithError<()> {
   }
 
   print_divider("SMC temp sensors");
-  const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
   let mut smc = SMC::new()?;
   let keys = smc.read_all_keys().unwrap_or(vec![]);
@@ -91,18 +90,7 @@ pub fn print_debug() -> WithError<()> {
       continue;
     }
 
-    let ki = smc.read_key_info(key)?;
-    if !(ki.data_type == FLOAT_TYPE && ki.data_size == 4) {
-      continue;
-    }
-
-    let val = smc.read_val(key);
-    if val.is_err() {
-      continue;
-    }
-
-    let val = val.unwrap();
-    let val = f32::from_le_bytes(val.data.clone().try_into().unwrap());
+    let Ok(val) = smc.read_float_val(key) else { continue };
     // if val < 20.0 || val > 99.0 {
     //   continue;
     // }

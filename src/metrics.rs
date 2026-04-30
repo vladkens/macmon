@@ -92,37 +92,29 @@ fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
 
 pub(crate) fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
   let mut smc = SMC::new()?;
-  const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
 
   let names = smc.read_all_keys().unwrap_or(vec![]);
   for name in &names {
-    let key = match smc.read_key_info(name) {
-      Ok(key) => key,
-      Err(_) => continue,
-    };
-
-    if key.data_size != 4 || key.data_type != FLOAT_TYPE {
-      continue;
-    }
-
-    let _ = match smc.read_val(name) {
-      Ok(val) => val,
-      Err(_) => continue,
-    };
-
     // Unfortunately, it is not known which keys are responsible for what.
     // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
-    match name {
-      // "Tp" – performance cores, "Te" – efficiency cores, "Ts" – super cores (M5+)
-      name if name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts") => {
-        cpu_sensors.push(name.clone())
-      }
-      name if name.starts_with("Tg") => gpu_sensors.push(name.clone()),
-      _ => (),
+    let is_cpu = name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts");
+    let is_gpu = name.starts_with("Tg");
+    if !is_cpu && !is_gpu {
+      continue;
+    }
+
+    if smc.read_float_val(name).is_err() {
+      continue;
+    }
+
+    if is_cpu {
+      cpu_sensors.push(name.clone());
+    } else if is_gpu {
+      gpu_sensors.push(name.clone());
     }
   }
 
@@ -165,8 +157,7 @@ impl Sampler {
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = self.smc.read_val(sensor)?;
-      let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
+      let val = self.smc.read_float_val(sensor)?;
       if is_valid_temp(val) {
         cpu_metrics.push(val);
       }
@@ -174,8 +165,7 @@ impl Sampler {
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = self.smc.read_val(sensor)?;
-      let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
+      let val = self.smc.read_float_val(sensor)?;
       if is_valid_temp(val) {
         gpu_metrics.push(val);
       }
@@ -233,9 +223,7 @@ impl Sampler {
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
-    let val = self.smc.read_val("PSTR")?;
-    let val = f32::from_le_bytes(val.data.clone().try_into().unwrap());
-    Ok(val)
+    self.smc.read_float_val("PSTR")
   }
 
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
