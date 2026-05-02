@@ -31,10 +31,10 @@ pub struct MemMetrics {
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,
-  pub ecpu_usage: (u32, f32), // freq, percent_from_max
-  pub pcpu_usage: (u32, f32), // freq, percent_from_max
+  pub ecpu_usage: (u32, f32), // freq MHz, usage ratio
+  pub pcpu_usage: (u32, f32), // freq MHz, usage ratio
   pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
-  pub gpu_usage: (u32, f32),  // freq, percent_from_max
+  pub gpu_usage: (u32, f32),  // freq MHz, usage ratio
   pub cpu_power: f32,         // Watts
   pub gpu_power: f32,         // Watts
   pub ane_power: f32,         // Watts
@@ -55,13 +55,20 @@ fn is_valid_temp(val: f32) -> bool {
   val > 0.0 && val <= 150.0
 }
 
-fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
-  let items = cfio_get_residencies(item); // (ns, freq)
-  let (len1, len2) = (items.len(), freqs.len());
-  assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
-
+fn is_active_state(name: &str) -> bool {
   // IDLE / DOWN for CPU; OFF for GPU; DOWN only on M2?/M3 Max Chips
-  let offset = items.iter().position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF").unwrap();
+  name != "IDLE" && name != "DOWN" && name != "OFF"
+}
+
+fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> (u32, f32) {
+  let offset = items.iter().position(|x| is_active_state(x.0.as_str())).unwrap();
+  assert!(
+    items.len() >= offset + freqs.len(),
+    "calc_freq invalid data: items={}, offset={}, freqs={}",
+    items.len(),
+    offset,
+    freqs.len()
+  );
 
   let usage = items.iter().map(|x| x.1 as f64).skip(offset).sum::<f64>();
   let total = items.iter().map(|x| x.1 as f64).sum::<f64>();
@@ -74,19 +81,25 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
   }
 
   let usage_ratio = zero_div(usage, total);
-  let min_freq = *freqs.first().unwrap() as f64;
-  let max_freq = *freqs.last().unwrap() as f64;
-  let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
-
-  (avg_freq as u32, from_max as f32)
+  (avg_freq as u32, usage_ratio as f32)
 }
 
-fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
-  let avg_freq = zero_div(items.iter().map(|x| x.0 as f32).sum(), items.len() as f32);
-  let avg_perc = zero_div(items.iter().map(|x| x.1).sum(), items.len() as f32);
-  let min_freq = *freqs.first().unwrap() as f32;
+fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
+  let items = cfio_get_residencies(item); // (ns, freq)
+  calc_freq_from_residencies(&items, freqs)
+}
 
-  (avg_freq.max(min_freq) as u32, avg_perc)
+fn calc_cluster_usage_at_peak_freq(items: &[(u32, f32)]) -> (u32, f32) {
+  let peak_freq = items.iter().filter(|x| x.1 > 0.0).map(|x| x.0).max().unwrap_or(0);
+  if peak_freq == 0 {
+    return (0, 0.0);
+  }
+
+  let peak_freq = peak_freq as f32;
+  let usage =
+    zero_div(items.iter().map(|x| x.1 * x.0 as f32 / peak_freq).sum(), items.len() as f32);
+
+  (peak_freq as u32, usage)
 }
 
 fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
@@ -293,8 +306,8 @@ impl Sampler {
 
       // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
       ecpu_usages.retain(|&(_, pct)| pct > 0.0);
-      rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
-      rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
+      rs.ecpu_usage = calc_cluster_usage_at_peak_freq(&ecpu_usages);
+      rs.pcpu_usage = calc_cluster_usage_at_peak_freq(&pcpu_usages);
       results.push(rs);
     }
 
@@ -336,6 +349,73 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
+  use super::{calc_cluster_usage_at_peak_freq, calc_freq_from_residencies};
+
+  #[test]
+  fn calc_freq_returns_raw_usage_ratio() {
+    let items = vec![
+      ("IDLE".to_string(), 50),
+      ("F1".to_string(), 25),
+      ("F2".to_string(), 15),
+      ("F3".to_string(), 10),
+    ];
+    let (freq, usage) = calc_freq_from_residencies(&items, &[1000, 2000, 3000]);
+
+    assert_eq!(freq, 1700);
+    assert_eq!(usage, 0.5);
+  }
+
+  #[test]
+  fn calc_freq_with_mismatched_states_matches_legacy_mapping() {
+    let items = vec![
+      ("IDLE".to_string(), 50),
+      ("S1".to_string(), 0),
+      ("S2".to_string(), 0),
+      ("S3".to_string(), 0),
+      ("S4".to_string(), 50),
+    ];
+    let (freq, usage) = calc_freq_from_residencies(&items, &[1000, 2000]);
+
+    assert_eq!(freq, 0);
+    assert!((usage - 0.5f32).abs() < 1e-6f32);
+  }
+
+  #[test]
+  #[should_panic(expected = "calc_freq invalid data")]
+  fn calc_freq_panics_when_frequency_table_outruns_active_states() {
+    let items = vec![("IDLE".to_string(), 50), ("F1".to_string(), 50)];
+
+    calc_freq_from_residencies(&items, &[1000, 2000]);
+  }
+
+  #[test]
+  fn calc_cluster_usage_at_peak_freq_preserves_idle_frequency() {
+    let (freq, usage) = calc_cluster_usage_at_peak_freq(&[(0, 0.0), (0, 0.0)]);
+
+    assert_eq!(freq, 0);
+    assert_eq!(usage, 0.0);
+  }
+
+  #[test]
+  fn calc_cluster_usage_at_peak_freq_scales_usage_to_peak_frequency() {
+    let items = [
+      (4500, 1.0),
+      (1000, 0.3),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+      (0, 0.0),
+    ];
+    let (freq, usage) = calc_cluster_usage_at_peak_freq(&items);
+
+    assert_eq!(freq, 4500);
+    assert!((usage - 0.10666).abs() < 1e-5);
+  }
+
   #[test]
   fn ultra_cpu_channel_matching() {
     // On Ultra chips (M1/M2/M3 Ultra) IOReport CPU Stats channels are prefixed "DIE_N_".
