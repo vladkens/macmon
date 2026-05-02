@@ -1,8 +1,10 @@
 use core_foundation::base::{CFRelease, CFShow};
+use std::{thread, time::Duration};
 
+use crate::config::INTERVAL_INIT_SAMPLE;
 use crate::sources::{
   IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
-  cfio_get_residencies, cfio_watts, get_dvfs_mhz, run_system_profiler,
+  cfio_get_residencies, get_dvfs_mhz, run_system_profiler,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -67,13 +69,14 @@ pub fn print_debug() -> WithError<()> {
     // ("GPU Stats", Some("Temperature")), // have 256 bit values, doesn't look parseable to f32/f64
   ];
 
-  let dur = 100;
-  let ior = IOReport::new(channels)?;
-  for x in ior.get_sample(dur) {
+  let dur = Duration::from_millis(INTERVAL_INIT_SAMPLE as u64);
+  let mut ior = IOReport::new(channels)?;
+  thread::sleep(dur);
+  for x in ior.get_sample() {
     let msg = format!("{} :: {} :: {} ({}) =", x.group, x.subgroup, x.channel, x.unit);
     match x.unit.as_str() {
       "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
-      "mJ" | "uJ" | "nJ" => println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, dur)?),
+      "mJ" | "uJ" | "nJ" => println!("{msg} {:.2}W", x.watts()?),
       _ => {
         println!("{msg} {:?}", x.item);
         unsafe { CFShow(x.item as _) };

@@ -1,8 +1,12 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
+use macmon::config::INTERVAL_MIN;
 use macmon::{App, Sampler, debug};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
-use std::thread;
+use std::{
+  thread,
+  time::{Duration, Instant},
+};
 
 mod serve;
 
@@ -47,9 +51,19 @@ struct Cli {
   #[command(subcommand)]
   command: Option<Commands>,
 
-  /// Update interval in milliseconds
+  /// Update interval in milliseconds (minimum: 100)
   #[arg(short, long, global = true, default_value_t = 1000)]
   interval: u32,
+}
+
+fn wait_until_next_sample(last_sampled_at: &mut Instant, interval: Duration) {
+  let mut now = Instant::now();
+  let elapsed = now.duration_since(*last_sampled_at);
+  if elapsed < interval {
+    thread::sleep(interval - elapsed);
+    now += interval - elapsed;
+  }
+  *last_sampled_at = now;
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -61,9 +75,12 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
+      let interval = Duration::from_millis(args.interval.max(INTERVAL_MIN) as u64);
+      let mut last_update_started = Instant::now();
 
       loop {
-        let doc = sampler.get_metrics(args.interval.max(100))?;
+        wait_until_next_sample(&mut last_update_started, interval);
+        let doc = sampler.get_metrics()?;
 
         let mut doc = serde_json::to_value(&doc)?;
         if let Some(ref soc) = soc_info_val {
@@ -88,6 +105,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
+      let interval = Duration::from_millis(args.interval.max(INTERVAL_MIN) as u64);
+      let mut last_update_started = Instant::now();
 
       let shared_http = Arc::clone(&shared);
       let soc_http = Arc::clone(&soc);
@@ -99,7 +118,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       });
 
       loop {
-        match sampler.get_metrics(args.interval.max(100)) {
+        wait_until_next_sample(&mut last_update_started, interval);
+        match sampler.get_metrics() {
           Ok(m) => *shared.write().unwrap() = Some(m),
           Err(e) => eprintln!("sampling error: {e}"),
         }

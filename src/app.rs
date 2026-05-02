@@ -9,7 +9,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 
-use crate::config::{Config, ViewType};
+use crate::config::{Config, INTERVAL_INIT_SAMPLE, INTERVAL_MIN, INTERVAL_TUI_MAX, ViewType};
 use crate::metrics::{Metrics, Sampler, zero_div};
 use crate::{metrics::MemMetrics, sources::SocInfo};
 
@@ -207,16 +207,29 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   });
 }
 
+fn wait_until_next_sample(last_sampled_at: &mut Instant, interval: Duration) {
+  let mut now = Instant::now();
+  let elapsed = now.duration_since(*last_sampled_at);
+  if elapsed < interval {
+    std::thread::sleep(interval - elapsed);
+    now += interval - elapsed;
+  }
+  *last_sampled_at = now;
+}
+
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
 
-    // Send initial metrics
-    tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
+    std::thread::sleep(Duration::from_millis(INTERVAL_INIT_SAMPLE as u64));
+    tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
+
+    let mut last_update_started = Instant::now();
 
     loop {
-      let msec = *msec.read().unwrap();
-      tx.send(Event::Update(sampler.get_metrics(msec).unwrap())).unwrap();
+      let interval = Duration::from_millis(*msec.read().unwrap() as u64);
+      wait_until_next_sample(&mut last_update_started, interval);
+      tx.send(Event::Update(sampler.get_metrics().unwrap())).unwrap();
     }
   });
 }
@@ -448,7 +461,7 @@ impl App {
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
     // use from arg if provided, otherwise use config restored value
-    self.cfg.interval = interval.unwrap_or(self.cfg.interval).clamp(100, 10_000);
+    self.cfg.interval = interval.unwrap_or(self.cfg.interval).clamp(INTERVAL_MIN, INTERVAL_TUI_MAX);
     let msec = Arc::new(RwLock::new(self.cfg.interval));
 
     let (tx, rx) = mpsc::channel::<Event>();

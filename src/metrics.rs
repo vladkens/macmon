@@ -2,7 +2,7 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::sources::{
-  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram, libc_swap,
+  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, libc_ram, libc_swap,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -150,9 +150,10 @@ impl Sampler {
     ];
 
     let soc = SocInfo::new()?;
-    let ior = IOReport::new(channels)?;
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
+    // Keep IOReport initialization last: it captures the baseline for the first timed sample.
+    let ior = IOReport::new(channels)?;
 
     Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys })
   }
@@ -233,10 +234,7 @@ impl Sampler {
     Ok(val)
   }
 
-  pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
-    let measures: usize = 4;
-    let mut results: Vec<Metrics> = Vec::with_capacity(measures);
-
+  pub fn get_metrics(&mut self) -> WithError<Metrics> {
     // CPU Stats channel naming by chip family (see: https://github.com/vladkens/macmon/issues/47)
     //   M1-M4:  ECPU* = efficiency cores (lower tier)
     //           PCPU* = performance cores (top tier)
@@ -250,71 +248,54 @@ impl Sampler {
     //           (e.g. "DIE_0_ECPU0"), so use contains() not starts_with() — same
     //           pattern as Energy Model's "DIE_{}_CPU Energy".
 
-    // do several samples to smooth metrics
-    // see: https://github.com/vladkens/macmon/issues/10
-    for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
-      let mut ecpu_usages = Vec::new();
-      let mut pcpu_usages = Vec::new();
-      let mut rs = Metrics::default();
+    let mut ecpu_usages = Vec::new();
+    let mut pcpu_usages = Vec::new();
+    let mut rs = Metrics::default();
 
-      for x in sample {
-        if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          if x.channel.contains("PCPU") {
-            pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
-            continue;
-          }
-
-          if x.channel.contains("ECPU") || x.channel.contains("MCPU") {
-            ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
-            continue;
-          }
+    for x in self.ior.get_sample() {
+      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
+        if x.channel.contains("PCPU") {
+          pcpu_usages.push(calc_freq(x.item, &self.soc.pcpu_freqs));
+          continue;
         }
 
-        if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
-          match x.channel.as_str() {
-            "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
-            _ => {}
-          }
-        }
-
-        if x.group == "Energy Model" {
-          match x.channel.as_str() {
-            "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
-            // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
-            c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
-            // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
-            c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
-            _ => {}
-          }
+        if x.channel.contains("ECPU") || x.channel.contains("MCPU") {
+          ecpu_usages.push(calc_freq(x.item, &self.soc.ecpu_freqs));
+          continue;
         }
       }
 
-      // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
-      ecpu_usages.retain(|&(_, pct)| pct > 0.0);
-      rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
-      rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
-      results.push(rs);
+      if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
+        match x.channel.as_str() {
+          "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
+          _ => {}
+        }
+      }
+
+      if x.group == "Energy Model" {
+        match x.channel.as_str() {
+          "GPU Energy" => rs.gpu_power += x.watts()?,
+          // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
+          c if c.ends_with("CPU Energy") => rs.cpu_power += x.watts()?,
+          // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
+          c if c.starts_with("ANE") => rs.ane_power += x.watts()?,
+          c if c.starts_with("DRAM") => rs.ram_power += x.watts()?,
+          c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += x.watts()?,
+          _ => {}
+        }
+      }
     }
+
+    // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN)
+    ecpu_usages.retain(|&(_, pct)| pct > 0.0);
+    rs.ecpu_usage = calc_freq_final(&ecpu_usages, &self.soc.ecpu_freqs);
+    rs.pcpu_usage = calc_freq_final(&pcpu_usages, &self.soc.pcpu_freqs);
 
     let ecores = self.soc.ecpu_cores as f32;
     let pcores = self.soc.pcpu_cores as f32;
     let tcores = ecores + pcores;
 
-    let mut rs = Metrics::default();
-    rs.ecpu_usage.0 = zero_div(results.iter().map(|x| x.ecpu_usage.0).sum(), measures as _);
-    rs.ecpu_usage.1 = zero_div(results.iter().map(|x| x.ecpu_usage.1).sum(), measures as _);
-    rs.pcpu_usage.0 = zero_div(results.iter().map(|x| x.pcpu_usage.0).sum(), measures as _);
-    rs.pcpu_usage.1 = zero_div(results.iter().map(|x| x.pcpu_usage.1).sum(), measures as _);
     rs.cpu_usage_pct = zero_div(rs.ecpu_usage.1 * ecores + rs.pcpu_usage.1 * pcores, tcores);
-    rs.gpu_usage.0 = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
-    rs.gpu_usage.1 = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
-    rs.cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
-    rs.gpu_power = zero_div(results.iter().map(|x| x.gpu_power).sum(), measures as _);
-    rs.ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
-    rs.ram_power = zero_div(results.iter().map(|x| x.ram_power).sum(), measures as _);
-    rs.gpu_ram_power = zero_div(results.iter().map(|x| x.gpu_ram_power).sum(), measures as _);
     rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
 
     rs.memory = self.get_mem()?;

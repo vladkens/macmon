@@ -7,6 +7,7 @@ use std::{
   mem::{MaybeUninit, size_of},
   os::raw::c_void,
   ptr::null,
+  time::{Duration, Instant},
 };
 
 use core_foundation::{
@@ -176,18 +177,6 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   res
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithError<f32> {
-  let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f32;
-  let val = val / (duration as f32 / 1000.0);
-  match unit.as_str() {
-    "mJ" => Ok(val / 1e3f32),
-    "uJ" => Ok(val / 1e6f32),
-    "nJ" => Ok(val / 1e9f32),
-    _ => Err(format!("Invalid energy unit: {}", unit).into()),
-  }
-}
-
 // MARK: IOServiceIterator
 
 pub struct IOServiceIterator {
@@ -242,16 +231,17 @@ impl Iterator for IOServiceIterator {
 
 pub struct IOReportIterator {
   sample: CFDictionaryRef,
+  duration: Duration,
   index: isize,
   items: CFArrayRef,
   items_size: isize,
 }
 
 impl IOReportIterator {
-  pub fn new(data: CFDictionaryRef) -> Self {
+  fn new(data: CFDictionaryRef, duration: Duration) -> Self {
     let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
     let items_size = unsafe { CFArrayGetCount(items) } as isize;
-    Self { sample: data, items, items_size, index: 0 }
+    Self { sample: data, duration, items, items_size, index: 0 }
   }
 }
 
@@ -268,6 +258,20 @@ pub struct IOReportIteratorItem {
   pub channel: String,
   pub unit: String,
   pub item: CFDictionaryRef,
+  duration: Duration,
+}
+
+impl IOReportIteratorItem {
+  pub fn watts(&self) -> WithError<f32> {
+    let val = unsafe { IOReportSimpleGetIntegerValue(self.item, 0) } as f32;
+    let val = val / self.duration.as_secs_f32();
+    match self.unit.as_str() {
+      "mJ" => Ok(val / 1e3f32),
+      "uJ" => Ok(val / 1e6f32),
+      "nJ" => Ok(val / 1e9f32),
+      _ => Err(format!("Invalid energy unit: {}", self.unit).into()),
+    }
+  }
 }
 
 impl Iterator for IOReportIterator {
@@ -286,7 +290,7 @@ impl Iterator for IOReportIterator {
     let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
 
     self.index += 1;
-    Some(IOReportIteratorItem { group, subgroup, channel, unit, item })
+    Some(IOReportIteratorItem { group, subgroup, channel, unit, item, duration: self.duration })
   }
 }
 
@@ -625,58 +629,40 @@ fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscription
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
-  prev: Option<(CFDictionaryRef, std::time::Instant)>,
+  prev: CFDictionaryRef,
+  sampled_at: Instant,
 }
 
 impl IOReport {
   pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
     let chan = cfio_get_chan(channels)?;
     let subs = cfio_get_subs(chan)?;
-    Ok(Self { subs, chan, prev: None })
+    let prev = unsafe { IOReportCreateSamples(subs, chan, null()) };
+    if prev.is_null() {
+      unsafe {
+        CFRelease(chan as _);
+        CFRelease(subs as _);
+      }
+      return Err("Failed to create initial sample".into());
+    }
+
+    Ok(Self { subs, chan, prev, sampled_at: Instant::now() })
   }
 
-  pub fn get_sample(&self, duration: u64) -> IOReportIterator {
+  pub fn get_sample(&mut self) -> IOReportIterator {
     unsafe {
-      let sample1 = IOReportCreateSamples(self.subs, self.chan, null());
-      std::thread::sleep(std::time::Duration::from_millis(duration));
-      let sample2 = IOReportCreateSamples(self.subs, self.chan, null());
+      let next = IOReportCreateSamples(self.subs, self.chan, null());
+      let sampled_at = Instant::now();
 
-      let sample3 = IOReportCreateSamplesDelta(sample1, sample2, null());
-      CFRelease(sample1 as _);
-      CFRelease(sample2 as _);
-      IOReportIterator::new(sample3)
+      let diff = IOReportCreateSamplesDelta(self.prev, next, null());
+      let duration = sampled_at.duration_since(self.sampled_at);
+
+      CFRelease(self.prev as _);
+      self.prev = next;
+      self.sampled_at = sampled_at;
+
+      IOReportIterator::new(diff, duration.max(Duration::from_nanos(1)))
     }
-  }
-
-  fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant) {
-    (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
-  }
-
-  pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
-    let count = count.clamp(1, 32);
-    let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
-    let step_msec = duration / count as u64;
-
-    let mut prev = match self.prev {
-      Some(x) => x,
-      None => self.raw_sample(),
-    };
-
-    for _ in 0..count {
-      std::thread::sleep(std::time::Duration::from_millis(step_msec));
-
-      let next = self.raw_sample();
-      let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
-      unsafe { CFRelease(prev.0 as _) };
-
-      let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
-      prev = next;
-
-      samples.push((IOReportIterator::new(diff), elapsed.max(1)));
-    }
-
-    self.prev = Some(prev);
-    samples
   }
 }
 
@@ -685,9 +671,7 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      if let Some(prev) = self.prev {
-        CFRelease(prev.0 as _);
-      }
+      CFRelease(self.prev as _);
     }
   }
 }
