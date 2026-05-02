@@ -1,3 +1,13 @@
+## v0.7.2 – 2026-05-02
+
+### Fixes
+- Fixed sparkline chart rendering gaps in Apple Terminal
+- Fixed frequency scale on MacBook Neo (#57)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.7.1...v0.7.2
+
+---
+
 ## v0.7.1 – 2026-04-07
 
 ### Fixes
