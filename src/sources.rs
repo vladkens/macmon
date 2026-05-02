@@ -464,6 +464,15 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
+// M1–M3 and A-series chips store frequencies in Hz; M4+ store in kHz.
+fn cpu_freq_scale(chip_name: &str) -> u32 {
+  let hz_freqs = chip_name.contains("M1")
+    || chip_name.contains("M2")
+    || chip_name.contains("M3")
+    || chip_name.contains("A1"); // A14–A18 and future A1x chips
+  if hz_freqs { 1_000_000 } else { 1_000 }
+}
+
 // Try known voltage-states key (M1-M4) first, fall back to acc-clusters discovery (M5+).
 fn cpu_freqs(item: CFDictionaryRef, key: &str, is_ecpu: bool, scale: u32) -> Option<Vec<u32>> {
   if let Some((_, freqs)) = get_dvfs_mhz(item, key) {
@@ -516,13 +525,7 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   let gpu_cores = out["SPDisplaysDataType"][0]["sppci_cores"].as_str();
   let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
-  // Determine scaling based on chip type
-  // M1–M3 and A-series chips store frequencies in Hz; M4+ store in kHz.
-  let hz_freqs = chip_name.contains("M1")
-    || chip_name.contains("M2")
-    || chip_name.contains("M3")
-    || chip_name.contains("A1"); // A14–A18 and future A1x chips
-  let cpu_scale: u32 = if hz_freqs { 1_000_000 } else { 1_000 };
+  let cpu_scale = cpu_freq_scale(&chip_name);
   let gpu_scale: u32 = 1000 * 1000; // MHz
 
   // Assign parsed values to info

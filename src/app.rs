@@ -142,6 +142,13 @@ impl TempStore {
   }
 }
 
+fn bar_set() -> symbols::bar::Set<'static> {
+  match std::env::var("TERM_PROGRAM").as_deref() {
+    Ok("Apple_Terminal") => symbols::bar::THREE_LEVELS,
+    _ => symbols::bar::NINE_LEVELS,
+  }
+}
+
 // MARK: Components
 
 fn h_stack(area: Rect) -> (Rect, Rect) {
@@ -303,6 +310,7 @@ impl App {
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
       .style(self.cfg.color)
+      .bar_set(bar_set())
   }
 
   fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
@@ -316,7 +324,8 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(100)
-          .style(self.cfg.color);
+          .style(self.cfg.color)
+          .bar_set(bar_set());
         f.render_widget(w, r);
       }
       ViewType::Gauge => {
@@ -350,7 +359,8 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(val.ram_total)
-          .style(self.cfg.color);
+          .style(self.cfg.color)
+          .bar_set(bar_set());
         f.render_widget(w, r);
       }
       ViewType::Gauge => {
