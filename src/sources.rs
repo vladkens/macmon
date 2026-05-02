@@ -11,13 +11,16 @@ use std::{
 };
 
 use core_foundation::{
-  array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef},
+  array::{
+    CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef,
+    CFMutableArrayRef, kCFTypeArrayCallBacks,
+  },
   base::{CFAllocatorRef, CFRange, CFRelease, CFTypeRef, kCFAllocatorDefault, kCFAllocatorNull},
   data::{CFDataGetBytes, CFDataGetLength, CFDataRef},
   dictionary::{
     CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
-    CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
-    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+    CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
+    CFMutableDictionaryRef, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
   },
   number::{CFNumberCreate, CFNumberRef, kCFNumberSInt32Type},
   string::{CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
@@ -111,13 +114,12 @@ struct IOReportSubscription {
 }
 
 type IOReportSubscriptionRef = *const IOReportSubscription;
+pub type ChannelFilter = fn(&str, &str, &str, &str) -> bool;
 
 #[link(name = "IOReport", kind = "dylib")]
 #[rustfmt::skip]
 unsafe extern "C" {
   fn IOReportCopyAllChannels(a: u64, b: u64) -> CFDictionaryRef;
-  fn IOReportCopyChannelsInGroup(a: CFStringRef, b: CFStringRef, c: u64, d: u64, e: u64) -> CFDictionaryRef;
-  fn IOReportMergeChannels(a: CFDictionaryRef, b: CFDictionaryRef, nil: CFTypeRef);
   fn IOReportCreateSubscription(a: CVoidRef, b: CFMutableDictionaryRef, c: *mut CFMutableDictionaryRef, d: u64, b: CFTypeRef) -> IOReportSubscriptionRef;
   fn IOReportCreateSamples(a: IOReportSubscriptionRef, b: CFMutableDictionaryRef, c: CFTypeRef) -> CFDictionaryRef;
   fn IOReportCreateSamplesDelta(a: CFDictionaryRef, b: CFDictionaryRef, c: CFTypeRef) -> CFDictionaryRef;
@@ -154,6 +156,13 @@ fn cfio_get_channel(item: CFDictionaryRef) -> String {
   }
 }
 
+fn cfio_channel_matches(items: &[(&str, Option<&str>)], group: &str, subgroup: &str) -> bool {
+  items.is_empty()
+    || items.iter().any(|(item_group, item_subgroup)| {
+      *item_group == group && item_subgroup.map_or(true, |value| value == subgroup)
+    })
+}
+
 pub fn cfio_get_props(entry: u32, name: String) -> WithError<CFDictionaryRef> {
   unsafe {
     let mut props: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
@@ -173,7 +182,11 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   for i in 0..count {
     let name = unsafe { IOReportStateGetNameForIndex(item, i) };
     let val = unsafe { IOReportStateGetResidency(item, i) };
-    res.push((from_cfstr(name), val));
+    let name = match name {
+      x if x.is_null() => format!("S{i}"),
+      x => from_cfstr(x),
+    };
+    res.push((name, val));
   }
 
   res
@@ -189,6 +202,11 @@ pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithEr
     "nJ" => Ok(val / 1e9f32),
     _ => Err(format!("Invalid energy unit: {}", unit).into()),
   }
+}
+
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn cfio_integer_value(item: CFDictionaryRef) -> i64 {
+  unsafe { IOReportSimpleGetIntegerValue(item, 0) }
 }
 
 // MARK: IOServiceIterator
@@ -248,13 +266,14 @@ pub struct IOReportIterator {
   index: isize,
   items: CFArrayRef,
   items_size: isize,
+  metadata: Vec<(String, String, String, String)>,
 }
 
 impl IOReportIterator {
-  pub fn new(data: CFDictionaryRef) -> Self {
+  pub fn new(data: CFDictionaryRef, metadata: Vec<(String, String, String, String)>) -> Self {
     let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
     let items_size = unsafe { CFArrayGetCount(items) } as isize;
-    Self { sample: data, items, items_size, index: 0 }
+    Self { sample: data, items, items_size, index: 0, metadata }
   }
 }
 
@@ -282,11 +301,8 @@ impl Iterator for IOReportIterator {
     }
 
     let item = unsafe { CFArrayGetValueAtIndex(self.items, self.index) } as CFDictionaryRef;
-
-    let group = cfio_get_group(item);
-    let subgroup = cfio_get_subgroup(item);
-    let channel = cfio_get_channel(item);
-    let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
+    let (group, subgroup, channel, unit) =
+      self.metadata.get(self.index as usize).cloned().unwrap_or_default();
 
     self.index += 1;
     Some(IOReportIteratorItem { group, subgroup, channel, unit, item })
@@ -575,47 +591,70 @@ fn load_soc_info() -> WithError<SocInfo> {
 
 // MARK: IOReport
 
-fn cfio_get_chan(items: Vec<(&str, Option<&str>)>) -> WithError<CFMutableDictionaryRef> {
-  // if no items are provided, return all channels
-  if items.is_empty() {
-    unsafe {
-      let c = IOReportCopyAllChannels(0, 0);
-      let r = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(c), c);
-      CFRelease(c as _);
-      return Ok(r);
-    }
-  }
+struct IOReportChannels {
+  chan: CFMutableDictionaryRef,
+  source: Option<CFDictionaryRef>,
+  selected: Option<CFMutableArrayRef>,
+}
 
-  let mut channels = vec![];
-  for (group, subgroup) in items {
-    let gname = cfstr(group);
-    let sname = subgroup.map_or(null(), cfstr);
-    let chan = unsafe { IOReportCopyChannelsInGroup(gname, sname, 0, 0, 0) };
-    channels.push(chan);
-
-    unsafe { CFRelease(gname as _) };
-    if subgroup.is_some() {
-      unsafe { CFRelease(sname as _) };
-    }
-  }
-
-  let chan = channels[0];
-  for i in 1..channels.len() {
-    unsafe { IOReportMergeChannels(chan, channels[i], null()) };
-  }
-
-  let size = unsafe { CFDictionaryGetCount(chan) };
-  let chan = unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, chan) };
-
-  for i in 0..channels.len() {
-    unsafe { CFRelease(channels[i] as _) };
-  }
-
-  if cfdict_get_val(chan, "IOReportChannels").is_none() {
+fn cfio_get_chan(filter: Option<ChannelFilter>) -> WithError<IOReportChannels> {
+  let all_channels = unsafe { IOReportCopyAllChannels(0, 0) };
+  let Some(channel_array) = cfdict_get_val(all_channels, "IOReportChannels") else {
+    unsafe { CFRelease(all_channels as _) };
     return Err("Failed to get channels".into());
+  };
+  let channel_array = channel_array as CFArrayRef;
+
+  let size = unsafe { CFDictionaryGetCount(all_channels) };
+  let chan = unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, all_channels) };
+
+  let mut selected_channels = None;
+  if let Some(filter) = filter {
+    let count = unsafe { CFArrayGetCount(channel_array) };
+    let selected =
+      unsafe { CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks) };
+
+    for i in 0..count {
+      let item = unsafe { CFArrayGetValueAtIndex(channel_array, i) } as CFDictionaryRef;
+      let group = cfio_get_group(item);
+      let subgroup = cfio_get_subgroup(item);
+      let channel = cfio_get_channel(item);
+      let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
+      if filter(&group, &subgroup, &channel, &unit) {
+        unsafe { CFArrayAppendValue(selected, item as _) };
+      }
+    }
+
+    let key = cfstr("IOReportChannels");
+    unsafe {
+      CFDictionarySetValue(chan, key as _, selected as _);
+      CFRelease(key as _);
+    }
+    selected_channels = Some(selected);
   }
 
-  Ok(chan)
+  Ok(IOReportChannels { chan, source: Some(all_channels), selected: selected_channels })
+}
+
+fn cfio_channel_metadata(channels: CFDictionaryRef) -> Vec<(String, String, String, String)> {
+  let Some(channel_array) = cfdict_get_val(channels, "IOReportChannels") else {
+    return Vec::new();
+  };
+  let channel_array = channel_array as CFArrayRef;
+  let count = unsafe { CFArrayGetCount(channel_array) };
+  let mut metadata = Vec::with_capacity(count as usize);
+
+  for i in 0..count {
+    let item = unsafe { CFArrayGetValueAtIndex(channel_array, i) } as CFDictionaryRef;
+    metadata.push((
+      cfio_get_group(item),
+      cfio_get_subgroup(item),
+      cfio_get_channel(item),
+      from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string(),
+    ));
+  }
+
+  metadata
 }
 
 fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
@@ -632,14 +671,25 @@ fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscription
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
+  source: Option<CFDictionaryRef>,
+  selected: Option<CFMutableArrayRef>,
+  metadata: Vec<(String, String, String, String)>,
   prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
-  pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
-    let chan = cfio_get_chan(channels)?;
-    let subs = cfio_get_subs(chan)?;
-    Ok(Self { subs, chan, prev: None })
+  pub fn new(filter: Option<ChannelFilter>) -> WithError<Self> {
+    let channels = cfio_get_chan(filter)?;
+    let metadata = cfio_channel_metadata(channels.chan);
+    let subs = cfio_get_subs(channels.chan)?;
+    Ok(Self {
+      subs,
+      chan: channels.chan,
+      source: channels.source,
+      selected: channels.selected,
+      metadata,
+      prev: None,
+    })
   }
 
   pub fn get_sample(&self, duration: u64) -> IOReportIterator {
@@ -651,7 +701,7 @@ impl IOReport {
       let sample3 = IOReportCreateSamplesDelta(sample1, sample2, null());
       CFRelease(sample1 as _);
       CFRelease(sample2 as _);
-      IOReportIterator::new(sample3)
+      IOReportIterator::new(sample3, self.metadata.clone())
     }
   }
 
@@ -681,7 +731,7 @@ impl IOReport {
       let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
       prev = next;
 
-      samples.push((IOReportIterator::new(diff), elapsed.max(1)));
+      samples.push((IOReportIterator::new(diff, self.metadata.clone()), elapsed.max(1)));
     }
 
     self.prev = Some(prev);
@@ -694,6 +744,12 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
+      if let Some(selected) = self.selected {
+        CFRelease(selected as _);
+      }
+      if let Some(source) = self.source {
+        CFRelease(source as _);
+      }
       if let Some(prev) = self.prev {
         CFRelease(prev.0 as _);
       }
@@ -1061,5 +1117,29 @@ mod tests {
     // M1-M3: MHz scale
     assert_eq!(to_mhz(vec![3_000_000_000, 2_000_000_000], 1000 * 1000), vec![3000, 2000]);
     assert_eq!(to_mhz(vec![], 1000), Vec::<u32>::new());
+  }
+
+  #[test]
+  fn cfio_channel_filter_preserves_group_subscription_semantics() {
+    let items = [("Energy Model", None)];
+
+    assert!(cfio_channel_matches(&items, "Energy Model", ""));
+    assert!(cfio_channel_matches(&items, "Energy Model", "CPU Core Performance States"));
+    assert!(!cfio_channel_matches(&items, "CPU Stats", "CPU Core Performance States"));
+  }
+
+  #[test]
+  fn cfio_channel_filter_preserves_subgroup_subscription_semantics() {
+    let items = [("CPU Stats", Some("CPU Core Performance States"))];
+
+    assert!(cfio_channel_matches(&items, "CPU Stats", "CPU Core Performance States"));
+    assert!(!cfio_channel_matches(&items, "CPU Stats", "CPU Performance States"));
+    assert!(!cfio_channel_matches(&items, "GPU Stats", "CPU Core Performance States"));
+  }
+
+  #[test]
+  fn cfio_channel_filter_empty_items_means_all_channels() {
+    assert!(cfio_channel_matches(&[], "CPU Stats", "CPU Core Performance States"));
+    assert!(cfio_channel_matches(&[], "Energy Model", ""));
   }
 }

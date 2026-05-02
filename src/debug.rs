@@ -1,11 +1,16 @@
 use core_foundation::base::{CFRelease, CFShow};
 
+use crate::metrics::ioreport_channels_filter;
 use crate::sources::{
   IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
-  cfio_get_residencies, cfio_watts, get_dvfs_mhz, run_system_profiler,
+  cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, run_system_profiler,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
+
+fn debug_channels(group: &str, _subgroup: &str, _channel: &str, _unit: &str) -> bool {
+  group == "Energy Model" || group == "CPU Stats" || group == "GPU Stats"
+}
 
 fn print_divider(msg: &str) {
   if msg.is_empty() {
@@ -59,21 +64,24 @@ pub fn print_debug() -> WithError<()> {
   }
 
   print_divider("IOReport");
-  let channels = vec![
-    ("Energy Model", None),
-    ("CPU Stats", Some("CPU Complex Performance States")),
-    ("CPU Stats", Some("CPU Core Performance States")),
-    ("GPU Stats", Some("GPU Performance States")),
-    // ("GPU Stats", Some("Temperature")), // have 256 bit values, doesn't look parseable to f32/f64
-  ];
-
   let dur = 100;
-  let ior = IOReport::new(channels)?;
+  let ior = IOReport::new(Some(debug_channels))?;
   for x in ior.get_sample(dur) {
-    let msg = format!("{} :: {} :: {} ({}) =", x.group, x.subgroup, x.channel, x.unit);
+    let subscribed = ioreport_channels_filter(&x.group, &x.subgroup, &x.channel, &x.unit);
+    let msg = format!(
+      "{} :: {} :: {} ({}{}) =",
+      x.group,
+      x.subgroup,
+      x.channel,
+      x.unit,
+      if subscribed { ", subscribed" } else { "" }
+    );
     match x.unit.as_str() {
       "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
       "mJ" | "uJ" | "nJ" => println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, dur)?),
+      "events" | "B" | "KiB" | "MiB" | "ns" | "us" | "ms" | "s" | "" => {
+        println!("{msg} {} {}", cfio_integer_value(x.item), x.unit)
+      }
       _ => {
         println!("{msg} {:?}", x.item);
         unsafe { CFShow(x.item as _) };

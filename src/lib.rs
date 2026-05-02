@@ -14,8 +14,8 @@ pub mod sources;
 pub mod bench {
   use crate::{metrics, sources};
 
-  pub fn init_ioreport() -> sources::WithError<sources::IOReport> {
-    metrics::init_ioreport()
+  pub fn ioreport_channels_filter(group: &str, subgroup: &str, channel: &str, unit: &str) -> bool {
+    metrics::ioreport_channels_filter(group, subgroup, channel, unit)
   }
 
   pub fn init_smc() -> sources::WithError<(sources::SMC, Vec<String>, Vec<String>)> {

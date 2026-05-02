@@ -122,17 +122,27 @@ pub(crate) fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
   Ok((smc, cpu_sensors, gpu_sensors))
 }
 
-pub(crate) fn init_ioreport() -> WithError<IOReport> {
-  let channels = vec![
-    ("Energy Model", None), // cpu/gpu/ane power
-    // ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
-    ("CPU Stats", Some(CPU_FREQ_CORE_SUBG)), // cpu freq per core
-    ("GPU Stats", Some(GPU_FREQ_DICE_SUBG)), // gpu freq
-  ];
+pub(crate) fn ioreport_channels_filter(
+  group: &str,
+  subgroup: &str,
+  channel: &str,
+  _unit: &str,
+) -> bool {
+  // Keep this filter in sync with the channel handling in Sampler::get_metrics.
+  if group == "Energy Model" {
+    return channel == "GPU Energy"
+      || channel.ends_with("CPU Energy")
+      || channel.starts_with("ANE")
+      || channel.starts_with("DRAM")
+      || channel.starts_with("GPU SRAM");
+  }
 
-  IOReport::new(channels)
+  if group == "CPU Stats" {
+    return subgroup == CPU_FREQ_CORE_SUBG;
+  }
+
+  group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
 }
-
 // MARK: Sampler
 
 pub struct Sampler {
@@ -147,7 +157,7 @@ pub struct Sampler {
 impl Sampler {
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
-    let ior = init_ioreport()?;
+    let ior = IOReport::new(Some(ioreport_channels_filter))?;
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
 
@@ -250,6 +260,7 @@ impl Sampler {
       let mut pcpu_usages = Vec::new();
       let mut rs = Metrics::default();
 
+      // Keep this channel handling in sync with ioreport_channels_filter.
       for x in sample {
         if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
           if x.channel.contains("PCPU") {
