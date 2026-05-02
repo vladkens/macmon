@@ -517,8 +517,12 @@ pub fn get_soc_info() -> WithError<SocInfo> {
   let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
   // Determine scaling based on chip type
-  let before_m4 = chip_name.contains("M1") || chip_name.contains("M2") || chip_name.contains("M3");
-  let cpu_scale: u32 = if before_m4 { 1000 * 1000 } else { 1000 }; // MHz before M4, KHz after
+  // M1–M3 and A-series chips store frequencies in Hz; M4+ store in kHz.
+  let hz_freqs = chip_name.contains("M1")
+    || chip_name.contains("M2")
+    || chip_name.contains("M3")
+    || chip_name.contains("A1"); // A14–A18 and future A1x chips
+  let cpu_scale: u32 = if hz_freqs { 1_000_000 } else { 1_000 };
   let gpu_scale: u32 = 1000 * 1000; // MHz
 
   // Assign parsed values to info
