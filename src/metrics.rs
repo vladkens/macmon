@@ -89,7 +89,7 @@ fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
   (avg_freq.max(min_freq) as u32, avg_perc)
 }
 
-fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
+pub(crate) fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
   let mut smc = SMC::new()?;
   const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
@@ -129,6 +129,17 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
   Ok((smc, cpu_sensors, gpu_sensors))
 }
 
+pub(crate) fn init_ioreport() -> WithError<IOReport> {
+  let channels = vec![
+    ("Energy Model", None), // cpu/gpu/ane power
+    // ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
+    ("CPU Stats", Some(CPU_FREQ_CORE_SUBG)), // cpu freq per core
+    ("GPU Stats", Some(GPU_FREQ_DICE_SUBG)), // gpu freq
+  ];
+
+  IOReport::new(channels)
+}
+
 // MARK: Sampler
 
 pub struct Sampler {
@@ -142,15 +153,8 @@ pub struct Sampler {
 
 impl Sampler {
   pub fn new() -> WithError<Self> {
-    let channels = vec![
-      ("Energy Model", None), // cpu/gpu/ane power
-      // ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
-      ("CPU Stats", Some(CPU_FREQ_CORE_SUBG)), // cpu freq per core
-      ("GPU Stats", Some(GPU_FREQ_DICE_SUBG)), // gpu freq
-    ];
-
     let soc = SocInfo::new()?;
-    let ior = IOReport::new(channels)?;
+    let ior = init_ioreport()?;
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
 

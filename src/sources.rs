@@ -663,7 +663,9 @@ impl IOReport {
     };
 
     for _ in 0..count {
-      std::thread::sleep(std::time::Duration::from_millis(step_msec));
+      if step_msec > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(step_msec));
+      }
 
       let next = self.raw_sample();
       let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };

@@ -1,0 +1,2 @@
+[alias]
+bb = "bench --features bench --bench bench --"
