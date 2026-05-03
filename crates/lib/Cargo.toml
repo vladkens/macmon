@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+autobenches = false
 description = "Sudoless performance monitoring library for Apple Silicon processors"
 keywords = ["macos", "monitoring", "performance", "ffi"]
 categories = ["hardware-support", "api-bindings"]
@@ -17,8 +18,19 @@ crate-type = ["cdylib", "rlib"]
 [lints]
 workspace = true
 
+[features]
+bench = []
+
 [dependencies]
 core-foundation.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+divan = "0.1.21"
+
+[[bench]]
+name = "bench"
+harness = false
+required-features = ["bench"]

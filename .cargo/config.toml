@@ -1,0 +1,2 @@
+[alias]
+bb = "bench -p macmon-lib --features bench --bench bench --"

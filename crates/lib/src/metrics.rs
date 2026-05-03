@@ -244,13 +244,33 @@ fn avg_in_range(values: &[f32], min: f32, max: f32) -> f32 {
   zero_div(sum, count as f32)
 }
 
+pub(crate) fn ioreport_channels_filter(
+  group: &str,
+  subgroup: &str,
+  channel: &str,
+  _unit: &str,
+) -> bool {
+  if group == "Energy Model" {
+    return channel == "GPU Energy"
+      || channel.ends_with("CPU Energy")
+      || channel.starts_with("ANE")
+      || channel.starts_with("DRAM")
+      || channel.starts_with("GPU SRAM")
+      || channel.starts_with("DISP");
+  }
+  if group == "CPU Stats" {
+    return subgroup == CPU_FREQ_CORE_SUBG;
+  }
+  group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
+}
+
 #[derive(Debug, Default)]
-struct SmcSensors {
+pub(crate) struct SmcSensors {
   cpu_keys: Vec<String>,
   gpu_keys: Vec<String>,
 }
 
-fn init_smc() -> WithError<(SMC, SmcSensors)> {
+pub(crate) fn init_smc() -> WithError<(SMC, SmcSensors)> {
   let mut smc = SMC::new()?;
   startup_log("lib smc: connection ready");
 
@@ -312,21 +332,7 @@ impl Sampler {
       soc.gpu_cores
     ));
 
-    let channels = |group: &str, subgroup: &str, channel: &str, _unit: &str| {
-      if group == "Energy Model" {
-        return channel == "GPU Energy"
-          || channel.ends_with("CPU Energy")
-          || channel.starts_with("ANE")
-          || channel.starts_with("DRAM")
-          || channel.starts_with("GPU SRAM")
-          || channel.starts_with("DISP");
-      }
-      if group == "CPU Stats" {
-        return subgroup == CPU_FREQ_CORE_SUBG;
-      }
-      group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
-    };
-    let io_report = match IOReport::new(Some(channels)) {
+    let io_report = match IOReport::new(Some(ioreport_channels_filter)) {
       Ok(io_report) => io_report,
       Err(err) => {
         let _ = smc_init.join();
