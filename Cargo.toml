@@ -2,6 +2,7 @@
 name = "macmon"
 version = "0.7.2"
 edition = "2024"
+autobenches = false
 description = "Apple Silicon system monitor & Rust library — CPU/GPU power, temperature, RAM. No sudo. TUI, JSON pipe, Prometheus exporter."
 authors = ["vladkens"]
 license = "MIT"
@@ -14,6 +15,9 @@ keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
 categories = ["command-line-utilities", "hardware-support", "visualization"]
 [package.metadata.docs.rs]
 targets = ["aarch64-apple-darwin"]
+
+[features]
+bench = []
 
 [lib]
 name = "macmon"
@@ -48,3 +52,11 @@ ratatui = { version = "0.30.0", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde-inline-default = "1.0.1"
 serde_json = "1.0.149"
+
+[dev-dependencies]
+divan = "0.1.21"
+
+[[bench]]
+name = "bench"
+harness = false
+required-features = ["bench"]
