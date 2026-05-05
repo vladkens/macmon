@@ -415,20 +415,8 @@ impl App {
     self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
 
     // 3rd row
-    let label_l = format!(
-      "Power: {:.2}W (avg {:.2}W, max {:.2}W)",
-      self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
-    );
-
-    // Show label only if sensor is available
-    let label_r = if self.sys_power.top_value > 0.0 {
-      format!(
-        "Total {:.2}W ({:.2}, {:.2})",
-        self.sys_power.top_value, self.sys_power.avg_value, self.sys_power.max_value
-      )
-    } else {
-      "".to_string()
-    };
+    let label_l = "Power";
+    let label_r = "";
 
     let block = self.title_block(&label_l, &label_r);
     let usage = format!(" 'q' – quit, 'c' – color, 'v' – view | -/+ {}ms ", self.cfg.interval);
@@ -438,12 +426,16 @@ impl App {
 
     let ha = Layout::default()
       .direction(Direction::Horizontal)
-      .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
+      .constraints(
+        [Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]
+          .as_ref(),
+      )
       .split(iarea);
 
     f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
     f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
     f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
+    f.render_widget(self.get_power_block("Total", &self.sys_power, 0.0), ha[3]);
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
