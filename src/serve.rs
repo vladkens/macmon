@@ -29,10 +29,10 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "macmon_memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge!(out, "macmon_memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
   gauge!(out, "macmon_cpu_usage_ratio", "Combined CPU utilization (0–1), weighted by core count", m.cpu_usage_pct);
-  gauge!(out, "macmon_ecpu_freq_mhz", "Efficiency CPU cluster frequency in MHz", m.ecpu_usage.0);
-  gauge!(out, "macmon_ecpu_usage_ratio", "Efficiency CPU cluster utilization (0–1)", m.ecpu_usage.1);
-  gauge!(out, "macmon_pcpu_freq_mhz", "Performance CPU cluster frequency in MHz", m.pcpu_usage.0);
-  gauge!(out, "macmon_pcpu_usage_ratio", "Performance CPU cluster utilization (0–1)", m.pcpu_usage.1);
+  gauge!(out, "macmon_ecpu_freq_mhz", "Efficiency CPU cluster average frequency in MHz", m.ecpu_usage.0);
+  gauge!(out, "macmon_ecpu_usage_ratio", "Efficiency CPU cluster average utilization (0–1)", m.ecpu_usage.1);
+  gauge!(out, "macmon_pcpu_freq_mhz", "Performance CPU cluster average frequency in MHz", m.pcpu_usage.0);
+  gauge!(out, "macmon_pcpu_usage_ratio", "Performance CPU cluster average utilization (0–1)", m.pcpu_usage.1);
   gauge!(out, "macmon_gpu_freq_mhz", "GPU frequency in MHz", m.gpu_usage.0);
   gauge!(out, "macmon_gpu_usage_ratio", "GPU utilization (0–1)", m.gpu_usage.1);
   gauge!(out, "macmon_cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);

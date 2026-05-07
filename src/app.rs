@@ -41,7 +41,7 @@ fn leave_term() {
 
 // MARK: Storage
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct FreqStore {
   items: Vec<u64>, // from 0 to 100
   top_value: u64,
@@ -82,11 +82,13 @@ impl PowerStore {
 #[derive(Debug, Default)]
 struct MemoryStore {
   items: Vec<u64>,
+  swap_items: Vec<u64>,
   ram_usage: u64,
   ram_total: u64,
   swap_usage: u64,
   swap_total: u64,
   max_ram: u64,
+  max_swap: u64,
 }
 
 impl MemoryStore {
@@ -94,11 +96,15 @@ impl MemoryStore {
     self.items.insert(0, value.ram_usage);
     self.items.truncate(MAX_SPARKLINE);
 
+    self.swap_items.insert(0, value.swap_usage);
+    self.swap_items.truncate(MAX_SPARKLINE);
+
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
     self.max_ram = self.items.iter().max().map_or(0, |v| *v);
+    self.max_swap = self.swap_items.iter().max().map_or(0, |v| *v);
   }
 }
 
@@ -151,6 +157,35 @@ fn bar_set() -> symbols::bar::Set<'static> {
 
 // MARK: Components
 
+fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
+  if cores.is_empty() {
+    return FreqStore::default();
+  }
+
+  let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
+  let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
+
+  // Aggregate sparkline data by averaging across cores
+  let max_len = cores.iter().map(|c| c.items.len()).max().unwrap_or(0);
+  let mut aggregated_items = Vec::with_capacity(max_len);
+
+  for i in 0..max_len {
+    let mut sum = 0u64;
+    let mut count = 0;
+    for core in cores {
+      if let Some(&val) = core.items.get(i) {
+        sum += val;
+        count += 1;
+      }
+    }
+    if count > 0 {
+      aggregated_items.push(sum / count as u64);
+    }
+  }
+
+  FreqStore { items: aggregated_items, top_value: avg_freq, usage: avg_usage }
+}
+
 fn h_stack(area: Rect) -> (Rect, Rect) {
   let ha = Layout::default()
     .direction(Direction::Horizontal)
@@ -166,6 +201,7 @@ enum Event {
   Update(Metrics),
   ChangeColor,
   ChangeView,
+  TogglePerCore,
   IncInterval,
   DecInterval,
   Tick,
@@ -178,6 +214,7 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
+    KeyCode::Char('d') => Ok(tx.send(Event::TogglePerCore)?),
     KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
     KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
     KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
@@ -245,8 +282,8 @@ pub struct App {
   cpu_temp: TempStore,
   gpu_temp: TempStore,
 
-  ecpu_freq: FreqStore,
-  pcpu_freq: FreqStore,
+  ecpu_freq: Vec<FreqStore>,
+  pcpu_freq: Vec<FreqStore>,
   igpu_freq: FreqStore,
 }
 
@@ -254,7 +291,9 @@ impl App {
   pub fn new() -> WithError<Self> {
     let soc = SocInfo::new()?;
     let cfg = Config::load();
-    Ok(Self { cfg, soc, ..Default::default() })
+    let ecpu_freq = vec![FreqStore::default(); soc.ecpu_cores as usize];
+    let pcpu_freq = vec![FreqStore::default(); soc.pcpu_cores as usize];
+    Ok(Self { cfg, soc, ecpu_freq, pcpu_freq, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -263,8 +302,21 @@ impl App {
     self.ane_power.push(data.ane_power as f64);
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
-    self.ecpu_freq.push(data.ecpu_usage.0 as u64, data.ecpu_usage.1 as f64);
-    self.pcpu_freq.push(data.pcpu_usage.0 as u64, data.pcpu_usage.1 as f64);
+
+    // Update per-core E-CPU frequencies
+    for (i, &(freq, usage)) in data.ecpu_core_usages.iter().enumerate() {
+      if i < self.ecpu_freq.len() {
+        self.ecpu_freq[i].push(freq as u64, usage as f64);
+      }
+    }
+
+    // Update per-core P-CPU frequencies
+    for (i, &(freq, usage)) in data.pcpu_core_usages.iter().enumerate() {
+      if i < self.pcpu_freq.len() {
+        self.pcpu_freq[i].push(freq as u64, usage as f64);
+      }
+    }
+
     self.igpu_freq.push(data.gpu_usage.0 as u64, data.gpu_usage.1 as f64);
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
@@ -340,6 +392,75 @@ impl App {
     }
   }
 
+  fn render_multi_core_block(&self, f: &mut Frame, r: Rect, label: &str, cores: &[FreqStore]) {
+    if cores.is_empty() {
+      return;
+    }
+
+    // Calculate average usage and frequency across all cores
+    let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
+    let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
+
+    let title = format!(
+      "{} {:3.0}% @ {:4.0} MHz ({} cores)",
+      label,
+      avg_usage * 100.0,
+      avg_freq,
+      cores.len()
+    );
+    let block = self.title_block(title.as_str(), "");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    // Create vertical layout for each core
+    let constraints: Vec<Constraint> = (0..cores.len()).map(|_| Constraint::Fill(1)).collect();
+
+    let core_areas =
+      Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
+
+    // Render each core
+    for (i, core) in cores.iter().enumerate() {
+      if i >= core_areas.len() {
+        break;
+      }
+
+      let core_label = format!("Core {} {:3.0}%", i, core.usage * 100.0);
+
+      match self.cfg.view_type {
+        ViewType::Sparkline => {
+          let w = Sparkline::default()
+            .direction(RenderDirection::RightToLeft)
+            .data(&core.items)
+            .max(100)
+            .style(self.cfg.color);
+
+          // Add a small label for the core
+          let label_len = core_label.len();
+          let label_span = Span::styled(core_label, Style::default().fg(self.cfg.color));
+          let mut area = core_areas[i];
+
+          // Render core label at the start
+          if area.width > label_len as u16 {
+            let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+            f.render_widget(Paragraph::new(label_span), label_area);
+            area.x += label_len as u16 + 1;
+            area.width = area.width.saturating_sub(label_len as u16 + 1);
+          }
+
+          f.render_widget(w, area);
+        }
+        ViewType::Gauge => {
+          let w = Gauge::default()
+            .gauge_style(self.cfg.color)
+            .style(self.cfg.color)
+            .label(core_label)
+            .ratio(core.usage);
+          f.render_widget(w, core_areas[i]);
+        }
+      }
+    }
+  }
+
   fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
@@ -375,6 +496,90 @@ impl App {
     }
   }
 
+  fn render_split_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
+    let ram_usage_gb = val.ram_usage as f64 / GB as f64;
+    let ram_total_gb = val.ram_total as f64 / GB as f64;
+    let swap_usage_gb = val.swap_usage as f64 / GB as f64;
+    let swap_total_gb = val.swap_total as f64 / GB as f64;
+
+    let title = "Memory";
+    let block = self.title_block(title, "");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    // Split into RAM and SWAP sections
+    let sections = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Fill(1), Constraint::Fill(1)])
+      .split(inner);
+
+    // RAM section
+    let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
+    match self.cfg.view_type {
+      ViewType::Sparkline => {
+        let w = Sparkline::default()
+          .direction(RenderDirection::RightToLeft)
+          .data(&val.items)
+          .max(val.ram_total)
+          .style(self.cfg.color);
+
+        let label_len = ram_label.len();
+        let label_span = Span::styled(ram_label, Style::default().fg(self.cfg.color));
+        let mut area = sections[0];
+
+        if area.width > label_len as u16 {
+          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+          f.render_widget(Paragraph::new(label_span), label_area);
+          area.x += label_len as u16 + 1;
+          area.width = area.width.saturating_sub(label_len as u16 + 1);
+        }
+
+        f.render_widget(w, area);
+      }
+      ViewType::Gauge => {
+        let w = Gauge::default()
+          .gauge_style(self.cfg.color)
+          .style(self.cfg.color)
+          .label(ram_label)
+          .ratio(zero_div(ram_usage_gb, ram_total_gb));
+        f.render_widget(w, sections[0]);
+      }
+    }
+
+    // SWAP section
+    let swap_label = format!("SWAP {:4.2}/{:4.1} GB", swap_usage_gb, swap_total_gb);
+    match self.cfg.view_type {
+      ViewType::Sparkline => {
+        let w = Sparkline::default()
+          .direction(RenderDirection::RightToLeft)
+          .data(&val.swap_items)
+          .max(val.swap_total.max(1)) // Avoid division by zero if no swap
+          .style(self.cfg.color);
+
+        let label_len = swap_label.len();
+        let label_span = Span::styled(swap_label, Style::default().fg(self.cfg.color));
+        let mut area = sections[1];
+
+        if area.width > label_len as u16 {
+          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
+          f.render_widget(Paragraph::new(label_span), label_area);
+          area.x += label_len as u16 + 1;
+          area.width = area.width.saturating_sub(label_len as u16 + 1);
+        }
+
+        f.render_widget(w, area);
+      }
+      ViewType::Gauge => {
+        let w = Gauge::default()
+          .gauge_style(self.cfg.color)
+          .style(self.cfg.color)
+          .label(swap_label)
+          .ratio(zero_div(swap_usage_gb, swap_total_gb));
+        f.render_widget(w, sections[1]);
+      }
+    }
+  }
+
   fn render(&mut self, f: &mut Frame) {
     let label_l = format!(
       "{} ({}{}+{}{}+{}GPU {}GB)",
@@ -406,12 +611,23 @@ impl App {
     let (c1, c2) = h_stack(iarea[0]);
     let ecpu_block_label = format!("{}-CPU", self.soc.ecpu_label);
     let pcpu_block_label = format!("{}-CPU", self.soc.pcpu_label);
-    self.render_freq_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
-    self.render_freq_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
+    if self.cfg.per_core_view {
+      self.render_multi_core_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
+      self.render_multi_core_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
+    } else {
+      let ecpu_agg = compute_aggregate_freq(&self.ecpu_freq);
+      let pcpu_agg = compute_aggregate_freq(&self.pcpu_freq);
+      self.render_freq_block(f, c1, &ecpu_block_label, &ecpu_agg);
+      self.render_freq_block(f, c2, &pcpu_block_label, &pcpu_agg);
+    }
 
     // 2nd row
     let (c1, c2) = h_stack(iarea[1]);
-    self.render_mem_block(f, c1, &self.mem);
+    if self.cfg.per_core_view {
+      self.render_split_mem_block(f, c1, &self.mem);
+    } else {
+      self.render_mem_block(f, c1, &self.mem);
+    }
     self.render_freq_block(f, c2, "GPU", &self.igpu_freq);
 
     // 3rd row
@@ -431,7 +647,10 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" 'q' – quit, 'c' – color, 'v' – view | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(
+      " 'q' – quit, 'c' – color, 'v' – view, 'd' – detailed | -/+ {}ms ",
+      self.cfg.interval
+    );
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -465,6 +684,7 @@ impl App {
         Event::Update(data) => self.update_metrics(data),
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
+        Event::TogglePerCore => self.cfg.toggle_per_core_view(),
         Event::IncInterval => {
           self.cfg.inc_interval();
           *msec.write().unwrap() = self.cfg.interval;
