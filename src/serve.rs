@@ -76,6 +76,17 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
   );
 }
 
+fn serve_url(host: &str, port: u16) -> String {
+  let host = if matches!(host, "0.0.0.0" | "::") { "localhost" } else { host };
+  let host = if host.contains(':') && !host.starts_with('[') {
+    format!("[{host}]")
+  } else {
+    host.to_string()
+  };
+
+  format!("http://{host}:{port}")
+}
+
 fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) {
   let path = match read_path(&mut stream) {
     Some(p) => p,
@@ -113,7 +124,7 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
-pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
   let home = std::env::var("HOME")?;
   let plist_path = format!("{home}/Library/LaunchAgents/com.macmon.plist");
 
@@ -141,6 +152,8 @@ pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error
   <array>
     <string>{bin}</string>
     <string>serve</string>
+    <string>--host</string>
+    <string>{host}</string>
     <string>--port</string>
     <string>{port}</string>
   </array>
@@ -166,18 +179,19 @@ pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error
   std::fs::write(&plist_path, plist)?;
   std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
   eprintln!("macmon service installed: {plist_path}");
-  eprintln!("serving on http://localhost:{port}");
+  eprintln!("serving on {}", serve_url(host, port));
 
   Ok(())
 }
 
 pub fn run(
+  host: &str,
   port: u16,
   shared: SharedMetrics,
   soc: Arc<SocInfo>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-  let listener = TcpListener::bind(format!("0.0.0.0:{port}"))?;
-  eprintln!("macmon serving on http://localhost:{port}");
+  let listener = TcpListener::bind((host, port))?;
+  eprintln!("macmon serving on {}", serve_url(host, port));
   eprintln!("  GET /json    → JSON metrics");
   eprintln!("  GET /metrics → Prometheus format");
 
@@ -189,4 +203,17 @@ pub fn run(
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::serve_url;
+
+  #[test]
+  fn formats_serving_urls() {
+    assert_eq!(serve_url("127.0.0.1", 9090), "http://127.0.0.1:9090");
+    assert_eq!(serve_url("0.0.0.0", 9090), "http://localhost:9090");
+    assert_eq!(serve_url("::", 9090), "http://localhost:9090");
+    assert_eq!(serve_url("::1", 9090), "http://[::1]:9090");
+  }
 }

@@ -1,10 +1,27 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
 use macmon::{App, Sampler, debug};
 use std::error::Error;
+use std::net::ToSocketAddrs;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
 mod serve;
+
+// Validate by asking the platform resolver for at least one socket address.
+// The original host string is preserved so launchd and serve use the same value
+// the user provided.
+fn validate_host(host: &str) -> Result<String, String> {
+  match (host, 0).to_socket_addrs() {
+    Ok(mut addrs) => {
+      if addrs.next().is_some() {
+        Ok(host.to_string())
+      } else {
+        Err("host must resolve to a socket address".to_string())
+      }
+    }
+    _ => Err("host must resolve to a socket address".to_string()),
+  }
+}
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -22,6 +39,10 @@ enum Commands {
 
   /// Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
   Serve {
+    /// Host address to listen on
+    #[arg(long, default_value = "0.0.0.0", value_parser = validate_host)]
+    host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
@@ -80,9 +101,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { port, install, uninstall }) => {
+    Some(Commands::Serve { host, port, install, uninstall }) => {
       if *install || *uninstall {
-        serve::launchd(*port, *install)?;
+        serve::launchd(host, *port, *install)?;
         return Ok(());
       }
       let mut sampler = Sampler::new()?;
@@ -91,9 +112,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
       let shared_http = Arc::clone(&shared);
       let soc_http = Arc::clone(&soc);
+      let host = host.clone();
       let port = *port;
       thread::spawn(move || {
-        if let Err(e) = serve::run(port, shared_http, soc_http) {
+        if let Err(e) = serve::run(&host, port, shared_http, soc_http) {
           eprintln!("server error: {e}");
         }
       });
@@ -120,4 +142,41 @@ fn main() -> Result<(), Box<dyn Error>> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::validate_host;
+
+  #[test]
+  fn accepts_resolvable_hosts() {
+    assert!(validate_host("127.0.0.1").is_ok());
+    assert!(validate_host("::1").is_ok());
+    assert!(validate_host("0.0.0.0").is_ok());
+    assert!(validate_host("localhost").is_ok());
+    assert!(validate_host("0").is_ok());
+    assert!(validate_host("127.1").is_ok());
+  }
+
+  #[test]
+  fn rejects_invalid_hostnames() {
+    assert!(validate_host("").is_err());
+    assert!(validate_host("example..com").is_err());
+    assert!(validate_host("example com").is_err());
+    assert!(validate_host("example.com:9090").is_err());
+  }
+
+  #[test]
+  fn rejects_unresolvable_dns_hostnames() {
+    assert!(validate_host("example.invalid").is_err());
+  }
+
+  #[test]
+  fn rejects_xml_metacharacters() {
+    assert!(validate_host("<example>").is_err());
+    assert!(validate_host("example>host").is_err());
+    assert!(validate_host("example&host").is_err());
+    assert!(validate_host(r#""example""#).is_err());
+    assert!(validate_host("example'host").is_err());
+  }
 }
