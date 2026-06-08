@@ -521,6 +521,11 @@ impl App {
     }
   }
 
+  fn gauge_label(&self, label: String, ratio: f64) -> Span<'static> {
+    let fg = if ratio > 0.5 { Color::Black } else { self.cfg.color };
+    Span::styled(label, Style::default().fg(fg))
+  }
+
   fn render_split_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
     let ram_usage_gb = val.ram_usage as f64 / GB as f64;
     let ram_total_gb = val.ram_total as f64 / GB as f64;
@@ -532,7 +537,6 @@ impl App {
     let inner = block.inner(r);
     f.render_widget(block, r);
 
-    // Split into RAM and SWAP sections
     let sections = Layout::default()
       .direction(Direction::Vertical)
       .constraints([Constraint::Fill(1), Constraint::Fill(1)])
@@ -563,11 +567,12 @@ impl App {
         f.render_widget(w, area);
       }
       ViewType::Gauge => {
+        let ratio = zero_div(ram_usage_gb, ram_total_gb);
         let w = Gauge::default()
           .gauge_style(self.cfg.color)
           .style(self.cfg.color)
-          .label(ram_label)
-          .ratio(zero_div(ram_usage_gb, ram_total_gb));
+          .label(self.gauge_label(ram_label, ratio))
+          .ratio(ratio);
         f.render_widget(w, sections[0]);
       }
     }
@@ -597,11 +602,12 @@ impl App {
         f.render_widget(w, area);
       }
       ViewType::Gauge => {
+        let ratio = zero_div(swap_usage_gb, swap_total_gb);
         let w = Gauge::default()
           .gauge_style(self.cfg.color)
           .style(self.cfg.color)
-          .label(swap_label)
-          .ratio(zero_div(swap_usage_gb, swap_total_gb));
+          .label(self.gauge_label(swap_label, ratio))
+          .ratio(ratio);
         f.render_widget(w, sections[1]);
       }
     }
@@ -681,10 +687,7 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(
-      " 'q' – quit, 'c' – color, 'v' – view, 'd' – detailed | -/+ {}ms ",
-      self.cfg.interval
-    );
+    let usage = format!(" q quit | c color | v chart | d detail | -/+ {}ms ", self.cfg.interval);
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);

@@ -7,9 +7,13 @@ use macmon::{Metrics, SocInfo};
 
 pub type SharedMetrics = Arc<RwLock<Option<Metrics>>>;
 
+fn escape_label_value(value: &str) -> String {
+  value.replace('\\', r"\\").replace('\n', r"\n").replace('"', r#"\""#)
+}
+
 #[rustfmt::skip]
 fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
-  let chip = &soc.chip_name;
+  let chip = escape_label_value(&soc.chip_name);
   let l = format!(r#"chip="{chip}""#);
 
   macro_rules! gauge_head {
@@ -229,7 +233,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-  use super::{escape_xml, serve_url};
+  use super::{escape_label_value, escape_xml, serve_url};
 
   #[test]
   fn formats_serving_urls() {
@@ -242,5 +246,10 @@ mod tests {
   #[test]
   fn escapes_xml_values() {
     assert_eq!(escape_xml(r#"<host>&"'host"#), "&lt;host&gt;&amp;&quot;&apos;host");
+  }
+
+  #[test]
+  fn escapes_prometheus_label_values() {
+    assert_eq!(escape_label_value("Mac\\Book\n\"Pro\""), r#"Mac\\Book\n\"Pro\""#);
   }
 }

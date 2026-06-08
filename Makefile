@@ -1,14 +1,17 @@
-.PHONY: prepare fmt lint build update publish-check
+.PHONY: prepare check test build update publish-check
 
-prepare: fmt lint build
-
-lint:
-	cargo fmt --check
-	cargo clippy --all-targets --all-features -- -D warnings
+prepare:
+	cargo fmt
+	cargo clippy --fix --all-targets --locked --allow-dirty -- -D warnings
 	cargo check --release --locked
 
-fmt:
-	cargo fmt
+check:
+	cargo fmt --check
+	cargo clippy --all-targets --locked -- -D warnings
+	cargo check --release --locked
+
+test:
+	cargo test --locked
 
 build:
 	cargo build --release
