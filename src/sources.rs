@@ -411,6 +411,7 @@ pub struct SocInfo {
 
 impl SocInfo {
   pub fn new() -> WithError<Self> {
+    // Keep this constructor for external library users; internal call sites use get_soc_info().
     get_soc_info()
   }
 }
@@ -1014,14 +1015,7 @@ impl SMC {
     Ok(key.bytes().fold(0, |acc, x| (acc << 8) + x as u32))
   }
 
-  pub fn key_by_index(&self, index: u32) -> WithError<String> {
-    let ival = KeyData { data8: 8, data32: index, ..Default::default() };
-    let oval = self.read(&ival)?;
-    Ok(std::str::from_utf8(&oval.key.to_be_bytes()).unwrap().to_string())
-  }
-
-  pub fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
-    let key = Self::parse_key(key)?;
+  fn read_key_info_by_id(&mut self, key: u32) -> WithError<KeyInfo> {
     if let Some(key_info) = self.keys.get(&key) {
       // println!("cache hit for {}", key);
       return Ok(*key_info);
@@ -1033,10 +1027,21 @@ impl SMC {
     Ok(oval.key_info)
   }
 
+  pub fn key_by_index(&self, index: u32) -> WithError<String> {
+    let ival = KeyData { data8: 8, data32: index, ..Default::default() };
+    let oval = self.read(&ival)?;
+    Ok(std::str::from_utf8(&oval.key.to_be_bytes()).unwrap().to_string())
+  }
+
+  pub fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
+    let key = Self::parse_key(key)?;
+    self.read_key_info_by_id(key)
+  }
+
   pub fn read_val(&mut self, key: &str) -> WithError<SensorVal> {
     let name = key.to_string();
-    let key_info = self.read_key_info(key)?;
     let key = Self::parse_key(key)?;
+    let key_info = self.read_key_info_by_id(key)?;
     let ival = KeyData { data8: 5, key, key_info, ..Default::default() };
     let oval = self.read(&ival)?;
 
@@ -1050,7 +1055,8 @@ impl SMC {
   pub fn read_float_val(&mut self, key: &str) -> WithError<f32> {
     const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
-    let key_info = self.read_key_info(key)?;
+    let key_id = Self::parse_key(key)?;
+    let key_info = self.read_key_info_by_id(key_id)?;
     if key_info.data_size != 4 || key_info.data_type != FLOAT_TYPE {
       return Err(
         format!(
@@ -1061,16 +1067,15 @@ impl SMC {
       );
     }
 
-    let key = Self::parse_key(key)?;
-    let ival = KeyData { data8: 5, key, key_info, ..Default::default() };
+    let ival = KeyData { data8: 5, key: key_id, key_info, ..Default::default() };
     let oval = self.read(&ival)?;
 
     Ok(f32::from_le_bytes(oval.bytes[0..4].try_into().unwrap()))
   }
 
   pub fn key_count(&mut self) -> WithError<u32> {
-    let key_info = self.read_key_info("#KEY")?;
     let key = Self::parse_key("#KEY")?;
+    let key_info = self.read_key_info_by_id(key)?;
     let ival = KeyData { data8: 5, key, key_info, ..Default::default() };
     let oval = self.read(&ival)?;
     Ok(u32::from_be_bytes(oval.bytes[0..4].try_into().unwrap()))
