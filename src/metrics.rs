@@ -28,9 +28,17 @@ pub struct MemMetrics {
 }
 
 #[derive(Debug, Default, Serialize)]
+pub struct FanMetric {
+  pub name: String,
+  pub key: String,
+  pub rpm: u32,
+}
+
+#[derive(Debug, Default, Serialize)]
 pub struct Metrics {
   pub temp: TempMetrics,
   pub memory: MemMetrics,
+  pub fans: Vec<FanMetric>,
   pub ecpu_usage: (u32, f32), // freq, percent_from_max
   pub pcpu_usage: (u32, f32), // freq, percent_from_max
   pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
@@ -53,6 +61,44 @@ pub fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T)
 
 fn is_valid_temp(val: f32) -> bool {
   val > 0.0 && val <= 150.0
+}
+
+fn is_valid_fan_rpm(val: f32) -> bool {
+  val >= 0.0 && val <= 100_000.0
+}
+
+fn fan_rpm_value(val: f32) -> Option<u32> {
+  if is_valid_fan_rpm(val) { Some(val.trunc() as u32) } else { None }
+}
+
+fn fan_name_from_smc_key(key: &str) -> String {
+  let Some(idx) = key.strip_prefix('F').and_then(|s| s.chars().next()).and_then(|c| c.to_digit(10))
+  else {
+    return key.to_string();
+  };
+  format!("Fan{}", idx)
+}
+
+fn fan_name_from_smc_id(data: &[u8]) -> Option<String> {
+  if data.len() <= 4 {
+    return None;
+  }
+
+  let name = data[4..].iter().copied().take_while(|b| *b != 0).collect::<Vec<u8>>();
+  let name = String::from_utf8(name).ok()?;
+  let name = name.trim();
+  if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+fn smc_numeric_value(data: &[u8], unit: &str) -> Option<f32> {
+  match unit {
+    "flt " if data.len() == 4 => Some(f32::from_le_bytes(data.try_into().ok()?)),
+    "fpe2" if data.len() >= 2 => Some(((data[0] as u16) << 6 | ((data[1] as u16) >> 2)) as f32),
+    "ui8 " if !data.is_empty() => Some(data[0] as f32),
+    "ui16" if data.len() >= 2 => Some(u16::from_be_bytes(data[0..2].try_into().ok()?) as f32),
+    "ui32" if data.len() >= 4 => Some(u32::from_be_bytes(data[0..4].try_into().ok()?) as f32),
+    _ => None,
+  }
 }
 
 fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32) {
@@ -89,12 +135,13 @@ fn calc_freq_final(items: &[(u32, f32)], freqs: &[u32]) -> (u32, f32) {
   (avg_freq.max(min_freq) as u32, avg_perc)
 }
 
-fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
+fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>, Vec<String>)> {
   let mut smc = SMC::new()?;
   const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
+  let mut fan_sensors = Vec::new();
 
   let names = smc.read_all_keys().unwrap_or(vec![]);
   for name in &names {
@@ -102,6 +149,11 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
       Ok(key) => key,
       Err(_) => continue,
     };
+
+    if name.len() == 4 && name.starts_with('F') && name.ends_with("Ac") {
+      fan_sensors.push(name.clone());
+      continue;
+    }
 
     if key.data_size != 4 || key.data_type != FLOAT_TYPE {
       continue;
@@ -125,8 +177,9 @@ fn init_smc() -> WithError<(SMC, Vec<String>, Vec<String>)> {
     }
   }
 
+  fan_sensors.sort();
   // println!("{} {}", cpu_sensors.len(), gpu_sensors.len());
-  Ok((smc, cpu_sensors, gpu_sensors))
+  Ok((smc, cpu_sensors, gpu_sensors, fan_sensors))
 }
 
 // MARK: Sampler
@@ -138,6 +191,7 @@ pub struct Sampler {
   smc: SMC,
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
+  smc_fan_keys: Vec<String>,
 }
 
 impl Sampler {
@@ -152,9 +206,9 @@ impl Sampler {
     let soc = SocInfo::new()?;
     let ior = IOReport::new(channels)?;
     let hid = IOHIDSensors::new()?;
-    let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
+    let (smc, smc_cpu_keys, smc_gpu_keys, smc_fan_keys) = init_smc()?;
 
-    Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys })
+    Ok(Sampler { soc, ior, hid, smc, smc_cpu_keys, smc_gpu_keys, smc_fan_keys })
   }
 
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
@@ -219,6 +273,25 @@ impl Sampler {
       true => self.get_temp_smc(),
       false => self.get_temp_hid(),
     }
+  }
+
+  fn get_fans(&mut self) -> WithError<Vec<FanMetric>> {
+    let mut fans = Vec::new();
+    for key in &self.smc_fan_keys {
+      let val = self.smc.read_val(key)?;
+      let Some(rpm) = smc_numeric_value(&val.data, &val.unit) else {
+        continue;
+      };
+      if let Some(rpm) = fan_rpm_value(rpm) {
+        let name = key
+          .get(0..2)
+          .and_then(|prefix| self.smc.read_val(&format!("{prefix}ID")).ok())
+          .and_then(|val| fan_name_from_smc_id(&val.data))
+          .unwrap_or_else(|| fan_name_from_smc_key(key));
+        fans.push(FanMetric { name, key: key.clone(), rpm });
+      }
+    }
+    Ok(fans)
   }
 
   fn get_mem(&mut self) -> WithError<MemMetrics> {
@@ -319,6 +392,7 @@ impl Sampler {
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
+    rs.fans = self.get_fans()?;
 
     rs.sys_power = match self.get_sys_power() {
       Ok(val) => val.max(rs.all_power),
@@ -336,6 +410,37 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
+  use super::{fan_name_from_smc_id, fan_name_from_smc_key, fan_rpm_value, smc_numeric_value};
+
+  #[test]
+  fn parse_smc_numeric_values() {
+    assert_eq!(smc_numeric_value(&42.5f32.to_le_bytes(), "flt "), Some(42.5));
+    assert_eq!(smc_numeric_value(&[0x13, 0x88], "fpe2"), Some(1250.0));
+    assert_eq!(smc_numeric_value(&[0x04, 0xd2], "ui16"), Some(1234.0));
+    assert_eq!(smc_numeric_value(&[0x00, 0x00, 0x04, 0xd2], "ui32"), Some(1234.0));
+  }
+
+  #[test]
+  fn parse_fan_rpm_values() {
+    assert_eq!(fan_rpm_value(1234.9), Some(1234));
+    assert_eq!(fan_rpm_value(0.0), Some(0));
+    assert_eq!(fan_rpm_value(-1.0), None);
+  }
+
+  #[test]
+  fn derive_fan_names_from_smc_keys() {
+    assert_eq!(fan_name_from_smc_key("F0Ac"), "Fan0");
+    assert_eq!(fan_name_from_smc_key("F1Ac"), "Fan1");
+    assert_eq!(fan_name_from_smc_key("FRmp"), "FRmp");
+  }
+
+  #[test]
+  fn derive_fan_names_from_smc_id() {
+    assert_eq!(fan_name_from_smc_id(b"\0\0\0\0Left side\0\0"), Some("Left side".into()));
+    assert_eq!(fan_name_from_smc_id(b"\0\0\0\0Exhaust\0\0"), Some("Exhaust".into()));
+    assert_eq!(fan_name_from_smc_id(b"\0\0\0\0"), None);
+  }
+
   #[test]
   fn ultra_cpu_channel_matching() {
     // On Ultra chips (M1/M2/M3 Ultra) IOReport CPU Stats channels are prefixed "DIE_N_".

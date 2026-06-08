@@ -112,6 +112,13 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     "swap_total": 4294967296,         // Bytes
     "swap_usage": 2602434560          // Bytes
   },
+  "fans": [
+    {
+      "name": "Fan0",
+      "key": "F0Ac",                  // SMC fan key
+      "rpm": 1234                     // Revolutions per minute
+    }
+  ],
   "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %)
   "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, Usage %)
   "cpu_usage_pct": 0.036854,          // Combined CPU usage (weighted by core count, 0–1)
@@ -204,6 +211,10 @@ macmon_cpu_temp_celsius{chip="Apple M3 Pro"} 47.3
 # HELP macmon_cpu_power_watts CPU power consumption in Watts
 # TYPE macmon_cpu_power_watts gauge
 macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
+
+# HELP macmon_fan_speed_rpm Fan speed in revolutions per minute
+# TYPE macmon_fan_speed_rpm gauge
+macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="Fan0",key="F0Ac"} 1234
 
 # HELP macmon_cpu_usage_ratio Combined CPU utilization (0–1), weighted by core count
 # TYPE macmon_cpu_usage_ratio gauge
