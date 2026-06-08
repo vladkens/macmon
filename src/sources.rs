@@ -274,6 +274,7 @@ impl IOReportIterator {
   pub fn new(data: CFDictionaryRef, metadata: Vec<(String, String, String, String)>) -> Self {
     let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
     let items_size = unsafe { CFArrayGetCount(items) } as isize;
+    debug_assert_eq!(metadata.len(), items_size as usize);
     Self { sample: data, items, items_size, index: 0, metadata }
   }
 }
