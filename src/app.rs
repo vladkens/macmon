@@ -10,7 +10,7 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::metrics::{Metrics, Sampler, zero_div};
+use crate::metrics::{FanMetric, Metrics, Sampler, zero_div};
 use crate::{metrics::MemMetrics, sources::SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -148,6 +148,35 @@ impl TempStore {
   }
 }
 
+#[derive(Debug, Default)]
+struct FanStore {
+  items: Vec<FanMetric>,
+}
+
+impl FanStore {
+  fn push(&mut self, value: Vec<FanMetric>) {
+    self.items = value;
+  }
+
+  fn label(&self) -> String {
+    match self.items.as_slice() {
+      [] => "".to_string(),
+      [fan] => format!("Fan {} RPM", fan.rpm),
+      fans => {
+        let values = fans.iter().map(|fan| fan.rpm.to_string()).collect::<Vec<_>>().join("/");
+        format!("Fans {values} RPM")
+      }
+    }
+  }
+}
+
+fn bar_set() -> symbols::bar::Set<'static> {
+  match std::env::var("TERM_PROGRAM").as_deref() {
+    Ok("Apple_Terminal") => symbols::bar::THREE_LEVELS,
+    _ => symbols::bar::NINE_LEVELS,
+  }
+}
+
 // MARK: Components
 
 fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
@@ -274,6 +303,7 @@ pub struct App {
 
   cpu_temp: TempStore,
   gpu_temp: TempStore,
+  fans: FanStore,
 
   ecpu_freq: Vec<FreqStore>,
   pcpu_freq: Vec<FreqStore>,
@@ -314,6 +344,7 @@ impl App {
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
     self.gpu_temp.push(data.temp.gpu_temp_avg);
+    self.fans.push(data.fans);
 
     self.mem.push(data.memory);
   }
@@ -355,6 +386,7 @@ impl App {
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
       .style(self.cfg.color)
+      .bar_set(bar_set())
   }
 
   fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
@@ -368,7 +400,8 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(100)
-          .style(self.cfg.color);
+          .style(self.cfg.color)
+          .bar_set(bar_set());
         f.render_widget(w, r);
       }
       ViewType::Gauge => {
@@ -423,7 +456,8 @@ impl App {
             .direction(RenderDirection::RightToLeft)
             .data(&core.items)
             .max(100)
-            .style(self.cfg.color);
+            .style(self.cfg.color)
+            .bar_set(bar_set());
 
           // Add a small label for the core
           let label_len = core_label.len();
@@ -471,7 +505,8 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(val.ram_total)
-          .style(self.cfg.color);
+          .style(self.cfg.color)
+          .bar_set(bar_set());
         f.render_widget(w, r);
       }
       ViewType::Gauge => {
@@ -511,7 +546,8 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(val.ram_total)
-          .style(self.cfg.color);
+          .style(self.cfg.color)
+          .bar_set(bar_set());
 
         let label_len = ram_label.len();
         let label_span = Span::styled(ram_label, Style::default().fg(self.cfg.color));
@@ -544,7 +580,8 @@ impl App {
           .direction(RenderDirection::RightToLeft)
           .data(&val.swap_items)
           .max(val.swap_total.max(1)) // Avoid division by zero if no swap
-          .style(self.cfg.color);
+          .style(self.cfg.color)
+          .bar_set(bar_set());
 
         let label_len = swap_label.len();
         let label_span = Span::styled(swap_label, Style::default().fg(self.cfg.color));
@@ -626,14 +663,21 @@ impl App {
       self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
     );
 
-    // Show label only if sensor is available
-    let label_r = if self.sys_power.top_value > 0.0 {
-      format!(
+    // Show labels only if sensors are available
+    let fan_label = self.fans.label();
+    let sys_label = if self.sys_power.top_value > 0.0 {
+      Some(format!(
         "Total {:.2}W ({:.2}, {:.2})",
         self.sys_power.top_value, self.sys_power.avg_value, self.sys_power.max_value
-      )
+      ))
     } else {
-      "".to_string()
+      None
+    };
+    let label_r = match (!fan_label.is_empty(), sys_label) {
+      (true, Some(sys_label)) => format!("{fan_label} | {sys_label}"),
+      (true, None) => fan_label,
+      (false, Some(sys_label)) => sys_label,
+      (false, None) => "".to_string(),
     };
 
     let block = self.title_block(&label_l, &label_r);

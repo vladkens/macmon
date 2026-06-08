@@ -1,3 +1,25 @@
+## v0.7.2 – 2026-05-02
+
+### Fixes
+- Fixed sparkline chart rendering gaps in Apple Terminal
+- Fixed frequency scale on MacBook Neo (#57)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.7.1...v0.7.2
+
+---
+
+## v0.7.1 – 2026-04-07
+
+### Fixes
+- Fixed CPU usage always showing 0% on Ultra chips (M1/M2/M3 Ultra) (#55)
+- Fixed GPU temperature sometimes reporting bogus values (#54, by @gtalusan)
+- Fixed potential data race when sharing metrics between threads
+- Fixed memory size showing 0GB on systems with 256GB or more RAM
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.7.0...v0.7.1
+
+---
+
 ## v0.7.0 – 2026-04-01
 
 ### Features

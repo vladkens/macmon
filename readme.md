@@ -76,6 +76,7 @@ Options:
 Controls:
   c - change color
   v - switch charts view: gauge / sparkline
+  d - toggle detailed CPU/RAM view
   q - quit
 ```
 
@@ -112,6 +113,12 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     "swap_total": 4294967296,         // Bytes
     "swap_usage": 2602434560          // Bytes
   },
+  "fans": [
+    {
+      "rpm": 1234,                    // Revolutions per minute
+      "max_rpm": 5200                 // Maximum RPM, if available
+    }
+  ],
   "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %) - cluster aggregate
   "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, Usage %) - cluster aggregate
   "ecpu_core_usages": [               // (Frequency MHz, Usage %) for each efficiency core, experimental
@@ -144,6 +151,7 @@ You can use the `serve` subcommand to expose metrics over HTTP. This is useful f
 
 ```sh
 macmon serve            # default port 9090, interval 1000ms
+macmon serve --host 127.0.0.1  # listen on localhost only
 macmon serve -p 8080    # custom port
 macmon serve -i 500     # sampling interval 500ms
 macmon serve &          # run in background
@@ -163,6 +171,7 @@ To start `macmon serve` automatically on login and keep it running:
 ```sh
 macmon serve --install              # install and start (default port 9090)
 macmon serve --port 8080 --install  # with custom port
+macmon serve --host 127.0.0.1 --install  # listen on localhost only
 macmon serve --uninstall            # stop and remove
 ```
 
@@ -216,6 +225,10 @@ macmon_cpu_temp_celsius{chip="Apple M3 Pro"} 47.3
 # HELP macmon_cpu_power_watts CPU power consumption in Watts
 # TYPE macmon_cpu_power_watts gauge
 macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
+
+# HELP macmon_fan_speed_rpm Fan speed in revolutions per minute
+# TYPE macmon_fan_speed_rpm gauge
+macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="0"} 1234
 
 # HELP macmon_cpu_usage_ratio Combined CPU utilization (0–1), weighted by core count
 # TYPE macmon_cpu_usage_ratio gauge

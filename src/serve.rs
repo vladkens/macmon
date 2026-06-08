@@ -12,12 +12,16 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   let chip = &soc.chip_name;
   let l = format!(r#"chip="{chip}""#);
 
+  macro_rules! gauge_head {
+    ($out:expr, $name:literal, $help:literal) => {
+      $out.push_str(&format!("# HELP {} {}\n# TYPE {} gauge\n", $name, $help, $name));
+    };
+  }
+
   macro_rules! gauge {
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
-      $out.push_str(&format!(
-        "# HELP {} {}\n# TYPE {} gauge\n{}{{{l}}} {}\n\n",
-        $name, $help, $name, $name, $value
-      ));
+      gauge_head!($out, $name, $help);
+      $out.push_str(&format!("{}{{{l}}} {}\n\n", $name, $value));
     };
   }
 
@@ -42,6 +46,13 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "macmon_sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge!(out, "macmon_ram_power_watts", "RAM power consumption in Watts", m.ram_power);
   gauge!(out, "macmon_gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  if !m.fans.is_empty() {
+    gauge_head!(out, "macmon_fan_speed_rpm", "Fan speed in revolutions per minute");
+    for (i, fan) in m.fans.iter().enumerate() {
+      out.push_str(&format!("macmon_fan_speed_rpm{{{l},fan=\"{i}\"}} {}\n", fan.rpm));
+    }
+    out.push('\n');
+  }
   out
 }
 
@@ -74,6 +85,26 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     )
     .as_bytes(),
   );
+}
+
+fn serve_url(host: &str, port: u16) -> String {
+  let host = if matches!(host, "0.0.0.0" | "::") { "localhost" } else { host };
+  let host = if host.contains(':') && !host.starts_with('[') {
+    format!("[{host}]")
+  } else {
+    host.to_string()
+  };
+
+  format!("http://{host}:{port}")
+}
+
+fn escape_xml(value: &str) -> String {
+  value
+    .replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&apos;")
 }
 
 fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) {
@@ -113,7 +144,7 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
-pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
   let home = std::env::var("HOME")?;
   let plist_path = format!("{home}/Library/LaunchAgents/com.macmon.plist");
 
@@ -130,6 +161,8 @@ pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error
 
   let bin = std::env::current_exe()?;
   let bin = bin.to_string_lossy();
+  let bin = escape_xml(&bin);
+  let host_xml = escape_xml(host);
   let plist = format!(
     r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -141,6 +174,8 @@ pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error
   <array>
     <string>{bin}</string>
     <string>serve</string>
+    <string>--host</string>
+    <string>{host_xml}</string>
     <string>--port</string>
     <string>{port}</string>
   </array>
@@ -166,18 +201,19 @@ pub fn launchd(port: u16, install: bool) -> Result<(), Box<dyn std::error::Error
   std::fs::write(&plist_path, plist)?;
   std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
   eprintln!("macmon service installed: {plist_path}");
-  eprintln!("serving on http://localhost:{port}");
+  eprintln!("serving on {}", serve_url(host, port));
 
   Ok(())
 }
 
 pub fn run(
+  host: &str,
   port: u16,
   shared: SharedMetrics,
   soc: Arc<SocInfo>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-  let listener = TcpListener::bind(format!("0.0.0.0:{port}"))?;
-  eprintln!("macmon serving on http://localhost:{port}");
+  let listener = TcpListener::bind((host, port))?;
+  eprintln!("macmon serving on {}", serve_url(host, port));
   eprintln!("  GET /json    → JSON metrics");
   eprintln!("  GET /metrics → Prometheus format");
 
@@ -189,4 +225,22 @@ pub fn run(
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{escape_xml, serve_url};
+
+  #[test]
+  fn formats_serving_urls() {
+    assert_eq!(serve_url("127.0.0.1", 9090), "http://127.0.0.1:9090");
+    assert_eq!(serve_url("0.0.0.0", 9090), "http://localhost:9090");
+    assert_eq!(serve_url("::", 9090), "http://localhost:9090");
+    assert_eq!(serve_url("::1", 9090), "http://[::1]:9090");
+  }
+
+  #[test]
+  fn escapes_xml_values() {
+    assert_eq!(escape_xml(r#"<host>&"'host"#), "&lt;host&gt;&amp;&quot;&apos;host");
+  }
 }

@@ -1,4 +1,6 @@
-.PHONY: fmt lint build update publish-check
+.PHONY: prepare fmt lint build update publish-check
+
+prepare: fmt lint build
 
 lint:
 	cargo fmt --check
