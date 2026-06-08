@@ -114,9 +114,8 @@ This will collect 10 samples with an update interval of 500 milliseconds.
   },
   "fans": [
     {
-      "name": "Fan0",
-      "key": "F0Ac",                  // SMC fan key
-      "rpm": 1234                     // Revolutions per minute
+      "rpm": 1234,                    // Revolutions per minute
+      "max_rpm": 5200                 // Maximum RPM, if available
     }
   ],
   "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, Usage %)
@@ -214,7 +213,7 @@ macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
 
 # HELP macmon_fan_speed_rpm Fan speed in revolutions per minute
 # TYPE macmon_fan_speed_rpm gauge
-macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="Fan0",key="F0Ac"} 1234
+macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="0"} 1234
 
 # HELP macmon_cpu_usage_ratio Combined CPU utilization (0–1), weighted by core count
 # TYPE macmon_cpu_usage_ratio gauge

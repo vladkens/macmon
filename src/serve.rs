@@ -12,12 +12,16 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   let chip = &soc.chip_name;
   let l = format!(r#"chip="{chip}""#);
 
+  macro_rules! gauge_head {
+    ($out:expr, $name:literal, $help:literal) => {
+      $out.push_str(&format!("# HELP {} {}\n# TYPE {} gauge\n", $name, $help, $name));
+    };
+  }
+
   macro_rules! gauge {
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
-      $out.push_str(&format!(
-        "# HELP {} {}\n# TYPE {} gauge\n{}{{{l}}} {}\n\n",
-        $name, $help, $name, $name, $value
-      ));
+      gauge_head!($out, $name, $help);
+      $out.push_str(&format!("{}{{{l}}} {}\n\n", $name, $value));
     };
   }
 
@@ -42,13 +46,12 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "macmon_sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge!(out, "macmon_ram_power_watts", "RAM power consumption in Watts", m.ram_power);
   gauge!(out, "macmon_gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
-  for fan in &m.fans {
-    let fan_name = &fan.name;
-    let fan_key = &fan.key;
-    out.push_str(&format!(
-      "# HELP macmon_fan_speed_rpm Fan speed in revolutions per minute\n# TYPE macmon_fan_speed_rpm gauge\nmacmon_fan_speed_rpm{{{l},fan=\"{fan_name}\",key=\"{fan_key}\"}} {}\n\n",
-      fan.rpm
-    ));
+  if !m.fans.is_empty() {
+    gauge_head!(out, "macmon_fan_speed_rpm", "Fan speed in revolutions per minute");
+    for (i, fan) in m.fans.iter().enumerate() {
+      out.push_str(&format!("macmon_fan_speed_rpm{{{l},fan=\"{i}\"}} {}\n", fan.rpm));
+    }
+    out.push('\n');
   }
   out
 }

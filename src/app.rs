@@ -153,12 +153,14 @@ impl FanStore {
   }
 
   fn label(&self) -> String {
-    self
-      .items
-      .iter()
-      .map(|fan| format!("{} {}RPM", fan.name, fan.rpm))
-      .collect::<Vec<_>>()
-      .join(" ")
+    match self.items.as_slice() {
+      [] => "".to_string(),
+      [fan] => format!("Fan {} RPM", fan.rpm),
+      fans => {
+        let values = fans.iter().map(|fan| fan.rpm.to_string()).collect::<Vec<_>>().join("/");
+        format!("Fans {values} RPM")
+      }
+    }
   }
 }
 
