@@ -157,7 +157,7 @@ pub struct Sampler {
 impl Sampler {
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
-    let ior = IOReport::new(Some(ioreport_channels_filter))?;
+    let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
     let hid = IOHIDSensors::new()?;
     let (smc, smc_cpu_keys, smc_gpu_keys) = init_smc()?;
 
@@ -330,6 +330,11 @@ impl Sampler {
     };
 
     Ok(rs)
+  }
+
+  /// Getter for the `soc` field
+  pub fn get_soc_info(&self) -> &SocInfo {
+    &self.soc
   }
 }
 

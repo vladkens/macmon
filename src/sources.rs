@@ -114,7 +114,8 @@ struct IOReportSubscription {
 }
 
 type IOReportSubscriptionRef = *const IOReportSubscription;
-pub type ChannelFilter = fn(&str, &str, &str, &str) -> bool;
+type ChannelFilter = fn(&str, &str, &str, &str) -> bool;
+type ChannelFilterRef<'a> = &'a dyn Fn(&str, &str, &str, &str) -> bool;
 
 #[link(name = "IOReport", kind = "dylib")]
 #[rustfmt::skip]
@@ -159,7 +160,7 @@ fn cfio_get_channel(item: CFDictionaryRef) -> String {
 fn cfio_channel_matches(items: &[(&str, Option<&str>)], group: &str, subgroup: &str) -> bool {
   items.is_empty()
     || items.iter().any(|(item_group, item_subgroup)| {
-      *item_group == group && item_subgroup.map_or(true, |value| value == subgroup)
+      *item_group == group && item_subgroup.is_none_or(|value| value == subgroup)
     })
 }
 
@@ -408,6 +409,12 @@ pub struct SocInfo {
   pub gpu_freqs: Vec<u32>,
 }
 
+impl SocInfo {
+  pub fn new() -> WithError<Self> {
+    get_soc_info()
+  }
+}
+
 // dynamic voltage and frequency scaling
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> Option<(Vec<u32>, Vec<u32>)> {
   unsafe {
@@ -597,7 +604,7 @@ struct IOReportChannels {
   selected: Option<CFMutableArrayRef>,
 }
 
-fn cfio_get_chan(filter: Option<ChannelFilter>) -> WithError<IOReportChannels> {
+fn cfio_get_chan(filter: Option<ChannelFilterRef<'_>>) -> WithError<IOReportChannels> {
   let all_channels = unsafe { IOReportCopyAllChannels(0, 0) };
   let Some(channel_array) = cfdict_get_val(all_channels, "IOReportChannels") else {
     unsafe { CFRelease(all_channels as _) };
@@ -678,7 +685,7 @@ pub struct IOReport {
 }
 
 impl IOReport {
-  pub fn new(filter: Option<ChannelFilter>) -> WithError<Self> {
+  fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Self> {
     let channels = cfio_get_chan(filter)?;
     let metadata = cfio_channel_metadata(channels.chan);
     let subs = cfio_get_subs(channels.chan)?;
@@ -690,6 +697,20 @@ impl IOReport {
       metadata,
       prev: None,
     })
+  }
+
+  pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
+    let filter = |group: &str, subgroup: &str, _channel: &str, _unit: &str| {
+      cfio_channel_matches(&channels, group, subgroup)
+    };
+    Self::from_filter(Some(&filter))
+  }
+
+  pub(crate) fn with_filter(filter: Option<ChannelFilter>) -> WithError<Self> {
+    match filter {
+      Some(filter) => Self::from_filter(Some(&filter)),
+      None => Self::from_filter(None),
+    }
   }
 
   pub fn get_sample(&self, duration: u64) -> IOReportIterator {
@@ -928,6 +949,13 @@ pub struct KeyData {
   pub bytes: [u8; 32],
 }
 
+#[derive(Debug, Clone)]
+pub struct SensorVal {
+  pub name: String,
+  pub unit: String,
+  pub data: Vec<u8>,
+}
+
 // MARK: SMC
 
 #[allow(clippy::upper_case_acronyms)]
@@ -986,13 +1014,13 @@ impl SMC {
     Ok(key.bytes().fold(0, |acc, x| (acc << 8) + x as u32))
   }
 
-  fn key_by_index(&self, index: u32) -> WithError<String> {
+  pub fn key_by_index(&self, index: u32) -> WithError<String> {
     let ival = KeyData { data8: 8, data32: index, ..Default::default() };
     let oval = self.read(&ival)?;
     Ok(std::str::from_utf8(&oval.key.to_be_bytes()).unwrap().to_string())
   }
 
-  fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
+  pub fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
     let key = Self::parse_key(key)?;
     if let Some(key_info) = self.keys.get(&key) {
       // println!("cache hit for {}", key);
@@ -1003,6 +1031,20 @@ impl SMC {
     let oval = self.read(&ival)?;
     self.keys.insert(key, oval.key_info);
     Ok(oval.key_info)
+  }
+
+  pub fn read_val(&mut self, key: &str) -> WithError<SensorVal> {
+    let name = key.to_string();
+    let key_info = self.read_key_info(key)?;
+    let key = Self::parse_key(key)?;
+    let ival = KeyData { data8: 5, key, key_info, ..Default::default() };
+    let oval = self.read(&ival)?;
+
+    Ok(SensorVal {
+      name,
+      unit: std::str::from_utf8(&key_info.data_type.to_be_bytes()).unwrap().to_string(),
+      data: oval.bytes[0..key_info.data_size as usize].to_vec(),
+    })
   }
 
   pub fn read_float_val(&mut self, key: &str) -> WithError<f32> {

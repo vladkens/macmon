@@ -65,7 +65,7 @@ pub fn print_debug() -> WithError<()> {
 
   print_divider("IOReport");
   let dur = 100;
-  let ior = IOReport::new(Some(debug_channels))?;
+  let ior = IOReport::with_filter(Some(debug_channels))?;
   for x in ior.get_sample(dur) {
     let subscribed = ioreport_channels_filter(&x.group, &x.subgroup, &x.channel, &x.unit);
     let msg = format!(
