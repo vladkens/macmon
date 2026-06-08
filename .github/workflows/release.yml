@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: macos-latest
@@ -54,20 +58,28 @@ jobs:
           fi
           echo "$NOTES" > release_notes.txt
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          body_path: release_notes.txt
-          files: macmon-${{ github.ref_name }}.tar.gz
+      - name: Create GitHub Release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --notes-file release_notes.txt \
+            "macmon-${{ github.ref_name }}.tar.gz"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          homebrew-tap: vladkens/homebrew-tap
-          formula-name: macmon
-          formula-path: macmon.rb
-          commit-message: "{{formulaName}} {{version}}"
-          download-url: https://github.com/vladkens/macmon/releases/download/${{ github.ref_name }}/macmon-${{ github.ref_name }}.tar.gz
-        env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bump Homebrew formula
+        run: |
+          VERSION="${{ github.ref_name }}"
+          TARBALL="macmon-${VERSION}.tar.gz"
+          SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+          URL="https://github.com/vladkens/macmon/releases/download/${VERSION}/${TARBALL}"
+
+          git clone "https://x-access-token:${{ secrets.HOMEBREW_REPO_TOKEN }}@github.com/vladkens/homebrew-tap.git" tap
+          cd tap
+          sed -i '' "s|version \".*\"|version \"${VERSION#v}\"|" macmon.rb
+          sed -i '' "s|url \".*\"|url \"${URL}\"|" macmon.rb
+          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" macmon.rb
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add macmon.rb
+          git commit -m "macmon ${VERSION}"
+          git push

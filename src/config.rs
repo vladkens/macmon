@@ -27,6 +27,9 @@ pub struct Config {
 
   #[serde_inline_default(1000)]
   pub interval: u32,
+
+  #[serde_inline_default(false)]
+  pub per_core_view: bool,
 }
 
 impl Default for Config {
@@ -98,6 +101,11 @@ impl Config {
   pub fn inc_interval(&mut self) {
     let step = INTERVAL_TUI_STEP;
     self.interval = (self.interval.saturating_add(step) / step * step).min(INTERVAL_TUI_MAX);
+    self.save();
+  }
+
+  pub fn toggle_per_core_view(&mut self) {
+    self.per_core_view = !self.per_core_view;
     self.save();
   }
 }

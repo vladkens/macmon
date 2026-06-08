@@ -1,12 +1,9 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
 use macmon::config::INTERVAL_MIN;
-use macmon::{App, Sampler, debug};
+use macmon::{App, Sampler, debug, get_soc_info};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
-use std::{
-  thread,
-  time::{Duration, Instant},
-};
+use std::thread;
 
 mod serve;
 
@@ -26,6 +23,10 @@ enum Commands {
 
   /// Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
   Serve {
+    /// Host address to listen on
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
@@ -56,16 +57,6 @@ struct Cli {
   interval: u32,
 }
 
-fn wait_until_next_sample(last_sampled_at: &mut Instant, interval: Duration) {
-  let mut now = Instant::now();
-  let elapsed = now.duration_since(*last_sampled_at);
-  if elapsed < interval {
-    thread::sleep(interval - elapsed);
-    now += interval - elapsed;
-  }
-  *last_sampled_at = now;
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
 
@@ -74,13 +65,10 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let mut counter = 0u32;
 
-      let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
-      let interval = Duration::from_millis(args.interval.max(INTERVAL_MIN) as u64);
-      let mut last_update_started = Instant::now();
+      let soc_info_val = if *soc_info { Some(get_soc_info()?) } else { None };
 
       loop {
-        wait_until_next_sample(&mut last_update_started, interval);
-        let doc = sampler.get_metrics()?;
+        let doc = sampler.get_metrics(args.interval.max(INTERVAL_MIN))?;
 
         let mut doc = serde_json::to_value(&doc)?;
         if let Some(ref soc) = soc_info_val {
@@ -97,29 +85,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { port, install, uninstall }) => {
+    Some(Commands::Serve { host, port, install, uninstall }) => {
       if *install || *uninstall {
-        serve::launchd(*port, *install)?;
+        serve::launchd(host, *port, *install)?;
         return Ok(());
       }
       let mut sampler = Sampler::new()?;
-      let soc = Arc::new(sampler.get_soc_info().clone());
+      let soc = Arc::new(get_soc_info()?);
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
-      let interval = Duration::from_millis(args.interval.max(INTERVAL_MIN) as u64);
-      let mut last_update_started = Instant::now();
 
       let shared_http = Arc::clone(&shared);
       let soc_http = Arc::clone(&soc);
+      let host = host.clone();
       let port = *port;
       thread::spawn(move || {
-        if let Err(e) = serve::run(port, shared_http, soc_http) {
+        if let Err(e) = serve::run(&host, port, shared_http, soc_http) {
           eprintln!("server error: {e}");
         }
       });
 
       loop {
-        wait_until_next_sample(&mut last_update_started, interval);
-        match sampler.get_metrics() {
+        match sampler.get_metrics(args.interval.max(INTERVAL_MIN)) {
           Ok(m) => *shared.write().unwrap() = Some(m),
           Err(e) => eprintln!("sampling error: {e}"),
         }
