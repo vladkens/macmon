@@ -108,6 +108,27 @@ pub fn print_debug() -> WithError<()> {
 
   println!(); // close previous line
 
+  print_divider("SMC fan sensors");
+  for key in &keys {
+    let is_fan_key = key.len() == 4 && key.starts_with('F');
+    let is_fan_id_key = key.len() == 4
+      && key.starts_with('F')
+      && key.as_bytes()[1].is_ascii_digit()
+      && key.ends_with("ID");
+    if !(is_fan_key || is_fan_id_key) {
+      continue;
+    }
+
+    let ki = smc.read_key_info(key)?;
+    let val = smc.read_val(key);
+    if val.is_err() {
+      continue;
+    }
+
+    let val = val.unwrap();
+    println!("{} type={} size={} bytes={:?}", key, val.unit, ki.data_size, val.data);
+  }
+
   print_divider("IOHID");
   let hid = IOHIDSensors::new()?;
   for (key, val) in hid.get_metrics() {

@@ -12,5 +12,5 @@ pub mod sources;
 // Re-export commonly used types
 pub use app::App;
 pub use config::{Config, ViewType};
-pub use metrics::{MemMetrics, Metrics, Sampler, TempMetrics, zero_div};
+pub use metrics::{FanMetric, MemMetrics, Metrics, Sampler, TempMetrics, zero_div};
 pub use sources::{SocInfo, get_soc_info};
