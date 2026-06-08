@@ -4,7 +4,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 use crate::sources::{
-  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, libc_ram, libc_swap,
+  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
+  libc_swap,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -153,7 +154,6 @@ fn parse_cpu_core_channel(channel: &str) -> Option<(CpuCoreKind, (usize, usize))
 
 fn init_smc() -> WithError<SmcSensors> {
   let mut smc = SMC::new()?;
-  const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
@@ -161,35 +161,27 @@ fn init_smc() -> WithError<SmcSensors> {
 
   let names = smc.read_all_keys().unwrap_or(vec![]);
   for name in &names {
-    let key = match smc.read_key_info(name) {
-      Ok(key) => key,
-      Err(_) => continue,
-    };
-
     if name.len() == 4 && name.starts_with('F') && name.ends_with("Ac") {
       fan_sensors.push(name.clone());
       continue;
     }
-
-    if key.data_size != 4 || key.data_type != FLOAT_TYPE {
-      continue;
-    }
-
-    let _ = match smc.read_val(name) {
-      Ok(val) => val,
-      Err(_) => continue,
-    };
-
     // Unfortunately, it is not known which keys are responsible for what.
     // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
-    match name {
-      // "Tp" – performance cores, "Te" – efficiency cores, "Ts" – super cores (M5+)
-      name if name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts") => {
-        cpu_sensors.push(name.clone())
-      }
-      name if name.starts_with("Tg") => gpu_sensors.push(name.clone()),
-      _ => (),
+    let is_cpu = name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts");
+    let is_gpu = name.starts_with("Tg");
+    if !is_cpu && !is_gpu {
+      continue;
+    }
+
+    if smc.read_float_val(name).is_err() {
+      continue;
+    }
+
+    if is_cpu {
+      cpu_sensors.push(name.clone());
+    } else if is_gpu {
+      gpu_sensors.push(name.clone());
     }
   }
 
@@ -201,6 +193,27 @@ fn init_smc() -> WithError<SmcSensors> {
   Ok(SmcSensors { smc, cpu_keys: cpu_sensors, gpu_keys: gpu_sensors, fan_keys: fan_sensors })
 }
 
+pub(crate) fn ioreport_channels_filter(
+  group: &str,
+  subgroup: &str,
+  channel: &str,
+  _unit: &str,
+) -> bool {
+  // Keep this filter in sync with the channel handling in Sampler::get_metrics.
+  if group == "Energy Model" {
+    return channel == "GPU Energy"
+      || channel.ends_with("CPU Energy")
+      || channel.starts_with("ANE")
+      || channel.starts_with("DRAM")
+      || channel.starts_with("GPU SRAM");
+  }
+
+  if group == "CPU Stats" {
+    return subgroup == CPU_FREQ_CORE_SUBG;
+  }
+
+  group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
+}
 // MARK: Sampler
 
 pub struct Sampler {
@@ -215,15 +228,8 @@ pub struct Sampler {
 
 impl Sampler {
   pub fn new() -> WithError<Self> {
-    let channels = vec![
-      ("Energy Model", None), // cpu/gpu/ane power
-      // ("CPU Stats", Some(CPU_FREQ_DICE_SUBG)), // cpu freq by cluster
-      ("CPU Stats", Some(CPU_FREQ_CORE_SUBG)), // cpu freq per core
-      ("GPU Stats", Some(GPU_FREQ_DICE_SUBG)), // gpu freq
-    ];
-
-    let soc = SocInfo::new()?;
-    let ior = IOReport::new(channels)?;
+    let soc = get_soc_info()?;
+    let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
@@ -241,8 +247,7 @@ impl Sampler {
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = self.smc.read_val(sensor)?;
-      let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
+      let val = self.smc.read_float_val(sensor)?;
       if is_valid_temp(val) {
         cpu_metrics.push(val);
       }
@@ -250,8 +255,7 @@ impl Sampler {
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = self.smc.read_val(sensor)?;
-      let val = f32::from_le_bytes(val.data[0..4].try_into().unwrap());
+      let val = self.smc.read_float_val(sensor)?;
       if is_valid_temp(val) {
         gpu_metrics.push(val);
       }
@@ -324,9 +328,7 @@ impl Sampler {
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
-    let val = self.smc.read_val("PSTR")?;
-    let val = f32::from_le_bytes(val.data.clone().try_into().unwrap());
-    Ok(val)
+    self.smc.read_float_val("PSTR")
   }
 
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
@@ -353,6 +355,7 @@ impl Sampler {
       let mut pcpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
       let mut rs = Metrics::default();
 
+      // Keep this channel handling in sync with ioreport_channels_filter.
       for x in sample {
         if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
           match parse_cpu_core_channel(&x.channel) {
