@@ -10,7 +10,7 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, ViewType};
-use crate::metrics::{Metrics, Sampler, zero_div};
+use crate::metrics::{FanMetric, Metrics, Sampler, zero_div};
 use crate::{metrics::MemMetrics, sources::SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -142,6 +142,28 @@ impl TempStore {
   }
 }
 
+#[derive(Debug, Default)]
+struct FanStore {
+  items: Vec<FanMetric>,
+}
+
+impl FanStore {
+  fn push(&mut self, value: Vec<FanMetric>) {
+    self.items = value;
+  }
+
+  fn label(&self) -> String {
+    match self.items.as_slice() {
+      [] => "".to_string(),
+      [fan] => format!("Fan {} RPM", fan.rpm),
+      fans => {
+        let values = fans.iter().map(|fan| fan.rpm.to_string()).collect::<Vec<_>>().join("/");
+        format!("Fans {values} RPM")
+      }
+    }
+  }
+}
+
 fn bar_set() -> symbols::bar::Set<'static> {
   match std::env::var("TERM_PROGRAM").as_deref() {
     Ok("Apple_Terminal") => symbols::bar::THREE_LEVELS,
@@ -244,6 +266,7 @@ pub struct App {
 
   cpu_temp: TempStore,
   gpu_temp: TempStore,
+  fans: FanStore,
 
   ecpu_freq: FreqStore,
   pcpu_freq: FreqStore,
@@ -269,6 +292,7 @@ impl App {
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
     self.gpu_temp.push(data.temp.gpu_temp_avg);
+    self.fans.push(data.fans);
 
     self.mem.push(data.memory);
   }
@@ -420,14 +444,21 @@ impl App {
       self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
     );
 
-    // Show label only if sensor is available
-    let label_r = if self.sys_power.top_value > 0.0 {
-      format!(
+    // Show labels only if sensors are available
+    let fan_label = self.fans.label();
+    let sys_label = if self.sys_power.top_value > 0.0 {
+      Some(format!(
         "Total {:.2}W ({:.2}, {:.2})",
         self.sys_power.top_value, self.sys_power.avg_value, self.sys_power.max_value
-      )
+      ))
     } else {
-      "".to_string()
+      None
+    };
+    let label_r = match (!fan_label.is_empty(), sys_label) {
+      (true, Some(sys_label)) => format!("{fan_label} | {sys_label}"),
+      (true, None) => fan_label,
+      (false, Some(sys_label)) => sys_label,
+      (false, None) => "".to_string(),
     };
 
     let block = self.title_block(&label_l, &label_r);
