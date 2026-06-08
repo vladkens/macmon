@@ -22,6 +22,10 @@ enum Commands {
 
   /// Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
   Serve {
+    /// Host address to listen on
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
@@ -80,9 +84,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { port, install, uninstall }) => {
+    Some(Commands::Serve { host, port, install, uninstall }) => {
       if *install || *uninstall {
-        serve::launchd(*port, *install)?;
+        serve::launchd(host, *port, *install)?;
         return Ok(());
       }
       let mut sampler = Sampler::new()?;
@@ -91,9 +95,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
       let shared_http = Arc::clone(&shared);
       let soc_http = Arc::clone(&soc);
+      let host = host.clone();
       let port = *port;
       thread::spawn(move || {
-        if let Err(e) = serve::run(port, shared_http, soc_http) {
+        if let Err(e) = serve::run(&host, port, shared_http, soc_http) {
           eprintln!("server error: {e}");
         }
       });

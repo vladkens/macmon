@@ -138,6 +138,7 @@ You can use the `serve` subcommand to expose metrics over HTTP. This is useful f
 
 ```sh
 macmon serve            # default port 9090, interval 1000ms
+macmon serve --host 127.0.0.1  # listen on localhost only
 macmon serve -p 8080    # custom port
 macmon serve -i 500     # sampling interval 500ms
 macmon serve &          # run in background
@@ -157,6 +158,7 @@ To start `macmon serve` automatically on login and keep it running:
 ```sh
 macmon serve --install              # install and start (default port 9090)
 macmon serve --port 8080 --install  # with custom port
+macmon serve --host 127.0.0.1 --install  # listen on localhost only
 macmon serve --uninstall            # stop and remove
 ```
 
