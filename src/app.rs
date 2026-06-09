@@ -221,7 +221,7 @@ fn h_stack(area: Rect) -> (Rect, Rect) {
 // MARK: Threads
 
 enum Event {
-  Update(Metrics),
+  Update(Box<Metrics>),
   ChangeColor,
   ChangeView,
   TogglePerCore,
@@ -272,11 +272,11 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
     let mut sampler = Sampler::new().unwrap();
 
     // Send initial metrics
-    tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
+    tx.send(Event::Update(Box::new(sampler.get_metrics(100).unwrap()))).unwrap();
 
     loop {
       let msec = (*msec.read().unwrap()).max(TUI_MIN_MS);
-      tx.send(Event::Update(sampler.get_metrics(msec).unwrap())).unwrap();
+      tx.send(Event::Update(Box::new(sampler.get_metrics(msec).unwrap()))).unwrap();
     }
   });
 }
@@ -719,7 +719,7 @@ impl App {
 
       match rx.recv()? {
         Event::Quit => break,
-        Event::Update(data) => self.update_metrics(data),
+        Event::Update(data) => self.update_metrics(*data),
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
         Event::TogglePerCore => self.cfg.toggle_per_core_view(),

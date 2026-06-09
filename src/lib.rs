@@ -19,7 +19,8 @@
 //!
 //!     println!("CPU power: {:.2} W", metrics.cpu_power);
 //!     println!("GPU power: {:.2} W", metrics.gpu_power);
-//!     println!("CPU usage: {:.1}%", metrics.cpu_usage_pct * 100.0);
+//!     println!("CPU effective usage: {:.1}%", metrics.cpu_usage_pct * 100.0);
+//!     println!("CPU active residency: {:.1}%", metrics.cpu_active_ratio * 100.0);
 //!   }
 //! }
 //! ```
@@ -43,7 +44,8 @@
 //!
 //!     println!("CPU power: {:.2} W", metrics.cpu_power);
 //!     println!("GPU power: {:.2} W", metrics.gpu_power);
-//!     println!("CPU usage: {:.1}%", metrics.cpu_usage_pct * 100.0);
+//!     println!("CPU effective usage: {:.1}%", metrics.cpu_usage_pct * 100.0);
+//!     println!("CPU active residency: {:.1}%", metrics.cpu_active_ratio * 100.0);
 //!   }
 //! }
 //! ```

@@ -16,44 +16,57 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   let chip = escape_label_value(&soc.chip_name);
   let l = format!(r#"chip="{chip}""#);
 
+  macro_rules! metric_name {
+    ($name:literal) => {
+      concat!("macmon_", $name)
+    };
+  }
+
   macro_rules! gauge_head {
     ($out:expr, $name:literal, $help:literal) => {
-      $out.push_str(&format!("# HELP {} {}\n# TYPE {} gauge\n", $name, $help, $name));
+      let name = metric_name!($name);
+      $out.push_str(&format!("# HELP {} {}\n# TYPE {} gauge\n", name, $help, name));
     };
   }
 
   macro_rules! gauge {
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
       gauge_head!($out, $name, $help);
-      $out.push_str(&format!("{}{{{l}}} {}\n\n", $name, $value));
+      let name = metric_name!($name);
+      $out.push_str(&format!("{}{{{l}}} {}\n\n", name, $value));
     };
   }
 
   let mut out = String::new();
-  gauge!(out, "macmon_cpu_temp_celsius", "Average CPU temperature in Celsius", m.temp.cpu_temp_avg);
-  gauge!(out, "macmon_gpu_temp_celsius", "Average GPU temperature in Celsius", m.temp.gpu_temp_avg);
-  gauge!(out, "macmon_memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
-  gauge!(out, "macmon_memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
-  gauge!(out, "macmon_memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
-  gauge!(out, "macmon_memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
-  gauge!(out, "macmon_cpu_usage_ratio", "Combined CPU utilization (0–1), weighted by core count", m.cpu_usage_pct);
-  gauge!(out, "macmon_ecpu_freq_mhz", "Efficiency CPU cluster average frequency in MHz", m.ecpu_usage.0);
-  gauge!(out, "macmon_ecpu_usage_ratio", "Efficiency CPU cluster average utilization (0–1)", m.ecpu_usage.1);
-  gauge!(out, "macmon_pcpu_freq_mhz", "Performance CPU cluster average frequency in MHz", m.pcpu_usage.0);
-  gauge!(out, "macmon_pcpu_usage_ratio", "Performance CPU cluster average utilization (0–1)", m.pcpu_usage.1);
-  gauge!(out, "macmon_gpu_freq_mhz", "GPU frequency in MHz", m.gpu_usage.0);
-  gauge!(out, "macmon_gpu_usage_ratio", "GPU utilization (0–1)", m.gpu_usage.1);
-  gauge!(out, "macmon_cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
-  gauge!(out, "macmon_gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
-  gauge!(out, "macmon_ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge!(out, "macmon_all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
-  gauge!(out, "macmon_sys_power_watts", "Total system power consumption in Watts", m.sys_power);
-  gauge!(out, "macmon_ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-  gauge!(out, "macmon_gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", m.temp.cpu_temp_avg);
+  gauge!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", m.temp.gpu_temp_avg);
+  gauge!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
+  gauge!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
+  gauge!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
+  gauge!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
+  gauge!(out, "cpu_usage_ratio", "Combined CPU effective usage (frequency-scaled, 0–1), weighted by core count", m.cpu_usage_pct);
+  gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
+  gauge!(out, "ecpu_freq_mhz", "Efficiency CPU cluster average frequency in MHz", m.ecpu_usage.0);
+  gauge!(out, "ecpu_usage_ratio", "Efficiency CPU cluster effective usage (frequency-scaled, 0–1)", m.ecpu_usage.1);
+  gauge!(out, "ecpu_active_ratio", "Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
+  gauge!(out, "pcpu_freq_mhz", "Performance CPU cluster average frequency in MHz", m.pcpu_usage.0);
+  gauge!(out, "pcpu_usage_ratio", "Performance CPU cluster effective usage (frequency-scaled, 0–1)", m.pcpu_usage.1);
+  gauge!(out, "pcpu_active_ratio", "Performance CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
+  gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_usage.0);
+  gauge!(out, "gpu_usage_ratio", "GPU effective usage (frequency-scaled, 0–1)", m.gpu_usage.1);
+  gauge!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
+  gauge!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
+  gauge!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
+  gauge!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
+  gauge!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
+  gauge!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
+  gauge!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
   if !m.fans.is_empty() {
-    gauge_head!(out, "macmon_fan_speed_rpm", "Fan speed in revolutions per minute");
+    gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
+    let fan_speed_rpm = metric_name!("fan_speed_rpm");
     for (i, fan) in m.fans.iter().enumerate() {
-      out.push_str(&format!("macmon_fan_speed_rpm{{{l},fan=\"{i}\"}} {}\n", fan.rpm));
+      out.push_str(&format!("{fan_speed_rpm}{{{l},fan=\"{i}\"}} {}\n", fan.rpm));
     }
     out.push('\n');
   }
