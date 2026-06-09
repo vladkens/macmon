@@ -82,6 +82,27 @@ fn fan_rpm_value(val: f32) -> Option<u32> {
   if is_valid_fan_rpm(val) { Some(val.trunc() as u32) } else { None }
 }
 
+fn aggregate_ioreport_metrics(mut rs: Metrics) -> Metrics {
+  let ecpu_total_pct: f32 = rs.ecpu_core_usages.iter().map(|&(_, pct)| pct).sum();
+  let pcpu_total_pct: f32 = rs.pcpu_core_usages.iter().map(|&(_, pct)| pct).sum();
+  let ecores = rs.ecpu_core_usages.len() as f32;
+  let pcores = rs.pcpu_core_usages.len() as f32;
+  let tcores = ecores + pcores;
+
+  rs.ecpu_usage = (
+    zero_div(rs.ecpu_core_usages.iter().map(|&(freq, _)| freq).sum::<u32>(), ecores as u32),
+    zero_div(ecpu_total_pct, ecores),
+  );
+  rs.pcpu_usage = (
+    zero_div(rs.pcpu_core_usages.iter().map(|&(freq, _)| freq).sum::<u32>(), pcores as u32),
+    zero_div(pcpu_total_pct, pcores),
+  );
+  rs.cpu_usage_pct = zero_div(ecpu_total_pct + pcpu_total_pct, tcores);
+  rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
+
+  rs
+}
+
 fn smc_numeric_value(data: &[u8], unit: &str) -> Option<f32> {
   match unit {
     "flt " if data.len() == 4 => Some(f32::from_le_bytes(data.try_into().ok()?)),
@@ -331,6 +352,72 @@ impl Sampler {
     self.smc.read_float_val("PSTR")
   }
 
+  fn get_ioreport_metrics(
+    &self,
+    sample: crate::sources::IOReportIterator,
+    dt: u64,
+  ) -> WithError<Metrics> {
+    let mut ecpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
+    let mut pcpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
+    let mut rs = Metrics::default();
+
+    // Keep this channel handling in sync with ioreport_channels_filter.
+    for x in sample {
+      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
+        match parse_cpu_core_channel(&x.channel) {
+          Some((CpuCoreKind::P, key)) => {
+            let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
+            pcpu_map.insert(key, metrics);
+            continue;
+          }
+          Some((CpuCoreKind::E, key)) => {
+            let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
+            // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN).
+            if metrics.1 > 0.0 {
+              ecpu_map.insert(key, metrics);
+            }
+            continue;
+          }
+          None => {}
+        }
+      }
+
+      if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
+        match x.channel.as_str() {
+          "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
+          _ => {}
+        }
+      }
+
+      if x.group == "Energy Model" {
+        match x.channel.as_str() {
+          "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
+          // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
+          c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
+          // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
+          c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
+          _ => {}
+        }
+      }
+    }
+
+    let mut ecpu_usages: Vec<((usize, usize), (u32, f32))> = ecpu_map.into_iter().collect();
+    ecpu_usages.sort_by_key(|&(key, _)| key);
+    rs.ecpu_core_usages = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+
+    let mut pcpu_usages: Vec<((usize, usize), (u32, f32))> = pcpu_map.into_iter().collect();
+    pcpu_usages.sort_by_key(|&(key, _)| key);
+    rs.pcpu_core_usages = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+
+    Ok(rs)
+  }
+
+  /// Collect smoothed metrics for the next polling interval.
+  ///
+  /// Intended to be called continuously in a polling loop. The sampler keeps
+  /// internal IOReport baseline state between calls to reduce interval drift.
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
     let measures: usize = 4;
     let mut results: Vec<Metrics> = Vec::with_capacity(measures);
@@ -351,61 +438,7 @@ impl Sampler {
     // do several samples to smooth metrics
     // see: https://github.com/vladkens/macmon/issues/10
     for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
-      let mut ecpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
-      let mut pcpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
-      let mut rs = Metrics::default();
-
-      // Keep this channel handling in sync with ioreport_channels_filter.
-      for x in sample {
-        if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          match parse_cpu_core_channel(&x.channel) {
-            Some((CpuCoreKind::P, key)) => {
-              let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
-              pcpu_map.insert(key, metrics);
-              continue;
-            }
-            Some((CpuCoreKind::E, key)) => {
-              let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
-              // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN).
-              if metrics.1 > 0.0 {
-                ecpu_map.insert(key, metrics);
-              }
-              continue;
-            }
-            None => {}
-          }
-        }
-
-        if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
-          match x.channel.as_str() {
-            "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
-            _ => {}
-          }
-        }
-
-        if x.group == "Energy Model" {
-          match x.channel.as_str() {
-            "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
-            // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
-            c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
-            // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
-            c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
-            _ => {}
-          }
-        }
-      }
-
-      let mut ecpu_usages: Vec<((usize, usize), (u32, f32))> = ecpu_map.into_iter().collect();
-      ecpu_usages.sort_by_key(|&(key, _)| key);
-      rs.ecpu_core_usages = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
-
-      let mut pcpu_usages: Vec<((usize, usize), (u32, f32))> = pcpu_map.into_iter().collect();
-      pcpu_usages.sort_by_key(|&(key, _)| key);
-      rs.pcpu_core_usages = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
-
-      results.push(rs);
+      results.push(self.get_ioreport_metrics(sample, dt)?);
     }
 
     // Average across samples for each core
@@ -450,20 +483,6 @@ impl Sampler {
       pcpu_avg.push((avg_freq, avg_perc));
     }
 
-    // Calculate combined CPU usage percentage weighted by core count
-    let ecpu_total_pct: f32 = ecpu_avg.iter().map(|&(_, pct)| pct).sum();
-    let pcpu_total_pct: f32 = pcpu_avg.iter().map(|&(_, pct)| pct).sum();
-    let ecores = ecpu_avg.len() as f32;
-    let pcores = pcpu_avg.len() as f32;
-    let tcores = ecores + pcores;
-    let cpu_usage_pct = zero_div(ecpu_total_pct + pcpu_total_pct, tcores);
-
-    // Calculate aggregate (average) values for backward compatibility
-    let ecpu_avg_freq = zero_div(ecpu_avg.iter().map(|&(f, _)| f).sum::<u32>(), ecores as u32);
-    let ecpu_avg_pct = zero_div(ecpu_total_pct, ecores);
-    let pcpu_avg_freq = zero_div(pcpu_avg.iter().map(|&(f, _)| f).sum::<u32>(), pcores as u32);
-    let pcpu_avg_pct = zero_div(pcpu_total_pct, pcores);
-
     let gpu_usage_freq = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
     let gpu_usage_pct = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
     let cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
@@ -471,23 +490,18 @@ impl Sampler {
     let ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
     let ram_power = zero_div(results.iter().map(|x| x.ram_power).sum(), measures as _);
     let gpu_ram_power = zero_div(results.iter().map(|x| x.gpu_ram_power).sum(), measures as _);
-    let all_power = cpu_power + gpu_power + ane_power;
 
-    let mut rs = Metrics {
-      ecpu_usage: (ecpu_avg_freq, ecpu_avg_pct),
-      pcpu_usage: (pcpu_avg_freq, pcpu_avg_pct),
+    let mut rs = aggregate_ioreport_metrics(Metrics {
       ecpu_core_usages: ecpu_avg,
       pcpu_core_usages: pcpu_avg,
-      cpu_usage_pct,
       gpu_usage: (gpu_usage_freq, gpu_usage_pct),
       cpu_power,
       gpu_power,
       ane_power,
       ram_power,
       gpu_ram_power,
-      all_power,
       ..Default::default()
-    };
+    });
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -501,6 +515,28 @@ impl Sampler {
     Ok(rs)
   }
 
+  /// Return metrics for manually scheduled sampling.
+  ///
+  /// This method does not sleep or use the 4-sample smoothing from
+  /// [`Sampler::get_metrics`]. It returns `None` for the first or stale sample window.
+  pub fn get_metrics_now(&mut self, stale_after_ms: u32) -> WithError<Option<Metrics>> {
+    let Some((sample, dt)) = self.ior.get_sample_now(stale_after_ms as u64)? else {
+      return Ok(None);
+    };
+    let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, dt)?);
+
+    rs.memory = self.get_mem()?;
+    rs.temp = self.get_temp()?;
+    rs.fans = self.get_fans();
+
+    rs.sys_power = match self.get_sys_power() {
+      Ok(val) => val.max(rs.all_power),
+      Err(_) => 0.0,
+    };
+
+    Ok(Some(rs))
+  }
+
   /// Getter for the `soc` field
   pub fn get_soc_info(&self) -> &SocInfo {
     &self.soc
@@ -509,7 +545,10 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
-  use super::{CpuCoreKind, fan_rpm_value, parse_cpu_core_channel, smc_numeric_value};
+  use super::{
+    CpuCoreKind, Metrics, aggregate_ioreport_metrics, fan_rpm_value, parse_cpu_core_channel,
+    smc_numeric_value,
+  };
 
   #[test]
   fn parse_smc_numeric_values() {
@@ -524,6 +563,23 @@ mod tests {
     assert_eq!(fan_rpm_value(1234.9), Some(1234));
     assert_eq!(fan_rpm_value(0.0), Some(0));
     assert_eq!(fan_rpm_value(-1.0), None);
+  }
+
+  #[test]
+  fn aggregates_ioreport_metrics() {
+    let rs = aggregate_ioreport_metrics(Metrics {
+      ecpu_core_usages: vec![(1000, 0.25), (1200, 0.50)],
+      pcpu_core_usages: vec![(2000, 0.75)],
+      cpu_power: 1.5,
+      gpu_power: 2.0,
+      ane_power: 0.5,
+      ..Default::default()
+    });
+
+    assert_eq!(rs.ecpu_usage, (1100, 0.375));
+    assert_eq!(rs.pcpu_usage, (2000, 0.75));
+    assert_eq!(rs.cpu_usage_pct, 0.5);
+    assert_eq!(rs.all_power, 4.0);
   }
 
   #[test]

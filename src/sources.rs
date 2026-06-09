@@ -684,6 +684,7 @@ pub struct IOReport {
   selected: Option<CFMutableArrayRef>,
   metadata: Vec<(String, String, String, String)>,
   prev: Option<(CFDictionaryRef, std::time::Instant)>,
+  manual_prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
@@ -698,6 +699,7 @@ impl IOReport {
       selected: channels.selected,
       metadata,
       prev: None,
+      manual_prev: None,
     })
   }
 
@@ -735,16 +737,21 @@ impl IOReport {
   pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
     let count = count.clamp(1, 32);
     let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
-    let step_msec = duration / count as u64;
 
     let mut prev = match self.prev {
       Some(x) => x,
       None => self.raw_sample(),
     };
 
-    for _ in 0..count {
-      if step_msec > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(step_msec));
+    let started_at = prev.1;
+    for i in 1..=count {
+      // Keep the requested sampling window stable: IOReportCreateSamples time should not
+      // accumulate as drift on top of the caller's interval.
+      let target_msec = duration.saturating_mul(i as u64) / count as u64;
+      let target_at = started_at + std::time::Duration::from_millis(target_msec);
+      let now = std::time::Instant::now();
+      if target_at > now {
+        std::thread::sleep(target_at.duration_since(now));
       }
 
       let next = self.raw_sample();
@@ -760,6 +767,30 @@ impl IOReport {
     self.prev = Some(prev);
     samples
   }
+
+  pub(crate) fn get_sample_now(
+    &mut self,
+    stale_after: u64,
+  ) -> WithError<Option<(IOReportIterator, u64)>> {
+    let next = self.raw_sample();
+    let Some(prev) = self.manual_prev.take() else {
+      self.manual_prev = Some(next);
+      return Ok(None);
+    };
+
+    let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
+    if elapsed > stale_after {
+      unsafe { CFRelease(prev.0 as _) };
+      self.manual_prev = Some(next);
+      return Ok(None);
+    }
+
+    let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
+    unsafe { CFRelease(prev.0 as _) };
+    self.manual_prev = Some(next);
+
+    Ok(Some((IOReportIterator::new(diff, self.metadata.clone()), elapsed.max(1))))
+  }
 }
 
 impl Drop for IOReport {
@@ -774,6 +805,9 @@ impl Drop for IOReport {
         CFRelease(source as _);
       }
       if let Some(prev) = self.prev {
+        CFRelease(prev.0 as _);
+      }
+      if let Some(prev) = self.manual_prev {
         CFRelease(prev.0 as _);
       }
     }
