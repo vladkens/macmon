@@ -69,7 +69,7 @@ Commands:
   help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -i, --interval <INTERVAL>  Update interval in milliseconds (minimum: 100) [default: 1000]
+  -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
   -h, --help                 Print help
   -V, --version              Print version
 
@@ -272,7 +272,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The `get_metrics(duration_ms)` call blocks for `duration_ms` milliseconds while sampling the hardware counters and returns a single averaged [`Metrics`](src/metrics.rs) snapshot.
+The `get_metrics(duration_ms)` call blocks for `duration_ms` milliseconds while sampling the hardware counters and returns a single averaged [`Metrics`](src/metrics.rs) snapshot. This is the default API for most callers: run it in a worker thread if you want macmon to manage the sampling window and keep the built-in smoothing used by the TUI, `pipe`, and `serve`.
+
+Use `get_metrics_now(stale_after_ms)` only when you want to schedule sampling yourself. It does not sleep or smooth samples: the first call stores a baseline and returns `None`, later calls return metrics for the elapsed window, and stale baselines are discarded after `stale_after_ms`.
 
 ## 📦 Build from Source
 

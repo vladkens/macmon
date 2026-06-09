@@ -331,6 +331,68 @@ impl Sampler {
     self.smc.read_float_val("PSTR")
   }
 
+  fn get_ioreport_metrics(
+    &self,
+    sample: crate::sources::IOReportIterator,
+    dt: u64,
+  ) -> WithError<Metrics> {
+    let mut ecpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
+    let mut pcpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
+    let mut rs = Metrics::default();
+
+    // Keep this channel handling in sync with ioreport_channels_filter.
+    for x in sample {
+      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
+        match parse_cpu_core_channel(&x.channel) {
+          Some((CpuCoreKind::P, key)) => {
+            let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
+            pcpu_map.insert(key, metrics);
+            continue;
+          }
+          Some((CpuCoreKind::E, key)) => {
+            let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
+            // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN).
+            if metrics.1 > 0.0 {
+              ecpu_map.insert(key, metrics);
+            }
+            continue;
+          }
+          None => {}
+        }
+      }
+
+      if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
+        match x.channel.as_str() {
+          "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
+          _ => {}
+        }
+      }
+
+      if x.group == "Energy Model" {
+        match x.channel.as_str() {
+          "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
+          // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
+          c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
+          // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
+          c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
+          _ => {}
+        }
+      }
+    }
+
+    let mut ecpu_usages: Vec<((usize, usize), (u32, f32))> = ecpu_map.into_iter().collect();
+    ecpu_usages.sort_by_key(|&(key, _)| key);
+    rs.ecpu_core_usages = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+
+    let mut pcpu_usages: Vec<((usize, usize), (u32, f32))> = pcpu_map.into_iter().collect();
+    pcpu_usages.sort_by_key(|&(key, _)| key);
+    rs.pcpu_core_usages = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
+
+    Ok(rs)
+  }
+
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
     let measures: usize = 4;
     let mut results: Vec<Metrics> = Vec::with_capacity(measures);
@@ -351,61 +413,7 @@ impl Sampler {
     // do several samples to smooth metrics
     // see: https://github.com/vladkens/macmon/issues/10
     for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
-      let mut ecpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
-      let mut pcpu_map: HashMap<(usize, usize), (u32, f32)> = HashMap::new();
-      let mut rs = Metrics::default();
-
-      // Keep this channel handling in sync with ioreport_channels_filter.
-      for x in sample {
-        if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-          match parse_cpu_core_channel(&x.channel) {
-            Some((CpuCoreKind::P, key)) => {
-              let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
-              pcpu_map.insert(key, metrics);
-              continue;
-            }
-            Some((CpuCoreKind::E, key)) => {
-              let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
-              // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN).
-              if metrics.1 > 0.0 {
-                ecpu_map.insert(key, metrics);
-              }
-              continue;
-            }
-            None => {}
-          }
-        }
-
-        if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
-          match x.channel.as_str() {
-            "GPUPH" => rs.gpu_usage = calc_freq(x.item, &self.soc.gpu_freqs[1..]),
-            _ => {}
-          }
-        }
-
-        if x.group == "Energy Model" {
-          match x.channel.as_str() {
-            "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
-            // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
-            c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
-            // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
-            c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
-            c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
-            _ => {}
-          }
-        }
-      }
-
-      let mut ecpu_usages: Vec<((usize, usize), (u32, f32))> = ecpu_map.into_iter().collect();
-      ecpu_usages.sort_by_key(|&(key, _)| key);
-      rs.ecpu_core_usages = ecpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
-
-      let mut pcpu_usages: Vec<((usize, usize), (u32, f32))> = pcpu_map.into_iter().collect();
-      pcpu_usages.sort_by_key(|&(key, _)| key);
-      rs.pcpu_core_usages = pcpu_usages.into_iter().map(|(_, metrics)| metrics).collect();
-
-      results.push(rs);
+      results.push(self.get_ioreport_metrics(sample, dt)?);
     }
 
     // Average across samples for each core
@@ -499,6 +507,28 @@ impl Sampler {
     };
 
     Ok(rs)
+  }
+
+  /// Return metrics for manually scheduled sampling.
+  ///
+  /// This method does not sleep or use the 4-sample smoothing from
+  /// [`Sampler::get_metrics`]. It returns `None` for the first or stale sample window.
+  pub fn get_metrics_now(&mut self, stale_after_ms: u32) -> WithError<Option<Metrics>> {
+    let Some((sample, dt)) = self.ior.get_sample_now(stale_after_ms as u64)? else {
+      return Ok(None);
+    };
+    let mut rs = self.get_ioreport_metrics(sample, dt)?;
+
+    rs.memory = self.get_mem()?;
+    rs.temp = self.get_temp()?;
+    rs.fans = self.get_fans();
+
+    rs.sys_power = match self.get_sys_power() {
+      Ok(val) => val.max(rs.all_power),
+      Err(_) => 0.0,
+    };
+
+    Ok(Some(rs))
   }
 
   /// Getter for the `soc` field

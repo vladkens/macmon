@@ -5,10 +5,8 @@ use serde_inline_default::serde_inline_default;
 const COLORS_OPTIONS: [Color; 7] =
   [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
-pub const INTERVAL_MIN: u32 = 100;
-pub const INTERVAL_TUI_MAX: u32 = 10_000;
-pub const INTERVAL_TUI_STEP: u32 = 250;
-pub const INTERVAL_INIT_SAMPLE: u32 = 100;
+pub(crate) const TUI_MIN_MS: u32 = 250;
+pub(crate) const TUI_MAX_MS: u32 = 10_000;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum ViewType {
@@ -93,14 +91,14 @@ impl Config {
   }
 
   pub fn dec_interval(&mut self) {
-    let step = INTERVAL_TUI_STEP;
-    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(INTERVAL_MIN);
+    let step = 250;
+    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(TUI_MIN_MS);
     self.save();
   }
 
   pub fn inc_interval(&mut self) {
-    let step = INTERVAL_TUI_STEP;
-    self.interval = (self.interval.saturating_add(step) / step * step).min(INTERVAL_TUI_MAX);
+    let step = 250;
+    self.interval = (self.interval.saturating_add(step) / step * step).min(TUI_MAX_MS);
     self.save();
   }
 

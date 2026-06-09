@@ -9,7 +9,7 @@ use ratatui::crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 
-use crate::config::{Config, INTERVAL_INIT_SAMPLE, INTERVAL_MIN, ViewType};
+use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
 use crate::metrics::{FanMetric, Metrics, Sampler, zero_div};
 use crate::{
   metrics::MemMetrics,
@@ -274,10 +274,10 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
     let mut sampler = Sampler::new().unwrap();
 
     // Send initial metrics
-    tx.send(Event::Update(sampler.get_metrics(INTERVAL_INIT_SAMPLE).unwrap())).unwrap();
+    tx.send(Event::Update(sampler.get_metrics(100).unwrap())).unwrap();
 
     loop {
-      let msec = (*msec.read().unwrap()).max(INTERVAL_MIN);
+      let msec = (*msec.read().unwrap()).max(TUI_MIN_MS);
       tx.send(Event::Update(sampler.get_metrics(msec).unwrap())).unwrap();
     }
   });
@@ -707,7 +707,7 @@ impl App {
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
     // use from arg if provided, otherwise use config restored value
-    self.cfg.interval = interval.unwrap_or(self.cfg.interval).clamp(100, 10_000);
+    self.cfg.interval = interval.unwrap_or(self.cfg.interval).clamp(TUI_MIN_MS, TUI_MAX_MS);
     let msec = Arc::new(RwLock::new(self.cfg.interval));
 
     let (tx, rx) = mpsc::channel::<Event>();
