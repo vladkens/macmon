@@ -66,7 +66,7 @@ Commands:
   pipe    Output metrics in JSON format
   serve   Serve metrics over HTTP
   debug   Print debug information
-  stress  Generate cyclic CPU load for testing metrics
+  stress  Generate load for testing metrics
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -83,14 +83,16 @@ Controls:
 
 ## 🧪 Stress Test
 
-Use `macmon stress` to generate a predictable cyclic CPU load while checking metric behavior:
+Use `macmon stress` to generate load while checking metric behavior:
 
 ```sh
 macmon stress
-macmon stress --workers 4 --duration 30
+macmon stress --duration 30
+macmon stress --full --duration 30
+macmon stress --full --workers 8 --duration 30
 ```
 
-The command runs synchronized worker threads with a fixed 50% duty cycle. This is useful when testing chart shape, sampling cadence, and smoothing changes against `macmon` or Activity Monitor.
+The default remains the predictable cyclic CPU load with a fixed 50% duty cycle and 4 CPU workers. Use `--full` for continuous CPU and GPU load; when `--workers` is omitted, full mode uses all logical CPUs.
 
 ## 🚰 Piping
 

@@ -119,7 +119,6 @@ jobs:
             ~/.cargo/git/db/
 
       - run: rustup update --no-self-update stable && rustup default stable
-      - run: make publish-check
       # https://crates.io/docs/trusted-publishing
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth

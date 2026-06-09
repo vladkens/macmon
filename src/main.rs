@@ -51,11 +51,15 @@ enum Commands {
   /// Print debug information
   Debug,
 
-  /// Generate cyclic CPU load for testing metrics
+  /// Generate load for testing metrics
   Stress {
-    /// Number of CPU worker threads
-    #[arg(short, long, default_value_t = 4)]
-    workers: usize,
+    /// Generate continuous CPU and GPU load instead of cyclic CPU load
+    #[arg(short, long, default_value_t = false)]
+    full: bool,
+
+    /// Number of CPU worker threads. Defaults to 4, or all logical CPUs with --full
+    #[arg(short, long)]
+    workers: Option<usize>,
 
     /// Stop after this many seconds. Runs until Ctrl-C when omitted
     #[arg(short, long)]
@@ -131,7 +135,17 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => print_debug()?,
-    Some(Commands::Stress { workers, duration }) => stress::run(*workers, *duration),
+    Some(Commands::Stress { full, workers, duration }) => {
+      let workers = workers.unwrap_or_else(|| {
+        if *full { thread::available_parallelism().map(|n| n.get()).unwrap_or(4) } else { 4 }
+      });
+
+      if *full {
+        stress::run_full(workers, *duration)?;
+      } else {
+        stress::run_pattern(workers, *duration);
+      }
+    }
     _ => {
       let mut app = App::new()?;
 

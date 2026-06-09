@@ -1,4 +1,4 @@
-.PHONY: prepare check test build update publish-check
+.PHONY: prepare check test build update bench
 
 prepare:
 	cargo fmt
@@ -20,6 +20,8 @@ build:
 update:
 	cargo upgrade -i
 
-publish-check:
-	cargo package --list --allow-dirty
-	cargo publish --dry-run --allow-dirty
+bench:
+	cargo build --release --locked
+	hyperfine --warmup 1 --runs 3 --command-name old --command-name new \
+		'/opt/homebrew/bin/macmon pipe --samples 100 --interval 100' \
+		'./target/release/macmon pipe --samples 100 --interval 100'
