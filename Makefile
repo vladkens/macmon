@@ -18,7 +18,6 @@ build:
 	ls -lh target/release/$(shell basename $(CURDIR))
 
 update:
-	@# cargo install cargo-edit
 	cargo upgrade -i
 
 publish-check:

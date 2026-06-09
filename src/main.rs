@@ -1,10 +1,18 @@
 use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
-use macmon::{App, Sampler, debug, get_soc_info};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
+mod app;
+mod config;
+mod debug;
 mod serve;
+mod shared;
+mod sources;
+
+use app::App;
+use debug::print_debug;
+use macmon::Sampler;
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -64,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       let mut sampler = Sampler::new()?;
       let mut counter = 0u32;
 
-      let soc_info_val = if *soc_info { Some(get_soc_info()?) } else { None };
+      let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
 
       loop {
         let doc = sampler.get_metrics(args.interval.max(100))?;
@@ -90,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
       }
       let mut sampler = Sampler::new()?;
-      let soc = Arc::new(get_soc_info()?);
+      let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
 
       let shared_http = Arc::clone(&shared);
@@ -110,7 +118,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Debug) => debug::print_debug()?,
+    Some(Commands::Debug) => print_debug()?,
     _ => {
       let mut app = App::new()?;
 

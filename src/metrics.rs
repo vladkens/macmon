@@ -3,6 +3,7 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 use std::collections::HashMap;
 
+use crate::shared::{ioreport_channels_filter, zero_div};
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
   libc_swap,
@@ -16,23 +17,34 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 
 // MARK: Structs
 
+/// Average hardware temperatures.
 #[derive(Debug, Default, Serialize)]
 pub struct TempMetrics {
-  pub cpu_temp_avg: f32, // Celsius
-  pub gpu_temp_avg: f32, // Celsius
+  /// Average CPU temperature in Celsius.
+  pub cpu_temp_avg: f32,
+  /// Average GPU temperature in Celsius.
+  pub gpu_temp_avg: f32,
 }
 
+/// Memory and swap usage.
 #[derive(Debug, Default, Serialize)]
 pub struct MemMetrics {
-  pub ram_total: u64,  // bytes
-  pub ram_usage: u64,  // bytes
-  pub swap_total: u64, // bytes
-  pub swap_usage: u64, // bytes
+  /// Total physical memory in bytes.
+  pub ram_total: u64,
+  /// Used physical memory in bytes.
+  pub ram_usage: u64,
+  /// Total configured swap in bytes.
+  pub swap_total: u64,
+  /// Used swap in bytes.
+  pub swap_usage: u64,
 }
 
+/// Fan speed metrics.
 #[derive(Debug, Default, Serialize)]
 pub struct FanMetric {
+  /// Current fan speed in revolutions per minute.
   pub rpm: u32,
+  /// Maximum fan speed in revolutions per minute, when reported by SMC.
   pub max_rpm: Option<u32>,
 }
 
@@ -43,32 +55,47 @@ struct SmcSensors {
   fan_keys: Vec<String>,
 }
 
+/// A complete metrics snapshot returned by [`Sampler`].
+///
+/// Usage ratios are normalized values in the `0.0..=1.0` range. Power values
+/// are reported in Watts.
 #[derive(Debug, Default, Serialize)]
 pub struct Metrics {
+  /// Temperature metrics.
   pub temp: TempMetrics,
+  /// Memory and swap metrics.
   pub memory: MemMetrics,
+  /// Fan metrics ordered by stable SMC fan key order.
   pub fans: Vec<FanMetric>,
-  pub ecpu_usage: (u32, f32), // cluster aggregate: freq, percent_from_max
-  pub pcpu_usage: (u32, f32), // cluster aggregate: freq, percent_from_max
-  pub ecpu_core_usages: Vec<(u32, f32)>, // per-core: freq, percent_from_max
-  pub pcpu_core_usages: Vec<(u32, f32)>, // per-core: freq, percent_from_max
-  pub cpu_usage_pct: f32,     // combined ecpu+pcpu usage, weighted by core count
-  pub gpu_usage: (u32, f32),  // freq, percent_from_max
-  pub cpu_power: f32,         // Watts
-  pub gpu_power: f32,         // Watts
-  pub ane_power: f32,         // Watts
-  pub all_power: f32,         // Watts
-  pub sys_power: f32,         // Watts
-  pub ram_power: f32,         // Watts
-  pub gpu_ram_power: f32,     // Watts
+  /// Efficiency-cluster aggregate as `(frequency_mhz, usage_ratio)`.
+  pub ecpu_usage: (u32, f32),
+  /// Performance-cluster aggregate as `(frequency_mhz, usage_ratio)`.
+  pub pcpu_usage: (u32, f32),
+  /// Per-core efficiency-cluster usage as `(frequency_mhz, usage_ratio)`.
+  pub ecpu_core_usages: Vec<(u32, f32)>,
+  /// Per-core performance-cluster usage as `(frequency_mhz, usage_ratio)`.
+  pub pcpu_core_usages: Vec<(u32, f32)>,
+  /// Combined CPU usage ratio across efficiency and performance cores.
+  pub cpu_usage_pct: f32,
+  /// GPU usage as `(frequency_mhz, usage_ratio)`.
+  pub gpu_usage: (u32, f32),
+  /// CPU package power in Watts.
+  pub cpu_power: f32,
+  /// GPU power in Watts.
+  pub gpu_power: f32,
+  /// Apple Neural Engine power in Watts.
+  pub ane_power: f32,
+  /// Sum of CPU, GPU, and ANE power in Watts.
+  pub all_power: f32,
+  /// System power estimate in Watts, when available.
+  pub sys_power: f32,
+  /// DRAM power in Watts.
+  pub ram_power: f32,
+  /// GPU SRAM power in Watts.
+  pub gpu_ram_power: f32,
 }
 
 // MARK: Helpers
-
-pub fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T) -> T {
-  let zero: T = Default::default();
-  if b == zero { zero } else { a / b }
-}
 
 fn is_valid_temp(val: f32) -> bool {
   val > 0.0 && val <= 150.0
@@ -214,29 +241,12 @@ fn init_smc() -> WithError<SmcSensors> {
   Ok(SmcSensors { smc, cpu_keys: cpu_sensors, gpu_keys: gpu_sensors, fan_keys: fan_sensors })
 }
 
-pub(crate) fn ioreport_channels_filter(
-  group: &str,
-  subgroup: &str,
-  channel: &str,
-  _unit: &str,
-) -> bool {
-  // Keep this filter in sync with the channel handling in Sampler::get_metrics.
-  if group == "Energy Model" {
-    return channel == "GPU Energy"
-      || channel.ends_with("CPU Energy")
-      || channel.starts_with("ANE")
-      || channel.starts_with("DRAM")
-      || channel.starts_with("GPU SRAM");
-  }
-
-  if group == "CPU Stats" {
-    return subgroup == CPU_FREQ_CORE_SUBG;
-  }
-
-  group == "GPU Stats" && subgroup == GPU_FREQ_DICE_SUBG
-}
 // MARK: Sampler
 
+/// Hardware metrics sampler for Apple Silicon Macs.
+///
+/// Create one sampler and call [`Sampler::get_metrics`] in a continuous polling
+/// loop, or use [`Sampler::get_metrics_now`] when the caller owns scheduling.
 pub struct Sampler {
   soc: SocInfo,
   ior: IOReport,
@@ -248,6 +258,7 @@ pub struct Sampler {
 }
 
 impl Sampler {
+  /// Initialize hardware metric sources.
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
     let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
@@ -418,6 +429,8 @@ impl Sampler {
   ///
   /// Intended to be called continuously in a polling loop. The sampler keeps
   /// internal IOReport baseline state between calls to reduce interval drift.
+  ///
+  /// `duration` is the requested polling interval in milliseconds.
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
     let measures: usize = 4;
     let mut results: Vec<Metrics> = Vec::with_capacity(measures);
@@ -519,6 +532,10 @@ impl Sampler {
   ///
   /// This method does not sleep or use the 4-sample smoothing from
   /// [`Sampler::get_metrics`]. It returns `None` for the first or stale sample window.
+  ///
+  /// `stale_after_ms` is the maximum accepted time between two manual samples.
+  /// If the elapsed time is larger, the old baseline is discarded and `None` is
+  /// returned.
   pub fn get_metrics_now(&mut self, stale_after_ms: u32) -> WithError<Option<Metrics>> {
     let Some((sample, dt)) = self.ior.get_sample_now(stale_after_ms as u64)? else {
       return Ok(None);
@@ -537,7 +554,7 @@ impl Sampler {
     Ok(Some(rs))
   }
 
-  /// Getter for the `soc` field
+  /// Return static SoC information used by this sampler.
   pub fn get_soc_info(&self) -> &SocInfo {
     &self.soc
   }

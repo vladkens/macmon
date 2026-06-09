@@ -10,11 +10,9 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
-use crate::metrics::{FanMetric, Metrics, Sampler, zero_div};
-use crate::{
-  metrics::MemMetrics,
-  sources::{SocInfo, get_soc_info},
-};
+use crate::shared::zero_div;
+use crate::sources::{SocInfo, get_soc_info};
+use macmon::{FanMetric, MemMetrics, Metrics, Sampler};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 

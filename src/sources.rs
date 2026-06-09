@@ -1,3 +1,14 @@
+//! Low-level Apple Silicon metric sources.
+//!
+//! This module exposes the SMC, IOReport, IOHID, CoreFoundation, and system
+//! profiler helpers used by [`crate::Sampler`]. It is useful for advanced
+//! integrations, debugging new hardware, or experimenting with additional Apple
+//! Silicon counters before they are added to the high-level metrics API.
+//!
+//! Prefer [`crate::Sampler`] for regular use. The APIs in this module are lower
+//! level and may change between releases as macOS, hardware generations, and
+//! metric keys change.
+
 #![allow(non_upper_case_globals)]
 #![allow(dead_code)]
 
@@ -27,17 +38,21 @@ use core_foundation::{
 };
 use serde::Serialize;
 
+/// Error type used by low-level source helpers.
 pub type WithError<T> = Result<T, Box<dyn std::error::Error>>;
+/// Raw CoreFoundation/IOKit pointer used by FFI bindings.
 pub type CVoidRef = *const std::ffi::c_void;
 
 static SOC_INFO_CACHE: OnceLock<SocInfo> = OnceLock::new();
 
 // MARK: CFUtils
 
+/// Create a CoreFoundation number object from an `i32`.
 pub fn cfnum(val: i32) -> CFNumberRef {
   unsafe { CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &val as *const i32 as _) }
 }
 
+/// Create a CoreFoundation string object from a Rust string.
 pub fn cfstr(val: &str) -> CFStringRef {
   // this creates broken objects if string len > 9
   // CFString::from_static_string(val).as_concrete_TypeRef()
@@ -56,6 +71,7 @@ pub fn cfstr(val: &str) -> CFStringRef {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Convert a CoreFoundation string reference into a Rust `String`.
 pub fn from_cfstr(val: CFStringRef) -> String {
   unsafe {
     let mut buf = Vec::with_capacity(128);
@@ -67,6 +83,7 @@ pub fn from_cfstr(val: CFStringRef) -> String {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Return all keys from a CoreFoundation dictionary as Rust strings.
 pub fn cfdict_keys(dict: CFDictionaryRef) -> Vec<String> {
   unsafe {
     let count = CFDictionaryGetCount(dict) as usize;
@@ -81,6 +98,7 @@ pub fn cfdict_keys(dict: CFDictionaryRef) -> Vec<String> {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Look up a value in a CoreFoundation dictionary by string key.
 pub fn cfdict_get_val(dict: CFDictionaryRef, key: &str) -> Option<CFTypeRef> {
   unsafe {
     let key = cfstr(key);
@@ -164,6 +182,7 @@ fn cfio_channel_matches(items: &[(&str, Option<&str>)], group: &str, subgroup: &
     })
 }
 
+/// Copy all CoreFoundation properties from an IORegistry entry.
 pub fn cfio_get_props(entry: u32, name: String) -> WithError<CFDictionaryRef> {
   unsafe {
     let mut props: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
@@ -176,6 +195,7 @@ pub fn cfio_get_props(entry: u32, name: String) -> WithError<CFDictionaryRef> {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Read IOReport state residency counters from a channel item.
 pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   let count = unsafe { IOReportStateGetCount(item) };
   let mut res = vec![];
@@ -194,6 +214,7 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Convert an IOReport energy counter into Watts for a sampling duration.
 pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithError<f32> {
   let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f32;
   let val = val / (duration as f32 / 1000.0);
@@ -206,17 +227,20 @@ pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithEr
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+/// Read the integer value from an IOReport channel item.
 pub fn cfio_integer_value(item: CFDictionaryRef) -> i64 {
   unsafe { IOReportSimpleGetIntegerValue(item, 0) }
 }
 
 // MARK: IOServiceIterator
 
+/// Iterator over IORegistry services matching a service name.
 pub struct IOServiceIterator {
   existing: u32,
 }
 
 impl IOServiceIterator {
+  /// Create an iterator for services such as `AppleSMC` or `AppleARMIODevice`.
   pub fn new(service_name: &str) -> WithError<Self> {
     let service_name = std::ffi::CString::new(service_name).unwrap();
     let existing = unsafe {
@@ -262,6 +286,7 @@ impl Iterator for IOServiceIterator {
 
 // MARK: IOReportIterator
 
+/// Iterator over IOReport channel samples.
 pub struct IOReportIterator {
   sample: CFDictionaryRef,
   index: isize,
@@ -271,6 +296,7 @@ pub struct IOReportIterator {
 }
 
 impl IOReportIterator {
+  /// Create an iterator from raw IOReport sample data and channel metadata.
   pub fn new(data: CFDictionaryRef, metadata: Vec<(String, String, String, String)>) -> Self {
     let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
     let items_size = unsafe { CFArrayGetCount(items) } as isize;
@@ -286,11 +312,17 @@ impl Drop for IOReportIterator {
 }
 
 #[derive(Debug)]
+/// One IOReport channel item returned by [`IOReportIterator`].
 pub struct IOReportIteratorItem {
+  /// IOReport group name.
   pub group: String,
+  /// IOReport subgroup name.
   pub subgroup: String,
+  /// IOReport channel name.
   pub channel: String,
+  /// IOReport unit label.
   pub unit: String,
+  /// Raw IOReport channel dictionary for advanced parsing.
   pub item: CFDictionaryRef,
 }
 
@@ -313,6 +345,7 @@ impl Iterator for IOReportIterator {
 
 // MARK: RAM
 
+/// Read used and total RAM in bytes via libc/mach APIs.
 pub fn libc_ram() -> WithError<(u64, u64)> {
   let (mut usage, mut total) = (0u64, 0u64);
 
@@ -365,6 +398,7 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
   Ok((usage, total))
 }
 
+/// Read used and total swap in bytes via libc sysctl.
 pub fn libc_swap() -> WithError<(u64, u64)> {
   let (mut usage, mut total) = (0u64, 0u64);
 
@@ -395,29 +429,45 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
 
 // MARK: SockInfo
 
+/// Static Apple Silicon system information.
+///
+/// This describes the current machine and the frequency tables used to interpret
+/// CPU/GPU residency counters.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct SocInfo {
+  /// Apple hardware model identifier, such as `Mac14,7`.
   pub mac_model: String,
+  /// Human-readable chip name.
   pub chip_name: String,
+  /// Installed unified memory size in GiB.
   pub memory_gb: u16,
+  /// Number of efficiency-tier CPU cores.
   pub ecpu_cores: u8,
+  /// Number of performance-tier CPU cores.
   pub pcpu_cores: u8,
-  pub ecpu_label: String, // "E" on M1-M4, "P" on M5+
-  pub pcpu_label: String, // "P" on M1-M4, "S" on M5+
+  /// UI label for the lower CPU tier, for example `E` on M1-M4 or `P` on M5+.
+  pub ecpu_label: String,
+  /// UI label for the higher CPU tier, for example `P` on M1-M4 or `S` on M5+.
+  pub pcpu_label: String,
+  /// Supported lower-tier CPU frequencies in MHz.
   pub ecpu_freqs: Vec<u32>,
+  /// Supported higher-tier CPU frequencies in MHz.
   pub pcpu_freqs: Vec<u32>,
+  /// Number of GPU cores.
   pub gpu_cores: u8,
+  /// Supported GPU frequencies in MHz.
   pub gpu_freqs: Vec<u32>,
 }
 
 impl SocInfo {
+  /// Load static SoC information for the current machine.
   pub fn new() -> WithError<Self> {
     // Keep this constructor for external library users; internal call sites use get_soc_info().
     get_soc_info()
   }
 }
 
-// dynamic voltage and frequency scaling
+/// Parse dynamic voltage and frequency scaling data from an IORegistry dictionary.
 pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> Option<(Vec<u32>, Vec<u32>)> {
   unsafe {
     let obj = cfdict_get_val(dict, key)? as CFDataRef;
@@ -471,6 +521,7 @@ fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
   parse_acc_clusters(&data)
 }
 
+/// Run `system_profiler` and return raw hardware/display/software JSON.
 pub fn run_system_profiler() -> WithError<serde_json::Value> {
   // system_profiler -listDataTypes
   let out = std::process::Command::new("system_profiler")
@@ -522,6 +573,7 @@ fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
   }
 }
 
+/// Load cached static SoC information for the current machine.
 pub fn get_soc_info() -> WithError<SocInfo> {
   if let Some(info) = SOC_INFO_CACHE.get() {
     return Ok(info.clone());
@@ -677,6 +729,7 @@ fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscription
   Ok(rs)
 }
 
+/// IOReport subscription used to sample Apple Silicon power and residency counters.
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
@@ -703,6 +756,7 @@ impl IOReport {
     })
   }
 
+  /// Subscribe to IOReport channels by group and optional subgroup.
   pub fn new(channels: Vec<(&str, Option<&str>)>) -> WithError<Self> {
     let filter = |group: &str, subgroup: &str, _channel: &str, _unit: &str| {
       cfio_channel_matches(&channels, group, subgroup)
@@ -717,6 +771,7 @@ impl IOReport {
     }
   }
 
+  /// Collect one delta sample over `duration` milliseconds.
   pub fn get_sample(&self, duration: u64) -> IOReportIterator {
     unsafe {
       let sample1 = IOReportCreateSamples(self.subs, self.chan, null());
@@ -734,6 +789,7 @@ impl IOReport {
     (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
   }
 
+  /// Collect multiple delta samples across one sampling window.
   pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
     let count = count.clamp(1, 32);
     let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
@@ -849,11 +905,13 @@ unsafe extern "C" {
 
 // MARK: IOHIDSensors
 
+/// IOHID temperature sensor reader.
 pub struct IOHIDSensors {
   sensors: CFDictionaryRef,
 }
 
 impl IOHIDSensors {
+  /// Create an IOHID temperature sensor reader.
   pub fn new() -> WithError<Self> {
     let keys = [cfstr("PrimaryUsagePage"), cfstr("PrimaryUsage")];
     let nums = [cfnum(kHIDPage_AppleVendor), cfnum(kHIDUsage_AppleVendor_TemperatureSensor)];
@@ -872,6 +930,7 @@ impl IOHIDSensors {
     Ok(Self { sensors })
   }
 
+  /// Read temperature sensor values as `(sensor_name, celsius)`.
   pub fn get_metrics(&self) -> Vec<(String, f32)> {
     unsafe {
       let system = match IOHIDEventSystemClientCreate(kCFAllocatorDefault) {
@@ -945,62 +1004,94 @@ unsafe extern "C" {
 
 #[repr(C)]
 #[derive(Debug, Default)]
+/// SMC protocol version payload.
 pub struct KeyDataVer {
+  /// SMC protocol major version.
   pub major: u8,
+  /// SMC protocol minor version.
   pub minor: u8,
+  /// SMC protocol build number.
   pub build: u8,
+  /// Reserved SMC protocol byte.
   pub reserved: u8,
+  /// SMC protocol release number.
   pub release: u16,
 }
 
 #[repr(C)]
 #[derive(Debug, Default)]
+/// SMC power limit payload.
 pub struct PLimitData {
+  /// Payload version.
   pub version: u16,
+  /// Payload length.
   pub length: u16,
+  /// CPU power limit field.
   pub cpu_p_limit: u32,
+  /// GPU power limit field.
   pub gpu_p_limit: u32,
+  /// Memory power limit field.
   pub mem_p_limit: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
+/// Metadata describing an SMC key value.
 pub struct KeyInfo {
+  /// Size of the SMC value payload in bytes.
   pub data_size: u32,
+  /// FourCC data type for the SMC value.
   pub data_type: u32,
+  /// SMC key attributes.
   pub data_attributes: u8,
 }
 
 #[repr(C)]
 #[derive(Debug, Default)]
+/// Raw SMC request/response payload.
 pub struct KeyData {
+  /// Four-byte SMC key encoded as a big-endian integer.
   pub key: u32,
+  /// SMC protocol version data.
   pub vers: KeyDataVer,
+  /// Power limit payload.
   pub p_limit_data: PLimitData,
+  /// SMC key metadata.
   pub key_info: KeyInfo,
+  /// SMC result byte.
   pub result: u8,
+  /// SMC status byte.
   pub status: u8,
+  /// 8-bit command/data field.
   pub data8: u8,
+  /// 32-bit command/data field.
   pub data32: u32,
+  /// Raw SMC value bytes.
   pub bytes: [u8; 32],
 }
 
 #[derive(Debug, Clone)]
+/// Decoded SMC sensor value.
 pub struct SensorVal {
+  /// Four-byte SMC key name.
   pub name: String,
+  /// FourCC unit/data type string.
   pub unit: String,
+  /// Raw sensor bytes.
   pub data: Vec<u8>,
 }
 
 // MARK: SMC
 
 #[allow(clippy::upper_case_acronyms)]
+/// Apple System Management Controller connection.
 pub struct SMC {
   conn: u32,
   keys: HashMap<u32, KeyInfo>,
 }
 
 impl SMC {
+  /// Open an SMC connection.
   pub fn new() -> WithError<Self> {
     let mut conn = 0;
 
@@ -1062,17 +1153,20 @@ impl SMC {
     Ok(oval.key_info)
   }
 
+  /// Read an SMC key name by numeric index.
   pub fn key_by_index(&self, index: u32) -> WithError<String> {
     let ival = KeyData { data8: 8, data32: index, ..Default::default() };
     let oval = self.read(&ival)?;
     Ok(std::str::from_utf8(&oval.key.to_be_bytes()).unwrap().to_string())
   }
 
+  /// Read metadata for a four-byte SMC key.
   pub fn read_key_info(&mut self, key: &str) -> WithError<KeyInfo> {
     let key = Self::parse_key(key)?;
     self.read_key_info_by_id(key)
   }
 
+  /// Read a raw SMC sensor value by four-byte key.
   pub fn read_val(&mut self, key: &str) -> WithError<SensorVal> {
     let name = key.to_string();
     let key = Self::parse_key(key)?;
@@ -1087,6 +1181,7 @@ impl SMC {
     })
   }
 
+  /// Read a four-byte float SMC value.
   pub fn read_float_val(&mut self, key: &str) -> WithError<f32> {
     const FLOAT_TYPE: u32 = 1718383648; // FourCC: "flt "
 
@@ -1108,6 +1203,7 @@ impl SMC {
     Ok(f32::from_le_bytes(oval.bytes[0..4].try_into().unwrap()))
   }
 
+  /// Read the number of SMC keys exposed by the current machine.
   pub fn key_count(&mut self) -> WithError<u32> {
     let key = Self::parse_key("#KEY")?;
     let key_info = self.read_key_info_by_id(key)?;
@@ -1116,6 +1212,7 @@ impl SMC {
     Ok(u32::from_be_bytes(oval.bytes[0..4].try_into().unwrap()))
   }
 
+  /// Enumerate all SMC key names.
   pub fn read_all_keys(&mut self) -> WithError<Vec<String>> {
     let count = self.key_count()?;
 

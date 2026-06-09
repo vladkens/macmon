@@ -1,6 +1,6 @@
 use core_foundation::base::{CFRelease, CFShow};
 
-use crate::metrics::ioreport_channels_filter;
+use crate::shared::ioreport_channels_filter;
 use crate::sources::{
   IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
   cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, run_system_profiler,
