@@ -37,6 +37,11 @@ impl Default for Config {
 }
 
 impl Config {
+  fn normalize(mut self) -> Self {
+    self.interval = self.interval.clamp(TUI_MIN_MS, TUI_MAX_MS);
+    self
+  }
+
   fn get_config_path() -> Option<String> {
     let home = match std::env::var("HOME") {
       Ok(home) => home,
@@ -52,14 +57,15 @@ impl Config {
     if let Some(path) = Self::get_config_path() {
       let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => return Self::default(),
+        Err(_) => return Self::default().normalize(),
       };
 
       let reader = std::io::BufReader::new(file);
-      return serde_json::from_reader(reader).unwrap_or_default();
+      let cfg: Self = serde_json::from_reader(reader).unwrap_or_default();
+      return cfg.normalize();
     }
 
-    Self::default()
+    Self::default().normalize()
   }
 
   pub fn save(&self) {

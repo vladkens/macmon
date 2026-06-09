@@ -63,10 +63,11 @@ nix-env -i macmon
 Usage: macmon [OPTIONS] [COMMAND]
 
 Commands:
-  pipe   Output metrics in JSON format
-  serve  Serve metrics over HTTP
-  debug  Print debug information
-  help   Print this message or the help of the given subcommand(s)
+  pipe    Output metrics in JSON format
+  serve   Serve metrics over HTTP
+  debug   Print debug information
+  stress  Generate cyclic CPU load for testing metrics
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
@@ -79,6 +80,17 @@ Controls:
   d - toggle detailed CPU/RAM view
   q - quit
 ```
+
+## 🧪 Stress Test
+
+Use `macmon stress` to generate a predictable cyclic CPU load while checking metric behavior:
+
+```sh
+macmon stress
+macmon stress --workers 4 --duration 30
+```
+
+The command runs synchronized worker threads with a fixed 50% duty cycle. This is useful when testing chart shape, sampling cadence, and smoothing changes against `macmon` or Activity Monitor.
 
 ## 🚰 Piping
 

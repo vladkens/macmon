@@ -9,6 +9,7 @@ mod debug;
 mod serve;
 mod shared;
 mod sources;
+mod stress;
 
 use app::App;
 use debug::print_debug;
@@ -49,6 +50,17 @@ enum Commands {
 
   /// Print debug information
   Debug,
+
+  /// Generate cyclic CPU load for testing metrics
+  Stress {
+    /// Number of CPU worker threads
+    #[arg(short, long, default_value_t = 4)]
+    workers: usize,
+
+    /// Stop after this many seconds. Runs until Ctrl-C when omitted
+    #[arg(short, long)]
+    duration: Option<u64>,
+  },
 }
 
 /// Sudoless performance monitoring CLI tool for Apple Silicon processors
@@ -119,6 +131,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => print_debug()?,
+    Some(Commands::Stress { workers, duration }) => stress::run(*workers, *duration),
     _ => {
       let mut app = App::new()?;
 
