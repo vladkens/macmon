@@ -44,6 +44,8 @@ pub struct MemMetrics {
 /// Fan speed metrics.
 #[derive(Debug, Default, Serialize)]
 pub struct FanMetric {
+  /// Stable fan name derived from the fan order, e.g. `fan0`.
+  pub name: String,
   /// Current fan speed in revolutions per minute.
   pub rpm: u32,
   /// Maximum fan speed in revolutions per minute, when reported by SMC.
@@ -360,15 +362,16 @@ impl Sampler {
 
   fn get_fans(&mut self) -> Vec<FanMetric> {
     let mut fans = Vec::new();
-    for key in &self.smc_fan_keys {
+    for (i, key) in self.smc_fan_keys.iter().enumerate() {
       let Some(rpm) = read_smc_numeric_u32(&mut self.smc, key) else { continue };
+      let name = format!("fan{i}");
       let max_rpm = match key.strip_suffix("Ac") {
         Some(prefix) => {
           read_smc_numeric_u32(&mut self.smc, &format!("{prefix}Mx")).filter(|rpm| *rpm > 0)
         }
         None => None,
       };
-      fans.push(FanMetric { rpm, max_rpm });
+      fans.push(FanMetric { name, rpm, max_rpm });
     }
     fans
   }

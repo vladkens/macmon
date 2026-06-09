@@ -65,8 +65,9 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
-    for (i, fan) in m.fans.iter().enumerate() {
-      out.push_str(&format!("{fan_speed_rpm}{{{l},fan=\"{i}\"}} {}\n", fan.rpm));
+    for fan in &m.fans {
+      let fan_name = escape_label_value(&fan.name);
+      out.push_str(&format!("{fan_speed_rpm}{{{l},fan=\"{fan_name}\"}} {}\n", fan.rpm));
     }
     out.push('\n');
   }

@@ -128,10 +128,8 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     "swap_usage": 2602434560          // Bytes
   },
   "fans": [
-    {
-      "rpm": 1234,                    // Revolutions per minute
-      "max_rpm": 5200                 // Maximum RPM, if available
-    }
+    { "name": "fan0", "rpm": 999, "max_rpm": 4900 },
+    { "name": "fan1", "rpm": 1200, "max_rpm": 5200 }
   ],
   "ecpu_usage": [1181, 0.082656614],  // (Frequency MHz, effective usage ratio) - cluster aggregate
   "pcpu_usage": [1974, 0.015181795],  // (Frequency MHz, effective usage ratio) - cluster aggregate
@@ -238,7 +236,7 @@ macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
 
 # HELP macmon_fan_speed_rpm Fan speed in revolutions per minute
 # TYPE macmon_fan_speed_rpm gauge
-macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="0"} 1234
+macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="fan0"} 1234
 
 # HELP macmon_cpu_usage_ratio Combined CPU effective usage (frequency-scaled, 0–1), weighted by core count
 # TYPE macmon_cpu_usage_ratio gauge
