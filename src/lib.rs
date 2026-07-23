@@ -19,7 +19,7 @@
 //!
 //!     println!("CPU power: {:.2} W", metrics.cpu_power);
 //!     println!("GPU power: {:.2} W", metrics.gpu_power);
-//!     println!("CPU effective usage: {:.1}%", metrics.cpu_usage_pct * 100.0);
+//!     println!("CPU effective usage: {:.1}%", metrics.cpu_usage_ratio * 100.0);
 //!     println!("CPU active residency: {:.1}%", metrics.cpu_active_ratio * 100.0);
 //!   }
 //! }
@@ -74,6 +74,6 @@ pub mod sources;
 
 // Re-export commonly used types
 #[doc(inline)]
-pub use metrics::{FanMetric, MemMetrics, Metrics, Sampler, TempMetrics};
+pub use metrics::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, TempMetrics};
 #[doc(inline)]
 pub use sources::SocInfo;

@@ -107,8 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("GPU power:  {:.2} W", metrics.gpu_power);
     println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
     println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
-    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_usage.0, metrics.ecpu_usage.1 * 100.0);
-    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_usage.0, metrics.pcpu_usage.1 * 100.0);
+    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_usage_ratio * 100.0);
+    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_usage_ratio * 100.0);
 
     Ok(())
 }
@@ -187,23 +187,24 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },
     { "name": "fan1", "rpm": 1200, "max_rpm": 5200 },
   ],
-  "ecpu_usage": [1181, 0.082656614], // (Frequency MHz, effective usage ratio) - cluster aggregate
-  "pcpu_usage": [1974, 0.015181795], // (Frequency MHz, effective usage ratio) - cluster aggregate
-  "ecpu_core_usages": [
-    [1600, 0.14],
-    [1700, 0.12],
-  ], // Per-core (Frequency MHz, effective usage ratio), experimental
-  "pcpu_core_usages": [
-    [2100, 0.05],
-    [2200, 0.07],
-  ], // Per-core (Frequency MHz, effective usage ratio), experimental
-  "cpu_usage_pct": 0.036854, // Combined effective CPU usage (frequency-scaled, weighted by core count, 0–1)
+  "cpu_usage_ratio": 0.036854, // Combined effective CPU usage (frequency-scaled, weighted by core count, 0–1)
   "cpu_active_ratio": 0.092, // Combined active residency ratio (not frequency-scaled, weighted by core count, 0–1)
-  "ecpu_active_ratio": 0.18, // Efficiency CPU active residency ratio (not frequency-scaled, 0–1)
-  "pcpu_active_ratio": 0.04, // Performance CPU active residency ratio (not frequency-scaled, 0–1)
-  "ecpu_core_active_ratios": [0.24, 0.2, 0.18, 0.1],
-  "pcpu_core_active_ratios": [0.08, 0.06, 0.03, 0.02],
-  "gpu_usage": [461, 0.021497859], // (Frequency MHz, effective usage ratio)
+  "ecpu_freq_mhz": 1181, // Average frequency while active
+  "ecpu_usage_ratio": 0.082656614, // Effective usage (frequency-scaled, 0–1)
+  "ecpu_active_ratio": 0.18, // Active residency (not frequency-scaled, 0–1)
+  "pcpu_freq_mhz": 1974, // Average frequency while active
+  "pcpu_usage_ratio": 0.015181795, // Effective usage (frequency-scaled, 0–1)
+  "pcpu_active_ratio": 0.04, // Active residency (not frequency-scaled, 0–1)
+  "ecpu_cores": [
+    { "die_id": 0, "core_id": 0, "freq_mhz": 1600, "usage_ratio": 0.14, "active_ratio": 0.24 },
+    { "die_id": 0, "core_id": 1, "freq_mhz": 1700, "usage_ratio": 0.12, "active_ratio": 0.2 },
+  ],
+  "pcpu_cores": [
+    { "die_id": 0, "core_id": 0, "freq_mhz": 2100, "usage_ratio": 0.05, "active_ratio": 0.08 },
+    { "die_id": 0, "core_id": 1, "freq_mhz": 2200, "usage_ratio": 0.07, "active_ratio": 0.06 },
+  ],
+  "gpu_freq_mhz": 461, // Average frequency while active
+  "gpu_usage_ratio": 0.021497859, // Effective usage (frequency-scaled, 0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
@@ -216,6 +217,12 @@ This will collect 10 samples with an update interval of 500 milliseconds.
 ```
 
 </details>
+
+Deprecated compatibility fields remain available in Rust and serialized JSON:
+`cpu_usage_pct` → `cpu_usage_ratio`, `ecpu_usage` →
+`(ecpu_freq_mhz, ecpu_usage_ratio)`, `pcpu_usage` →
+`(pcpu_freq_mhz, pcpu_usage_ratio)`, and `gpu_usage` →
+`(gpu_freq_mhz, gpu_usage_ratio)`.
 
 ## 🌐 HTTP Server
 
