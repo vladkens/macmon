@@ -5,18 +5,15 @@ on:
     branches: [main]
     tags: ["v*"]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.sha }}
-  cancel-in-progress: false
-
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/cache@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           path: |
@@ -28,15 +25,16 @@ jobs:
       - run: make check
       - run: make test
 
-  release:
+  publish:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: macos-latest
     needs: test
     permissions:
-      contents: write
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/cache@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           path: |
@@ -45,7 +43,6 @@ jobs:
             ~/.cargo/git/db/
 
       - run: rustup update --no-self-update stable && rustup default stable
-      - run: make build
 
       - name: Check Cargo.toml version matches tag
         run: |
@@ -55,6 +52,32 @@ jobs:
             echo "Error: tag ${TAG} does not match Cargo.toml version ${CARGO_VERSION}"
             exit 1
           fi
+
+      # https://crates.io/docs/trusted-publishing
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  release:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: macos-latest
+    needs: publish
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+
+      - run: rustup update --no-self-update stable && rustup default stable
+      - run: make build
 
       - name: Check binary version matches tag
         run: ./target/release/macmon -V | grep "${GITHUB_REF_NAME#v}" || exit 1
@@ -100,28 +123,3 @@ jobs:
           git add macmon.rb
           git commit -m "macmon ${VERSION}"
           git push
-
-  publish:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    runs-on: macos-latest
-    needs: test
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/cache@v5
-        with:
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-
-      - run: rustup update --no-self-update stable && rustup default stable
-      # https://crates.io/docs/trusted-publishing
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-      - run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
