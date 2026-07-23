@@ -14,10 +14,11 @@
 
 use std::{
   collections::HashMap,
+  ffi::CString,
   marker::{PhantomData, PhantomPinned},
   mem::{MaybeUninit, size_of},
   os::raw::c_void,
-  ptr::null,
+  ptr::{null, null_mut},
   sync::OnceLock,
   time::Duration,
 };
@@ -34,7 +35,9 @@ use core_foundation::{
     CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
     CFMutableDictionaryRef, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
   },
-  number::{CFNumberCreate, CFNumberRef, kCFNumberSInt32Type},
+  number::{
+    CFNumberCreate, CFNumberGetValue, CFNumberRef, kCFNumberSInt32Type, kCFNumberSInt64Type,
+  },
   string::{CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
 };
 use serde::Serialize;
@@ -526,18 +529,6 @@ fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
   parse_acc_clusters(&data)
 }
 
-/// Run `system_profiler` and return raw hardware/display/software JSON.
-pub fn run_system_profiler() -> WithError<serde_json::Value> {
-  // system_profiler -listDataTypes
-  let out = std::process::Command::new("system_profiler")
-    .args(["SPHardwareDataType", "SPDisplaysDataType", "SPSoftwareDataType", "-json"])
-    .output()?;
-
-  let out = std::str::from_utf8(&out.stdout)?;
-  let out = serde_json::from_str::<serde_json::Value>(out)?;
-  Ok(out)
-}
-
 fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
@@ -578,20 +569,128 @@ fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
   }
 }
 
-/// Load cached static SoC information for the current machine.
-pub fn get_soc_info() -> WithError<SocInfo> {
-  if let Some(info) = SOC_INFO_CACHE.get() {
-    return Ok(info.clone());
-  }
-
-  let info = load_soc_info()?;
-  let _ = SOC_INFO_CACHE.set(info.clone());
-  Ok(info)
+// Static hardware fields obtainable either via `system_profiler` or directly via
+// sysctl/IOKit. Kept separate from SocInfo so the two sourcing strategies below
+// don't need to touch the CPU/GPU frequency tables, which are always read via IOKit.
+#[derive(Debug)]
+pub(crate) struct HwInfo {
+  pub(crate) chip_name: String,
+  pub(crate) mac_model: String,
+  pub(crate) memory_gb: u16,
+  pub(crate) ecpu_cores: u8,
+  pub(crate) pcpu_cores: u8,
+  pub(crate) ecpu_label: String,
+  pub(crate) pcpu_label: String,
+  pub(crate) gpu_cores: u8,
 }
 
-fn load_soc_info() -> WithError<SocInfo> {
-  let out = run_system_profiler()?;
-  let mut info = SocInfo::default();
+/// Read a string sysctl value by name.
+pub(crate) fn sysctl_str(name: &str) -> Option<String> {
+  let cname = CString::new(name).ok()?;
+  unsafe {
+    let mut size: usize = 0;
+    let ret = libc::sysctlbyname(cname.as_ptr(), null_mut(), &mut size, null_mut(), 0);
+    if ret != 0 || size == 0 {
+      return None;
+    }
+
+    let mut buf = vec![0u8; size];
+    let ret =
+      libc::sysctlbyname(cname.as_ptr(), buf.as_mut_ptr() as *mut c_void, &mut size, null_mut(), 0);
+    if ret != 0 {
+      return None;
+    }
+
+    buf.truncate(size.saturating_sub(1)); // drop trailing NUL
+    String::from_utf8(buf).ok()
+  }
+}
+
+fn sysctl_buf<const N: usize>(name: &str) -> Option<[u8; N]> {
+  let cname = CString::new(name).ok()?;
+  let mut buf = [0; N];
+  let mut size = N;
+  let ret = unsafe {
+    libc::sysctlbyname(cname.as_ptr(), buf.as_mut_ptr().cast(), &mut size, null_mut(), 0)
+  };
+  (ret == 0).then_some(buf)
+}
+
+fn sysctl_u32(name: &str) -> Option<u32> {
+  sysctl_buf(name).map(u32::from_ne_bytes)
+}
+
+fn sysctl_u64(name: &str) -> Option<u64> {
+  sysctl_buf(name).map(u64::from_ne_bytes)
+}
+
+/// Read an integer CFNumber property from an IORegistry properties dictionary.
+fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
+  let obj = cfdict_get_val(dict, key)? as CFNumberRef;
+  let mut val: i64 = 0;
+  let ok = unsafe { CFNumberGetValue(obj, kCFNumberSInt64Type, &mut val as *mut _ as *mut c_void) };
+  ok.then_some(val)
+}
+
+// perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the
+// lowest (confirmed via `sysctl hw.perflevel0/1.name` -> Performance/Efficiency on
+// M1-M4). M5 drops E-cores for a new higher "Super" tier above Performance, so the
+// same two-slot ecpu/pcpu split still applies, just relabeled P/S instead of E/P.
+// Unverified on real M5 hardware (see hw_from_profiler for the tested fallback path).
+fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static str)> {
+  let nperflevels = sysctl_u32("hw.nperflevels")?;
+  if nperflevels < 2 {
+    return None;
+  }
+
+  let hi = sysctl_u32("hw.perflevel0.physicalcpu")?;
+  let lo = sysctl_u32(&format!("hw.perflevel{}.physicalcpu", nperflevels - 1))?;
+
+  let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
+  let (ecpu_label, pcpu_label) = if is_legacy { ("E", "P") } else { ("P", "S") };
+
+  Some((lo as u8, hi as u8, ecpu_label, pcpu_label))
+}
+
+/// Read hardware descriptor fields via sysctl and IORegistry only (no subprocess).
+pub(crate) fn hw_native() -> WithError<HwInfo> {
+  let chip_name = sysctl_str("machdep.cpu.brand_string").ok_or("Failed to read chip name")?;
+  let mac_model = sysctl_str("hw.model").ok_or("Failed to read mac model")?;
+  let memory_gb =
+    sysctl_u64("hw.memsize").ok_or("Failed to read memory size")? / (1024 * 1024 * 1024);
+  let (ecpu_cores, pcpu_cores, ecpu_label, pcpu_label) =
+    cpu_tier_counts(&chip_name).ok_or("Failed to read CPU core topology")?;
+
+  let mut gpu_cores = 0u8;
+  for (entry, name) in IOServiceIterator::new("AGXAccelerator")? {
+    if let Ok(item) = cfio_get_props(entry, name) {
+      if let Some(cores) = cfnum_get_i64(item, "gpu-core-count") {
+        gpu_cores = cores as u8;
+      }
+      unsafe { CFRelease(item as _) }
+    }
+  }
+
+  Ok(HwInfo {
+    chip_name,
+    mac_model,
+    memory_gb: memory_gb as u16,
+    ecpu_cores,
+    pcpu_cores,
+    ecpu_label: ecpu_label.into(),
+    pcpu_label: pcpu_label.into(),
+    gpu_cores,
+  })
+}
+
+/// Read hardware descriptor fields via `system_profiler` (slower, ~250-300ms subprocess
+/// spawn, but battle-tested against real M1-M5 hardware bug reports).
+pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
+  let out = std::process::Command::new("system_profiler")
+    .args(["SPHardwareDataType", "SPDisplaysDataType", "-json"])
+    .output()?;
+  let out = std::str::from_utf8(&out.stdout)?;
+  let out = serde_json::from_str::<serde_json::Value>(out)?;
 
   // SPHardwareDataType.0.chip_type
   let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str();
@@ -614,20 +713,41 @@ fn load_soc_info() -> WithError<SocInfo> {
   let gpu_cores = out["SPDisplaysDataType"][0]["sppci_cores"].as_str();
   let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
-  let cpu_scale = cpu_freq_scale(&chip_name);
+  Ok(HwInfo {
+    chip_name,
+    mac_model,
+    memory_gb: mem_gb as u16,
+    ecpu_cores: ecpu_cores as u8,
+    pcpu_cores: pcpu_cores as u8,
+    ecpu_label: if has_mcpu { "P".into() } else { "E".into() },
+    pcpu_label: if has_mcpu { "S".into() } else { "P".into() },
+    gpu_cores: gpu_cores as u8,
+  })
+}
+
+fn load_soc_info() -> WithError<SocInfo> {
+  let hw = match hw_native() {
+    Ok(hw) => hw,
+    Err(_) => hw_from_profiler()?,
+  };
+
+  let mut info = SocInfo {
+    chip_name: hw.chip_name,
+    mac_model: hw.mac_model,
+    memory_gb: hw.memory_gb,
+    ecpu_cores: hw.ecpu_cores,
+    pcpu_cores: hw.pcpu_cores,
+    ecpu_label: hw.ecpu_label,
+    pcpu_label: hw.pcpu_label,
+    gpu_cores: hw.gpu_cores,
+    ..Default::default()
+  };
+
+  let cpu_scale = cpu_freq_scale(&info.chip_name);
   let gpu_scale: u32 = 1000 * 1000; // MHz
 
-  // Assign parsed values to info
-  info.chip_name = chip_name;
-  info.mac_model = mac_model;
-  info.memory_gb = mem_gb as u16;
-  info.gpu_cores = gpu_cores as u8;
-  info.ecpu_cores = ecpu_cores as u8;
-  info.pcpu_cores = pcpu_cores as u8;
-  info.ecpu_label = if has_mcpu { "P".into() } else { "E".into() };
-  info.pcpu_label = if has_mcpu { "S".into() } else { "P".into() };
-
-  // CPU frequencies
+  // CPU/GPU frequencies always come from IOKit directly, regardless of how the
+  // rest of the hardware descriptor above was sourced.
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if name == "pmgr" {
       let item = cfio_get_props(entry, name)?;
@@ -652,6 +772,17 @@ fn load_soc_info() -> WithError<SocInfo> {
     return Err("No CPU frequencies found".into());
   }
 
+  Ok(info)
+}
+
+/// Load cached static SoC information for the current machine.
+pub fn get_soc_info() -> WithError<SocInfo> {
+  if let Some(info) = SOC_INFO_CACHE.get() {
+    return Ok(info.clone());
+  }
+
+  let info = load_soc_info()?;
+  let _ = SOC_INFO_CACHE.set(info.clone());
   Ok(info)
 }
 

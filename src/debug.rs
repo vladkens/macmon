@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use crate::shared::ioreport_channels_filter;
 use crate::sources::{
-  IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
-  cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, run_system_profiler,
+  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
+  cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
+  sysctl_str,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -23,20 +24,48 @@ fn print_divider(msg: &str) {
   println!("\n--- {} {}", msg, "-".repeat(len));
 }
 
-pub fn print_debug() -> WithError<()> {
-  let out = run_system_profiler()?;
+fn print_hw_row(name: &str, profiler: impl std::fmt::Display, native: impl std::fmt::Display) {
+  println!("{name:<8} {profiler:<20} {native}");
+}
 
-  let chip =
-    out["SPHardwareDataType"][0]["chip_type"].as_str().unwrap_or("Unknown chip").to_string();
-  let model =
-    out["SPHardwareDataType"][0]["machine_model"].as_str().unwrap_or("Unknown model").to_string();
-  let os_ver =
-    out["SPSoftwareDataType"][0]["os_version"].as_str().unwrap_or("Unknown OS version").to_string();
-  let procs = out["SPHardwareDataType"][0]["number_processors"]
-    .as_str()
-    .unwrap_or("Unknown processors")
-    .to_string();
-  println!("Chip: {} | Model: {} | OS: {} | {}", chip, model, os_ver, procs);
+fn print_hw(profiler: &HwInfo, native: &HwInfo) {
+  println!("{:<8} {:<20} Native", "", "Profiler");
+  print_hw_row("Chip", &profiler.chip_name, &native.chip_name);
+  print_hw_row("Model", &profiler.mac_model, &native.mac_model);
+  print_hw_row("Memory", format!("{} GB", profiler.memory_gb), format!("{} GB", native.memory_gb));
+  print_hw_row(
+    "CPU",
+    format!(
+      "{}{} + {}{}",
+      profiler.ecpu_cores, profiler.ecpu_label, profiler.pcpu_cores, profiler.pcpu_label
+    ),
+    format!(
+      "{}{} + {}{}",
+      native.ecpu_cores, native.ecpu_label, native.pcpu_cores, native.pcpu_label
+    ),
+  );
+  print_hw_row(
+    "GPU",
+    format!("{} cores", profiler.gpu_cores),
+    format!("{} cores", native.gpu_cores),
+  );
+}
+
+pub fn print_debug() -> WithError<()> {
+  let os_ver = sysctl_str("kern.osproductversion").unwrap_or("Unknown".into());
+  let os_build = sysctl_str("kern.osversion").unwrap_or("Unknown".into());
+  println!("macmon {} | OS: macOS {os_ver} ({os_build})", env!("CARGO_PKG_VERSION"));
+
+  print_divider("Hardware");
+  let profiler = hw_from_profiler();
+  let native = hw_native();
+  match (&profiler, &native) {
+    (Ok(profiler), Ok(native)) => print_hw(profiler, native),
+    _ => {
+      println!("Profiler: {profiler:?}");
+      println!("Native: {native:?}");
+    }
+  }
 
   print_divider("AppleARMIODevice");
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
