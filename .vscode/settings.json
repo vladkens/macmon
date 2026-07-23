@@ -1,19 +1,14 @@
 {
-  "[rust]": {
-    "editor.defaultFormatter": "rust-lang.rust-analyzer",
-    "editor.formatOnSave": true
-  },
-  "[toml]": {
-    "editor.defaultFormatter": "tamasfe.even-better-toml"
-  },
+  "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer" },
+  "[toml]": { "editor.defaultFormatter": "tamasfe.even-better-toml" },
   "code-runner.executorMap": {
     "rust": "cargo run -r #$fileName"
   },
   "editor.formatOnSave": true,
   "files.exclude": {
-    ".claude": true,
     "Cargo.lock": true,
     "LICENSE": true,
     "target": true
-  }
+  },
+  "prettier.requireConfig": false
 }
