@@ -19,6 +19,7 @@ use std::{
   os::raw::c_void,
   ptr::null,
   sync::OnceLock,
+  time::Duration,
 };
 
 use core_foundation::{
@@ -215,13 +216,17 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 /// Convert an IOReport energy counter into Watts for a sampling duration.
-pub fn cfio_watts(item: CFDictionaryRef, unit: &String, duration: u64) -> WithError<f32> {
-  let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f32;
-  let val = val / (duration as f32 / 1000.0);
-  match unit.as_str() {
-    "mJ" => Ok(val / 1e3f32),
-    "uJ" => Ok(val / 1e6f32),
-    "nJ" => Ok(val / 1e9f32),
+pub fn cfio_watts(item: CFDictionaryRef, unit: &str, duration: Duration) -> WithError<f32> {
+  let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f64;
+  watts_from_energy(val, unit, duration)
+}
+
+fn watts_from_energy(val: f64, unit: &str, duration: Duration) -> WithError<f32> {
+  let val = val / duration.as_secs_f64();
+  match unit {
+    "mJ" => Ok((val / 1e3) as f32),
+    "uJ" => Ok((val / 1e6) as f32),
+    "nJ" => Ok((val / 1e9) as f32),
     _ => Err(format!("Invalid energy unit: {}", unit).into()),
   }
 }
@@ -737,7 +742,6 @@ pub struct IOReport {
   selected: Option<CFMutableArrayRef>,
   metadata: Vec<(String, String, String, String)>,
   prev: Option<(CFDictionaryRef, std::time::Instant)>,
-  manual_prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
@@ -752,7 +756,6 @@ impl IOReport {
       selected: channels.selected,
       metadata,
       prev: None,
-      manual_prev: None,
     })
   }
 
@@ -789,6 +792,28 @@ impl IOReport {
     (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
   }
 
+  pub(crate) fn get_sample_interval(&mut self, duration: Duration) -> (IOReportIterator, Duration) {
+    let prev = match self.prev {
+      Some(x) => x,
+      None => self.raw_sample(),
+    };
+
+    let target_at = prev.1 + duration;
+    let now = std::time::Instant::now();
+    if target_at > now {
+      std::thread::sleep(target_at.duration_since(now));
+    }
+
+    let next = self.raw_sample();
+    let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
+    unsafe { CFRelease(prev.0 as _) };
+
+    let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
+    self.prev = Some(next);
+
+    (IOReportIterator::new(diff, self.metadata.clone()), elapsed)
+  }
+
   /// Collect multiple delta samples across one sampling window.
   pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
     let count = count.clamp(1, 32);
@@ -823,30 +848,6 @@ impl IOReport {
     self.prev = Some(prev);
     samples
   }
-
-  pub(crate) fn get_sample_now(
-    &mut self,
-    stale_after: u64,
-  ) -> WithError<Option<(IOReportIterator, u64)>> {
-    let next = self.raw_sample();
-    let Some(prev) = self.manual_prev.take() else {
-      self.manual_prev = Some(next);
-      return Ok(None);
-    };
-
-    let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
-    if elapsed > stale_after {
-      unsafe { CFRelease(prev.0 as _) };
-      self.manual_prev = Some(next);
-      return Ok(None);
-    }
-
-    let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
-    unsafe { CFRelease(prev.0 as _) };
-    self.manual_prev = Some(next);
-
-    Ok(Some((IOReportIterator::new(diff, self.metadata.clone()), elapsed.max(1))))
-  }
 }
 
 impl Drop for IOReport {
@@ -861,9 +862,6 @@ impl Drop for IOReport {
         CFRelease(source as _);
       }
       if let Some(prev) = self.prev {
-        CFRelease(prev.0 as _);
-      }
-      if let Some(prev) = self.manual_prev {
         CFRelease(prev.0 as _);
       }
     }
@@ -1296,6 +1294,12 @@ mod tests {
     // M1-M3: MHz scale
     assert_eq!(to_mhz(vec![3_000_000_000, 2_000_000_000], 1000 * 1000), vec![3000, 2000]);
     assert_eq!(to_mhz(vec![], 1000), Vec::<u32>::new());
+  }
+
+  #[test]
+  fn converts_energy_using_the_exact_sample_duration() {
+    let watts = watts_from_energy(1_000_000.0, "uJ", Duration::from_micros(250_500)).unwrap();
+    assert!((watts - 3.992_016).abs() < 0.000_001);
   }
 
   #[test]

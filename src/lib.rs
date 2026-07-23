@@ -5,8 +5,8 @@
 //!
 //! # Examples
 //!
-//! Use [`Sampler::get_metrics`] when macmon should manage the polling interval
-//! and return smoothed metrics:
+//! [`Sampler::get_metrics`] blocks the current thread while macmon collects
+//! metrics over the requested interval:
 //!
 //! ```no_run
 //! use macmon::Sampler;
@@ -25,27 +25,44 @@
 //! }
 //! ```
 //!
-//! Use [`Sampler::get_metrics_now`] when the caller owns scheduling:
+//! To keep an application thread responsive, create the sampler inside a
+//! dedicated worker thread and send completed metrics through a channel:
 //!
 //! ```no_run
-//! use std::{thread, time::Duration};
+//! use std::{
+//!   sync::mpsc::{self, Receiver, TryRecvError},
+//!   thread,
+//! };
 //!
-//! use macmon::Sampler;
+//! use macmon::{Metrics, Sampler};
 //!
-//! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!   let mut sampler = Sampler::new()?;
+//! fn spawn_sampler(interval_ms: u32) -> Receiver<Metrics> {
+//!   let (tx, rx) = mpsc::channel();
+//!
+//!   thread::spawn(move || {
+//!     let mut sampler = Sampler::new().expect("failed to create sampler");
+//!
+//!     while let Ok(metrics) = sampler.get_metrics(interval_ms) {
+//!       if tx.send(metrics).is_err() {
+//!         break;
+//!       }
+//!     }
+//!   });
+//!
+//!   rx
+//! }
+//!
+//! fn main() {
+//!   let metrics = spawn_sampler(1000);
 //!
 //!   loop {
-//!     thread::sleep(Duration::from_millis(1000));
+//!     match metrics.try_recv() {
+//!       Ok(metrics) => println!("CPU power: {:.2} W", metrics.cpu_power),
+//!       Err(TryRecvError::Empty) => {}
+//!       Err(TryRecvError::Disconnected) => break,
+//!     }
 //!
-//!     let Some(metrics) = sampler.get_metrics_now(1500)? else {
-//!       continue;
-//!     };
-//!
-//!     println!("CPU power: {:.2} W", metrics.cpu_power);
-//!     println!("GPU power: {:.2} W", metrics.gpu_power);
-//!     println!("CPU effective usage: {:.1}%", metrics.cpu_usage_pct * 100.0);
-//!     println!("CPU active residency: {:.1}%", metrics.cpu_active_ratio * 100.0);
+//!     // The application can continue doing other work here.
 //!   }
 //! }
 //! ```

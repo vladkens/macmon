@@ -1,4 +1,5 @@
 use core_foundation::base::{CFRelease, CFShow};
+use std::time::Duration;
 
 use crate::shared::ioreport_channels_filter;
 use crate::sources::{
@@ -78,7 +79,9 @@ pub fn print_debug() -> WithError<()> {
     );
     match x.unit.as_str() {
       "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
-      "mJ" | "uJ" | "nJ" => println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, dur)?),
+      "mJ" | "uJ" | "nJ" => {
+        println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, Duration::from_millis(dur))?)
+      }
       "events" | "B" | "KiB" | "MiB" | "ns" | "us" | "ms" | "s" | "" => {
         println!("{msg} {} {}", cfio_integer_value(x.item), x.unit)
       }

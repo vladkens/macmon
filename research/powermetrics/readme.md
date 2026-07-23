@@ -155,13 +155,84 @@ The actual delta window is slightly longer than the requested interval because
 collection and processing take additional time. `powermetrics` records the real
 window in plist `elapsed_ns`.
 
+### CPU `IDLE` and `DOWN` states
+
+Apple's public `IOStateReporter` contract describes generic state-residency
+accounting, not CPU-specific power states. State identifiers are
+provider-defined 64-bit values, and the public Apple Silicon CPU driver source
+that assigns `IDLE` and `DOWN` is unavailable. The XNU implementation records
+elapsed time against the previous state on every transition and updates the
+current state's residency when a report is produced:
+
+- [IOStateReporter documentation](https://developer.apple.com/documentation/driverkit/iostatereporter)
+- [IOStateReporter state IDs](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/IOKit/IOKernelReporters.h#L965-L1004)
+- [IOStateReporter transition accounting](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOStateReporter.cpp#L613-L710)
+- [IOStateReporter report update](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOStateReporter.cpp#L802-L865)
+
+Inspection of the Apple Silicon `powermetrics` binary on macOS 26.5.2 found two
+accepted CPU state layouts:
+
+```text
+[IDLE, frequency states...]
+[DOWN, IDLE, frequency states...]
+```
+
+Its `cpu_power_arm.m` logic treats `IDLE` and `DOWN` as distinct states but
+excludes both from active residency. The observed calculations are:
+
+```text
+total = DOWN + IDLE + sum(frequency states)
+active = sum(frequency states)
+active_ratio = active / total
+idle_ratio = IDLE / total
+down_ratio = DOWN / total
+active_frequency =
+  sum(frequency * frequency_residency) / active
+```
+
+`man powermetrics` likewise describes average CPU frequency as frequency while
+the processor was executing, excluding idle time. The binary exposes separate
+`idle_ratio`, `down_ratio`, `idle residency`, and `down residency` labels.
+
+The distinction is physical but not topological: both values change over time.
+Public measurements show valid M4 cores entering `DOWN`, and an M5 Max P-core
+cluster spending about 99.8% of an interval in `DOWN` while another cluster is
+active. The same M5 Max topology is reported as two valid performance clusters
+in [macmon issue #47](https://github.com/vladkens/macmon/issues/47). Therefore,
+an all-`DOWN` sample does not prove that a core or cluster is disabled:
+
+- [M4 P-core power states](https://eclecticlight.co/2024/11/11/inside-m4-chips-p-cores/)
+- [M5 Max CPU frequency measurements](https://eclecticlight.co/2026/04/09/please-help-update-cpu-frequencies-for-apple-silicon-macs/)
+
+The binary inspection can be repeated with:
+
+```sh
+man powermetrics
+strings /usr/bin/powermetrics | grep -E 'idle residency|down residency|idle_ratio|down_ratio'
+otool -arch arm64e -tvV /usr/bin/powermetrics
+```
+
+This is an observed implementation detail, not a documented ABI. Re-check it
+after material macOS or hardware changes.
+
 ### Consequence for macmon
 
-macmon currently divides every requested interval into four adjacent windows,
-derives metrics for each window, and averages the four derived values.
+Before this research, macmon divided every requested interval into four
+adjacent windows, derived metrics for each window, and averaged the four
+derived values. That behavior did not reproduce `powermetrics`: Apple's tool
+derives one report from the delta between adjacent report-level samples for
+each subscription.
 
-That behavior does not reproduce `powermetrics`. Apple's tool derives one
-report from the delta between adjacent report-level samples for each
-subscription. Four-way sampling in macmon is presentation smoothing introduced
-to make bursty graphs resemble Activity Monitor; it should not be justified as
-matching `powermetrics` collection semantics.
+The production sampler should therefore:
+
+1. Create one IOReport delta over the complete requested interval.
+2. Use the real elapsed duration for energy-to-power conversion.
+3. Derive active frequency only from frequency-state residency.
+4. Include `IDLE`, `DOWN`, and `OFF` in the total residency denominator.
+5. Preserve every recognized core channel even when its active residency is
+   zero; topology must not be inferred from a dynamic power state.
+
+Four-way sampling was presentation smoothing introduced to make bursty graphs
+resemble Activity Monitor. If smoothing is desired, it belongs after raw
+interval metrics have been derived, not inside the library's collection
+semantics.

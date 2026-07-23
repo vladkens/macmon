@@ -288,9 +288,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Use `get_metrics(duration_ms)` in a continuous polling loop. This is the default API for most callers: run the loop in a worker thread or task if you want macmon to manage the sampling cadence and keep the built-in smoothing used by the TUI, `pipe`, and `serve`.
+`get_metrics(duration_ms)` blocks the calling thread while collecting one
+IOReport delta over the complete interval. Call it continuously to let macmon
+manage the same sampling cadence used by the TUI, `pipe`, and `serve`.
 
-Use `get_metrics_now(stale_after_ms)` only when you want to schedule sampling yourself. It does not sleep or smooth samples: the first call stores a baseline and returns `None`, later calls return metrics for the elapsed window, and stale baselines are discarded after `stale_after_ms`.
+For a UI, server, or async application, create the sampler inside a dedicated
+worker thread and send completed metrics back through a channel. In an async
+runtime, use its blocking-thread facility instead of calling `get_metrics`
+directly from an executor worker.
 
 ## 📦 Build from Source
 

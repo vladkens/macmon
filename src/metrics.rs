@@ -1,7 +1,7 @@
 use core_foundation::dictionary::CFDictionaryRef;
 
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use crate::shared::{ioreport_channels_filter, zero_div};
 use crate::sources::{
@@ -63,7 +63,8 @@ struct SmcSensors {
 ///
 /// Usage ratios are frequency-scaled effective usage values in the `0.0..=1.0`
 /// range. Active ratios are active residency values without frequency scaling.
-/// Power values are reported in Watts.
+/// Frequencies are averaged over active residency and are zero when a device
+/// has no active residency. Power values are reported in Watts.
 #[derive(Debug, Default, Serialize)]
 pub struct Metrics {
   /// Temperature metrics.
@@ -72,13 +73,13 @@ pub struct Metrics {
   pub memory: MemMetrics,
   /// Fan metrics ordered by stable SMC fan key order.
   pub fans: Vec<FanMetric>,
-  /// Efficiency-cluster aggregate as `(frequency_mhz, effective_usage_ratio)`.
+  /// Efficiency-cluster aggregate as `(active_frequency_mhz, effective_usage_ratio)`.
   pub ecpu_usage: (u32, f32),
-  /// Performance-cluster aggregate as `(frequency_mhz, effective_usage_ratio)`.
+  /// Performance-cluster aggregate as `(active_frequency_mhz, effective_usage_ratio)`.
   pub pcpu_usage: (u32, f32),
-  /// Per-core efficiency-cluster usage as `(frequency_mhz, effective_usage_ratio)`.
+  /// Per-core efficiency-cluster usage as `(active_frequency_mhz, effective_usage_ratio)`.
   pub ecpu_core_usages: Vec<(u32, f32)>,
-  /// Per-core performance-cluster usage as `(frequency_mhz, effective_usage_ratio)`.
+  /// Per-core performance-cluster usage as `(active_frequency_mhz, effective_usage_ratio)`.
   pub pcpu_core_usages: Vec<(u32, f32)>,
   /// Combined effective CPU usage ratio across efficiency and performance cores.
   pub cpu_usage_pct: f32,
@@ -92,7 +93,7 @@ pub struct Metrics {
   pub ecpu_core_active_ratios: Vec<f32>,
   /// Per-core performance-cluster active residency ratios, without frequency scaling.
   pub pcpu_core_active_ratios: Vec<f32>,
-  /// GPU usage as `(frequency_mhz, effective_usage_ratio)`.
+  /// GPU usage as `(active_frequency_mhz, effective_usage_ratio)`.
   pub gpu_usage: (u32, f32),
   /// GPU active residency ratio, without frequency scaling.
   pub gpu_active_ratio: f32,
@@ -126,6 +127,16 @@ fn fan_rpm_value(val: f32) -> Option<u32> {
   if is_valid_fan_rpm(val) { Some(val.trunc() as u32) } else { None }
 }
 
+fn aggregate_active_frequency(usages: &[(u32, f32)], active_ratios: &[f32]) -> u32 {
+  let active: f64 = active_ratios.iter().map(|&ratio| ratio as f64).sum();
+  let weighted: f64 = usages
+    .iter()
+    .zip(active_ratios)
+    .map(|(&(frequency, _), &ratio)| frequency as f64 * ratio as f64)
+    .sum();
+  zero_div(weighted, active) as u32
+}
+
 fn aggregate_ioreport_metrics(mut rs: Metrics) -> Metrics {
   let ecpu_total_pct: f32 = rs.ecpu_core_usages.iter().map(|&(_, pct)| pct).sum();
   let pcpu_total_pct: f32 = rs.pcpu_core_usages.iter().map(|&(_, pct)| pct).sum();
@@ -136,11 +147,11 @@ fn aggregate_ioreport_metrics(mut rs: Metrics) -> Metrics {
   let tcores = ecores + pcores;
 
   rs.ecpu_usage = (
-    zero_div(rs.ecpu_core_usages.iter().map(|&(freq, _)| freq).sum::<u32>(), ecores as u32),
+    aggregate_active_frequency(&rs.ecpu_core_usages, &rs.ecpu_core_active_ratios),
     zero_div(ecpu_total_pct, ecores),
   );
   rs.pcpu_usage = (
-    zero_div(rs.pcpu_core_usages.iter().map(|&(freq, _)| freq).sum::<u32>(), pcores as u32),
+    aggregate_active_frequency(&rs.pcpu_core_usages, &rs.pcpu_core_active_ratios),
     zero_div(pcpu_total_pct, pcores),
   );
   rs.cpu_usage_pct = zero_div(ecpu_total_pct + pcpu_total_pct, tcores);
@@ -169,20 +180,22 @@ fn read_smc_numeric_u32(smc: &mut SMC, key: &str) -> Option<u32> {
   fan_rpm_value(val)
 }
 
-fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32, f32) {
-  let items = cfio_get_residencies(item); // (ns, freq)
+fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> FreqMetrics {
   let (len1, len2) = (items.len(), freqs.len());
-  assert!(len1 > len2, "cacl_freq invalid data: {} vs {}", len1, len2); // todo?
+  assert!(len1 > len2, "calc_freq invalid data: {len1} vs {len2}"); // todo?
 
-  // IDLE / DOWN for CPU; OFF for GPU; DOWN only on M2?/M3 Max Chips
-  let offset = items.iter().position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF").unwrap();
+  // CPU layouts are [IDLE, frequencies...] or [DOWN, IDLE, frequencies...];
+  // GPU uses OFF before frequency states.
+  let offset = items
+    .iter()
+    .position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF")
+    .expect("calc_freq missing active states");
 
-  let usage = items.iter().map(|x| x.1 as f64).skip(offset).sum::<f64>();
+  let usage = items.iter().skip(offset).take(freqs.len()).map(|x| x.1 as f64).sum::<f64>();
   let total = items.iter().map(|x| x.1 as f64).sum::<f64>();
-  let count = freqs.len();
 
   let mut avg_freq = 0f64;
-  for i in 0..count {
+  for i in 0..freqs.len() {
     let percent = zero_div(items[i + offset].1 as _, usage);
     avg_freq += percent * freqs[i] as f64;
   }
@@ -193,6 +206,10 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> (u32, f32, f32) {
   let from_max = (avg_freq.max(min_freq) * usage_ratio) / max_freq;
 
   (avg_freq as u32, from_max as f32, usage_ratio as f32)
+}
+
+fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> FreqMetrics {
+  calc_freq_from_residencies(&cfio_get_residencies(item), freqs)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,7 +285,8 @@ fn init_smc() -> WithError<SmcSensors> {
 /// Hardware metrics sampler for Apple Silicon Macs.
 ///
 /// Create one sampler and call [`Sampler::get_metrics`] in a continuous polling
-/// loop, or use [`Sampler::get_metrics_now`] when the caller owns scheduling.
+/// loop. Run the sampler in a worker thread when sampling must not block the
+/// application thread.
 pub struct Sampler {
   soc: SocInfo,
   ior: IOReport,
@@ -389,7 +407,7 @@ impl Sampler {
   fn get_ioreport_metrics(
     &self,
     sample: crate::sources::IOReportIterator,
-    dt: u64,
+    dt: Duration,
   ) -> WithError<Metrics> {
     let mut ecpu_map: HashMap<CpuCoreKey, FreqMetrics> = HashMap::new();
     let mut pcpu_map: HashMap<CpuCoreKey, FreqMetrics> = HashMap::new();
@@ -405,11 +423,7 @@ impl Sampler {
             continue;
           }
           Some((CpuCoreKind::E, key)) => {
-            let metrics = calc_freq(x.item, &self.soc.ecpu_freqs);
-            // Filter dead/disabled cores (e.g. M5 Max MCPU0 cluster is all-DOWN).
-            if metrics.1 > 0.0 {
-              ecpu_map.insert(key, metrics);
-            }
+            ecpu_map.insert(key, calc_freq(x.item, &self.soc.ecpu_freqs));
             continue;
           }
           None => {}
@@ -456,16 +470,14 @@ impl Sampler {
     Ok(rs)
   }
 
-  /// Collect smoothed metrics for the next polling interval.
+  /// Collect metrics for the next polling interval.
   ///
   /// Intended to be called continuously in a polling loop. The sampler keeps
-  /// internal IOReport baseline state between calls to reduce interval drift.
+  /// an IOReport baseline between calls and derives metrics from the complete
+  /// interval between consecutive samples.
   ///
   /// `duration` is the requested polling interval in milliseconds.
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
-    let measures: usize = 4;
-    let mut results: Vec<Metrics> = Vec::with_capacity(measures);
-
     // CPU Stats channel naming by chip family (see: https://github.com/vladkens/macmon/issues/47)
     //   M1-M4:  ECPU* = efficiency cores (lower tier)
     //           PCPU* = performance cores (top tier)
@@ -479,94 +491,9 @@ impl Sampler {
     //           (e.g. "DIE_0_ECPU0"), so use contains() not starts_with() — same
     //           pattern as Energy Model's "DIE_{}_CPU Energy".
 
-    // do several samples to smooth metrics
-    // see: https://github.com/vladkens/macmon/issues/10
-    for (sample, dt) in self.ior.get_samples(duration as u64, measures) {
-      results.push(self.get_ioreport_metrics(sample, dt)?);
-    }
-
-    // Average across samples for each core
-    let ecpu_core_count = results.iter().map(|r| r.ecpu_core_usages.len()).max().unwrap_or(0);
-    let pcpu_core_count = results.iter().map(|r| r.pcpu_core_usages.len()).max().unwrap_or(0);
-
-    let mut ecpu_avg = Vec::with_capacity(ecpu_core_count);
-    let mut ecpu_active_avg = Vec::with_capacity(ecpu_core_count);
-    for core_idx in 0..ecpu_core_count {
-      let avg_freq = zero_div(
-        results
-          .iter()
-          .map(|r| r.ecpu_core_usages.get(core_idx).map(|x| x.0).unwrap_or(0))
-          .sum::<u32>(),
-        measures as u32,
-      );
-      let avg_perc = zero_div(
-        results
-          .iter()
-          .map(|r| r.ecpu_core_usages.get(core_idx).map(|x| x.1).unwrap_or(0.0))
-          .sum::<f32>(),
-        measures as f32,
-      );
-      ecpu_avg.push((avg_freq, avg_perc));
-      ecpu_active_avg.push(zero_div(
-        results
-          .iter()
-          .map(|r| r.ecpu_core_active_ratios.get(core_idx).copied().unwrap_or(0.0))
-          .sum::<f32>(),
-        measures as f32,
-      ));
-    }
-
-    let mut pcpu_avg = Vec::with_capacity(pcpu_core_count);
-    let mut pcpu_active_avg = Vec::with_capacity(pcpu_core_count);
-    for core_idx in 0..pcpu_core_count {
-      let avg_freq = zero_div(
-        results
-          .iter()
-          .map(|r| r.pcpu_core_usages.get(core_idx).map(|x| x.0).unwrap_or(0))
-          .sum::<u32>(),
-        measures as u32,
-      );
-      let avg_perc = zero_div(
-        results
-          .iter()
-          .map(|r| r.pcpu_core_usages.get(core_idx).map(|x| x.1).unwrap_or(0.0))
-          .sum::<f32>(),
-        measures as f32,
-      );
-      pcpu_avg.push((avg_freq, avg_perc));
-      pcpu_active_avg.push(zero_div(
-        results
-          .iter()
-          .map(|r| r.pcpu_core_active_ratios.get(core_idx).copied().unwrap_or(0.0))
-          .sum::<f32>(),
-        measures as f32,
-      ));
-    }
-
-    let gpu_usage_freq = zero_div(results.iter().map(|x| x.gpu_usage.0).sum(), measures as _);
-    let gpu_usage_pct = zero_div(results.iter().map(|x| x.gpu_usage.1).sum(), measures as _);
-    let gpu_active_ratio =
-      zero_div(results.iter().map(|x| x.gpu_active_ratio).sum(), measures as _);
-    let cpu_power = zero_div(results.iter().map(|x| x.cpu_power).sum(), measures as _);
-    let gpu_power = zero_div(results.iter().map(|x| x.gpu_power).sum(), measures as _);
-    let ane_power = zero_div(results.iter().map(|x| x.ane_power).sum(), measures as _);
-    let ram_power = zero_div(results.iter().map(|x| x.ram_power).sum(), measures as _);
-    let gpu_ram_power = zero_div(results.iter().map(|x| x.gpu_ram_power).sum(), measures as _);
-
-    let mut rs = aggregate_ioreport_metrics(Metrics {
-      ecpu_core_usages: ecpu_avg,
-      pcpu_core_usages: pcpu_avg,
-      ecpu_core_active_ratios: ecpu_active_avg,
-      pcpu_core_active_ratios: pcpu_active_avg,
-      gpu_usage: (gpu_usage_freq, gpu_usage_pct),
-      gpu_active_ratio,
-      cpu_power,
-      gpu_power,
-      ane_power,
-      ram_power,
-      gpu_ram_power,
-      ..Default::default()
-    });
+    let duration = Duration::from_millis(duration as u64);
+    let (sample, elapsed) = self.ior.get_sample_interval(duration);
+    let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, elapsed)?);
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -580,32 +507,6 @@ impl Sampler {
     Ok(rs)
   }
 
-  /// Return metrics for manually scheduled sampling.
-  ///
-  /// This method does not sleep or use the 4-sample smoothing from
-  /// [`Sampler::get_metrics`]. It returns `None` for the first or stale sample window.
-  ///
-  /// `stale_after_ms` is the maximum accepted time between two manual samples.
-  /// If the elapsed time is larger, the old baseline is discarded and `None` is
-  /// returned.
-  pub fn get_metrics_now(&mut self, stale_after_ms: u32) -> WithError<Option<Metrics>> {
-    let Some((sample, dt)) = self.ior.get_sample_now(stale_after_ms as u64)? else {
-      return Ok(None);
-    };
-    let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, dt)?);
-
-    rs.memory = self.get_mem()?;
-    rs.temp = self.get_temp()?;
-    rs.fans = self.get_fans();
-
-    rs.sys_power = match self.get_sys_power() {
-      Ok(val) => val.max(rs.all_power),
-      Err(_) => 0.0,
-    };
-
-    Ok(Some(rs))
-  }
-
   /// Return static SoC information used by this sampler.
   pub fn get_soc_info(&self) -> &SocInfo {
     &self.soc
@@ -615,8 +516,8 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
   use super::{
-    CpuCoreKind, Metrics, aggregate_ioreport_metrics, fan_rpm_value, parse_cpu_core_channel,
-    smc_numeric_value,
+    CpuCoreKind, Metrics, aggregate_ioreport_metrics, calc_freq_from_residencies, fan_rpm_value,
+    parse_cpu_core_channel, smc_numeric_value,
   };
 
   #[test]
@@ -647,13 +548,61 @@ mod tests {
       ..Default::default()
     });
 
-    assert_eq!(rs.ecpu_usage, (1100, 0.375));
+    assert_eq!(rs.ecpu_usage, (1120, 0.375));
     assert_eq!(rs.pcpu_usage, (2000, 0.75));
     assert_eq!(rs.cpu_usage_pct, 0.5);
     assert_eq!(rs.ecpu_active_ratio, 0.625);
     assert_eq!(rs.pcpu_active_ratio, 1.0);
     assert_eq!(rs.cpu_active_ratio, 0.75);
     assert_eq!(rs.all_power, 4.0);
+  }
+
+  #[test]
+  fn inactive_cores_count_toward_cluster_capacity() {
+    let rs = aggregate_ioreport_metrics(Metrics {
+      ecpu_core_usages: vec![(0, 0.0), (2000, 1.0)],
+      ecpu_core_active_ratios: vec![0.0, 1.0],
+      ..Default::default()
+    });
+
+    assert_eq!(rs.ecpu_usage, (2000, 0.5));
+    assert_eq!(rs.cpu_usage_pct, 0.5);
+    assert_eq!(rs.ecpu_active_ratio, 0.5);
+    assert_eq!(rs.cpu_active_ratio, 0.5);
+  }
+
+  #[test]
+  fn calculates_frequency_over_the_complete_residency_window() {
+    let (frequency, effective_usage, active_ratio) = calc_freq_from_residencies(
+      &[
+        ("DOWN".into(), 0),
+        ("IDLE".into(), 500),
+        ("1000 MHz".into(), 100),
+        ("2000 MHz".into(), 400),
+      ],
+      &[1000, 2000],
+    );
+
+    assert_eq!(frequency, 1800);
+    assert!((effective_usage - 0.45).abs() < f32::EPSILON);
+    assert!((active_ratio - 0.5).abs() < f32::EPSILON);
+  }
+
+  #[test]
+  fn treats_down_as_dynamic_inactive_residency() {
+    let (frequency, effective_usage, active_ratio) = calc_freq_from_residencies(
+      &[
+        ("DOWN".into(), 800),
+        ("IDLE".into(), 100),
+        ("1000 MHz".into(), 100),
+        ("2000 MHz".into(), 0),
+      ],
+      &[1000, 2000],
+    );
+
+    assert_eq!(frequency, 1000);
+    assert!((effective_usage - 0.05).abs() < f32::EPSILON);
+    assert!((active_ratio - 0.1).abs() < f32::EPSILON);
   }
 
   #[test]
