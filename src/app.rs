@@ -496,7 +496,11 @@ impl App {
 
     let ram_pct = zero_div(ram_usage_gb, ram_total_gb) * 100.0;
     let label_l = format!("RAM {:4.2} / {:4.1} GB ({:.1}%)", ram_usage_gb, ram_total_gb, ram_pct);
-    let label_r = format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb);
+    let label_r = if val.swap_total > 0 {
+      format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb)
+    } else {
+      String::new()
+    };
 
     let block = self.title_block(label_l.as_str(), label_r.as_str());
     match self.cfg.view_type {
@@ -538,10 +542,13 @@ impl App {
     let inner = block.inner(r);
     f.render_widget(block, r);
 
-    let sections = Layout::default()
-      .direction(Direction::Vertical)
-      .constraints([Constraint::Fill(1), Constraint::Fill(1)])
-      .split(inner);
+    let constraints = if val.swap_total > 0 {
+      vec![Constraint::Fill(1), Constraint::Fill(1)]
+    } else {
+      vec![Constraint::Fill(1)]
+    };
+    let sections =
+      Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
 
     // RAM section
     let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
@@ -576,6 +583,10 @@ impl App {
           .ratio(ratio);
         f.render_widget(w, sections[0]);
       }
+    }
+
+    if val.swap_total == 0 {
+      return;
     }
 
     // SWAP section

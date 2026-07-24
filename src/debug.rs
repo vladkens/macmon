@@ -5,13 +5,16 @@ use crate::shared::ioreport_channels_filter;
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
   cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
-  sysctl_str,
+  libc_ram, libc_swap, sysctl_str,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn debug_channels(group: &str, _subgroup: &str, _channel: &str, _unit: &str) -> bool {
-  group == "Energy Model" || group == "CPU Stats" || group == "GPU Stats"
+  group == "Energy Model"
+    || group == "Energy Counters"
+    || group == "CPU Stats"
+    || group == "GPU Stats"
 }
 
 fn print_divider(msg: &str) {
@@ -65,6 +68,16 @@ pub fn print_debug() -> WithError<()> {
       println!("Profiler: {profiler:?}");
       println!("Native: {native:?}");
     }
+  }
+
+  print_divider("Memory");
+  match libc_ram() {
+    Ok((used, total)) => println!("RAM  used={used} bytes total={total} bytes"),
+    Err(err) => println!("RAM  error={err}"),
+  }
+  match libc_swap() {
+    Ok((used, total)) => println!("Swap used={used} bytes total={total} bytes"),
+    Err(err) => println!("Swap error={err}"),
   }
 
   print_divider("AppleARMIODevice");
@@ -121,9 +134,14 @@ pub fn print_debug() -> WithError<()> {
     }
   }
 
-  print_divider("SMC temp sensors");
-
   let mut smc = SMC::new()?;
+  print_divider("SMC system sensors");
+  match smc.read_float_val("PSTR") {
+    Ok(watts) => println!("PSTR={watts:.2}W"),
+    Err(err) => println!("PSTR error={err}"),
+  }
+
+  print_divider("SMC temp sensors");
   let keys = smc.read_all_keys().unwrap_or(vec![]);
   for key in &keys {
     if !key.starts_with("T") {

@@ -1,3 +1,28 @@
+## v0.8.0 – 2026-07-24
+
+### Breaking Changes
+- Narrowed the public Rust library API to hardware sampling types; `App`, `Config`, `ViewType`, and `zero_div` are no longer exported
+
+### Features
+- Added a toggleable detailed per-core CPU view and exposed per-core CPU metrics (by @it7760)
+- Added named aggregate frequency and effective-usage metrics, plus CPU and GPU active residency ratios (#61)
+- Added fan speed and fan name metrics to JSON and Prometheus output (#64, by @chodorenko)
+- Added a `--host` option for the metrics server and its launchd service (by @claytono)
+- Added a `stress` command with cyclic CPU and full CPU/GPU load modes
+
+### Fixes
+- Fixed RAM and swap gauge labels becoming unreadable at higher usage
+- Fixed the TUI showing an empty swap section when swap is unavailable
+- Fixed Prometheus chip labels containing special characters
+
+### Improvements
+- Improved `Sampler::get_metrics` to collect complete caller-scheduled intervals with faster startup (#60, by @homm)
+- Sped up hardware detection
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.7.2...v0.8.0
+
+---
+
 ## v0.7.2 – 2026-05-02
 
 ### Fixes
