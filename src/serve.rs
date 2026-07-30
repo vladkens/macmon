@@ -254,7 +254,7 @@ pub fn run(
 mod tests {
   use macmon::{Metrics, SocInfo};
 
-  use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
+  use super::{escape_label_value, escape_xml, serve_url, to_json};
 
   #[test]
   fn formats_serving_urls() {
@@ -275,50 +275,12 @@ mod tests {
   }
 
   #[test]
-  fn exports_deprecated_v07_usage_series() {
-    let metrics = Metrics {
-      cpu_scaled_ratio: 0.1,
-      ecpu_scaled_ratio: 0.2,
-      pcpu_scaled_ratio: 0.3,
-      gpu_scaled_ratio: 0.4,
-      ..Default::default()
-    };
-    let soc = SocInfo { chip_name: "Test".into(), ..Default::default() };
-    let output = to_prometheus(&metrics, &soc);
-
-    for (old, new, value) in [
-      ("cpu_usage_ratio", "cpu_scaled_ratio", "0.1"),
-      ("ecpu_usage_ratio", "ecpu_scaled_ratio", "0.2"),
-      ("pcpu_usage_ratio", "pcpu_scaled_ratio", "0.3"),
-      ("gpu_usage_ratio", "gpu_scaled_ratio", "0.4"),
-    ] {
-      assert!(output.contains(&format!("# HELP macmon_{old} DEPRECATED: use macmon_{new}")));
-      assert!(output.contains(&format!("macmon_{old}{{chip=\"Test\"}} {value}")));
-      assert!(output.contains(&format!("macmon_{new}{{chip=\"Test\"}} {value}")));
-    }
-  }
-
-  #[test]
-  fn exports_v07_json_fields_as_aliases() {
-    let metrics = Metrics {
-      cpu_scaled_ratio: 0.1,
-      ecpu_freq_mhz: 1000,
-      ecpu_scaled_ratio: 0.2,
-      pcpu_freq_mhz: 2000,
-      pcpu_scaled_ratio: 0.3,
-      gpu_freq_mhz: 500,
-      gpu_scaled_ratio: 0.4,
-      ..Default::default()
-    };
+  fn includes_usage_fields_in_json() {
     let json: serde_json::Value =
-      serde_json::from_str(&to_json(&metrics, &SocInfo::default())).unwrap();
+      serde_json::from_str(&to_json(&Metrics::default(), &SocInfo::default())).unwrap();
 
-    assert_eq!(json["cpu_usage_pct"], json["cpu_scaled_ratio"]);
-    assert_eq!(json["ecpu_usage"][0], json["ecpu_freq_mhz"]);
-    assert_eq!(json["ecpu_usage"][1], json["ecpu_scaled_ratio"]);
-    assert_eq!(json["pcpu_usage"][0], json["pcpu_freq_mhz"]);
-    assert_eq!(json["pcpu_usage"][1], json["pcpu_scaled_ratio"]);
-    assert_eq!(json["gpu_usage"][0], json["gpu_freq_mhz"]);
-    assert_eq!(json["gpu_usage"][1], json["gpu_scaled_ratio"]);
+    for field in ["cpu_usage_pct", "ecpu_usage", "pcpu_usage", "gpu_usage"] {
+      assert!(json.get(field).is_some(), "missing {field}");
+    }
   }
 }

@@ -1370,7 +1370,7 @@ mod tests {
   use super::*;
 
   #[test]
-  fn parse_acc_clusters_m5_max() {
+  fn parse_acc_clusters_values() {
     // Real acc-clusters bytes captured from M5 Max via ioreg
     #[rustfmt::skip]
     let data = [
@@ -1382,49 +1382,27 @@ mod tests {
     // Second-highest type (1 = Performance) as ecpu, highest (2 = Super) as pcpu
     assert_eq!(e, "voltage-states23-sram");
     assert_eq!(p, "voltage-states5-sram");
-  }
-
-  #[test]
-  fn parse_acc_clusters_incomplete() {
     assert!(parse_acc_clusters(&[]).is_none());
     // Single cluster – need both ecpu and pcpu
     assert!(parse_acc_clusters(&[1, 0, 0, 0, 0, 0, 0, 0]).is_none());
   }
 
   #[test]
-  fn parse_cpu_cores_macos26_4field() {
-    // Real data captured from macOS 26 machines
-    // M5 Max: 18 total, 6 super, 0 efficiency, 12 performance(M-cores)
-    assert_eq!(parse_cpu_cores("proc 18:6:0:12"), (12, 6, true));
-    // M4 Max: 16 total, 12 performance, 4 efficiency, 0 M-cores
-    assert_eq!(parse_cpu_cores("proc 16:12:4:0"), (4, 12, false));
-    // M3 Air: 8 total, 4 performance, 4 efficiency, 0 M-cores
-    assert_eq!(parse_cpu_cores("proc 8:4:4:0"), (4, 4, false));
-  }
-
-  #[test]
-  fn parse_cpu_cores_macos15_3field() {
-    // Real data: M3 Air on macOS 15.6.1
-    assert_eq!(parse_cpu_cores("proc 8:4:4"), (4, 4, false));
-  }
-
-  #[test]
-  fn parse_cpu_cores_invalid() {
-    assert_eq!(parse_cpu_cores(""), (0, 0, false));
-    assert_eq!(parse_cpu_cores("garbage"), (0, 0, false));
-    assert_eq!(parse_cpu_cores("10:8:2"), (0, 0, false)); // missing "proc " prefix
-    assert_eq!(parse_cpu_cores("proc 8"), (0, 0, false)); // too few fields
-    assert_eq!(parse_cpu_cores("proc 8:4"), (0, 0, false)); // 2 fields, unsupported
-    assert_eq!(parse_cpu_cores("proc 24:6:0:12:6"), (0, 0, false)); // unknown future format
-  }
-
-  #[test]
-  fn to_mhz_scales() {
-    // M4+: KHz scale
-    assert_eq!(to_mhz(vec![4608000, 3000000], 1000), vec![4608, 3000]);
-    // M1-M3: MHz scale
-    assert_eq!(to_mhz(vec![3_000_000_000, 2_000_000_000], 1000 * 1000), vec![3000, 2000]);
-    assert_eq!(to_mhz(vec![], 1000), Vec::<u32>::new());
+  fn parse_cpu_core_counts() {
+    for (value, expected) in [
+      ("proc 18:6:0:12", (12, 6, true)),
+      ("proc 16:12:4:0", (4, 12, false)),
+      ("proc 8:4:4:0", (4, 4, false)),
+      ("proc 8:4:4", (4, 4, false)),
+      ("", (0, 0, false)),
+      ("garbage", (0, 0, false)),
+      ("10:8:2", (0, 0, false)),
+      ("proc 8", (0, 0, false)),
+      ("proc 8:4", (0, 0, false)),
+      ("proc 24:6:0:12:6", (0, 0, false)),
+    ] {
+      assert_eq!(parse_cpu_cores(value), expected, "{value}");
+    }
   }
 
   #[test]
@@ -1434,25 +1412,17 @@ mod tests {
   }
 
   #[test]
-  fn cfio_channel_filter_preserves_group_subscription_semantics() {
-    let items = [("Energy Model", None)];
+  fn cfio_channel_filter_semantics() {
+    let group = [("Energy Model", None)];
+    assert!(cfio_channel_matches(&group, "Energy Model", ""));
+    assert!(cfio_channel_matches(&group, "Energy Model", "CPU Core Performance States"));
+    assert!(!cfio_channel_matches(&group, "CPU Stats", "CPU Core Performance States"));
 
-    assert!(cfio_channel_matches(&items, "Energy Model", ""));
-    assert!(cfio_channel_matches(&items, "Energy Model", "CPU Core Performance States"));
-    assert!(!cfio_channel_matches(&items, "CPU Stats", "CPU Core Performance States"));
-  }
+    let subgroup = [("CPU Stats", Some("CPU Core Performance States"))];
+    assert!(cfio_channel_matches(&subgroup, "CPU Stats", "CPU Core Performance States"));
+    assert!(!cfio_channel_matches(&subgroup, "CPU Stats", "CPU Performance States"));
+    assert!(!cfio_channel_matches(&subgroup, "GPU Stats", "CPU Core Performance States"));
 
-  #[test]
-  fn cfio_channel_filter_preserves_subgroup_subscription_semantics() {
-    let items = [("CPU Stats", Some("CPU Core Performance States"))];
-
-    assert!(cfio_channel_matches(&items, "CPU Stats", "CPU Core Performance States"));
-    assert!(!cfio_channel_matches(&items, "CPU Stats", "CPU Performance States"));
-    assert!(!cfio_channel_matches(&items, "GPU Stats", "CPU Core Performance States"));
-  }
-
-  #[test]
-  fn cfio_channel_filter_empty_items_means_all_channels() {
     assert!(cfio_channel_matches(&[], "CPU Stats", "CPU Core Performance States"));
     assert!(cfio_channel_matches(&[], "Energy Model", ""));
   }

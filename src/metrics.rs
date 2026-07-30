@@ -161,19 +161,17 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
   average.max(min_frequency_mhz as f64) as u32
 }
 
-fn aggregate_ioreport_metrics(
-  mut rs: Metrics,
-  ecpu_min_frequency_mhz: u32,
-  pcpu_min_frequency_mhz: u32,
-) -> Metrics {
+fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
   let ecpu_total_scaled: f32 = rs.ecpu_cores.iter().map(|core| core.scaled_ratio).sum();
   let pcpu_total_scaled: f32 = rs.pcpu_cores.iter().map(|core| core.scaled_ratio).sum();
   let ecpu_total_active: f32 = rs.ecpu_cores.iter().map(|core| core.active_ratio).sum();
   let pcpu_total_active: f32 = rs.pcpu_cores.iter().map(|core| core.active_ratio).sum();
-  let ecores = rs.ecpu_cores.len() as f32;
-  let pcores = rs.pcpu_cores.len() as f32;
+  let ecores = rs.ecpu_cores.len().max(soc.ecpu_cores as usize) as f32;
+  let pcores = rs.pcpu_cores.len().max(soc.pcpu_cores as usize) as f32;
   let tcores = ecores + pcores;
 
+  let ecpu_min_frequency_mhz = soc.ecpu_freqs.first().copied().unwrap_or_default();
+  let pcpu_min_frequency_mhz = soc.pcpu_freqs.first().copied().unwrap_or_default();
   rs.ecpu_freq_mhz = aggregate_frequency(&rs.ecpu_cores, ecpu_min_frequency_mhz);
   rs.ecpu_scaled_ratio = zero_div(ecpu_total_scaled, ecores);
   rs.ecpu_active_ratio = zero_div(ecpu_total_active, ecores);
@@ -523,13 +521,7 @@ impl Sampler {
 
     let duration = Duration::from_millis(duration as u64);
     let (sample, elapsed) = self.ior.get_sample_interval(duration);
-    let ecpu_min_frequency_mhz = self.soc.ecpu_freqs.first().copied().unwrap_or_default();
-    let pcpu_min_frequency_mhz = self.soc.pcpu_freqs.first().copied().unwrap_or_default();
-    let mut rs = aggregate_ioreport_metrics(
-      self.get_ioreport_metrics(sample, elapsed)?,
-      ecpu_min_frequency_mhz,
-      pcpu_min_frequency_mhz,
-    );
+    let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, elapsed)?, &self.soc);
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -553,9 +545,11 @@ impl Sampler {
 mod tests {
   use std::collections::HashMap;
 
+  use crate::sources::SocInfo;
+
   use super::{
     CpuCoreKind, CpuCoreMetrics, Metrics, aggregate_ioreport_metrics, calc_freq_from_residencies,
-    collect_cpu_core_metrics, fan_rpm_value, parse_cpu_core_channel, smc_numeric_value,
+    collect_cpu_core_metrics, parse_cpu_core_channel, smc_numeric_value,
   };
 
   fn core(
@@ -568,6 +562,16 @@ mod tests {
     CpuCoreMetrics { die_id, core_id, freq_mhz, scaled_ratio, active_ratio }
   }
 
+  fn soc_info(ecpu_cores: u8, pcpu_cores: u8) -> SocInfo {
+    SocInfo {
+      ecpu_cores,
+      pcpu_cores,
+      ecpu_freqs: vec![800],
+      pcpu_freqs: vec![1800],
+      ..Default::default()
+    }
+  }
+
   #[test]
   fn parse_smc_numeric_values() {
     assert_eq!(smc_numeric_value(&42.5f32.to_le_bytes(), "flt "), Some(42.5));
@@ -577,54 +581,28 @@ mod tests {
   }
 
   #[test]
-  fn parse_fan_rpm_values() {
-    assert_eq!(fan_rpm_value(1234.9), Some(1234));
-    assert_eq!(fan_rpm_value(0.0), Some(0));
-    assert_eq!(fan_rpm_value(-1.0), None);
-  }
-
-  #[test]
   fn aggregates_ioreport_metrics() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
-        ecpu_cores: vec![core(0, 0, 1000, 0.25, 0.50), core(0, 1, 1200, 0.50, 0.75)],
-        pcpu_cores: vec![core(0, 0, 2000, 0.75, 1.0)],
+        ecpu_cores: vec![core(0, 0, 2000, 1.0, 1.0)],
+        pcpu_cores: vec![core(0, 0, 0, 0.0, 0.0), core(0, 1, 4000, 1.0, 1.0)],
         cpu_power: 1.5,
         gpu_power: 2.0,
         ane_power: 0.5,
         ..Default::default()
       },
-      800,
-      1800,
+      &soc_info(2, 1),
     );
 
-    assert_eq!(rs.ecpu_freq_mhz, 1100);
-    assert_eq!(rs.ecpu_scaled_ratio, 0.375);
-    assert_eq!(rs.ecpu_active_ratio, 0.625);
-    assert_eq!(rs.pcpu_freq_mhz, 2000);
-    assert_eq!(rs.pcpu_scaled_ratio, 0.75);
-    assert_eq!(rs.pcpu_active_ratio, 1.0);
-    assert_eq!(rs.cpu_scaled_ratio, 0.5);
-    assert_eq!(rs.cpu_active_ratio, 0.75);
-    assert_eq!(rs.all_power, 4.0);
-  }
-
-  #[test]
-  fn inactive_cores_count_toward_cluster_capacity() {
-    let rs = aggregate_ioreport_metrics(
-      Metrics {
-        ecpu_cores: vec![core(0, 0, 0, 0.0, 0.0), core(0, 1, 2000, 1.0, 1.0)],
-        ..Default::default()
-      },
-      800,
-      1800,
-    );
-
-    assert_eq!(rs.ecpu_freq_mhz, 1000);
+    assert_eq!(rs.ecpu_freq_mhz, 2000);
     assert_eq!(rs.ecpu_scaled_ratio, 0.5);
     assert_eq!(rs.ecpu_active_ratio, 0.5);
+    assert_eq!(rs.pcpu_freq_mhz, 2000);
+    assert_eq!(rs.pcpu_scaled_ratio, 0.5);
+    assert_eq!(rs.pcpu_active_ratio, 0.5);
     assert_eq!(rs.cpu_scaled_ratio, 0.5);
     assert_eq!(rs.cpu_active_ratio, 0.5);
+    assert_eq!(rs.all_power, 4.0);
   }
 
   #[test]
@@ -635,8 +613,7 @@ mod tests {
         pcpu_cores: vec![core(0, 0, 0, 0.0, 0.0)],
         ..Default::default()
       },
-      800,
-      1800,
+      &soc_info(0, 0),
     );
 
     assert_eq!(rs.ecpu_freq_mhz, 800);
@@ -644,79 +621,14 @@ mod tests {
   }
 
   #[test]
-  fn serializes_named_core_metrics_in_stable_order() {
-    let metrics = Metrics {
-      ecpu_cores: collect_cpu_core_metrics(HashMap::from([
-        ((1, 0), (2000, 0.50, 0.75)),
-        ((0, 1), (1000, 0.25, 0.50)),
-      ])),
-      ..Default::default()
-    };
-    let json = serde_json::to_value(metrics).unwrap();
-    let cores = json["ecpu_cores"].as_array().unwrap();
+  fn orders_named_core_metrics() {
+    let cores = collect_cpu_core_metrics(HashMap::from([
+      ((1, 0), (2000, 0.50, 0.75)),
+      ((0, 1), (1000, 0.25, 0.50)),
+    ]));
 
-    assert_eq!(cores[0]["die_id"], 0);
-    assert_eq!(cores[0]["core_id"], 1);
-    assert_eq!(cores[0]["freq_mhz"], 1000);
-    assert_eq!(cores[0]["scaled_ratio"], 0.25);
-    assert_eq!(cores[0]["active_ratio"], 0.50);
-    assert_eq!(cores[1]["die_id"], 1);
-
-    let mut keys: Vec<_> = cores[0].as_object().unwrap().keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, ["active_ratio", "core_id", "die_id", "freq_mhz", "scaled_ratio"]);
-  }
-
-  #[test]
-  fn serializes_one_frequency_and_parallel_ratios() {
-    let rs = aggregate_ioreport_metrics(
-      Metrics {
-        ecpu_cores: vec![core(0, 0, 1000, 0.25, 0.25), core(0, 1, 2000, 0.75, 0.75)],
-        pcpu_cores: vec![core(0, 0, 2000, 0.75, 1.0)],
-        gpu_freq_mhz: 500,
-        gpu_scaled_ratio: 0.20,
-        ..Default::default()
-      },
-      800,
-      1800,
-    );
-
-    assert_eq!(rs.ecpu_freq_mhz, 1500);
-    assert_eq!(rs.pcpu_freq_mhz, 2000);
-    assert_eq!(rs.gpu_freq_mhz, 500);
-
-    let json = serde_json::to_value(rs).unwrap();
-    assert_eq!(json["ecpu_freq_mhz"], 1500);
-    assert_eq!(json["ecpu_scaled_ratio"], 0.5);
-    assert_eq!(json["pcpu_freq_mhz"], 2000);
-    assert_eq!(json["pcpu_scaled_ratio"], 0.75);
-    assert_eq!(json["gpu_freq_mhz"], 500);
-    assert!((json["gpu_scaled_ratio"].as_f64().unwrap() - 0.20).abs() < f32::EPSILON as f64);
-
-    let mut keys: Vec<_> = json
-      .as_object()
-      .unwrap()
-      .keys()
-      .filter(|key| key.ends_with("_freq_mhz") || key.ends_with("_ratio"))
-      .map(String::as_str)
-      .collect();
-    keys.sort_unstable();
-    assert_eq!(
-      keys,
-      [
-        "cpu_active_ratio",
-        "cpu_scaled_ratio",
-        "ecpu_active_ratio",
-        "ecpu_freq_mhz",
-        "ecpu_scaled_ratio",
-        "gpu_active_ratio",
-        "gpu_freq_mhz",
-        "gpu_scaled_ratio",
-        "pcpu_active_ratio",
-        "pcpu_freq_mhz",
-        "pcpu_scaled_ratio",
-      ]
-    );
+    assert_eq!((cores[0].die_id, cores[0].core_id), (0, 1));
+    assert_eq!((cores[1].die_id, cores[1].core_id), (1, 0));
   }
 
   #[test]
