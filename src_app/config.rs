@@ -1,3 +1,5 @@
+//! Persistent terminal UI settings.
+
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;

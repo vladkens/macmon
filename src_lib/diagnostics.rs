@@ -1,3 +1,5 @@
+//! Diagnostic report used by the `macmon debug` command.
+
 use core_foundation::base::{CFRelease, CFShow};
 use std::time::Duration;
 

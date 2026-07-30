@@ -1,3 +1,5 @@
+//! Terminal user interface.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::{io::stdout, time::Instant};
@@ -11,9 +13,7 @@ use ratatui::crossterm::{
 use ratatui::{prelude::*, widgets::*};
 
 use crate::config::{Config, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
-use crate::shared::zero_div;
-use crate::sources::{SocInfo, get_soc_info};
-use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler};
+use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, SocInfo};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -344,6 +344,10 @@ fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
   if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() }
 }
 
+fn ratio(value: f64, total: f64) -> f64 {
+  if total == 0.0 { 0.0 } else { value / total }
+}
+
 // MARK: App
 
 #[derive(Debug, Default)]
@@ -370,7 +374,7 @@ pub struct App {
 
 impl App {
   pub fn new() -> WithError<Self> {
-    let soc = get_soc_info()?;
+    let soc = SocInfo::new()?;
     let cfg = Config::load();
     Ok(Self { cfg, soc, ..Default::default() })
   }
@@ -546,7 +550,7 @@ impl App {
     let swap_usage_gb = val.swap_usage as f64 / GB as f64;
     let swap_total_gb = val.swap_total as f64 / GB as f64;
 
-    let ram_pct = zero_div(ram_usage_gb, ram_total_gb) * 100.0;
+    let ram_pct = ratio(ram_usage_gb, ram_total_gb) * 100.0;
     let label_l = format!("RAM {:4.2} / {:4.1} GB ({:.1}%)", ram_usage_gb, ram_total_gb, ram_pct);
     let label_r = if val.swap_total > 0 {
       format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb)
@@ -572,7 +576,7 @@ impl App {
           .gauge_style(self.cfg.color)
           .style(self.cfg.color)
           .label("")
-          .ratio(zero_div(ram_usage_gb, ram_total_gb));
+          .ratio(ratio(ram_usage_gb, ram_total_gb));
         f.render_widget(w, r);
       }
     }
@@ -627,7 +631,7 @@ impl App {
         f.render_widget(w, area);
       }
       ViewType::Gauge => {
-        let ratio = zero_div(ram_usage_gb, ram_total_gb);
+        let ratio = ratio(ram_usage_gb, ram_total_gb);
         let w = Gauge::default()
           .gauge_style(self.cfg.color)
           .style(self.cfg.color)
@@ -666,7 +670,7 @@ impl App {
         f.render_widget(w, area);
       }
       ViewType::Gauge => {
-        let ratio = zero_div(swap_usage_gb, swap_total_gb);
+        let ratio = ratio(swap_usage_gb, swap_total_gb);
         let w = Gauge::default()
           .gauge_style(self.cfg.color)
           .style(self.cfg.color)

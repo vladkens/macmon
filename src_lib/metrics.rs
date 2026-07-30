@@ -1,3 +1,5 @@
+//! Metrics model and hardware sampler.
+
 use core_foundation::dictionary::CFDictionaryRef;
 
 use serde::Serialize;

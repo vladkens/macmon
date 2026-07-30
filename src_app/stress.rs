@@ -1,3 +1,5 @@
+//! CPU and GPU stress-test workloads.
+
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::ffi::{CString, c_char, c_void};

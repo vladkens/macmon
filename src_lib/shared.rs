@@ -1,3 +1,5 @@
+//! Shared library helpers.
+
 pub(crate) fn zero_div<T: core::ops::Div<Output = T> + Default + PartialEq>(a: T, b: T) -> T {
   let zero: T = Default::default();
   if b == zero { zero } else { a / b }

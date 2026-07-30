@@ -10,6 +10,8 @@
 //! metric keys change.
 
 #![allow(non_upper_case_globals)]
+//! Low-level macOS metric sources.
+
 #![allow(dead_code)]
 
 use std::{

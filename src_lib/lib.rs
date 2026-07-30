@@ -68,12 +68,15 @@
 //! }
 //! ```
 
+#[cfg(feature = "app")]
+#[doc(hidden)]
+pub mod diagnostics;
 #[doc(hidden)]
 pub mod metrics;
 mod shared;
 pub mod sources;
 
-// Re-export commonly used types
+// Re-export the commonly used types.
 #[doc(inline)]
 pub use metrics::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, TempMetrics};
 #[doc(inline)]

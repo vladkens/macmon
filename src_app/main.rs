@@ -1,19 +1,17 @@
+//! The macmon command-line application.
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, parser::ValueSource};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-mod app;
 mod config;
-mod debug;
 mod serve;
-mod shared;
-mod sources;
 mod stress;
+mod tui;
 
-use app::App;
-use debug::print_debug;
-use macmon::{Metrics, Sampler};
+use macmon::{Metrics, Sampler, diagnostics::print_debug};
+use tui::App;
 
 // JSON output keeps the v0.7 field names as deprecated aliases.
 #[derive(serde::Serialize)]

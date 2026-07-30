@@ -1,3 +1,5 @@
+//! HTTP serving and launchd support.
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};

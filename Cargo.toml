@@ -9,19 +9,39 @@ repository = "https://github.com/vladkens/macmon"
 homepage = "https://github.com/vladkens/macmon"
 documentation = "https://docs.rs/macmon"
 readme = "readme.md"
-include = ["src/**", "Cargo.toml", "Cargo.lock", "LICENSE", "readme.md"]
+include = [
+  "src_app/**",
+  "src_lib/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "LICENSE",
+  "readme.md",
+]
 keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
 categories = ["command-line-utilities", "hardware-support", "visualization"]
+
 [package.metadata.docs.rs]
+no-default-features = true
 targets = ["aarch64-apple-darwin"]
 
 [lib]
 name = "macmon"
-path = "src/lib.rs"
+path = "src_lib/lib.rs"
 
 [[bin]]
 name = "macmon"
-path = "src/main.rs"
+path = "src_app/main.rs"
+required-features = ["app"]
+
+[features]
+default = ["app"]
+app = [
+  "dep:chrono",
+  "dep:clap",
+  "dep:num-traits",
+  "dep:ratatui",
+  "dep:serde-inline-default",
+]
 
 [lints.rust]
 non_camel_case_types = "allow"
@@ -39,12 +59,12 @@ strip = false
 lto = false
 
 [dependencies]
-chrono = "0.4.45"
-clap = { version = "4.6.4", features = ["derive"] }
+chrono = { version = "0.4.45", optional = true }
+clap = { version = "4.6.4", features = ["derive"], optional = true }
 core-foundation = "0.10.1"
 libc = "0.2.189"
-num-traits = "0.2.19"
-ratatui = { version = "0.30.2", features = ["serde"] }
+num-traits = { version = "0.2.19", optional = true }
+ratatui = { version = "0.30.2", features = ["serde"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
-serde-inline-default = "1.0.2"
+serde-inline-default = { version = "1.0.2", optional = true }
 serde_json = "1.0.151"
