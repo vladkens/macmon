@@ -147,7 +147,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "macmon_cpu_usage_ratio",
+          "expr": "macmon_cpu_scaled_ratio",
           "legendFormat": "",
           "range": true,
           "refId": "A"
@@ -214,7 +214,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "macmon_gpu_usage_ratio",
+          "expr": "macmon_gpu_scaled_ratio",
           "legendFormat": "",
           "range": true,
           "refId": "A"
@@ -473,28 +473,28 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "macmon_cpu_usage_ratio",
+          "expr": "macmon_cpu_scaled_ratio",
           "legendFormat": "CPU total",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "macmon_ecpu_usage_ratio",
+          "expr": "macmon_ecpu_scaled_ratio",
           "legendFormat": "E-cores",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "macmon_pcpu_usage_ratio",
+          "expr": "macmon_pcpu_scaled_ratio",
           "legendFormat": "P-cores",
           "range": true,
           "refId": "C"
         },
         {
           "editorMode": "code",
-          "expr": "macmon_gpu_usage_ratio",
+          "expr": "macmon_gpu_scaled_ratio",
           "legendFormat": "GPU",
           "range": true,
           "refId": "D"

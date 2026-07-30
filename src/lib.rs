@@ -19,8 +19,9 @@
 //!
 //!     println!("CPU power: {:.2} W", metrics.cpu_power);
 //!     println!("GPU power: {:.2} W", metrics.gpu_power);
-//!     println!("CPU effective usage: {:.1}%", metrics.cpu_usage_ratio * 100.0);
+//!     println!("CPU frequency-scaled ratio: {:.1}%", metrics.cpu_scaled_ratio * 100.0);
 //!     println!("CPU active residency: {:.1}%", metrics.cpu_active_ratio * 100.0);
+//!     println!("E-CPU frequency: {} MHz", metrics.ecpu_freq_mhz);
 //!   }
 //! }
 //! ```

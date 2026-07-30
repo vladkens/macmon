@@ -5,6 +5,8 @@ use std::thread;
 
 use macmon::{Metrics, SocInfo};
 
+use crate::metrics_to_json_value;
+
 pub type SharedMetrics = Arc<RwLock<Option<Metrics>>>;
 
 fn escape_label_value(value: &str) -> String {
@@ -44,16 +46,20 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
-  gauge!(out, "cpu_usage_ratio", "Combined CPU effective usage (frequency-scaled, 0–1), weighted by core count", m.cpu_usage_ratio);
+  gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
+  gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
-  gauge!(out, "ecpu_freq_mhz", "Efficiency CPU cluster average frequency in MHz", m.ecpu_freq_mhz);
-  gauge!(out, "ecpu_usage_ratio", "Efficiency CPU cluster effective usage (frequency-scaled, 0–1)", m.ecpu_usage_ratio);
+  gauge!(out, "ecpu_freq_mhz", "Efficiency CPU cluster frequency in MHz", m.ecpu_freq_mhz);
+  gauge!(out, "ecpu_scaled_ratio", "Efficiency CPU cluster frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
+  gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_ecpu_scaled_ratio", m.ecpu_scaled_ratio);
   gauge!(out, "ecpu_active_ratio", "Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
-  gauge!(out, "pcpu_freq_mhz", "Performance CPU cluster average frequency in MHz", m.pcpu_freq_mhz);
-  gauge!(out, "pcpu_usage_ratio", "Performance CPU cluster effective usage (frequency-scaled, 0–1)", m.pcpu_usage_ratio);
+  gauge!(out, "pcpu_freq_mhz", "Performance CPU cluster frequency in MHz", m.pcpu_freq_mhz);
+  gauge!(out, "pcpu_scaled_ratio", "Performance CPU cluster frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
+  gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_pcpu_scaled_ratio", m.pcpu_scaled_ratio);
   gauge!(out, "pcpu_active_ratio", "Performance CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
   gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
-  gauge!(out, "gpu_usage_ratio", "GPU effective usage (frequency-scaled, 0–1)", m.gpu_usage_ratio);
+  gauge!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
+  gauge!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
   gauge!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
   gauge!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
@@ -75,7 +81,7 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
 }
 
 fn to_json(m: &Metrics, soc: &SocInfo) -> String {
-  let mut doc = serde_json::to_value(m).unwrap_or_default();
+  let mut doc = metrics_to_json_value(m).unwrap_or_default();
   doc["soc"] = serde_json::to_value(soc).unwrap_or_default();
   doc["timestamp"] = serde_json::to_value(chrono::Utc::now().to_rfc3339()).unwrap_or_default();
   serde_json::to_string(&doc).unwrap_or_default()
@@ -247,7 +253,9 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-  use super::{escape_label_value, escape_xml, serve_url};
+  use macmon::{Metrics, SocInfo};
+
+  use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
 
   #[test]
   fn formats_serving_urls() {
@@ -265,5 +273,53 @@ mod tests {
   #[test]
   fn escapes_prometheus_label_values() {
     assert_eq!(escape_label_value("Mac\\Book\n\"Pro\""), r#"Mac\\Book\n\"Pro\""#);
+  }
+
+  #[test]
+  fn exports_deprecated_v07_usage_series() {
+    let metrics = Metrics {
+      cpu_scaled_ratio: 0.1,
+      ecpu_scaled_ratio: 0.2,
+      pcpu_scaled_ratio: 0.3,
+      gpu_scaled_ratio: 0.4,
+      ..Default::default()
+    };
+    let soc = SocInfo { chip_name: "Test".into(), ..Default::default() };
+    let output = to_prometheus(&metrics, &soc);
+
+    for (old, new, value) in [
+      ("cpu_usage_ratio", "cpu_scaled_ratio", "0.1"),
+      ("ecpu_usage_ratio", "ecpu_scaled_ratio", "0.2"),
+      ("pcpu_usage_ratio", "pcpu_scaled_ratio", "0.3"),
+      ("gpu_usage_ratio", "gpu_scaled_ratio", "0.4"),
+    ] {
+      assert!(output.contains(&format!("# HELP macmon_{old} DEPRECATED: use macmon_{new}")));
+      assert!(output.contains(&format!("macmon_{old}{{chip=\"Test\"}} {value}")));
+      assert!(output.contains(&format!("macmon_{new}{{chip=\"Test\"}} {value}")));
+    }
+  }
+
+  #[test]
+  fn exports_v07_json_fields_as_aliases() {
+    let metrics = Metrics {
+      cpu_scaled_ratio: 0.1,
+      ecpu_freq_mhz: 1000,
+      ecpu_scaled_ratio: 0.2,
+      pcpu_freq_mhz: 2000,
+      pcpu_scaled_ratio: 0.3,
+      gpu_freq_mhz: 500,
+      gpu_scaled_ratio: 0.4,
+      ..Default::default()
+    };
+    let json: serde_json::Value =
+      serde_json::from_str(&to_json(&metrics, &SocInfo::default())).unwrap();
+
+    assert_eq!(json["cpu_usage_pct"], json["cpu_scaled_ratio"]);
+    assert_eq!(json["ecpu_usage"][0], json["ecpu_freq_mhz"]);
+    assert_eq!(json["ecpu_usage"][1], json["ecpu_scaled_ratio"]);
+    assert_eq!(json["pcpu_usage"][0], json["pcpu_freq_mhz"]);
+    assert_eq!(json["pcpu_usage"][1], json["pcpu_scaled_ratio"]);
+    assert_eq!(json["gpu_usage"][0], json["gpu_freq_mhz"]);
+    assert_eq!(json["gpu_usage"][1], json["gpu_scaled_ratio"]);
   }
 }

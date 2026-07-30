@@ -50,7 +50,7 @@
 ### Features
 - Added HTTP server mode with JSON and Prometheus metrics endpoints (#34, #53)
 - Added launchd service install/uninstall commands for the HTTP server (#34)
-- Added `cpu_usage_pct` metric (#28)
+- Added combined CPU usage metric (#28)
 - Added RAM usage percentage display in the label (#31)
 - Exposed macmon as a library crate for programmatic use (#52, by @tasleson)
 

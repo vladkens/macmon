@@ -13,7 +13,28 @@ mod stress;
 
 use app::App;
 use debug::print_debug;
-use macmon::Sampler;
+use macmon::{Metrics, Sampler};
+
+// JSON output keeps the v0.7 field names as deprecated aliases.
+#[derive(serde::Serialize)]
+struct JsonMetrics<'a> {
+  #[serde(flatten)]
+  metrics: &'a Metrics,
+  cpu_usage_pct: f32,
+  ecpu_usage: (u32, f32),
+  pcpu_usage: (u32, f32),
+  gpu_usage: (u32, f32),
+}
+
+fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_json::Error> {
+  serde_json::to_value(JsonMetrics {
+    metrics,
+    cpu_usage_pct: metrics.cpu_scaled_ratio,
+    ecpu_usage: (metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio),
+    pcpu_usage: (metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio),
+    gpu_usage: (metrics.gpu_freq_mhz, metrics.gpu_scaled_ratio),
+  })
+}
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -93,7 +114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       loop {
         let doc = sampler.get_metrics(args.interval.max(100))?;
 
-        let mut doc = serde_json::to_value(&doc)?;
+        let mut doc = metrics_to_json_value(&doc)?;
         if let Some(ref soc) = soc_info_val {
           doc["soc"] = serde_json::to_value(soc)?;
         }

@@ -330,18 +330,18 @@ impl App {
     // Update per-core E-CPU frequencies
     for (i, core) in data.ecpu_cores.iter().enumerate() {
       if i < self.ecpu_freq.len() {
-        self.ecpu_freq[i].push(core.freq_mhz as u64, core.usage_ratio as f64);
+        self.ecpu_freq[i].push(core.freq_mhz as u64, core.scaled_ratio as f64);
       }
     }
 
     // Update per-core P-CPU frequencies
     for (i, core) in data.pcpu_cores.iter().enumerate() {
       if i < self.pcpu_freq.len() {
-        self.pcpu_freq[i].push(core.freq_mhz as u64, core.usage_ratio as f64);
+        self.pcpu_freq[i].push(core.freq_mhz as u64, core.scaled_ratio as f64);
       }
     }
 
-    self.igpu_freq.push(data.gpu_freq_mhz as u64, data.gpu_usage_ratio as f64);
+    self.igpu_freq.push(data.gpu_freq_mhz as u64, data.gpu_scaled_ratio as f64);
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
     self.gpu_temp.push(data.temp.gpu_temp_avg);

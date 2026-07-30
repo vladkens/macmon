@@ -19,7 +19,7 @@
 
 - 🚫 Runs without sudo
 - ⚡ Real-time CPU / GPU / ANE power usage
-- 📊 CPU effective usage per cluster
+- 📊 CPU frequency-scaled and active ratios per cluster
 - 💾 RAM / Swap usage
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
@@ -107,8 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("GPU power:  {:.2} W", metrics.gpu_power);
     println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
     println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
-    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_usage_ratio * 100.0);
-    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_usage_ratio * 100.0);
+    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio * 100.0);
+    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio * 100.0);
 
     Ok(())
 }
@@ -187,24 +187,24 @@ This will collect 10 samples with an update interval of 500 milliseconds.
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },
     { "name": "fan1", "rpm": 1200, "max_rpm": 5200 },
   ],
-  "cpu_usage_ratio": 0.036854, // Combined effective CPU usage (frequency-scaled, weighted by core count, 0–1)
+  "cpu_scaled_ratio": 0.036854, // Combined frequency-scaled CPU ratio (weighted by core count, 0–1)
   "cpu_active_ratio": 0.092, // Combined active residency ratio (not frequency-scaled, weighted by core count, 0–1)
-  "ecpu_freq_mhz": 1181, // Average frequency while active
-  "ecpu_usage_ratio": 0.082656614, // Effective usage (frequency-scaled, 0–1)
+  "ecpu_freq_mhz": 1100, // Cluster frequency
+  "ecpu_scaled_ratio": 0.082656614, // Frequency-scaled ratio (0–1)
   "ecpu_active_ratio": 0.18, // Active residency (not frequency-scaled, 0–1)
-  "pcpu_freq_mhz": 1974, // Average frequency while active
-  "pcpu_usage_ratio": 0.015181795, // Effective usage (frequency-scaled, 0–1)
+  "pcpu_freq_mhz": 1800, // Cluster frequency
+  "pcpu_scaled_ratio": 0.015181795, // Frequency-scaled ratio (0–1)
   "pcpu_active_ratio": 0.04, // Active residency (not frequency-scaled, 0–1)
   "ecpu_cores": [
-    { "die_id": 0, "core_id": 0, "freq_mhz": 1600, "usage_ratio": 0.14, "active_ratio": 0.24 },
-    { "die_id": 0, "core_id": 1, "freq_mhz": 1700, "usage_ratio": 0.12, "active_ratio": 0.2 },
+    { "die_id": 0, "core_id": 0, "freq_mhz": 1600, "scaled_ratio": 0.14, "active_ratio": 0.24 },
+    { "die_id": 0, "core_id": 1, "freq_mhz": 1700, "scaled_ratio": 0.12, "active_ratio": 0.2 },
   ],
   "pcpu_cores": [
-    { "die_id": 0, "core_id": 0, "freq_mhz": 2100, "usage_ratio": 0.05, "active_ratio": 0.08 },
-    { "die_id": 0, "core_id": 1, "freq_mhz": 2200, "usage_ratio": 0.07, "active_ratio": 0.06 },
+    { "die_id": 0, "core_id": 0, "freq_mhz": 2100, "scaled_ratio": 0.05, "active_ratio": 0.08 },
+    { "die_id": 0, "core_id": 1, "freq_mhz": 2200, "scaled_ratio": 0.07, "active_ratio": 0.06 },
   ],
-  "gpu_freq_mhz": 461, // Average frequency while active
-  "gpu_usage_ratio": 0.021497859, // Effective usage (frequency-scaled, 0–1)
+  "gpu_freq_mhz": 461, // GPU frequency
+  "gpu_scaled_ratio": 0.021497859, // Frequency-scaled ratio (0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
@@ -212,17 +212,33 @@ This will collect 10 samples with an update interval of 500 milliseconds.
   "all_power": 0.22231553, // Watts
   "sys_power": 5.876533, // Watts
   "ram_power": 0.11635789, // Watts
-  "gpu_ram_power": 0.0009615385, // Watts (not sure what it means)
+  "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
 }
 ```
 
 </details>
 
-Deprecated compatibility fields remain available in Rust and serialized JSON:
-`cpu_usage_pct` → `cpu_usage_ratio`, `ecpu_usage` →
-`(ecpu_freq_mhz, ecpu_usage_ratio)`, `pcpu_usage` →
-`(pcpu_freq_mhz, pcpu_usage_ratio)`, and `gpu_usage` →
-`(gpu_freq_mhz, gpu_usage_ratio)`.
+### Scaled and active ratios
+
+Both ratios are calculated from the same frequency-state residency counters, but answer different questions.
+
+`active_ratio` is the fraction of the sampling interval spent in any active frequency state. Every active state counts equally, whether the device runs at its minimum or maximum frequency.
+
+```text
+active_ratio = Σ active_state_time / total_time
+```
+
+`scaled_ratio` weights each active state by its frequency relative to the hardware maximum. It represents the used fraction of the maximum possible frequency-time over the interval.
+
+```text
+scaled_ratio = Σ(active_state_time × state_frequency / max_frequency) / total_time
+```
+
+A device active for the entire interval at half its maximum frequency reports `active_ratio = 100%` and `scaled_ratio = 50%`. The same `scaled_ratio = 50%` is produced by a device active for half the interval at maximum frequency, but its `active_ratio` is only `50%`.
+
+Cluster ratios are arithmetic means across all physical cores in the cluster. Consequently, one fully active core in a ten-core cluster contributes 10% to the cluster `active_ratio`. The combined CPU ratios are weighted by the core count of each cluster.
+
+`ecpu_freq_mhz` and `pcpu_freq_mhz` are arithmetic means of per-core frequencies with the hardware minimum-frequency floor. `gpu_freq_mhz` is averaged over active residency.
 
 ## 🌐 HTTP Server
 
@@ -290,7 +306,8 @@ Then import or build a Grafana dashboard querying metrics such as:
 
 ```
 macmon_cpu_power_watts{chip="Apple M3 Pro"}
-macmon_ecpu_usage_ratio{chip="Apple M3 Pro"}
+macmon_ecpu_scaled_ratio{chip="Apple M3 Pro"}
+macmon_ecpu_freq_mhz{chip="Apple M3 Pro"}
 macmon_memory_ram_used_bytes{chip="Apple M3 Pro"}
 ```
 
@@ -310,17 +327,21 @@ macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
 # TYPE macmon_fan_speed_rpm gauge
 macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="fan0"} 1234
 
-# HELP macmon_cpu_usage_ratio Combined CPU effective usage (frequency-scaled, 0–1), weighted by core count
-# TYPE macmon_cpu_usage_ratio gauge
-macmon_cpu_usage_ratio{chip="Apple M3 Pro"} 0.037
+# HELP macmon_cpu_scaled_ratio Combined frequency-scaled CPU ratio (0–1), weighted by core count
+# TYPE macmon_cpu_scaled_ratio gauge
+macmon_cpu_scaled_ratio{chip="Apple M3 Pro"} 0.037
 
 # HELP macmon_cpu_active_ratio Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count
 # TYPE macmon_cpu_active_ratio gauge
 macmon_cpu_active_ratio{chip="Apple M3 Pro"} 0.092
 
-# HELP macmon_ecpu_usage_ratio Efficiency CPU cluster effective usage (frequency-scaled, 0–1)
-# TYPE macmon_ecpu_usage_ratio gauge
-macmon_ecpu_usage_ratio{chip="Apple M3 Pro"} 0.083
+# HELP macmon_ecpu_scaled_ratio Efficiency CPU cluster frequency-scaled ratio (0–1)
+# TYPE macmon_ecpu_scaled_ratio gauge
+macmon_ecpu_scaled_ratio{chip="Apple M3 Pro"} 0.083
+
+# HELP macmon_ecpu_freq_mhz Efficiency CPU cluster frequency in MHz
+# TYPE macmon_ecpu_freq_mhz gauge
+macmon_ecpu_freq_mhz{chip="Apple M3 Pro"} 1100
 
 # HELP macmon_ecpu_active_ratio Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)
 # TYPE macmon_ecpu_active_ratio gauge
