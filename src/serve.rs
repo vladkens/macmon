@@ -112,7 +112,6 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
 }
 
 fn serve_url(host: &str, port: u16) -> String {
-  let host = if matches!(host, "0.0.0.0" | "::") { "localhost" } else { host };
   let host = if host.contains(':') && !host.starts_with('[') {
     format!("[{host}]")
   } else {
@@ -225,7 +224,7 @@ pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::
   std::fs::write(&plist_path, plist)?;
   std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
   eprintln!("macmon service installed: {plist_path}");
-  eprintln!("serving on {}", serve_url(host, port));
+  eprintln!("configured to serve on {}", serve_url(host, port));
 
   Ok(())
 }
@@ -237,7 +236,7 @@ pub fn run(
   soc: Arc<SocInfo>,
 ) -> Result<(), Box<dyn std::error::Error>> {
   let listener = TcpListener::bind((host, port))?;
-  eprintln!("macmon serving on {}", serve_url(host, port));
+  eprintln!("macmon serving on http://{}", listener.local_addr()?);
   eprintln!("  GET /json    → JSON metrics");
   eprintln!("  GET /metrics → Prometheus format");
 
@@ -260,8 +259,8 @@ mod tests {
   #[test]
   fn formats_serving_urls() {
     assert_eq!(serve_url("127.0.0.1", 9090), "http://127.0.0.1:9090");
-    assert_eq!(serve_url("0.0.0.0", 9090), "http://localhost:9090");
-    assert_eq!(serve_url("::", 9090), "http://localhost:9090");
+    assert_eq!(serve_url("0.0.0.0", 9090), "http://0.0.0.0:9090");
+    assert_eq!(serve_url("::", 9090), "http://[::]:9090");
     assert_eq!(serve_url("::1", 9090), "http://[::1]:9090");
   }
 
