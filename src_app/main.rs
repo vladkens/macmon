@@ -2,8 +2,10 @@
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, parser::ValueSource};
 use std::error::Error;
-use std::sync::{Arc, RwLock};
+use std::io::{self, IsTerminal, Write};
+use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 mod config;
 mod serve;
@@ -111,21 +113,82 @@ struct Cli {
   interval: u32,
 }
 
+fn clock(seconds: u64) -> String {
+  format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
 fn run_stress(
   mode: StressMode,
   workers: Option<usize>,
   duration: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
   let cpu_count = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+  let workers = match mode {
+    StressMode::Pulse => workers.unwrap_or(cpu_count.div_ceil(2)),
+    StressMode::Cpu | StressMode::All => workers.unwrap_or(cpu_count),
+    StressMode::Gpu => 1,
+  }
+  .max(1);
+  let plural = if workers == 1 { "" } else { "s" };
+  let label = match mode {
+    StressMode::Pulse => format!("CPU pulse · {workers} worker{plural}"),
+    StressMode::Cpu => format!("CPU · {workers} worker{plural}"),
+    StressMode::Gpu => "GPU".to_string(),
+    StressMode::All => format!("CPU + GPU · {workers} CPU worker{plural}"),
+  };
 
-  match mode {
-    StressMode::Pulse => stress::run_pattern(workers.unwrap_or(cpu_count.div_ceil(2)), duration),
-    StressMode::Cpu => stress::run_cpu(workers.unwrap_or(cpu_count), duration),
-    StressMode::Gpu => stress::run_gpu(duration)?,
-    StressMode::All => stress::run_all(workers.unwrap_or(cpu_count), duration)?,
+  let started = Instant::now();
+  let spinner = io::stderr().is_terminal().then(|| {
+    let (done, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+      let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+      let mut frame = 0;
+
+      loop {
+        let elapsed = started.elapsed().as_secs();
+        let timing = match duration {
+          Some(total) => format!(
+            "{} elapsed · {} remaining",
+            clock(elapsed.min(total)),
+            clock(total.saturating_sub(elapsed))
+          ),
+          None => format!("{} elapsed · Ctrl-C to stop", clock(elapsed)),
+        };
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\r\x1b[2K{} {label} · {timing}", frames[frame]);
+        let _ = stderr.flush();
+
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+          Err(mpsc::RecvTimeoutError::Timeout) => frame = (frame + 1) % frames.len(),
+          _ => break,
+        }
+      }
+    });
+    (done, handle)
+  });
+
+  let result = match mode {
+    StressMode::Pulse => {
+      stress::run_pattern(workers, duration);
+      Ok(())
+    }
+    StressMode::Cpu => {
+      stress::run_cpu(workers, duration);
+      Ok(())
+    }
+    StressMode::Gpu => stress::run_gpu(duration),
+    StressMode::All => stress::run_all(workers, duration),
+  };
+
+  if let Some((done, handle)) = spinner {
+    let _ = done.send(());
+    let _ = handle.join();
+    let mut stderr = io::stderr().lock();
+    let _ = write!(stderr, "\r\x1b[2K");
+    let _ = stderr.flush();
   }
 
-  Ok(())
+  result
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
