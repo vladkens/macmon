@@ -11,7 +11,7 @@ macmon serve
 Then start the monitoring stack:
 
 ```sh
-cd example-grafana
+cd examples/grafana
 docker compose up -d
 ```
 

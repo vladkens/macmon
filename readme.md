@@ -141,7 +141,7 @@ This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that a
 
 #### Prometheus and Grafana
 
-The `/metrics` endpoint exposes metrics in Prometheus format. See [`example-grafana`](example-grafana) for a local demo stack with Prometheus and Grafana.
+The `/metrics` endpoint exposes metrics in Prometheus format. See [`examples/grafana`](examples/grafana) for a local demo stack with Prometheus and Grafana.
 
 <details>
 <summary>Prometheus output example</summary>
@@ -289,6 +289,12 @@ cargo add macmon --no-default-features
 ```
 
 The default `app` feature enables the `macmon` executable and its terminal UI dependencies. Disable default features when using `macmon` only as a library.
+
+Run the standalone [demo app](examples/demo-app):
+
+```sh
+cargo run --manifest-path examples/demo-app/Cargo.toml
+```
 
 Then use the `Sampler` to collect metrics:
 
