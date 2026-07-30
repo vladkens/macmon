@@ -1,4 +1,4 @@
-use clap::{CommandFactory, Parser, Subcommand, parser::ValueSource};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, parser::ValueSource};
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -34,6 +34,18 @@ fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_j
     pcpu_usage: (metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio),
     gpu_usage: (metrics.gpu_freq_mhz, metrics.gpu_scaled_ratio),
   })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum StressMode {
+  /// Cyclic CPU load: one second busy, one second idle
+  Pulse,
+  /// Continuous CPU-only load
+  Cpu,
+  /// Continuous GPU-only load
+  Gpu,
+  /// Continuous CPU and GPU load
+  All,
 }
 
 #[derive(Debug, Subcommand)]
@@ -74,11 +86,11 @@ enum Commands {
 
   /// Generate load for testing metrics
   Stress {
-    /// Generate continuous CPU and GPU load instead of cyclic CPU load
-    #[arg(short, long, default_value_t = false)]
-    full: bool,
+    /// Load pattern to generate
+    #[arg(value_enum, default_value = "pulse")]
+    mode: StressMode,
 
-    /// Number of CPU worker threads. Defaults to 4, or all logical CPUs with --full
+    /// Number of CPU worker threads. Ignored in GPU mode
     #[arg(short, long)]
     workers: Option<usize>,
 
@@ -99,6 +111,23 @@ struct Cli {
   /// Update interval in milliseconds
   #[arg(short, long, global = true, default_value_t = 1000)]
   interval: u32,
+}
+
+fn run_stress(
+  mode: StressMode,
+  workers: Option<usize>,
+  duration: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
+  let cpu_count = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+
+  match mode {
+    StressMode::Pulse => stress::run_pattern(workers.unwrap_or(cpu_count.div_ceil(2)), duration),
+    StressMode::Cpu => stress::run_cpu(workers.unwrap_or(cpu_count), duration),
+    StressMode::Gpu => stress::run_gpu(duration)?,
+    StressMode::All => stress::run_all(workers.unwrap_or(cpu_count), duration)?,
+  }
+
+  Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -156,17 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => print_debug()?,
-    Some(Commands::Stress { full, workers, duration }) => {
-      let workers = workers.unwrap_or_else(|| {
-        if *full { thread::available_parallelism().map(|n| n.get()).unwrap_or(4) } else { 4 }
-      });
-
-      if *full {
-        stress::run_full(workers, *duration)?;
-      } else {
-        stress::run_pattern(workers, *duration);
-      }
-    }
+    Some(Commands::Stress { mode, workers, duration }) => run_stress(*mode, *workers, *duration)?,
     _ => {
       let mut app = App::new()?;
 

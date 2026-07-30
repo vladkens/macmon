@@ -357,12 +357,14 @@ Use `macmon stress` to generate load while checking metric behavior:
 
 ```sh
 macmon stress
-macmon stress --duration 30
-macmon stress --full --duration 30
-macmon stress --full --workers 8 --duration 30
+macmon stress pulse --duration 30
+macmon stress cpu --duration 30
+macmon stress cpu --workers 8 --duration 30
+macmon stress gpu --duration 30
+macmon stress all --duration 30
 ```
 
-The default remains the predictable cyclic CPU load with a fixed 50% duty cycle and 4 CPU workers. Use `--full` for continuous CPU and GPU load; when `--workers` is omitted, full mode uses all logical CPUs.
+The default `pulse` mode generates a predictable cyclic CPU load with a fixed 50% duty cycle on half of the logical CPUs. The `cpu` and `gpu` modes continuously load only the selected processor, while `all` loads both. The `cpu` and `all` modes use all logical CPUs unless `--workers` is specified; `--workers` has no effect in `gpu` mode.
 
 ## 🤝 Contributing
 

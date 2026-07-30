@@ -156,14 +156,32 @@ pub fn run_pattern(workers: usize, duration_sec: Option<u64>) {
   join_cpu(spawn_cpu(workers, Mode::Cyclic, start_at, stop_at));
 }
 
-pub fn run_full(workers: usize, duration_sec: Option<u64>) -> Result<(), Box<dyn Error>> {
+pub fn run_cpu(workers: usize, duration_sec: Option<u64>) {
+  let start_at = Instant::now();
+  let stop_at = duration_sec.map(|duration| start_at + Duration::from_secs(duration));
+  join_cpu(spawn_cpu(workers, Mode::Full, start_at, stop_at));
+}
+
+pub fn run_gpu(duration_sec: Option<u64>) -> Result<(), Box<dyn Error>> {
+  let start_at = Instant::now();
+  let stop_at = duration_sec.map(|duration| start_at + Duration::from_secs(duration));
+
+  run_gpu_workload(
+    Mode::Full,
+    FULL_GPU_WORK_ITEMS,
+    FULL_GPU_ITERATIONS,
+    FULL_GPU_INFLIGHT,
+    start_at,
+    stop_at,
+  )
+}
+
+pub fn run_all(workers: usize, duration_sec: Option<u64>) -> Result<(), Box<dyn Error>> {
   let start_at = Instant::now();
   let stop_at = duration_sec.map(|duration| start_at + Duration::from_secs(duration));
   let threads = spawn_cpu(workers, Mode::Full, start_at, stop_at);
 
-  println!("Full stress: cpu-workers={workers} gpu=on");
-
-  let gpu_result = run_gpu(
+  let gpu_result = run_gpu_workload(
     Mode::Full,
     FULL_GPU_WORK_ITEMS,
     FULL_GPU_ITERATIONS,
@@ -275,7 +293,7 @@ fn require_id(value: Id, message: &str) -> Result<Id, Box<dyn Error>> {
   if value.is_null() { Err(message.to_string().into()) } else { Ok(value) }
 }
 
-fn run_gpu(
+fn run_gpu_workload(
   mode: Mode,
   work_items: usize,
   iterations: u32,
@@ -334,9 +352,7 @@ fn run_gpu(
     let max_threads = msg_usize(pipeline, "maxTotalThreadsPerThreadgroup").clamp(1, 256);
     let threads_per_group = MtlSize { width: max_threads, height: 1, depth: 1 };
     let threads_per_grid = MtlSize { width: work_items, height: 1, depth: 1 };
-    let mut submitted = 0usize;
     let mut pending = Vec::with_capacity(inflight);
-    let mut last_report = start_at;
     let mut cycle_at = start_at;
 
     loop {
@@ -393,21 +409,10 @@ fn run_gpu(
         msg_void(command_buffer, "commit");
 
         pending.push(command_buffer);
-        submitted += 1;
 
         if pending.len() >= inflight {
           let command_buffer = pending.remove(0);
           msg_void(command_buffer, "waitUntilCompleted");
-        }
-
-        let now = Instant::now();
-        if now.duration_since(last_report) >= Duration::from_secs(1) {
-          let elapsed = now.duration_since(start_at).as_secs_f64();
-          println!(
-            "elapsed={elapsed:.1}s dispatches={submitted} rate={:.1}/s",
-            submitted as f64 / elapsed
-          );
-          last_report = now;
         }
       }
 
