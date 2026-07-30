@@ -74,7 +74,13 @@ Options:
   -i, --interval <INTERVAL>  Update interval in milliseconds [default: 1000]
   -h, --help                 Print help
   -V, --version              Print version
+```
 
+### Interactive mode
+
+Run `macmon` without a subcommand to open the terminal UI.
+
+```text
 Controls:
   c - change color
   v - switch charts view: gauge / sparkline
@@ -83,74 +89,7 @@ Controls:
   q - quit
 ```
 
-## 📚 Library Usage
-
-`macmon` can be used as a Rust library to collect Apple Silicon metrics in your own applications.
-
-Add it to your project:
-
-```sh
-cargo add macmon
-```
-
-Then use the `Sampler` to collect metrics:
-
-```rust
-use macmon::Sampler;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut sampler = Sampler::new()?;
-
-    // collect metrics over a 1000ms window
-    let metrics = sampler.get_metrics(1000)?;
-
-    println!("CPU power:  {:.2} W", metrics.cpu_power);
-    println!("GPU power:  {:.2} W", metrics.gpu_power);
-    println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
-    println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
-    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio * 100.0);
-    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio * 100.0);
-
-    Ok(())
-}
-```
-
-`get_metrics(duration_ms)` blocks the calling thread while collecting one
-IOReport delta over the complete interval. For a UI, server, or async
-application, create the sampler inside a dedicated worker thread and send the
-completed metrics back through a channel:
-
-```rust
-use std::{sync::mpsc, thread};
-
-use macmon::Sampler;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (tx, rx) = mpsc::channel();
-
-    thread::spawn(move || {
-        let mut sampler = Sampler::new().expect("failed to create sampler");
-
-        while let Ok(metrics) = sampler.get_metrics(1000) {
-            if tx.send(metrics).is_err() {
-                break;
-            }
-        }
-    });
-
-    // Use recv() in a consumer thread or try_recv() in a non-blocking event loop.
-    let metrics = rx.recv()?;
-    println!("CPU power: {:.2} W", metrics.cpu_power);
-
-    Ok(())
-}
-```
-
-Creating `Sampler` inside the worker keeps its low-level macOS handles on that
-thread. In an async runtime, use its blocking-thread facility rather than
-calling `get_metrics` directly from an executor worker.
-
-## 🚰 Piping
+### JSON output
 
 You can use the `pipe` subcommand to output metrics in JSON format, which makes it suitable for piping into other tools or scripts. For example:
 
@@ -168,8 +107,104 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
+### HTTP server
+
+You can use the `serve` subcommand to expose metrics over HTTP. This is useful for integrating with monitoring systems like [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/).
+
+```sh
+macmon serve                   # default port 9090, interval 1000ms
+macmon serve --host 127.0.0.1  # listen on localhost only
+macmon serve -p 8080           # custom port
+macmon serve -i 500            # sampling interval 500ms
+macmon serve &                 # run in background
+```
+
+Two endpoints are available:
+
+| Endpoint       | Format     | Description                                                                                       |
+| -------------- | ---------- | ------------------------------------------------------------------------------------------------- |
+| `GET /json`    | JSON       | Current metrics snapshot (same format as `pipe --soc-info`)                                       |
+| `GET /metrics` | Prometheus | Metrics in [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/) |
+
+#### launchd service
+
+To start `macmon serve` automatically on login and keep it running:
+
+```sh
+macmon serve --install                   # install and start (default port 9090)
+macmon serve --port 8080 --install       # with custom port
+macmon serve --host 127.0.0.1 --install  # listen on localhost only
+macmon serve --uninstall                 # stop and remove
+```
+
+This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that auto-starts on login and restarts on crash.
+
+#### Prometheus and Grafana
+
+The `/metrics` endpoint exposes metrics in Prometheus format. See [`example-grafana`](example-grafana) for a local demo stack with Prometheus and Grafana.
+
 <details>
-<summary>Output</summary>
+<summary>Prometheus output example</summary>
+
+```
+# HELP macmon_cpu_temp_celsius Average CPU temperature in Celsius
+# TYPE macmon_cpu_temp_celsius gauge
+macmon_cpu_temp_celsius{chip="Apple M3 Pro"} 47.3
+
+# HELP macmon_cpu_power_watts CPU power consumption in Watts
+# TYPE macmon_cpu_power_watts gauge
+macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
+
+# HELP macmon_fan_speed_rpm Fan speed in revolutions per minute
+# TYPE macmon_fan_speed_rpm gauge
+macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="fan0"} 1234
+
+# HELP macmon_cpu_scaled_ratio Combined frequency-scaled CPU ratio (0–1), weighted by core count
+# TYPE macmon_cpu_scaled_ratio gauge
+macmon_cpu_scaled_ratio{chip="Apple M3 Pro"} 0.037
+
+# HELP macmon_cpu_active_ratio Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count
+# TYPE macmon_cpu_active_ratio gauge
+macmon_cpu_active_ratio{chip="Apple M3 Pro"} 0.092
+
+# HELP macmon_ecpu_scaled_ratio Efficiency CPU cluster frequency-scaled ratio (0–1)
+# TYPE macmon_ecpu_scaled_ratio gauge
+macmon_ecpu_scaled_ratio{chip="Apple M3 Pro"} 0.083
+
+# HELP macmon_ecpu_freq_mhz Efficiency CPU cluster frequency in MHz
+# TYPE macmon_ecpu_freq_mhz gauge
+macmon_ecpu_freq_mhz{chip="Apple M3 Pro"} 1100
+
+# HELP macmon_ecpu_active_ratio Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)
+# TYPE macmon_ecpu_active_ratio gauge
+macmon_ecpu_active_ratio{chip="Apple M3 Pro"} 0.18
+```
+
+</details>
+
+### Stress testing
+
+Use `macmon stress` to generate load while checking metric behavior:
+
+```sh
+macmon stress
+macmon stress pulse --duration 30
+macmon stress cpu --duration 30
+macmon stress cpu --workers 8 --duration 30
+macmon stress gpu --duration 30
+macmon stress all --duration 30
+```
+
+The default `pulse` mode generates a predictable cyclic CPU load with a fixed 50% duty cycle on half of the logical CPUs. The `cpu` and `gpu` modes continuously load only the selected processor, while `all` loads both. The `cpu` and `all` modes use all logical CPUs unless `--workers` is specified; `--workers` has no effect in `gpu` mode.
+
+## 📊 Metrics
+
+### Output format
+
+The `pipe` command and the HTTP `/json` endpoint return the same metrics:
+
+<details>
+<summary>JSON example</summary>
 
 ```jsonc
 {
@@ -219,152 +254,93 @@ This will collect 10 samples with an update interval of 500 milliseconds.
 
 </details>
 
-### Scaled and active ratios
+### Active and scaled ratios
 
-Both ratios are calculated from the same frequency-state residency counters, but answer different questions.
+`active_ratio` is the share of the sampling interval during which the processor was doing any work. `scaled_ratio` is the same measure adjusted for operating frequency, showing the share of the processor's maximum possible capacity that was used.
 
-`active_ratio` is the fraction of the sampling interval spent in any active frequency state. Every active state counts equally, whether the device runs at its minimum or maximum frequency.
+For interval $T$, $t_i$ is the time spent doing work at frequency $f_i$, and $f_\text{max}$ is the hardware maximum frequency for the CPU cluster or GPU. The product $T f_\text{max}$ is the theoretical maximum frequency-time the processor could deliver at full load without thermal or power throttling:
 
-```text
-active_ratio = Σ active_state_time / total_time
+```math
+R_\text{active} = \frac{\sum_i t_i}{T}
+\qquad
+R_\text{scaled} = \frac{\sum_i t_i f_i}{T f_\text{max}}
 ```
 
-`scaled_ratio` weights each active state by its frequency relative to the hardware maximum. It represents the used fraction of the maximum possible frequency-time over the interval.
+CPU ratios are calculated per core and averaged across the cluster. A core that did no work contributes zero; combined CPU ratios average all cores from both clusters:
 
-```text
-scaled_ratio = Σ(active_state_time × state_frequency / max_frequency) / total_time
+```math
+R_\text{cluster} = \frac{1}{N_\text{cores}}\sum_j R_j
 ```
 
-A device active for the entire interval at half its maximum frequency reports `active_ratio = 100%` and `scaled_ratio = 50%`. The same `scaled_ratio = 50%` is produced by a device active for half the interval at maximum frequency, but its `active_ratio` is only `50%`.
+Examples:
 
-Cluster ratios are arithmetic means across all physical cores in the cluster. Consequently, one fully active core in a ten-core cluster contributes 10% to the cluster `active_ratio`. The combined CPU ratios are weighted by the core count of each cluster.
+- Full interval at half the maximum frequency → `active = 1.0`, `scaled = 0.5`.
+- Half the interval at the maximum frequency → `active = 0.5`, `scaled = 0.5`.
+- One of ten cores working at maximum frequency → cluster `active = scaled = 0.1`.
 
-`ecpu_freq_mhz` and `pcpu_freq_mhz` are arithmetic means of per-core frequencies with the hardware minimum-frequency floor. `gpu_freq_mhz` is averaged over active residency.
+## 📚 Library usage
 
-## 🌐 HTTP Server
+`macmon` can be used as a Rust library to collect Apple Silicon metrics in your own applications.
 
-You can use the `serve` subcommand to expose metrics over HTTP. This is useful for integrating with monitoring systems like [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/).
+Add it to your project:
 
 ```sh
-macmon serve                   # default port 9090, interval 1000ms
-macmon serve --host 127.0.0.1  # listen on localhost only
-macmon serve -p 8080           # custom port
-macmon serve -i 500            # sampling interval 500ms
-macmon serve &                 # run in background
+cargo add macmon --no-default-features
 ```
 
-Two endpoints are available:
+The default `app` feature enables the `macmon` executable and its terminal UI dependencies. Disable default features when using `macmon` only as a library.
 
-| Endpoint       | Format     | Description                                                                                       |
-| -------------- | ---------- | ------------------------------------------------------------------------------------------------- |
-| `GET /json`    | JSON       | Current metrics snapshot (same format as `pipe --soc-info`)                                       |
-| `GET /metrics` | Prometheus | Metrics in [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/) |
+Then use the `Sampler` to collect metrics:
 
-### Running as a background service (launchd)
+```rust
+use macmon::Sampler;
 
-To start `macmon serve` automatically on login and keep it running:
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut sampler = Sampler::new()?;
 
-```sh
-macmon serve --install                   # install and start (default port 9090)
-macmon serve --port 8080 --install       # with custom port
-macmon serve --host 127.0.0.1 --install  # listen on localhost only
-macmon serve --uninstall                 # stop and remove
+    // collect metrics over a 1000ms window
+    let metrics = sampler.get_metrics(1000)?;
+
+    println!("CPU power:  {:.2} W", metrics.cpu_power);
+    println!("GPU power:  {:.2} W", metrics.gpu_power);
+    println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
+    println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
+    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio * 100.0);
+    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio * 100.0);
+
+    Ok(())
+}
 ```
 
-This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that auto-starts on login and restarts on crash.
+`get_metrics(duration_ms)` blocks the calling thread while collecting one IOReport delta over the complete interval. For a UI, server, or async application, create the sampler inside a dedicated worker thread and send the completed metrics back through a channel:
 
-### Prometheus / Grafana setup
+```rust
+use std::{sync::mpsc, thread};
 
-Add a scrape target to your `prometheus.yml`:
+use macmon::Sampler;
 
-```yaml
-scrape_configs:
-  - job_name: macmon
-    static_configs:
-      - targets: ["localhost:9090"]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let mut sampler = Sampler::new().expect("failed to create sampler");
+
+        while let Ok(metrics) = sampler.get_metrics(1000) {
+            if tx.send(metrics).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Use recv() in a consumer thread or try_recv() in a non-blocking event loop.
+    let metrics = rx.recv()?;
+    println!("CPU power: {:.2} W", metrics.cpu_power);
+
+    Ok(())
+}
 ```
 
-For a ready-to-run local example with Prometheus + Grafana, see [`example-grafana`](example-grafana):
-
-```sh
-macmon serve --port 9090
-cd example-grafana
-docker compose up -d
-```
-
-This example provisions:
-
-- Prometheus on `http://localhost:9091`
-- Grafana on `http://localhost:9000`
-- a prebuilt `Macmon Overview` dashboard
-
-Grafana login:
-
-- username: `macmon`
-- password: `macmon`
-
-Then import or build a Grafana dashboard querying metrics such as:
-
-```
-macmon_cpu_power_watts{chip="Apple M3 Pro"}
-macmon_ecpu_scaled_ratio{chip="Apple M3 Pro"}
-macmon_ecpu_freq_mhz{chip="Apple M3 Pro"}
-macmon_memory_ram_used_bytes{chip="Apple M3 Pro"}
-```
-
-<details>
-<summary>Prometheus output example</summary>
-
-```
-# HELP macmon_cpu_temp_celsius Average CPU temperature in Celsius
-# TYPE macmon_cpu_temp_celsius gauge
-macmon_cpu_temp_celsius{chip="Apple M3 Pro"} 47.3
-
-# HELP macmon_cpu_power_watts CPU power consumption in Watts
-# TYPE macmon_cpu_power_watts gauge
-macmon_cpu_power_watts{chip="Apple M3 Pro"} 8.42
-
-# HELP macmon_fan_speed_rpm Fan speed in revolutions per minute
-# TYPE macmon_fan_speed_rpm gauge
-macmon_fan_speed_rpm{chip="Apple M3 Pro",fan="fan0"} 1234
-
-# HELP macmon_cpu_scaled_ratio Combined frequency-scaled CPU ratio (0–1), weighted by core count
-# TYPE macmon_cpu_scaled_ratio gauge
-macmon_cpu_scaled_ratio{chip="Apple M3 Pro"} 0.037
-
-# HELP macmon_cpu_active_ratio Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count
-# TYPE macmon_cpu_active_ratio gauge
-macmon_cpu_active_ratio{chip="Apple M3 Pro"} 0.092
-
-# HELP macmon_ecpu_scaled_ratio Efficiency CPU cluster frequency-scaled ratio (0–1)
-# TYPE macmon_ecpu_scaled_ratio gauge
-macmon_ecpu_scaled_ratio{chip="Apple M3 Pro"} 0.083
-
-# HELP macmon_ecpu_freq_mhz Efficiency CPU cluster frequency in MHz
-# TYPE macmon_ecpu_freq_mhz gauge
-macmon_ecpu_freq_mhz{chip="Apple M3 Pro"} 1100
-
-# HELP macmon_ecpu_active_ratio Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)
-# TYPE macmon_ecpu_active_ratio gauge
-macmon_ecpu_active_ratio{chip="Apple M3 Pro"} 0.18
-```
-
-</details>
-
-## 🧪 Stress Test
-
-Use `macmon stress` to generate load while checking metric behavior:
-
-```sh
-macmon stress
-macmon stress pulse --duration 30
-macmon stress cpu --duration 30
-macmon stress cpu --workers 8 --duration 30
-macmon stress gpu --duration 30
-macmon stress all --duration 30
-```
-
-The default `pulse` mode generates a predictable cyclic CPU load with a fixed 50% duty cycle on half of the logical CPUs. The `cpu` and `gpu` modes continuously load only the selected processor, while `all` loads both. The `cpu` and `all` modes use all logical CPUs unless `--workers` is specified; `--workers` has no effect in `gpu` mode.
+Creating `Sampler` inside the worker keeps its low-level macOS handles on that thread. In an async runtime, use its blocking-thread facility rather than calling `get_metrics` directly from an executor worker.
 
 ## 🤝 Contributing
 
