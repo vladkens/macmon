@@ -14,6 +14,21 @@ pub enum ViewType {
   Gauge,
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+pub enum RatioMode {
+  Scaled,
+  Active,
+}
+
+impl RatioMode {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Scaled => "scaled",
+      Self::Active => "active",
+    }
+  }
+}
+
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -28,6 +43,9 @@ pub struct Config {
 
   #[serde_inline_default(false)]
   pub per_core_view: bool,
+
+  #[serde_inline_default(RatioMode::Scaled)]
+  pub ratio_mode: RatioMode,
 }
 
 impl Default for Config {
@@ -110,6 +128,14 @@ impl Config {
 
   pub fn toggle_per_core_view(&mut self) {
     self.per_core_view = !self.per_core_view;
+    self.save();
+  }
+
+  pub fn toggle_ratio_mode(&mut self) {
+    self.ratio_mode = match self.ratio_mode {
+      RatioMode::Scaled => RatioMode::Active,
+      RatioMode::Active => RatioMode::Scaled,
+    };
     self.save();
   }
 }

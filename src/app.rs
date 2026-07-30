@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
@@ -9,10 +10,10 @@ use ratatui::crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 
-use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
+use crate::config::{Config, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
 use crate::shared::zero_div;
 use crate::sources::{SocInfo, get_soc_info};
-use macmon::{FanMetric, MemMetrics, Metrics, Sampler};
+use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -43,19 +44,102 @@ fn leave_term() {
 // MARK: Storage
 
 #[derive(Debug, Default, Clone)]
+struct RatioSeries {
+  items: Vec<u64>, // Recent percentages (0..=100), newest first.
+  ratio: f64,      // Latest ratio (0.0..=1.0).
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FreqSample {
+  freq_mhz: u64,
+  scaled_ratio: f64,
+  active_ratio: f64,
+}
+
+impl FreqSample {
+  fn new(freq_mhz: u32, scaled_ratio: f32, active_ratio: f32) -> Self {
+    Self {
+      freq_mhz: freq_mhz as u64,
+      scaled_ratio: scaled_ratio as f64,
+      active_ratio: active_ratio as f64,
+    }
+  }
+
+  fn from_core(core: &CpuCoreMetrics) -> Self {
+    Self::new(core.freq_mhz, core.scaled_ratio, core.active_ratio)
+  }
+}
+
+impl RatioSeries {
+  fn push(&mut self, ratio: f64) {
+    self.items.insert(0, (ratio * 100.0) as u64);
+    self.items.truncate(MAX_SPARKLINE);
+    self.ratio = ratio;
+  }
+}
+
+/// One frequency with parallel scaled and active ratio histories.
+#[derive(Debug, Default, Clone)]
 struct FreqStore {
-  items: Vec<u64>, // from 0 to 100
-  top_value: u64,
-  usage: f64, // from 0.0 to 1.0
+  freq_mhz: u64,
+  scaled: RatioSeries,
+  active: RatioSeries,
 }
 
 impl FreqStore {
-  fn push(&mut self, value: u64, usage: f64) {
-    self.items.insert(0, (usage * 100.0) as u64);
-    self.items.truncate(MAX_SPARKLINE);
+  fn push(&mut self, sample: FreqSample) {
+    self.freq_mhz = sample.freq_mhz;
+    self.scaled.push(sample.scaled_ratio);
+    self.active.push(sample.active_ratio);
+  }
 
-    self.top_value = value;
-    self.usage = usage;
+  fn ratio(&self, mode: RatioMode) -> &RatioSeries {
+    match mode {
+      RatioMode::Scaled => &self.scaled,
+      RatioMode::Active => &self.active,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CoreId {
+  die_id: usize,
+  core_id: usize,
+}
+
+impl From<&CpuCoreMetrics> for CoreId {
+  fn from(core: &CpuCoreMetrics) -> Self {
+    Self { die_id: core.die_id, core_id: core.core_id }
+  }
+}
+
+#[derive(Debug, Default)]
+struct CpuFreqStore {
+  aggregate: FreqStore,
+  cores: BTreeMap<CoreId, FreqStore>,
+}
+
+impl CpuFreqStore {
+  fn push(&mut self, aggregate: FreqSample, cores: &[CpuCoreMetrics]) {
+    self.aggregate.push(aggregate);
+
+    let mut seen = BTreeSet::new();
+    for core in cores {
+      let id = CoreId::from(core);
+      self.cores.entry(id).or_default().push(FreqSample::from_core(core));
+      seen.insert(id);
+    }
+
+    for (id, store) in &mut self.cores {
+      if !seen.contains(id) {
+        store.push(FreqSample::default());
+      }
+    }
+  }
+
+  fn has_multiple_dies(&self) -> bool {
+    let Some(first) = self.cores.keys().next() else { return false };
+    self.cores.keys().any(|id| id.die_id != first.die_id)
   }
 }
 
@@ -180,35 +264,6 @@ fn bar_set() -> symbols::bar::Set<'static> {
 
 // MARK: Components
 
-fn compute_aggregate_freq(cores: &[FreqStore]) -> FreqStore {
-  if cores.is_empty() {
-    return FreqStore::default();
-  }
-
-  let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
-  let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
-
-  // Aggregate sparkline data by averaging across cores
-  let max_len = cores.iter().map(|c| c.items.len()).max().unwrap_or(0);
-  let mut aggregated_items = Vec::with_capacity(max_len);
-
-  for i in 0..max_len {
-    let mut sum = 0u64;
-    let mut count = 0;
-    for core in cores {
-      if let Some(&val) = core.items.get(i) {
-        sum += val;
-        count += 1;
-      }
-    }
-    if count > 0 {
-      aggregated_items.push(sum / count as u64);
-    }
-  }
-
-  FreqStore { items: aggregated_items, top_value: avg_freq, usage: avg_usage }
-}
-
 fn h_stack(area: Rect) -> (Rect, Rect) {
   let ha = Layout::default()
     .direction(Direction::Horizontal)
@@ -225,6 +280,7 @@ enum Event {
   ChangeColor,
   ChangeView,
   TogglePerCore,
+  ToggleRatioMode,
   IncInterval,
   DecInterval,
   Tick,
@@ -238,6 +294,7 @@ fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithErro
     KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
     KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
     KeyCode::Char('d') => Ok(tx.send(Event::TogglePerCore)?),
+    KeyCode::Char('r') => Ok(tx.send(Event::ToggleRatioMode)?),
     KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
     KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
     KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
@@ -306,8 +363,8 @@ pub struct App {
   gpu_temp: TempStore,
   fans: FanStore,
 
-  ecpu_freq: Vec<FreqStore>,
-  pcpu_freq: Vec<FreqStore>,
+  ecpu_freq: CpuFreqStore,
+  pcpu_freq: CpuFreqStore,
   igpu_freq: FreqStore,
 }
 
@@ -315,9 +372,7 @@ impl App {
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
     let cfg = Config::load();
-    let ecpu_freq = vec![FreqStore::default(); soc.ecpu_cores as usize];
-    let pcpu_freq = vec![FreqStore::default(); soc.pcpu_cores as usize];
-    Ok(Self { cfg, soc, ecpu_freq, pcpu_freq, ..Default::default() })
+    Ok(Self { cfg, soc, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -327,21 +382,13 @@ impl App {
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
-    // Update per-core E-CPU frequencies
-    for (i, core) in data.ecpu_cores.iter().enumerate() {
-      if i < self.ecpu_freq.len() {
-        self.ecpu_freq[i].push(core.freq_mhz as u64, core.scaled_ratio as f64);
-      }
-    }
+    let ecpu = FreqSample::new(data.ecpu_freq_mhz, data.ecpu_scaled_ratio, data.ecpu_active_ratio);
+    let pcpu = FreqSample::new(data.pcpu_freq_mhz, data.pcpu_scaled_ratio, data.pcpu_active_ratio);
+    let igpu = FreqSample::new(data.gpu_freq_mhz, data.gpu_scaled_ratio, data.gpu_active_ratio);
 
-    // Update per-core P-CPU frequencies
-    for (i, core) in data.pcpu_cores.iter().enumerate() {
-      if i < self.pcpu_freq.len() {
-        self.pcpu_freq[i].push(core.freq_mhz as u64, core.scaled_ratio as f64);
-      }
-    }
-
-    self.igpu_freq.push(data.gpu_freq_mhz as u64, data.gpu_scaled_ratio as f64);
+    self.ecpu_freq.push(ecpu, &data.ecpu_cores);
+    self.pcpu_freq.push(pcpu, &data.pcpu_cores);
+    self.igpu_freq.push(igpu);
 
     self.cpu_temp.push(data.temp.cpu_temp_avg);
     self.gpu_temp.push(data.temp.gpu_temp_avg);
@@ -391,7 +438,8 @@ impl App {
   }
 
   fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
-    let label = format!("{} {:3.0}% @ {:4.0} MHz", label, val.usage * 100.0, val.top_value);
+    let ratio = val.ratio(self.cfg.ratio_mode);
+    let label = format!("{} {:3.0}% @ {:4.0} MHz", label, ratio.ratio * 100.0, val.freq_mhz);
     let block = self.title_block(label.as_str(), "");
 
     match self.cfg.view_type {
@@ -399,7 +447,7 @@ impl App {
         let w = Sparkline::default()
           .block(block)
           .direction(RenderDirection::RightToLeft)
-          .data(&val.items)
+          .data(&ratio.items)
           .max(100)
           .style(self.cfg.color)
           .bar_set(bar_set());
@@ -411,45 +459,49 @@ impl App {
           .gauge_style(self.cfg.color)
           .style(self.cfg.color)
           .label("")
-          .ratio(val.usage);
+          .ratio(ratio.ratio);
         f.render_widget(w, r);
       }
     }
   }
 
-  fn render_multi_core_block(&self, f: &mut Frame, r: Rect, label: &str, cores: &[FreqStore]) {
-    if cores.is_empty() {
+  fn render_cores(&self, f: &mut Frame, r: Rect, label: &str, val: &CpuFreqStore) {
+    if val.cores.is_empty() {
       return;
     }
 
-    // Calculate average usage and frequency across all cores
-    let avg_usage = cores.iter().map(|c| c.usage).sum::<f64>() / cores.len() as f64;
-    let avg_freq = cores.iter().map(|c| c.top_value).sum::<u64>() / cores.len() as u64;
+    let aggregate_ratio = val.aggregate.ratio(self.cfg.ratio_mode);
 
     let title = format!(
       "{} {:3.0}% @ {:4.0} MHz ({} cores)",
       label,
-      avg_usage * 100.0,
-      avg_freq,
-      cores.len()
+      aggregate_ratio.ratio * 100.0,
+      val.aggregate.freq_mhz,
+      val.cores.len()
     );
     let block = self.title_block(title.as_str(), "");
     let inner = block.inner(r);
     f.render_widget(block, r);
 
     // Create vertical layout for each core
-    let constraints: Vec<Constraint> = (0..cores.len()).map(|_| Constraint::Fill(1)).collect();
+    let constraints: Vec<Constraint> = (0..val.cores.len()).map(|_| Constraint::Fill(1)).collect();
 
     let core_areas =
       Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
 
     // Render each core
-    for (i, core) in cores.iter().enumerate() {
+    let show_die = val.has_multiple_dies();
+    for (i, (id, core)) in val.cores.iter().enumerate() {
       if i >= core_areas.len() {
         break;
       }
 
-      let core_label = format!("Core {} {:3.0}%", i, core.usage * 100.0);
+      let core = core.ratio(self.cfg.ratio_mode);
+      let core_label = if show_die {
+        format!("D{} Core {} {:3.0}%", id.die_id, id.core_id, core.ratio * 100.0)
+      } else {
+        format!("Core {} {:3.0}%", id.core_id, core.ratio * 100.0)
+      };
 
       match self.cfg.view_type {
         ViewType::Sparkline => {
@@ -480,7 +532,7 @@ impl App {
             .gauge_style(self.cfg.color)
             .style(self.cfg.color)
             .label(core_label)
-            .ratio(core.usage);
+            .ratio(core.ratio);
           f.render_widget(w, core_areas[i]);
         }
       }
@@ -657,13 +709,11 @@ impl App {
     let ecpu_block_label = format!("{}-CPU", self.soc.ecpu_label);
     let pcpu_block_label = format!("{}-CPU", self.soc.pcpu_label);
     if self.cfg.per_core_view {
-      self.render_multi_core_block(f, c1, &ecpu_block_label, &self.ecpu_freq);
-      self.render_multi_core_block(f, c2, &pcpu_block_label, &self.pcpu_freq);
+      self.render_cores(f, c1, &ecpu_block_label, &self.ecpu_freq);
+      self.render_cores(f, c2, &pcpu_block_label, &self.pcpu_freq);
     } else {
-      let ecpu_agg = compute_aggregate_freq(&self.ecpu_freq);
-      let pcpu_agg = compute_aggregate_freq(&self.pcpu_freq);
-      self.render_freq_block(f, c1, &ecpu_block_label, &ecpu_agg);
-      self.render_freq_block(f, c2, &pcpu_block_label, &pcpu_agg);
+      self.render_freq_block(f, c1, &ecpu_block_label, &self.ecpu_freq.aggregate);
+      self.render_freq_block(f, c2, &pcpu_block_label, &self.pcpu_freq.aggregate);
     }
 
     // 2nd row
@@ -699,7 +749,11 @@ impl App {
     };
 
     let block = self.title_block(&label_l, &label_r);
-    let usage = format!(" q quit | c color | v chart | d detail | -/+ {}ms ", self.cfg.interval);
+    let usage = format!(
+      " q quit | c color | v chart | d detail | r {} | -/+ {}ms ",
+      self.cfg.ratio_mode.label(),
+      self.cfg.interval,
+    );
     let block = block.title_bottom(Line::from(usage).right_aligned());
     let iarea = block.inner(rows[1]);
     f.render_widget(block, rows[1]);
@@ -734,6 +788,7 @@ impl App {
         Event::ChangeColor => self.cfg.next_color(),
         Event::ChangeView => self.cfg.next_view_type(),
         Event::TogglePerCore => self.cfg.toggle_per_core_view(),
+        Event::ToggleRatioMode => self.cfg.toggle_ratio_mode(),
         Event::IncInterval => {
           self.cfg.inc_interval();
           *msec.write().unwrap() = self.cfg.interval;

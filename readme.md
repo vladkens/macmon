@@ -79,6 +79,7 @@ Controls:
   c - change color
   v - switch charts view: gauge / sparkline
   d - toggle detailed CPU/RAM view
+  r - switch ratio mode: scaled / active
   q - quit
 ```
 
