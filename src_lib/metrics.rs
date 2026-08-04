@@ -12,7 +12,7 @@ use crate::sources::{
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
-type CpuCoreKey = (usize, usize);
+type CpuCoreKey = String;
 type FreqMetrics = (u32, f32, f32);
 
 // const CPU_FREQ_DICE_SUBG: &str = "CPU Complex Performance States";
@@ -252,27 +252,59 @@ fn parse_die_id(channel: &str) -> usize {
   rest.split_once('_').and_then(|(id, _)| id.parse().ok()).unwrap_or(0)
 }
 
-fn parse_cpu_core_channel(channel: &str) -> Option<(CpuCoreKind, (usize, usize))> {
-  if let Some(core_id) = parse_cpu_core_id(channel, "PCPU") {
-    return Some((CpuCoreKind::P, (parse_die_id(channel), core_id)));
+fn cpu_core_prefix(channel: &str) -> Option<&'static str> {
+  ["PCPU", "ECPU", "MCPU"].into_iter().find(|prefix| channel.contains(prefix))
+}
+
+fn cpu_core_sort_key(channel: &str) -> (usize, usize, usize) {
+  let die_id = parse_die_id(channel);
+  let Some(prefix) = cpu_core_prefix(channel) else { return (die_id, 0, 0) };
+  let start = channel.find(prefix).unwrap_or_default() + prefix.len();
+  let suffix = &channel[start..];
+
+  if let Some((cluster_id, core_id)) = suffix.split_once("_CPU") {
+    let cluster_id = if cluster_id.is_empty() { 0 } else { cluster_id.parse().unwrap_or(0) };
+    return (die_id, cluster_id, core_id.parse().unwrap_or(0));
   }
 
-  parse_cpu_core_id(channel, "ECPU")
-    .or_else(|| parse_cpu_core_id(channel, "MCPU"))
-    .map(|core_id| (CpuCoreKind::E, (parse_die_id(channel), core_id)))
+  (die_id, 0, parse_cpu_core_id(channel, prefix).unwrap_or(0))
+}
+
+fn parse_cpu_core_channel(channel: &str) -> Option<(CpuCoreKind, CpuCoreKey)> {
+  let kind = if channel.contains("PCPU") {
+    CpuCoreKind::P
+  } else if channel.contains("ECPU") || channel.contains("MCPU") {
+    CpuCoreKind::E
+  } else {
+    return None;
+  };
+
+  // Ultra channel numbers identify a cluster and a core separately, so the complete channel name
+  // is the only collision-free key shared by both regular and Ultra chips.
+  Some((kind, channel.to_owned()))
 }
 
 fn collect_cpu_core_metrics(metrics: HashMap<CpuCoreKey, FreqMetrics>) -> Vec<CpuCoreMetrics> {
   let mut metrics: Vec<_> = metrics.into_iter().collect();
-  metrics.sort_by_key(|&(key, _)| key);
+  metrics.sort_by_key(|(channel, _)| cpu_core_sort_key(channel));
+  let mut next_clustered_core_id = HashMap::<usize, usize>::new();
+
   metrics
     .into_iter()
-    .map(|((die_id, core_id), (freq_mhz, scaled_ratio, active_ratio))| CpuCoreMetrics {
-      die_id,
-      core_id,
-      freq_mhz,
-      scaled_ratio,
-      active_ratio,
+    .map(|(channel, (freq_mhz, scaled_ratio, active_ratio))| {
+      let die_id = parse_die_id(&channel);
+      let core_id = if channel.contains("_CPU") {
+        let next = next_clustered_core_id.entry(die_id).or_default();
+        let core_id = *next;
+        *next += 1;
+        core_id
+      } else {
+        cpu_core_prefix(&channel)
+          .and_then(|prefix| parse_cpu_core_id(&channel, prefix))
+          .unwrap_or_default()
+      };
+
+      CpuCoreMetrics { die_id, core_id, freq_mhz, scaled_ratio, active_ratio }
     })
     .collect()
 }
@@ -511,15 +543,12 @@ impl Sampler {
     // CPU Stats channel naming by chip family (see: https://github.com/vladkens/macmon/issues/47)
     //   M1-M4:  ECPU* = efficiency cores (lower tier)
     //           PCPU* = performance cores (top tier)
-    //   M5:     Apple renamed ECPU → MCPU in IOReport and introduced a third core tier.
-    //           Three-tier architecture (sysctl hw.perflevel{N}.name):
-    //             perflevel0 = Super       (top tier,    ex-P, PCPU* in IOReport)
-    //             perflevel1 = Performance (mid tier,    Pro/Max only, MCPU* in IOReport)
-    //             perflevel2 = Efficiency  (base M5 only, absent on Pro/Max)
-    //           M5 Max example: 6 Super + 12 Performance + 0 Efficiency = 18 total.
+    //   M5:     The family has three core tiers, but current chips expose two at a time:
+    //             Base:    PCPU* = Super, ECPU* = Efficiency
+    //             Pro/Max: PCPU* = Super, MCPU* = Performance
+    //           MCPU is a separate middle-tier design, not a renamed ECPU core.
     //   Ultra:  Any-generation Ultra chips prefix channels with "DIE_N_"
-    //           (e.g. "DIE_0_ECPU0"), so use contains() not starts_with() — same
-    //           pattern as Energy Model's "DIE_{}_CPU Energy".
+    //           and include cluster/core separators (e.g. "DIE_0_PCPU1_CPU0").
 
     let duration = Duration::from_millis(duration as u64);
     let (sample, elapsed) = self.ior.get_sample_interval(duration);
@@ -545,7 +574,7 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
-  use std::collections::HashMap;
+  use std::collections::{HashMap, HashSet};
 
   use crate::sources::SocInfo;
 
@@ -625,8 +654,8 @@ mod tests {
   #[test]
   fn orders_named_core_metrics() {
     let cores = collect_cpu_core_metrics(HashMap::from([
-      ((1, 0), (2000, 0.50, 0.75)),
-      ((0, 1), (1000, 0.25, 0.50)),
+      ("DIE_1_ECPU0".into(), (2000, 0.50, 0.75)),
+      ("DIE_0_ECPU1".into(), (1000, 0.25, 0.50)),
     ]));
 
     assert_eq!((cores[0].die_id, cores[0].core_id), (0, 1));
@@ -672,17 +701,60 @@ mod tests {
     // On Ultra chips (M1/M2/M3 Ultra) IOReport CPU Stats channels are prefixed "DIE_N_".
     // The DIE_N prefix must not be mistaken for the core id.
     let cases = [
-      ("DIE_0_ECPU0", Some((CpuCoreKind::E, (0, 0)))),
-      ("DIE_1_ECPU0", Some((CpuCoreKind::E, (1, 0)))),
-      ("DIE_0_PCPU0", Some((CpuCoreKind::P, (0, 0)))),
-      ("DIE_1_PCPU0", Some((CpuCoreKind::P, (1, 0)))),
-      ("ECPU7", Some((CpuCoreKind::E, (0, 7)))),
-      ("PCPU12", Some((CpuCoreKind::P, (0, 12)))),
-      ("MCPU3", Some((CpuCoreKind::E, (0, 3)))), // M5+ performance cores map to ecpu slot
+      ("DIE_0_ECPU0", Some(CpuCoreKind::E)),
+      ("DIE_1_ECPU0", Some(CpuCoreKind::E)),
+      ("DIE_0_PCPU0", Some(CpuCoreKind::P)),
+      ("DIE_1_PCPU0", Some(CpuCoreKind::P)),
+      ("ECPU7", Some(CpuCoreKind::E)),
+      ("PCPU12", Some(CpuCoreKind::P)),
+      ("MCPU3", Some(CpuCoreKind::E)), // M5+ performance cores map to ecpu slot
       ("GPU0", None),
     ];
     for (channel, expected) in cases {
-      assert_eq!(parse_cpu_core_channel(channel), expected, "channel {channel}");
+      assert_eq!(
+        parse_cpu_core_channel(channel).map(|(kind, _)| kind),
+        expected,
+        "channel {channel}"
+      );
     }
+  }
+
+  #[test]
+  fn parses_real_m3_ultra_core_channels_without_collisions() {
+    let channels = [
+      "DIE_0_ECPU_CPU0",
+      "DIE_0_ECPU_CPU1",
+      "DIE_0_PCPU_CPU0",
+      "DIE_0_PCPU_CPU1",
+      "DIE_0_PCPU1_CPU0",
+      "DIE_0_PCPU1_CPU1",
+      "DIE_1_ECPU_CPU0",
+      "DIE_1_PCPU_CPU0",
+      "DIE_1_PCPU1_CPU0",
+    ];
+    let parsed = channels.map(parse_cpu_core_channel);
+
+    assert!(parsed.iter().all(Option::is_some));
+    let unique = parsed
+      .into_iter()
+      .flatten()
+      .map(|(kind, key)| (kind == CpuCoreKind::P, key))
+      .collect::<HashSet<_>>();
+    assert_eq!(unique.len(), channels.len());
+  }
+
+  #[test]
+  fn flattens_real_ultra_cluster_channels_into_core_ids() {
+    let cores = collect_cpu_core_metrics(HashMap::from([
+      ("DIE_0_PCPU1_CPU0".into(), (2000, 0.50, 0.75)),
+      ("DIE_0_PCPU_CPU1".into(), (1100, 0.25, 0.50)),
+      ("DIE_0_PCPU_CPU0".into(), (1000, 0.20, 0.40)),
+      ("DIE_1_PCPU_CPU0".into(), (1200, 0.30, 0.60)),
+    ]));
+
+    assert_eq!(
+      cores.iter().map(|core| (core.die_id, core.core_id, core.freq_mhz)).collect::<Vec<_>>(),
+      [(0, 0, 1000), (0, 1, 1100), (0, 2, 2000), (1, 0, 1200)]
+    );
   }
 }

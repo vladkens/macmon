@@ -1,3 +1,13 @@
+## v0.8.2 – 2026-08-04
+
+### Fixes
+
+- Fixed a regression that caused missing per-core CPU metrics on M3 Ultra systems (#55)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.1...v0.8.2
+
+---
+
 ## v0.8.1 – 2026-07-31
 
 ### Features
