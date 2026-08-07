@@ -1,3 +1,11 @@
+## v0.8.3 – unreleased
+
+### Fixes
+
+- Fixed a panic in the frequency sampler when a residency window has no IDLE/DOWN/OFF prefix or is malformed (by @YuriNachos)
+
+---
+
 ## v0.8.2 – 2026-08-04
 
 ### Fixes
