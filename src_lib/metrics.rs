@@ -204,15 +204,17 @@ fn read_smc_numeric_u32(smc: &mut SMC, key: &str) -> Option<u32> {
 }
 
 fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> FreqMetrics {
-  let (len1, len2) = (items.len(), freqs.len());
-  assert!(len1 > len2, "calc_freq invalid data: {len1} vs {len2}"); // todo?
-
   // CPU layouts are [IDLE, frequencies...] or [DOWN, IDLE, frequencies...];
-  // GPU uses OFF before frequency states.
-  let offset = items
-    .iter()
-    .position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF")
-    .expect("calc_freq missing active states");
+  // GPU uses OFF before frequency states. A window may also start at the first
+  // active state (no inactive prefix); malformed or all-inactive windows return zeros.
+  let Some(offset) = items.iter().position(|x| x.0 != "IDLE" && x.0 != "DOWN" && x.0 != "OFF")
+  else {
+    return (0, 0.0, 0.0);
+  };
+
+  if items.len() - offset < freqs.len() {
+    return (0, 0.0, 0.0);
+  }
 
   let usage = items.iter().skip(offset).take(freqs.len()).map(|x| x.1 as f64).sum::<f64>();
   let total = items.iter().map(|x| x.1 as f64).sum::<f64>();
@@ -694,6 +696,40 @@ mod tests {
     assert_eq!(frequency, 1000);
     assert!((scaled_ratio - 0.05).abs() < f32::EPSILON);
     assert!((active_ratio - 0.1).abs() < f32::EPSILON);
+  }
+
+  #[test]
+  fn calc_freq_handles_residency_window_without_idle_prefix() {
+    let (frequency, scaled_ratio, active_ratio) = calc_freq_from_residencies(
+      &[("1000 MHz".into(), 100), ("2000 MHz".into(), 50)],
+      &[1000, 2000],
+    );
+
+    assert_eq!(frequency, 1333);
+    assert!((scaled_ratio - 2.0 / 3.0).abs() < f32::EPSILON);
+    assert!((active_ratio - 1.0).abs() < f32::EPSILON);
+  }
+
+  #[test]
+  fn calc_freq_returns_safe_values_for_malformed_residency_window() {
+    let (frequency, scaled_ratio, active_ratio) =
+      calc_freq_from_residencies(&[("1000 MHz".into(), 100)], &[1000, 2000]);
+
+    assert_eq!(frequency, 0);
+    assert_eq!(scaled_ratio, 0.0);
+    assert_eq!(active_ratio, 0.0);
+  }
+
+  #[test]
+  fn calc_freq_returns_safe_values_when_all_states_inactive() {
+    let (frequency, scaled_ratio, active_ratio) = calc_freq_from_residencies(
+      &[("IDLE".into(), 100), ("DOWN".into(), 50), ("OFF".into(), 0)],
+      &[1000, 2000],
+    );
+
+    assert_eq!(frequency, 0);
+    assert_eq!(scaled_ratio, 0.0);
+    assert_eq!(active_ratio, 0.0);
   }
 
   #[test]
