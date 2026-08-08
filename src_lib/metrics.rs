@@ -580,7 +580,8 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, Metrics, aggregate_ioreport_metrics, calc_freq_from_residencies,
-    collect_cpu_core_metrics, parse_cpu_core_channel, smc_numeric_value,
+    collect_cpu_core_metrics, cpu_core_prefix, cpu_core_sort_key, parse_cpu_core_channel,
+    parse_cpu_core_id, parse_die_id, smc_numeric_value,
   };
 
   fn core(
@@ -756,5 +757,90 @@ mod tests {
       cores.iter().map(|core| (core.die_id, core.core_id, core.freq_mhz)).collect::<Vec<_>>(),
       [(0, 0, 1000), (0, 1, 1100), (0, 2, 2000), (1, 0, 1200)]
     );
+  }
+
+  #[test]
+  fn parse_cpu_core_id_extracts_numeric_suffix() {
+    assert_eq!(parse_cpu_core_id("ECPU0", "ECPU"), Some(0));
+    assert_eq!(parse_cpu_core_id("PCPU12", "PCPU"), Some(12));
+    // On Ultra channels the digit run right after the prefix is the cluster id.
+    assert_eq!(parse_cpu_core_id("DIE_0_PCPU1_CPU0", "PCPU"), Some(1));
+    assert_eq!(parse_cpu_core_id("ECPU", "ECPU"), None);
+    assert_eq!(parse_cpu_core_id("GPU0", "ECPU"), None);
+  }
+
+  #[test]
+  fn parse_die_id_reads_die_prefix() {
+    assert_eq!(parse_die_id("DIE_0_ECPU0"), 0);
+    assert_eq!(parse_die_id("DIE_1_PCPU0"), 1);
+    assert_eq!(parse_die_id("DIE_2_PCPU1_CPU0"), 2);
+    assert_eq!(parse_die_id("ECPU0"), 0);
+    assert_eq!(parse_die_id("DIE_X_PCPU0"), 0);
+  }
+
+  #[test]
+  fn cpu_core_prefix_detects_tier() {
+    assert_eq!(cpu_core_prefix("ECPU0"), Some("ECPU"));
+    assert_eq!(cpu_core_prefix("PCPU12"), Some("PCPU"));
+    assert_eq!(cpu_core_prefix("MCPU3"), Some("MCPU"));
+    assert_eq!(cpu_core_prefix("DIE_0_PCPU1_CPU0"), Some("PCPU"));
+    assert_eq!(cpu_core_prefix("GPU0"), None);
+  }
+
+  #[test]
+  fn cpu_core_sort_key_orders_die_cluster_core() {
+    assert_eq!(cpu_core_sort_key("ECPU0"), (0, 0, 0));
+    assert_eq!(cpu_core_sort_key("ECPU7"), (0, 0, 7));
+    assert_eq!(cpu_core_sort_key("PCPU12"), (0, 0, 12));
+    assert_eq!(cpu_core_sort_key("DIE_0_ECPU_CPU0"), (0, 0, 0));
+    assert_eq!(cpu_core_sort_key("DIE_0_PCPU_CPU1"), (0, 0, 1));
+    assert_eq!(cpu_core_sort_key("DIE_0_PCPU1_CPU0"), (0, 1, 0));
+    assert_eq!(cpu_core_sort_key("DIE_0_PCPU1_CPU1"), (0, 1, 1));
+    assert_eq!(cpu_core_sort_key("DIE_0_PCPU10_CPU0"), (0, 10, 0));
+    assert_eq!(cpu_core_sort_key("DIE_1_PCPU_CPU0"), (1, 0, 0));
+    assert_eq!(cpu_core_sort_key("DIE_1_PCPU1_CPU0"), (1, 1, 0));
+    // Non-CPU channel has no tier prefix, so it collapses to (die, 0, 0).
+    assert_eq!(cpu_core_sort_key("GPU0"), (0, 0, 0));
+
+    // The (die, cluster, core) tuple must map mixed single-die + Ultra channels
+    // into one physically-meaningful order: die 0 before die 1, cluster 0 before
+    // cluster N, core 0 before core N within a cluster. This is the ordering
+    // collect_cpu_core_metrics depends on for stable per-core output.
+    let mut channels = vec![
+      "DIE_1_PCPU1_CPU0",
+      "PCPU12",
+      "DIE_0_PCPU1_CPU1",
+      "ECPU0",
+      "DIE_0_PCPU_CPU1",
+      "DIE_1_PCPU_CPU0",
+      "DIE_0_ECPU_CPU0",
+      "ECPU7",
+      "DIE_0_PCPU1_CPU0",
+    ];
+    channels.sort_by_key(|&ch| cpu_core_sort_key(ch));
+    assert_eq!(
+      channels,
+      vec![
+        "ECPU0",
+        "DIE_0_ECPU_CPU0",
+        "DIE_0_PCPU_CPU1",
+        "ECPU7",
+        "PCPU12",
+        "DIE_0_PCPU1_CPU0",
+        "DIE_0_PCPU1_CPU1",
+        "DIE_1_PCPU_CPU0",
+        "DIE_1_PCPU1_CPU0",
+      ]
+    );
+  }
+
+  #[test]
+  fn parse_cpu_core_channel_returns_full_name_as_key() {
+    // The full channel name is the collision-free key shared by regular and
+    // Ultra chips: Ultra channels encode cluster and core separately, so the
+    // raw channel must be preserved verbatim (see parse_cpu_core_channel).
+    assert_eq!(parse_cpu_core_channel("DIE_0_PCPU1_CPU0").unwrap().1.as_str(), "DIE_0_PCPU1_CPU0");
+    assert_eq!(parse_cpu_core_channel("PCPU12").unwrap().1.as_str(), "PCPU12");
+    assert_eq!(parse_cpu_core_channel("GPU0"), None);
   }
 }
