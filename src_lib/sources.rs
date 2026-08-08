@@ -535,13 +535,46 @@ fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
 
+/// Apple Silicon chip family, parsed from the leading letter of a brand string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChipFamily {
+  M,
+  A,
+}
+
+/// Parse an Apple Silicon brand string such as "Apple M3 Max" or "Apple A17 Pro" into
+/// its `(family, major generation)` pair. Returns `None` for non-Apple-Silicon names
+/// (e.g. "Intel i7") and for empty input.
+///
+/// Only the family letter and the leading digits are considered; the vendor prefix
+/// "Apple " and any suffix (" Pro", " Max", " Ultra") are ignored. Parsing the
+/// generation directly — rather than substring-matching "M1" — keeps future M10/M11
+/// chips from falsely matching the M1 rule.
+fn chip_generation(name: &str) -> Option<(ChipFamily, u32)> {
+  // "Apple M3 Max" -> "M3 Max" -> family M, leading digits "3".
+  let rest = name.strip_prefix("Apple ")?;
+  let family = match rest.chars().next()? {
+    'M' => ChipFamily::M,
+    'A' => ChipFamily::A,
+    _ => return None,
+  };
+  // Major number = leading digits right after the family letter (rest[1..] is safe:
+  // 'M'/'A' are ASCII, so the first byte is a full char).
+  let major =
+    rest[1..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>().ok()?;
+  Some((family, major))
+}
+
 // M1–M3 and A-series chips store frequencies in Hz; M4+ store in kHz.
 fn cpu_freq_scale(chip_name: &str) -> u32 {
-  let hz_freqs = chip_name.contains("M1")
-    || chip_name.contains("M2")
-    || chip_name.contains("M3")
-    || chip_name.contains("A1"); // A14–A18 and future A1x chips
-  if hz_freqs { 1_000_000 } else { 1_000 }
+  // Route through chip_generation so future M10/M11 chips (whose names contain "M1"
+  // as a substring) land on the kHz path instead of the legacy M1 Hz rule.
+  let is_hz = match chip_generation(chip_name) {
+    Some((ChipFamily::M, major)) => major <= 3,
+    Some((ChipFamily::A, _)) => true,
+    None => false,
+  };
+  if is_hz { 1_000_000 } else { 1_000 }
 }
 
 // Try known voltage-states key (M1-M4) first, fall back to acc-clusters discovery (M5+).
@@ -639,6 +672,19 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 // M1-M4). M5 drops E-cores for a new higher "Super" tier above Performance, so the
 // same two-slot ecpu/pcpu split still applies, just relabeled P/S instead of E/P.
 // Unverified on real M5 hardware (see hw_from_profiler for the tested fallback path).
+//
+// M1–M4 and A-series chips keep the legacy Efficiency/Performance (E/P) labels; M5+
+// uses Performance/Super (P/S). chip_generation (not substring matching) drives the
+// decision so future M10/M11 chips don't falsely match the M1 legacy rule.
+fn cpu_tier_labels(chip_name: &str) -> (&'static str, &'static str) {
+  let is_legacy = match chip_generation(chip_name) {
+    Some((ChipFamily::M, major)) => major <= 4,
+    Some((ChipFamily::A, _)) => true,
+    None => false,
+  };
+  if is_legacy { ("E", "P") } else { ("P", "S") }
+}
+
 fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static str)> {
   let nperflevels = sysctl_u32("hw.nperflevels")?;
   if nperflevels < 2 {
@@ -648,8 +694,7 @@ fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static st
   let hi = sysctl_u32("hw.perflevel0.physicalcpu")?;
   let lo = sysctl_u32(&format!("hw.perflevel{}.physicalcpu", nperflevels - 1))?;
 
-  let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
-  let (ecpu_label, pcpu_label) = if is_legacy { ("E", "P") } else { ("P", "S") };
+  let (ecpu_label, pcpu_label) = cpu_tier_labels(chip_name);
 
   Some((lo as u8, hi as u8, ecpu_label, pcpu_label))
 }
@@ -1405,6 +1450,47 @@ mod tests {
     ] {
       assert_eq!(parse_cpu_cores(value), expected, "{value}");
     }
+  }
+
+  #[test]
+  fn chip_generation_parses_apple_silicon() {
+    assert_eq!(chip_generation("Apple M1"), Some((ChipFamily::M, 1)));
+    assert_eq!(chip_generation("Apple M1 Ultra"), Some((ChipFamily::M, 1)));
+    assert_eq!(chip_generation("Apple M3 Max"), Some((ChipFamily::M, 3)));
+    assert_eq!(chip_generation("Apple M4"), Some((ChipFamily::M, 4)));
+    assert_eq!(chip_generation("Apple M5"), Some((ChipFamily::M, 5)));
+    assert_eq!(chip_generation("Apple M10"), Some((ChipFamily::M, 10))); // the killer case
+    assert_eq!(chip_generation("Apple M11 Pro"), Some((ChipFamily::M, 11)));
+    assert_eq!(chip_generation("Apple A17 Pro"), Some((ChipFamily::A, 17)));
+    assert_eq!(chip_generation("Apple A14"), Some((ChipFamily::A, 14)));
+    assert_eq!(chip_generation("Intel i7"), None);
+    assert_eq!(chip_generation(""), None);
+  }
+
+  #[test]
+  fn cpu_freq_scale_future_chips_use_khz() {
+    // Current chips — behavior preserved (GREEN both before and after):
+    assert_eq!(cpu_freq_scale("Apple M1"), 1_000_000); // Hz
+    assert_eq!(cpu_freq_scale("Apple M3 Max"), 1_000_000);
+    assert_eq!(cpu_freq_scale("Apple A17 Pro"), 1_000_000);
+    assert_eq!(cpu_freq_scale("Apple M4"), 1_000); // kHz
+    assert_eq!(cpu_freq_scale("Apple M5"), 1_000);
+    // FUTURE chips — RED on today's code (returns 1_000_000), GREEN after the fix:
+    assert_eq!(cpu_freq_scale("Apple M10"), 1_000); // today: wrongly 1_000_000
+    assert_eq!(cpu_freq_scale("Apple M11"), 1_000); // today: wrongly 1_000_000
+  }
+
+  #[test]
+  fn cpu_tier_labels_future_chips_are_m5_style() {
+    // Legacy (E/P) — preserved:
+    assert_eq!(cpu_tier_labels("Apple M1"), ("E", "P"));
+    assert_eq!(cpu_tier_labels("Apple M4"), ("E", "P"));
+    assert_eq!(cpu_tier_labels("Apple A17 Pro"), ("E", "P"));
+    // M5-style (P/S) — preserved:
+    assert_eq!(cpu_tier_labels("Apple M5"), ("P", "S"));
+    // FUTURE — RED today (returns ("E","P")), GREEN after fix (returns ("P","S")):
+    assert_eq!(cpu_tier_labels("Apple M10"), ("P", "S"));
+    assert_eq!(cpu_tier_labels("Apple M11"), ("P", "S"));
   }
 
   #[test]

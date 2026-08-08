@@ -1,3 +1,11 @@
+## v0.8.3 – Unreleased
+
+### Fixes
+
+- Fixed CPU frequency scaling and core-tier labels for future Apple Silicon chips whose names contain earlier substrings (e.g. M10/M11) (by @YuriNachos) (#PR)
+
+---
+
 ## v0.8.2 – 2026-08-04
 
 ### Fixes
