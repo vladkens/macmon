@@ -114,7 +114,14 @@ struct Cli {
 }
 
 fn clock(seconds: u64) -> String {
-  format!("{:02}:{:02}", seconds / 60, seconds % 60)
+  let hours = seconds / 3600;
+  let minutes = (seconds / 60) % 60;
+  let secs = seconds % 60;
+  if hours > 0 {
+    format!("{hours:02}:{minutes:02}:{secs:02}")
+  } else {
+    format!("{minutes:02}:{secs:02}")
+  }
 }
 
 fn run_stress(
@@ -261,4 +268,29 @@ fn main() -> Result<(), Box<dyn Error>> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn clock_below_one_hour_is_minutes_seconds() {
+    assert_eq!(clock(0), "00:00");
+    assert_eq!(clock(9), "00:09");
+    assert_eq!(clock(59), "00:59");
+    assert_eq!(clock(60), "01:00");
+    assert_eq!(clock(90), "01:30");
+    assert_eq!(clock(599), "09:59");
+    assert_eq!(clock(600), "10:00");
+    assert_eq!(clock(3599), "59:59");
+  }
+
+  #[test]
+  fn clock_at_and_above_one_hour_rolls_into_hours() {
+    assert_eq!(clock(3600), "01:00:00");
+    assert_eq!(clock(3661), "01:01:01");
+    assert_eq!(clock(7200), "02:00:00");
+    assert_eq!(clock(86399), "23:59:59");
+  }
 }

@@ -1,3 +1,11 @@
+## v0.8.3 – unreleased
+
+### Fixes
+
+- Fixed the `stress` spinner timer to roll into `HH:MM:SS` for runs over one hour instead of printing unbounded minutes such as `60:00` (by @YuriNachos)
+
+---
+
 ## v0.8.2 – 2026-08-04
 
 ### Fixes
