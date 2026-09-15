@@ -15,6 +15,11 @@ type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 type CpuCoreKey = String;
 type FreqMetrics = (u32, f32, f32);
 
+// Verified specifically on Apple M3 Max: P0 core/misc, P1 core/misc, and
+// E-cluster rails, respectively. SMC key meanings vary by processor; do not
+// reuse this mapping for another M-series chip without hardware validation.
+const M3_MAX_CPU_POWER_KEYS: [&str; 5] = ["PC02", "PC03", "PC42", "PC43", "PP5b"];
+
 // const CPU_FREQ_DICE_SUBG: &str = "CPU Complex Performance States";
 const CPU_FREQ_CORE_SUBG: &str = "CPU Core Performance States";
 const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
@@ -201,6 +206,13 @@ fn read_smc_numeric_u32(smc: &mut SMC, key: &str) -> Option<u32> {
   let val = smc.read_val(key).ok()?;
   let val = smc_numeric_value(&val.data, &val.unit)?;
   fan_rpm_value(val)
+}
+
+fn cpu_power_smc_keys(chip_name: &str) -> Option<&'static [&'static str]> {
+  match chip_name {
+    "Apple M3 Max" => Some(&M3_MAX_CPU_POWER_KEYS),
+    _ => None,
+  }
 }
 
 fn calc_freq_from_residencies(items: &[(String, i64)], freqs: &[u32]) -> FreqMetrics {
@@ -474,6 +486,14 @@ impl Sampler {
     self.smc.read_float_val("PSTR")
   }
 
+  fn get_cpu_power_smc(&mut self) -> Option<f32> {
+    let keys = cpu_power_smc_keys(&self.soc.chip_name)?;
+    keys.iter().try_fold(0.0, |total, key| {
+      let value = self.smc.read_float_val(key).ok()?;
+      (value.is_finite() && value >= 0.0).then_some(total + value)
+    })
+  }
+
   fn get_ioreport_metrics(
     &self,
     sample: crate::sources::IOReportIterator,
@@ -552,7 +572,19 @@ impl Sampler {
 
     let duration = Duration::from_millis(duration as u64);
     let (sample, elapsed) = self.ior.get_sample_interval(duration);
-    let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, elapsed)?, &self.soc);
+    let mut raw = self.get_ioreport_metrics(sample, elapsed)?;
+
+    // AppleT6031PMGR's CPU Energy counter can freeze at zero on macOS 27 while
+    // the M3 Max SMC cluster rails continue reporting live power. Prefer the
+    // standard IOReport total whenever it works and use the measured cluster
+    // rails only for the affected zero-reading case.
+    if raw.cpu_power == 0.0
+      && let Some(cpu_power) = self.get_cpu_power_smc()
+    {
+      raw.cpu_power = cpu_power;
+    }
+
+    let mut rs = aggregate_ioreport_metrics(raw, &self.soc);
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -580,7 +612,7 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, Metrics, aggregate_ioreport_metrics, calc_freq_from_residencies,
-    collect_cpu_core_metrics, parse_cpu_core_channel, smc_numeric_value,
+    collect_cpu_core_metrics, cpu_power_smc_keys, parse_cpu_core_channel, smc_numeric_value,
   };
 
   fn core(
@@ -609,6 +641,16 @@ mod tests {
     assert_eq!(smc_numeric_value(&[0x13, 0x88], "fpe2"), Some(1250.0));
     assert_eq!(smc_numeric_value(&[0x04, 0xd2], "ui16"), Some(1234.0));
     assert_eq!(smc_numeric_value(&[0x00, 0x00, 0x04, 0xd2], "ui32"), Some(1234.0));
+  }
+
+  #[test]
+  fn scopes_cpu_power_smc_fallback_to_m3_max() {
+    assert_eq!(
+      cpu_power_smc_keys("Apple M3 Max"),
+      Some(&["PC02", "PC03", "PC42", "PC43", "PP5b"][..])
+    );
+    assert_eq!(cpu_power_smc_keys("Apple M3 Pro"), None);
+    assert_eq!(cpu_power_smc_keys("Apple M4 Max"), None);
   }
 
   #[test]
