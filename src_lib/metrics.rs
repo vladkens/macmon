@@ -15,7 +15,9 @@ type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 type CpuCoreKey = String;
 type FreqMetrics = (u32, f32, f32);
 
-// P0 core/misc, P1 core/misc, and E-cluster rails, respectively.
+// Verified specifically on Apple M3 Max: P0 core/misc, P1 core/misc, and
+// E-cluster rails, respectively. SMC key meanings vary by processor; do not
+// reuse this mapping for another M-series chip without hardware validation.
 const M3_MAX_CPU_POWER_KEYS: [&str; 5] = ["PC02", "PC03", "PC42", "PC43", "PP5b"];
 
 // const CPU_FREQ_DICE_SUBG: &str = "CPU Complex Performance States";
