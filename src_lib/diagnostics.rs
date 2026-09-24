@@ -7,7 +7,7 @@ use crate::shared::ioreport_channels_filter;
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
   cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
-  libc_ram, libc_swap, sysctl_str,
+  is_pmgr_node, libc_ram, libc_swap, sysctl_str,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -84,7 +84,8 @@ pub fn print_debug() -> WithError<()> {
 
   print_divider("AppleARMIODevice");
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
-    if name == "pmgr" {
+    if is_pmgr_node(&name) {
+      println!("[{name}]");
       let item = cfio_get_props(entry, name)?;
       let mut keys = cfdict_keys(item);
       keys.sort();

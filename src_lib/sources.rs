@@ -531,6 +531,12 @@ fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
   parse_acc_clusters(&data)
 }
 
+// M1-M5 keep DVFS tables on "pmgr"; M6+ move them to a "pmgr-child" node
+// (compatible "pmgr2,t8152") and leave "pmgr" as a bare "pmgr2,arch" stub.
+pub(crate) fn is_pmgr_node(name: &str) -> bool {
+  name == "pmgr" || name == "pmgr-child"
+}
+
 fn to_mhz(vals: Vec<u32>, scale: u32) -> Vec<u32> {
   vals.iter().map(|x| *x / scale).collect()
 }
@@ -751,19 +757,26 @@ fn load_soc_info() -> WithError<SocInfo> {
   // CPU/GPU frequencies always come from IOKit directly, regardless of how the
   // rest of the hardware descriptor above was sourced.
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
-    if name == "pmgr" {
+    if is_pmgr_node(&name) {
       let item = cfio_get_props(entry, name)?;
       // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
       //    but their values are zero, so sram used here; it looks valid.
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
-      if let Some(f) = cpu_freqs(item, "voltage-states1-sram", true, cpu_scale) {
+      // First node with a table wins, so a stub node can't clobber real values.
+      if info.ecpu_freqs.is_empty()
+        && let Some(f) = cpu_freqs(item, "voltage-states1-sram", true, cpu_scale)
+      {
         info.ecpu_freqs = f;
       }
-      if let Some(f) = cpu_freqs(item, "voltage-states5-sram", false, cpu_scale) {
+      if info.pcpu_freqs.is_empty()
+        && let Some(f) = cpu_freqs(item, "voltage-states5-sram", false, cpu_scale)
+      {
         info.pcpu_freqs = f;
       }
 
-      if let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states9") {
+      if info.gpu_freqs.is_empty()
+        && let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states9")
+      {
         info.gpu_freqs = to_mhz(freqs, gpu_scale);
       }
       unsafe { CFRelease(item as _) }
