@@ -89,7 +89,7 @@
 - Own processes: `proc_listallpids` → `proc_pidinfo(PROC_PIDTBSDINFO)` (uid, ppid, name) → `proc_pid_rusage(RUSAGE_INFO_V6)` (user+system time, `ri_phys_footprint`, `ri_energy_nj`). `ri_*_time` are mach absolute units → convert with `mach_timebase_info`. Name = basename of `proc_pidpath`, fallback `pbi_name`.
 - Foreign processes (libproc failed): one `ps -A -o pid=,ppid=,uid=,rss=,time=,comm=` per tick; parse `[[dd-]hh:]mm:ss.ss`; memory = RSS; power = `None`. Skipped when running as root.
 - GPU: walk `IOAccelerator` children, read `IOUserClientCreator` + sum `AppUsage[].accumulatedGPUTime` per pid.
-- CPU % follows Activity Monitor convention (100% = one core). Deltas keyed by pid; negative delta or changed start time → treat as new process (no spike).
+- CPU % follows Activity Monitor convention (100% = one core). Deltas keyed by pid; negative delta, changed start time or changed command → treat as new process (no spike).
 - User names via `getpwuid_r`, cached per uid.
 - Thread `run_procs_thread` uses the same interval `Arc<RwLock<u32>>`, sends `Event::Procs(Vec<ProcInfo>)`; `AtomicBool` pauses it while the proc panel is hidden or auto-hidden.
 
@@ -201,12 +201,12 @@
 **Files:**
 - Modify: `src_app/procs.rs`
 
-- [ ] run `ps -A -o pid=,ppid=,uid=,rss=,time=,comm=` only when some pids failed libproc and euid != 0
-- [ ] parse lines (names with spaces, `m:ss.ss`, `h:mm:ss`, `d-hh:mm:ss`), merge into results with `power_w = None`
-- [ ] uid → user name via `getpwuid_r` with cache; fallback to numeric uid
-- [ ] write tests for ps line parsing and time parsing (valid, malformed, empty)
-- [ ] write tests for merge: libproc entries win over ps entries for the same pid
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] run `ps -A -o pid=,ppid=,uid=,rss=,time=,comm=` only when some pids failed libproc and euid != 0 (runs `/bin/ps` by absolute path; the `ps` child's own pid is dropped from its output)
+- [x] parse lines (names with spaces, `m:ss.ss`, `h:mm:ss`, `d-hh:mm:ss`), merge into results with `power_w = None` (memory = RSS; ➕ both sources produce a `Raw` row, rates are computed once in `ProcSampler::update`; `ps` has no start time, so a process is the same while pid + start time + command match — a changed command reads as a new process, also after `exec`; names still come from `proc_pidpath`, falling back to the basename of `comm`)
+- [x] uid → user name via `getpwuid_r` with cache; fallback to numeric uid (cache = `ProcSampler::users`)
+- [x] write tests for ps line parsing and time parsing (valid, malformed, empty)
+- [x] write tests for merge: libproc entries win over ps entries for the same pid (➕ also `update()` rates for ps rows without power, command change → no spike, user names; the live sampling test checks `launchd` comes in as `root`)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 8: Per-process GPU usage from IORegistry
 
