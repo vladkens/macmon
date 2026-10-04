@@ -333,7 +333,21 @@ User decision after Task 11: follow the terminal's color scheme instead of built
 - [x] run `make check`
 - [x] run `cargo run --release` manually and walk through every key (automated part: the release binary on a pty with a `pyte` screen, every key checked on screen and in the saved config (`HOME` in the scratchpad): `d`, `r`, `+` / `=` / `-`, `1`–`5`, `s` × 6, `S`, `/` typing with `q` / Backspace / Enter / Esc, ↑ ↓ PgUp PgDn Home End, Esc clears selection then filter, `c` / `v` do nothing, `q` and Ctrl-C (also while typing) exit 0, resize; 86/86 checks. Walking through it in a real terminal by hand: skipped - not automatable, see Post-Completion)
 
-### Task 14: [Final] Update documentation
+### Task 14: ➕ Restore per-row power avg / max
+
+The user asked at the start to keep every existing label. The old UI showed avg / max for CPU, GPU and ANE power (`CPU 4.20W (3.10, 8.20) 58°C`) and for SYS (`Total 18.30W (17.10, 21.40)`); V3 dropped them (⚠️ found in Task 13).
+
+**Files:**
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/layout.rs` (only if the power column width changes)
+
+- [ ] power rows CPU / GPU / ANE show current W, avg and max (same values as `PowerStore::top_value` / `avg_value` / `max_value`), plus temp for CPU / GPU; the SYS row shows SYS W with avg / max, fans stay on that row or the next one when they don't fit
+- [ ] widen the power column on wide terminals so the braille history keeps ≥ 8 cells next to the numbers; when space is short drop the graph first, then the temperature, and avg / max last (current W always stays)
+- [ ] keep the `all` row with total avg / max
+- [ ] write render tests: avg / max visible for CPU / GPU / ANE / SYS at 200x50 and 120x40; at 80x24 and 60x15 numbers stay and the graph is dropped first; nothing overflows the column or the box
+- [ ] run `make test` and `make check` - must pass before next task
+
+### Task 15: [Final] Update documentation
 - [ ] update `readme.md`: features list, Controls section, note on process data without sudo
 - [ ] add entry to `changelog.md`
 - [ ] move this plan to `docs/plans/completed/`
