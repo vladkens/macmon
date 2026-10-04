@@ -4,8 +4,10 @@
 //! replies and a terminal that ignores OSC 4 doesn't cost the full timeout.
 //!
 //! The query needs raw mode (no echo, no line buffering), and nothing else may read the terminal
-//! meanwhile: replies left unread would reach crossterm, which reads them as key presses.
+//! meanwhile: replies left unread would reach crossterm, which reads them as key presses. Over SSH
+//! replies can be that late, so remote sessions skip the query.
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -178,6 +180,22 @@ fn query(term: &mut (impl Write + TimedRead)) -> io::Result<Option<Palette>> {
   Ok(palette)
 }
 
+/// Environment variables sshd sets in a remote session.
+const SSH_VARS: [&str; 2] = ["SSH_TTY", "SSH_CONNECTION"];
+
+/// Whether asking the terminal for its palette is worth it. Only a smooth (truecolor) gradient
+/// uses the palette, and over SSH the replies can come back after the drain window and turn into
+/// key presses, so remote sessions keep the ANSI steps.
+pub fn should_query(truecolor: bool) -> bool {
+  wants_query(truecolor, |name| std::env::var_os(name))
+}
+
+/// `should_query` with the environment lookup passed in; empty variables count as unset.
+fn wants_query(truecolor: bool, env: impl Fn(&str) -> Option<OsString>) -> bool {
+  let ssh = SSH_VARS.iter().any(|name| env(name).is_some_and(|value| !value.is_empty()));
+  truecolor && !ssh
+}
+
 /// Asks the terminal for its palette. Needs raw mode and must run before anything else reads the
 /// terminal. `None` when the terminal doesn't answer in time or can't be opened.
 pub fn query_terminal() -> Option<Palette> {
@@ -244,6 +262,7 @@ impl TimedRead for Tty {
 #[cfg(test)]
 mod tests {
   use std::collections::VecDeque;
+  use std::ffi::OsString;
   use std::fs::File;
   use std::io::{self, Read, Write};
   use std::os::fd::FromRawFd;
@@ -252,7 +271,7 @@ mod tests {
 
   use super::{
     DRAIN_TIMEOUT, Palette, QUERY, QUERY_TIMEOUT, Replies, TimedRead, Tty, channel, parse_replies,
-    query,
+    query, wants_query,
   };
 
   const RED: &[u8] = b"\x1b]4;1;rgb:dcdc/3232/2f2f\x07";
@@ -422,6 +441,32 @@ mod tests {
 
   fn data(bytes: &[u8]) -> Step {
     Step::Data(bytes.to_vec())
+  }
+
+  /// Environment lookup over `vars`.
+  fn env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+    move |name| vars.iter().find(|(n, _)| *n == name).map(|(_, value)| OsString::from(value))
+  }
+
+  #[test]
+  fn query_skipped_without_truecolor_or_over_ssh() {
+    let local: &[(&str, &str)] = &[("TERM", "xterm-256color"), ("HOME", "/Users/me")];
+    assert!(wants_query(true, env(local)));
+    assert!(!wants_query(false, env(local)), "no truecolor: the palette isn't used");
+
+    // either variable marks a remote session
+    let remote: [&[(&str, &str)]; 3] = [
+      &[("SSH_TTY", "/dev/ttys003")],
+      &[("SSH_CONNECTION", "10.0.0.2 52144 10.0.0.1 22")],
+      &[("SSH_TTY", "/dev/ttys003"), ("SSH_CONNECTION", "10.0.0.2 52144 10.0.0.1 22")],
+    ];
+    for vars in remote {
+      assert!(!wants_query(true, env(vars)), "{vars:?}");
+      assert!(!wants_query(false, env(vars)), "{vars:?}");
+    }
+
+    // empty values don't count
+    assert!(wants_query(true, env(&[("SSH_TTY", ""), ("SSH_CONNECTION", "")])));
   }
 
   #[test]

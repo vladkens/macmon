@@ -417,8 +417,9 @@ impl App {
 
     let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
     self.proc_view.fit(body.height as usize);
-    // one blank cell between the last column and the right border
-    let columns = fit_columns(inner.width.saturating_sub(1));
+    // one blank cell between the columns and each border, as in the metrics box
+    let table = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
+    let columns = fit_columns(table.width);
     let buf = f.buffer_mut();
 
     let header = columns.iter().map(|&(column, _)| {
@@ -426,15 +427,15 @@ impl App {
         if column.sort() == Some(self.proc_view.sort) { self.theme.title } else { self.theme.dim };
       Span::styled(column.header(), Style::new().fg(color).add_modifier(Modifier::BOLD))
     });
-    draw_row(buf, Rect { height: 1, ..inner }, &columns, header);
+    draw_row(buf, Rect { height: 1, ..table }, &columns, header);
 
     for (i, (selected, proc)) in self.proc_view.page_rows().enumerate() {
-      let row = Rect { y: body.y + i as u16, height: 1, ..body };
+      let y = body.y + i as u16;
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
-      draw_row(buf, row, &columns, cells);
-      // reverse video in the default colors, so the row reads as one bar
+      draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
+      // reverse video in the default colors from border to border, so the row reads as one bar
       if selected {
-        buf.set_style(row, self.theme.selected);
+        buf.set_style(Rect { y, height: 1, ..inner }, self.theme.selected);
       }
     }
   }

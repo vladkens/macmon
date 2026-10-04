@@ -1,7 +1,7 @@
 # TUI Redesign: btop-style Layout and Process List (Phase 1)
 
 ## Overview
-- Redesign the interactive TUI in a btop-inspired style: a full-width CPU box on top, a left column with GPU / MEM / POWER boxes, and a process list on the right.
+- Redesign the interactive TUI in a btop-inspired style: a full-width CPU box on top, a left column with GPU / MEM / POWER boxes, and a process list on the right (Layout V3 since Task 11: one metrics box on top, full-width process list below).
 - Replace single-accent coloring with load gradients (green → yellow → red) in the terminal's own colors (built-in themes until Task 12), and use braille history graphs.
 - Add a process list (PID, NAME, USER, CPU%, MEM, POWER W, GPU%) with sorting, filtering and selection, so macmon covers the "what is eating my Mac" use case that currently requires btop/htop/Activity Monitor.
 - Differentiators vs btop: per-process power (W) and per-process GPU %, both sudoless.
@@ -108,6 +108,7 @@
 - At startup (raw mode on, before the input thread starts) query the real palette: OSC 4 for indexes 1/2/3 (+ OSC 10/11 for fg/bg), followed by a DA1 (`ESC [ c`) sentinel so terminals that ignore OSC 4 don't cost the full timeout; overall timeout ≈ 150 ms; drain late replies so they never reach the key handler. Parse `ESC ] 4 ; n ; rgb:R/G/B` with 1–4 hex digits per channel, terminated by BEL or ST.
 - Palette known + truecolor (`COLORTERM` = `truecolor`/`24bit`) → smooth RGB interpolation between the terminal's own green/yellow/red. Otherwise → discrete steps (green / yellow / red ANSI indexes), still the terminal's colors.
 - ➕ As built (Task 12): the query runs only with truecolor (otherwise the palette is unused); OSC 10/11 are not queried, since nothing uses fg/bg (borders / dim are ANSI 8, selection is reverse video, titles and text are the default fg). Replies are read from `/dev/tty` with `select(2)` (macOS `poll(2)` doesn't support devices). Colors count only within 150 ms; without the DA1 reply by then, input is read and dropped until it arrives, at most 500 ms more, so replies up to ~650 ms late can't become key presses (later ones still could). Discrete steps: green up to 1/3, yellow up to 2/3, red above.
+- ➕ As built (Task 13): no query in SSH sessions (`SSH_TTY` or `SSH_CONNECTION` non-empty), where replies are most likely to come after the drain window; those sessions get the discrete steps.
 
 ### Graph style (user decision after Task 11)
 - Braille only: no `v` key and no block mode. Power-column mini graphs are braille too. Core bars (one `▁`…`█` cell per core) stay — they show current values, not history.
@@ -324,12 +325,13 @@ User decision after Task 11: follow the terminal's color scheme instead of built
 - [x] run `make test` and `make check` - must pass before next task
 
 ### Task 13: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented (all old metrics visible, terminal palette colors, braille, panels, process list with POWER/GPU)
-- [ ] verify edge cases: tiny window, no swap, no fans, multi-die, palette query unanswered / no truecolor
-- [ ] ➕ skip the palette query in SSH sessions (`SSH_TTY` / `SSH_CONNECTION` set): replies later than ~650 ms leak into the key handler (found in Task 12), and high latency links are where that happens; fall back to ANSI steps there; add a unit test for the skip decision
-- [ ] run full test suite: `make test`
-- [ ] run `make check`
-- [ ] run `cargo run --release` manually and walk through every key
+- [x] verify all requirements from Overview are implemented (all old metrics visible, terminal palette colors, braille, panels, process list with POWER/GPU) (checked against Layout V3 in render tests and a real run: E/P cluster strips with scaled / active ratio (`r`) and per-core bars (`d`), GPU, RAM / SWAP, CPU / GPU / ANE power with temps and braille history, SYS + fans, total with avg / max, terminal colors only (borders ANSI 8, gradient ANSI 2/3/1 or RGB between the queried colors), panels `1`–`5`, process list with POWER W and GPU % (real run: WindowServer GPU 10 %, Chrome renderer 0.96 W, foreign processes with `-` power); `src_lib`, `pipe` / `serve` / `debug` / `stress` untouched (`main.rs` only gained `mod procs`). ⚠️ per-unit avg / max of the old UI (CPU / GPU / ANE rows, SYS) are not shown: V3 gives those rows a history graph and keeps avg / max on the total only, as designed — left for the user to decide)
+- [x] verify edge cases: tiny window, no swap, no fans, multi-die, palette query unanswered / no truecolor (covered by tests: `renders_any_size_and_panel_set` down to 1x1, `swap_row_hidden_without_swap`, `fans_and_sys_hidden_when_unavailable`, `core_rows_for_real_chips`, palette query / gradient tests; real binary on a pty: resize to 60x15 auto-hides the process box, 30x8 / 12x4 / 1x1 don't crash, 200x50 brings everything back; unanswered query → ANSI steps, no leaked keys; no `COLORTERM` → no query)
+- [x] ➕ skip the palette query in SSH sessions (`SSH_TTY` / `SSH_CONNECTION` set): replies later than ~650 ms leak into the key handler (found in Task 12), and high latency links are where that happens; fall back to ANSI steps there; add a unit test for the skip decision (`palette::should_query(truecolor)`; empty variables count as unset; test `query_skipped_without_truecolor_or_over_ssh`; real run with `SSH_TTY` set: no query bytes, ANSI colors only)
+- [x] ➕ process table: one blank cell after the left border too (found in the real run: 5-digit pids, most of them on a running Mac, touched the border as `│64845 macmon`; the right side already had one, the metrics box has one on both sides); the selected row stays reverse video from border to border (test `proc_table_keeps_a_blank_cell_at_both_borders`)
+- [x] run full test suite: `make test`
+- [x] run `make check`
+- [x] run `cargo run --release` manually and walk through every key (automated part: the release binary on a pty with a `pyte` screen, every key checked on screen and in the saved config (`HOME` in the scratchpad): `d`, `r`, `+` / `=` / `-`, `1`–`5`, `s` × 6, `S`, `/` typing with `q` / Backspace / Enter / Esc, ↑ ↓ PgUp PgDn Home End, Esc clears selection then filter, `c` / `v` do nothing, `q` and Ctrl-C (also while typing) exit 0, resize; 86/86 checks. Walking through it in a real terminal by hand: skipped - not automatable, see Post-Completion)
 
 ### Task 14: [Final] Update documentation
 - [ ] update `readme.md`: features list, Controls section, note on process data without sudo
@@ -341,6 +343,8 @@ User decision after Task 11: follow the terminal's color scheme instead of built
 
 **Manual verification**:
 - Ghostty / iTerm2 / Apple Terminal / inside tmux: palette query answered vs not (smooth vs stepped gradient), no stray characters from late replies, light and dark terminal themes.
+- `cargo run --release` in a real terminal: walk through every key (Task 13 drove them only on a pty with an emulated screen).
+- Over SSH: stepped gradient, no palette query, no stray characters.
 - Small window (e.g. 60x15) and huge window; resize while running.
 - M-series with many cores (Max/Ultra) for the per-core grid; Mac without fans (MacBook Air).
 - Compare CPU% / MEM / GPU% for a few processes with Activity Monitor.

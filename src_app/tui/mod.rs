@@ -290,9 +290,10 @@ impl App {
     let mut term = enter_term();
 
     // raw mode is on and the input thread doesn't read the terminal yet, so the palette replies
-    // can't turn into key presses; the palette only matters for a smooth (truecolor) gradient
+    // can't turn into key presses; the palette only matters for a smooth (truecolor) gradient,
+    // and SSH sessions skip the query (late replies)
     let truecolor = theme::detect_truecolor();
-    let palette = if truecolor { palette::query_terminal() } else { None };
+    let palette = if palette::should_query(truecolor) { palette::query_terminal() } else { None };
     self.theme = Theme::new(palette, truecolor);
     run_inputs_thread(tx.clone(), 250);
 
@@ -1227,8 +1228,9 @@ mod tests {
       ["│", "2301", "Safari", "vlad", "12.0", "1.5G", "0.80W", "5.0", "│"]
     );
     assert_eq!(row_words(&rows[2]), ["│", "1", "launchd", "root", "0.0", "20M", "-", "0.0", "│"]);
-    assert!(rows[0].starts_with("│  631 WindowServer"), "{}", rows[0]);
-    // one blank cell before the right border
+    // one blank cell after the left border and before the right one
+    assert!(header.starts_with("│   PID NAME "), "{header}");
+    assert!(rows[0].starts_with("│   631 WindowServer"), "{}", rows[0]);
     assert!(rows[0].ends_with("  25.0   300M  1.50W  40.0 │"), "{}", rows[0]);
 
     // gradient colors for load values, dim zeros and missing power
@@ -1264,13 +1266,47 @@ mod tests {
     ] {
       assert_eq!(header.contains(label), shown, "{label} in {header}");
     }
-    // NAME gets the 11 cells left: truncated
-    assert!(row(&buf, 2).starts_with("│  631 WindowServe   25.0"), "{}", row(&buf, 2));
+    // NAME gets the 10 cells left: truncated
+    assert!(row(&buf, 2).starts_with("│   631 WindowServ   25.0"), "{}", row(&buf, 2));
 
     // very narrow: PID and NAME only, nothing drawn over the border
     let buf = render_buffer(&mut app, 18, 20);
-    assert_eq!(row(&buf, 1), "│  PID NAME      │");
-    assert_eq!(row(&buf, 2), "│  631 WindowSer │");
+    assert_eq!(row(&buf, 1), "│   PID NAME     │");
+    assert_eq!(row(&buf, 2), "│   631 WindowSe │");
+  }
+
+  #[test]
+  fn proc_table_keeps_a_blank_cell_at_both_borders() {
+    // the widest pids (5 digits) and a name longer than its column
+    let mut procs = varied_procs();
+    procs[0].pid = 99_998;
+    procs[1].name = "x".repeat(300);
+    let mut app = app_with_procs(procs);
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
+
+    let all = Panels::default();
+    let only_proc = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
+    for (panels, width, height) in
+      [(all, 200, 50), (all, 80, 24), (only_proc, 40, 20), (only_proc, 18, 20)]
+    {
+      app.cfg.panels = panels;
+      let buf = render_buffer(&mut app, width, height);
+      let proc = app.layout(buf.area).proc.expect("process box");
+      for y in proc.top() + 1..proc.bottom() - 1 {
+        let ctx = format!("{width}x{height}: {}", row(&buf, y));
+        assert_eq!(buf[(proc.left() + 1, y)].symbol(), " ", "{ctx}");
+        assert_eq!(buf[(proc.right() - 2, y)].symbol(), " ", "{ctx}");
+      }
+
+      let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+      assert!(screen.contains("│ 99998 "), "{width}x{height}");
+      // the selected row is one bar from border to border, padding cells included
+      let selected = proc.top() + 2;
+      for x in proc.left() + 1..proc.right() - 1 {
+        let cell = &buf[(x, selected)];
+        assert!(cell.modifier.contains(Modifier::REVERSED), "{width}x{height}: x {x}");
+      }
+    }
   }
 
   #[test]
