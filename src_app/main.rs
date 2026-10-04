@@ -8,7 +8,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod config;
-#[allow(dead_code)] // TODO: remove once the TUI process thread uses the sampler
 mod procs;
 mod serve;
 mod stress;

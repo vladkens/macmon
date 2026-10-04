@@ -7,7 +7,9 @@ mod theme;
 mod widgets;
 
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::thread::{self, JoinHandle};
 use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
 
@@ -19,6 +21,7 @@ use ratatui::crossterm::{
 use ratatui::prelude::*;
 
 use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS};
+use crate::procs::{ProcInfo, ProcSampler};
 use layout::compute_layout;
 use macmon::{Metrics, Sampler, SocInfo};
 use panels::Titles;
@@ -51,9 +54,15 @@ fn leave_term() {
 
 enum Event {
   Update(Box<Metrics>),
+  Procs(Vec<ProcInfo>),
   Key(KeyEvent),
   Tick,
 }
+
+/// How often the paused process thread checks whether the panel is back.
+const PROCS_PAUSE_POLL: Duration = Duration::from_millis(100);
+/// Window of the first process sample after the panel shows up, so the list fills in quickly.
+const PROCS_WARMUP: Duration = Duration::from_millis(TUI_MIN_MS as u64);
 
 fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   let tick_rate = Duration::from_millis(tick);
@@ -91,6 +100,43 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   });
 }
 
+/// Sends `Event::Procs` every `msec` while `active` is set (the process panel is on screen) and
+/// sleeps otherwise. A pause drops the sampler, so rates after it don't average over the hidden
+/// time. Exits when the receiver is gone.
+fn run_procs_thread(
+  tx: mpsc::Sender<Event>,
+  msec: Arc<RwLock<u32>>,
+  active: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+  thread::spawn(move || {
+    let mut sampler: Option<ProcSampler> = None;
+
+    loop {
+      if !active.load(Ordering::Relaxed) {
+        sampler = None;
+        thread::sleep(PROCS_PAUSE_POLL);
+        continue;
+      }
+
+      let started = Instant::now();
+      let delay = match sampler.as_mut() {
+        Some(sampler) => {
+          if tx.send(Event::Procs(sampler.sample())).is_err() {
+            return;
+          }
+          Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into())
+        }
+        // the first sample only sets the baseline: its CPU and power rates are zero
+        None => {
+          sampler.insert(ProcSampler::new()).sample();
+          PROCS_WARMUP
+        }
+      };
+      thread::sleep(delay.saturating_sub(started.elapsed()));
+    }
+  })
+}
+
 // MARK: App
 
 #[derive(Debug, Default)]
@@ -114,6 +160,11 @@ pub struct App {
   ecpu_freq: CpuFreqStore,
   pcpu_freq: CpuFreqStore,
   igpu_freq: FreqStore,
+
+  /// Latest process list, `None` until the first sample with rates arrives.
+  procs: Option<Vec<ProcInfo>>,
+  /// Set while the process panel is on screen; the process thread samples only then.
+  procs_active: Arc<AtomicBool>,
 }
 
 impl App {
@@ -146,6 +197,22 @@ impl App {
     self.mem.push(data.memory);
   }
 
+  /// Follows the process panel visibility (toggled or auto-hidden). A hidden panel drops its
+  /// list, so it reads "collecting…" when shown again instead of showing stale rows.
+  fn set_procs_visible(&mut self, visible: bool) {
+    self.procs_active.store(visible, Ordering::Relaxed);
+    if !visible {
+      self.procs = None;
+    }
+  }
+
+  /// Stores a process sample; one still in flight when the panel got hidden is dropped.
+  fn update_procs(&mut self, procs: Vec<ProcInfo>) {
+    if self.procs_active.load(Ordering::Relaxed) {
+      self.procs = Some(procs);
+    }
+  }
+
   /// Applies a key press to the app state. Returns `Break` when the app should quit.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     match key.code {
@@ -174,8 +241,21 @@ impl App {
     f.render_widget(Line::from(Span::styled(text, self.theme.dim)).centered(), row);
   }
 
+  /// Process panel: "collecting…" until the first sample with rates arrives.
+  fn render_proc_box(&self, f: &mut Frame, area: Rect) {
+    let inner = self.draw_box(f, area, Titles::new(self.heading("proc")));
+    let text = match &self.procs {
+      Some(procs) => format!("{} processes", procs.len()),
+      None => "collecting…".to_string(),
+    };
+
+    let row = inner.centered_vertically(Constraint::Length(1));
+    f.render_widget(Line::from(Span::styled(text, self.theme.dim)).centered(), row);
+  }
+
   fn render(&mut self, f: &mut Frame) {
     let plan = compute_layout(f.area(), self.cfg.panels, self.cfg.per_core_view);
+    self.set_procs_visible(plan.proc.is_some());
 
     self.render_cpu_box(f, &plan);
 
@@ -191,9 +271,8 @@ impl App {
       self.render_power_box(f, r);
     }
 
-    // placeholder until the process list lands
     if let Some(r) = plan.proc {
-      self.draw_box(f, r, Titles::new(self.heading("proc")));
+      self.render_proc_box(f, r);
     }
 
     match plan.bottom_left() {
@@ -210,6 +289,7 @@ impl App {
     let (tx, rx) = mpsc::channel::<Event>();
     run_inputs_thread(tx.clone(), 250);
     run_sampler_thread(tx.clone(), msec.clone());
+    run_procs_thread(tx.clone(), msec.clone(), self.procs_active.clone());
 
     let mut term = enter_term();
 
@@ -218,6 +298,7 @@ impl App {
 
       match rx.recv()? {
         Event::Update(data) => self.update_metrics(*data),
+        Event::Procs(procs) => self.update_procs(procs),
         Event::Key(key) => {
           if self.handle_key(key).is_break() {
             break;
@@ -236,6 +317,9 @@ impl App {
 #[cfg(test)]
 mod tests {
   use std::ops::ControlFlow;
+  use std::sync::atomic::{AtomicBool, Ordering};
+  use std::sync::{Arc, RwLock, mpsc};
+  use std::time::{Duration, Instant};
 
   use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
@@ -244,9 +328,10 @@ mod tests {
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::style::Color;
 
-  use super::App;
   use super::theme::{THEMES, Theme};
-  use crate::config::{Panels, RatioMode, ViewType};
+  use super::{App, Event, run_procs_thread};
+  use crate::config::{Panels, RatioMode, TUI_MIN_MS, ViewType};
+  use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -776,5 +861,131 @@ mod tests {
     let screen = render_to_string(&mut app, 120, 40);
     assert!(screen.contains("power 0.00W") && screen.contains("RAM"));
     assert!(!screen.contains("°C") && !screen.contains("SYS") && !screen.contains("Fan"));
+  }
+
+  fn test_procs() -> Vec<ProcInfo> {
+    let proc = |pid: i32, name: &str| ProcInfo {
+      pid,
+      ppid: 1,
+      name: name.to_string(),
+      user: "root".to_string(),
+      cpu_pct: 12.5,
+      mem_bytes: 64 << 20,
+      power_w: Some(0.5),
+      gpu_pct: 3.0,
+    };
+    vec![proc(1, "launchd"), proc(631, "WindowServer"), proc(2301, "Safari")]
+  }
+
+  fn procs_active(app: &App) -> bool {
+    app.procs_active.load(Ordering::Relaxed)
+  }
+
+  #[test]
+  fn proc_sampling_follows_panel_visibility() {
+    let mut app = test_app();
+    assert!(!procs_active(&app), "no sampling before the first frame");
+
+    render_buffer(&mut app, 200, 50);
+    assert!(procs_active(&app));
+
+    // auto-hidden in a small window, back when it grows
+    render_buffer(&mut app, 80, 24);
+    assert!(!procs_active(&app));
+    assert!(app.cfg.panels.proc);
+    render_buffer(&mut app, 200, 50);
+    assert!(procs_active(&app));
+
+    // `5` toggles the panel; the flag follows on the next frame
+    assert!(app.handle_key(key('5')).is_continue());
+    assert!(procs_active(&app));
+    render_buffer(&mut app, 200, 50);
+    assert!(!procs_active(&app));
+    assert!(app.handle_key(key('5')).is_continue());
+    render_buffer(&mut app, 200, 50);
+    assert!(procs_active(&app));
+
+    // the only visible panel is never auto-hidden
+    app.cfg.panels = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
+    render_buffer(&mut app, 80, 24);
+    assert!(procs_active(&app));
+
+    for c in ['5', '1'] {
+      assert!(app.handle_key(key(c)).is_continue());
+      render_buffer(&mut app, 200, 50);
+      assert!(!procs_active(&app), "after {c}");
+    }
+  }
+
+  #[test]
+  fn proc_panel_collects_until_first_sample() {
+    let mut app = test_app();
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains(" proc ") && screen.contains("collecting…"));
+
+    app.update_procs(test_procs());
+    assert_eq!(app.procs, Some(test_procs()));
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains("3 processes") && !screen.contains("collecting"));
+
+    app.update_procs(vec![]);
+    assert!(render_to_string(&mut app, 200, 50).contains("0 processes"));
+  }
+
+  #[test]
+  fn hidden_proc_panel_drops_samples() {
+    let mut app = test_app();
+    // samples arriving before the first frame are dropped
+    app.update_procs(test_procs());
+    assert_eq!(app.procs, None);
+
+    render_buffer(&mut app, 200, 50);
+    app.update_procs(test_procs());
+    assert!(app.procs.is_some());
+
+    // hiding drops the list and a sample still in flight
+    render_buffer(&mut app, 80, 24);
+    assert_eq!(app.procs, None);
+    app.update_procs(test_procs());
+    assert_eq!(app.procs, None);
+
+    // shown again: collecting until the next sample instead of stale rows
+    assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
+    app.update_procs(test_procs());
+    assert!(render_to_string(&mut app, 200, 50).contains("3 processes"));
+  }
+
+  #[test]
+  fn procs_thread_samples_only_while_active() {
+    let (tx, rx) = mpsc::channel();
+    let active = Arc::new(AtomicBool::new(false));
+    let thread = run_procs_thread(tx, Arc::new(RwLock::new(TUI_MIN_MS)), active.clone());
+
+    // paused: a sample (baseline + warm-up + delta) would take longer than ~250 ms
+    assert!(rx.recv_timeout(Duration::from_millis(600)).is_err(), "sampled while paused");
+
+    // active: the first message is already a delta sample with the own process in it
+    active.store(true, Ordering::Relaxed);
+    let Ok(Event::Procs(procs)) = rx.recv_timeout(Duration::from_secs(10)) else {
+      panic!("no process sample");
+    };
+    let pid = std::process::id() as i32;
+    assert!(procs.iter().any(|p| p.pid == pid && !p.name.is_empty()));
+
+    // paused again: a sample already in progress may still arrive, but no more
+    active.store(false, Ordering::Relaxed);
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    let mut late = 0;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+      if rx.recv_timeout(left).is_ok() {
+        late += 1;
+      }
+    }
+    assert!(late <= 1, "{late} samples after pausing");
+
+    // exits once the receiver is gone
+    drop(rx);
+    active.store(true, Ordering::Relaxed);
+    thread.join().expect("process thread exits cleanly");
   }
 }

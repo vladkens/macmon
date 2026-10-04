@@ -226,12 +226,12 @@
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/main.rs` (➕)
 
-- [ ] `run_procs_thread(tx, msec, active: Arc<AtomicBool>)` sending `Event::Procs`; sleeps while inactive
-- [ ] `active` follows proc panel visibility (toggle + auto-hide) on every render
-- [ ] app state stores latest `Vec<ProcInfo>`; panel shows "collecting…" until the first delta sample
-- [ ] ➕ remove `#[allow(dead_code)]` from `mod procs` in `src_app/main.rs` (`ProcSampler::sample()` returns zero CPU / power on its first call)
-- [ ] write tests for the visibility → active flag logic
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] `run_procs_thread(tx, msec, active: Arc<AtomicBool>)` sending `Event::Procs`; sleeps while inactive (polls the flag every 100 ms; a pause drops the `ProcSampler`, so after a resume the first sample is a silent baseline followed by a 250 ms warm-up sample, then one sample per interval; exits when the receiver is gone, returns its `JoinHandle`)
+- [x] `active` follows proc panel visibility (toggle + auto-hide) on every render (`App::set_procs_visible(plan.proc.is_some())`; false until the first frame)
+- [x] app state stores latest `Vec<ProcInfo>`; panel shows "collecting…" until the first delta sample (`App::procs: Option<Vec<ProcInfo>>`; hiding the panel drops the list and samples arriving while hidden, so a re-shown panel never shows stale rows; interim panel body is "N processes" until Task 10)
+- [x] ➕ remove `#[allow(dead_code)]` from `mod procs` in `src_app/main.rs` (`ProcSampler::sample()` returns zero CPU / power on its first call) (no narrower allow needed: the derived `PartialEq` on `ProcInfo` reads its fields)
+- [x] write tests for the visibility → active flag logic (render-driven: auto-hide, `5` toggle, only-proc, all hidden; collecting → count; hidden panel drops samples; real thread: no samples while paused, own pid once active, at most one in-flight sample after pausing, exits on receiver drop)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 10: Process panel (table, sort, filter, selection)
 
