@@ -63,6 +63,11 @@ impl Config {
   }
 
   fn get_config_path() -> Option<String> {
+    // keep tests from reading or overwriting the user's real config
+    if cfg!(test) {
+      return None;
+    }
+
     let home = match std::env::var("HOME") {
       Ok(home) => home,
       Err(_) => return None,

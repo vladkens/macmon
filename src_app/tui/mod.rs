@@ -1,25 +1,26 @@
 //! Terminal user interface.
 
-use std::collections::{BTreeMap, BTreeSet};
+mod store;
+
+use std::ops::ControlFlow;
 use std::sync::{Arc, RwLock};
 use std::{io::stdout, time::Instant};
 use std::{sync::mpsc, time::Duration};
 
 use ratatui::crossterm::{
   ExecutableCommand,
-  event::{self, KeyCode, KeyModifiers},
+  event::{self, KeyCode, KeyEvent, KeyModifiers},
   terminal,
 };
 use ratatui::{prelude::*, widgets::*};
 
-use crate::config::{Config, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
-use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, SocInfo};
+use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
+use macmon::{Metrics, Sampler, SocInfo};
+use store::{CpuFreqStore, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
-const MAX_SPARKLINE: usize = 128;
-const MAX_TEMPS: usize = 8;
 
 // MARK: Term utils
 
@@ -39,220 +40,6 @@ fn enter_term() -> Terminal<impl Backend> {
 fn leave_term() {
   terminal::disable_raw_mode().unwrap();
   stdout().execute(terminal::LeaveAlternateScreen).unwrap();
-}
-
-// MARK: Storage
-
-#[derive(Debug, Default, Clone)]
-struct RatioSeries {
-  items: Vec<u64>, // Recent percentages (0..=100), newest first.
-  ratio: f64,      // Latest ratio (0.0..=1.0).
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct FreqSample {
-  freq_mhz: u64,
-  scaled_ratio: f64,
-  active_ratio: f64,
-}
-
-impl FreqSample {
-  fn new(freq_mhz: u32, scaled_ratio: f32, active_ratio: f32) -> Self {
-    Self {
-      freq_mhz: freq_mhz as u64,
-      scaled_ratio: scaled_ratio as f64,
-      active_ratio: active_ratio as f64,
-    }
-  }
-
-  fn from_core(core: &CpuCoreMetrics) -> Self {
-    Self::new(core.freq_mhz, core.scaled_ratio, core.active_ratio)
-  }
-}
-
-impl RatioSeries {
-  fn push(&mut self, ratio: f64) {
-    self.items.insert(0, (ratio * 100.0) as u64);
-    self.items.truncate(MAX_SPARKLINE);
-    self.ratio = ratio;
-  }
-}
-
-/// One frequency with parallel scaled and active ratio histories.
-#[derive(Debug, Default, Clone)]
-struct FreqStore {
-  freq_mhz: u64,
-  scaled: RatioSeries,
-  active: RatioSeries,
-}
-
-impl FreqStore {
-  fn push(&mut self, sample: FreqSample) {
-    self.freq_mhz = sample.freq_mhz;
-    self.scaled.push(sample.scaled_ratio);
-    self.active.push(sample.active_ratio);
-  }
-
-  fn ratio(&self, mode: RatioMode) -> &RatioSeries {
-    match mode {
-      RatioMode::Scaled => &self.scaled,
-      RatioMode::Active => &self.active,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct CoreId {
-  die_id: usize,
-  core_id: usize,
-}
-
-impl From<&CpuCoreMetrics> for CoreId {
-  fn from(core: &CpuCoreMetrics) -> Self {
-    Self { die_id: core.die_id, core_id: core.core_id }
-  }
-}
-
-#[derive(Debug, Default)]
-struct CpuFreqStore {
-  aggregate: FreqStore,
-  cores: BTreeMap<CoreId, FreqStore>,
-}
-
-impl CpuFreqStore {
-  fn push(&mut self, aggregate: FreqSample, cores: &[CpuCoreMetrics]) {
-    self.aggregate.push(aggregate);
-
-    let mut seen = BTreeSet::new();
-    for core in cores {
-      let id = CoreId::from(core);
-      self.cores.entry(id).or_default().push(FreqSample::from_core(core));
-      seen.insert(id);
-    }
-
-    for (id, store) in &mut self.cores {
-      if !seen.contains(id) {
-        store.push(FreqSample::default());
-      }
-    }
-  }
-
-  fn has_multiple_dies(&self) -> bool {
-    let Some(first) = self.cores.keys().next() else { return false };
-    self.cores.keys().any(|id| id.die_id != first.die_id)
-  }
-}
-
-#[derive(Debug, Default)]
-struct PowerStore {
-  items: Vec<u64>,
-  top_value: f64,
-  max_value: f64,
-  avg_value: f64,
-}
-
-impl PowerStore {
-  fn push(&mut self, value: f64) {
-    let was_top = if !self.items.is_empty() { self.items[0] as f64 / 1000.0 } else { 0.0 };
-
-    self.items.insert(0, (value * 1000.0) as u64);
-    self.items.truncate(MAX_SPARKLINE);
-
-    self.top_value = avg2(was_top, value);
-    self.avg_value = self.items.iter().sum::<u64>() as f64 / self.items.len() as f64 / 1000.0;
-    self.max_value = self.items.iter().max().map_or(0, |v| *v) as f64 / 1000.0;
-  }
-}
-
-#[derive(Debug, Default)]
-struct MemoryStore {
-  items: Vec<u64>,
-  swap_items: Vec<u64>,
-  ram_usage: u64,
-  ram_total: u64,
-  swap_usage: u64,
-  swap_total: u64,
-  max_ram: u64,
-  max_swap: u64,
-}
-
-impl MemoryStore {
-  fn push(&mut self, value: MemMetrics) {
-    self.items.insert(0, value.ram_usage);
-    self.items.truncate(MAX_SPARKLINE);
-
-    self.swap_items.insert(0, value.swap_usage);
-    self.swap_items.truncate(MAX_SPARKLINE);
-
-    self.ram_usage = value.ram_usage;
-    self.ram_total = value.ram_total;
-    self.swap_usage = value.swap_usage;
-    self.swap_total = value.swap_total;
-    self.max_ram = self.items.iter().max().map_or(0, |v| *v);
-    self.max_swap = self.swap_items.iter().max().map_or(0, |v| *v);
-  }
-}
-
-#[derive(Debug, Default)]
-struct TempStore {
-  items: Vec<f32>,
-}
-
-impl TempStore {
-  fn last(&self) -> f32 {
-    *self.items.first().unwrap_or(&0.0)
-  }
-
-  fn push(&mut self, value: f32) {
-    // https://www.tunabellysoftware.com/blog/files/tg-pro-apple-silicon-m3-series-support.html
-    // https://github.com/vladkens/macmon/issues/12
-    let value = if value == 0.0 { self.trend_ema(0.8) } else { value };
-    if value == 0.0 {
-      return; // skip if not sensor available
-    }
-
-    self.items.insert(0, value);
-    self.items.truncate(MAX_TEMPS);
-  }
-
-  // https://en.wikipedia.org/wiki/Exponential_smoothing
-  fn trend_ema(&self, alpha: f32) -> f32 {
-    if self.items.len() < 2 {
-      return 0.0;
-    }
-
-    // starts from most recent value, so need to be reversed
-    let mut iter = self.items.iter().rev();
-    let mut ema = *iter.next().unwrap_or(&0.0);
-
-    for &item in iter {
-      ema = alpha * item + (1.0 - alpha) * ema;
-    }
-
-    ema
-  }
-}
-
-#[derive(Debug, Default)]
-struct FanStore {
-  items: Vec<FanMetric>,
-}
-
-impl FanStore {
-  fn push(&mut self, value: Vec<FanMetric>) {
-    self.items = value;
-  }
-
-  fn label(&self) -> String {
-    match self.items.as_slice() {
-      [] => "".to_string(),
-      [fan] => format!("Fan {} RPM", fan.rpm),
-      fans => {
-        let values = fans.iter().map(|fan| fan.rpm.to_string()).collect::<Vec<_>>().join("/");
-        format!("Fans {values} RPM")
-      }
-    }
-  }
 }
 
 fn bar_set() -> symbols::bar::Set<'static> {
@@ -277,29 +64,8 @@ fn h_stack(area: Rect) -> (Rect, Rect) {
 
 enum Event {
   Update(Box<Metrics>),
-  ChangeColor,
-  ChangeView,
-  TogglePerCore,
-  ToggleRatioMode,
-  IncInterval,
-  DecInterval,
+  Key(KeyEvent),
   Tick,
-  Quit,
-}
-
-fn handle_key_event(key: &event::KeyEvent, tx: &mpsc::Sender<Event>) -> WithError<()> {
-  match key.code {
-    KeyCode::Char('q') => Ok(tx.send(Event::Quit)?),
-    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Ok(tx.send(Event::Quit)?),
-    KeyCode::Char('c') => Ok(tx.send(Event::ChangeColor)?),
-    KeyCode::Char('v') => Ok(tx.send(Event::ChangeView)?),
-    KeyCode::Char('d') => Ok(tx.send(Event::TogglePerCore)?),
-    KeyCode::Char('r') => Ok(tx.send(Event::ToggleRatioMode)?),
-    KeyCode::Char('+') => Ok(tx.send(Event::IncInterval)?),
-    KeyCode::Char('=') => Ok(tx.send(Event::IncInterval)?), // fallback to press without shift
-    KeyCode::Char('-') => Ok(tx.send(Event::DecInterval)?),
-    _ => Ok(()),
-  }
 }
 
 fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
@@ -311,7 +77,7 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
     loop {
       if event::poll(Duration::from_millis(tick)).unwrap() {
         match event::read().unwrap() {
-          event::Event::Key(key) => handle_key_event(&key, &tx).unwrap(),
+          event::Event::Key(key) => tx.send(Event::Key(key)).unwrap(),
           _ => {}
         };
       }
@@ -336,12 +102,6 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
       tx.send(Event::Update(Box::new(sampler.get_metrics(msec).unwrap()))).unwrap();
     }
   });
-}
-
-// get average of two values, used to smooth out metrics
-// see: https://github.com/vladkens/macmon/issues/10
-fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
-  if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() }
 }
 
 fn ratio(value: f64, total: f64) -> f64 {
@@ -399,6 +159,24 @@ impl App {
     self.fans.push(data.fans);
 
     self.mem.push(data.memory);
+  }
+
+  /// Applies a key press to the app state. Returns `Break` when the app should quit.
+  fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
+    match key.code {
+      KeyCode::Char('q') => return ControlFlow::Break(()),
+      KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return ControlFlow::Break(()),
+      KeyCode::Char('c') => self.cfg.next_color(),
+      KeyCode::Char('v') => self.cfg.next_view_type(),
+      KeyCode::Char('d') => self.cfg.toggle_per_core_view(),
+      KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
+      KeyCode::Char('+') => self.cfg.inc_interval(),
+      KeyCode::Char('=') => self.cfg.inc_interval(), // fallback to press without shift
+      KeyCode::Char('-') => self.cfg.dec_interval(),
+      _ => {}
+    }
+
+    ControlFlow::Continue(())
   }
 
   fn title_block<'a>(&self, label_l: &str, label_r: &str) -> Block<'a> {
@@ -787,25 +565,196 @@ impl App {
       term.draw(|f| self.render(f)).unwrap();
 
       match rx.recv()? {
-        Event::Quit => break,
         Event::Update(data) => self.update_metrics(*data),
-        Event::ChangeColor => self.cfg.next_color(),
-        Event::ChangeView => self.cfg.next_view_type(),
-        Event::TogglePerCore => self.cfg.toggle_per_core_view(),
-        Event::ToggleRatioMode => self.cfg.toggle_ratio_mode(),
-        Event::IncInterval => {
-          self.cfg.inc_interval();
+        Event::Key(key) => {
+          if self.handle_key(key).is_break() {
+            break;
+          }
           *msec.write().unwrap() = self.cfg.interval;
         }
-        Event::DecInterval => {
-          self.cfg.dec_interval();
-          *msec.write().unwrap() = self.cfg.interval;
-        }
-        _ => {}
+        Event::Tick => {}
       }
     }
 
     leave_term();
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::ops::ControlFlow;
+
+  use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
+  use ratatui::Terminal;
+  use ratatui::backend::TestBackend;
+  use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use ratatui::style::Color;
+
+  use super::App;
+  use crate::config::{RatioMode, ViewType};
+
+  fn key(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+  }
+
+  fn core(core_id: usize, ratio: f32) -> CpuCoreMetrics {
+    CpuCoreMetrics { die_id: 0, core_id, freq_mhz: 2000, scaled_ratio: ratio, active_ratio: ratio }
+  }
+
+  fn test_soc() -> SocInfo {
+    SocInfo {
+      chip_name: "Apple M3 Pro".to_string(),
+      memory_gb: 36,
+      ecpu_cores: 6,
+      pcpu_cores: 6,
+      ecpu_label: "E".to_string(),
+      pcpu_label: "P".to_string(),
+      gpu_cores: 18,
+      ..Default::default()
+    }
+  }
+
+  fn test_metrics() -> Metrics {
+    Metrics {
+      temp: TempMetrics { cpu_temp_avg: 45.0, gpu_temp_avg: 40.0 },
+      memory: MemMetrics {
+        ram_total: 36 << 30,
+        ram_usage: 20 << 30,
+        swap_total: 2 << 30,
+        swap_usage: 1 << 30,
+      },
+      fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
+      ecpu_freq_mhz: 1800,
+      ecpu_scaled_ratio: 0.42,
+      ecpu_active_ratio: 0.5,
+      pcpu_freq_mhz: 3200,
+      pcpu_scaled_ratio: 0.77,
+      pcpu_active_ratio: 0.8,
+      ecpu_cores: (0..6).map(|i| core(i, 0.4)).collect(),
+      pcpu_cores: (0..6).map(|i| core(i, 0.7)).collect(),
+      gpu_freq_mhz: 1400,
+      gpu_scaled_ratio: 0.23,
+      gpu_active_ratio: 0.3,
+      cpu_power: 4.5,
+      gpu_power: 2.0,
+      ane_power: 0.1,
+      all_power: 6.6,
+      sys_power: 12.0,
+      ..Default::default()
+    }
+  }
+
+  fn test_app() -> App {
+    let mut app = App { soc: test_soc(), ..Default::default() };
+    for _ in 0..3 {
+      app.update_metrics(test_metrics());
+    }
+    app
+  }
+
+  fn render_to_string(app: &mut App, width: u16, height: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+    term.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+  }
+
+  #[test]
+  fn quit_keys_break() {
+    let mut app = App::default();
+    assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
+    assert_eq!(app.cfg.color, Color::Green); // ctrl-c doesn't change color
+  }
+
+  #[test]
+  fn c_cycles_color() {
+    let mut app = App::default();
+    assert_eq!(app.cfg.color, Color::Green);
+    assert_eq!(app.handle_key(key('c')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.color, Color::Yellow);
+  }
+
+  #[test]
+  fn v_toggles_view_type() {
+    let mut app = App::default();
+    assert_eq!(app.cfg.view_type, ViewType::Sparkline);
+    assert_eq!(app.handle_key(key('v')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.view_type, ViewType::Gauge);
+    assert_eq!(app.handle_key(key('v')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.view_type, ViewType::Sparkline);
+  }
+
+  #[test]
+  fn d_toggles_per_core_view() {
+    let mut app = App::default();
+    assert!(!app.cfg.per_core_view);
+    assert_eq!(app.handle_key(key('d')), ControlFlow::Continue(()));
+    assert!(app.cfg.per_core_view);
+  }
+
+  #[test]
+  fn r_toggles_ratio_mode() {
+    let mut app = App::default();
+    assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
+    assert_eq!(app.handle_key(key('r')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.ratio_mode, RatioMode::Active);
+  }
+
+  #[test]
+  fn plus_equals_minus_change_interval() {
+    let mut app = App::default();
+    assert_eq!(app.cfg.interval, 1000);
+
+    assert_eq!(app.handle_key(key('+')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.interval, 1250);
+
+    assert_eq!(app.handle_key(key('=')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.interval, 1500);
+
+    assert_eq!(app.handle_key(key('-')), ControlFlow::Continue(()));
+    assert_eq!(app.cfg.interval, 1250);
+  }
+
+  #[test]
+  fn unknown_keys_are_ignored() {
+    let mut app = App::default();
+    for code in [KeyCode::Char('x'), KeyCode::Esc, KeyCode::Enter, KeyCode::Up] {
+      let event = KeyEvent::new(code, KeyModifiers::NONE);
+      assert_eq!(app.handle_key(event), ControlFlow::Continue(()));
+    }
+
+    assert_eq!(app.cfg.color, Color::Green);
+    assert_eq!(app.cfg.view_type, ViewType::Sparkline);
+    assert!(!app.cfg.per_core_view);
+    assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
+    assert_eq!(app.cfg.interval, 1000);
+  }
+
+  #[test]
+  fn renders_current_layout() {
+    for per_core_view in [false, true] {
+      for view_type in [ViewType::Sparkline, ViewType::Gauge] {
+        let mut app = test_app();
+        app.cfg.per_core_view = per_core_view;
+        app.cfg.view_type = view_type;
+
+        let screen = render_to_string(&mut app, 120, 40);
+        for label in ["Apple M3 Pro", "E-CPU", "P-CPU", "GPU", "RAM", "Power", "CPU", "ANE"] {
+          assert!(screen.contains(label), "missing {label:?} (per_core_view={per_core_view})");
+        }
+        assert!(screen.contains("Fan 1200 RPM"));
+        assert!(screen.contains("q quit"));
+      }
+    }
+  }
+
+  #[test]
+  fn renders_without_metrics() {
+    let mut app = App::default();
+    let screen = render_to_string(&mut app, 120, 40);
+    assert!(screen.contains("Power"));
   }
 }

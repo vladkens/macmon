@@ -115,13 +115,14 @@
 - Create: `src_app/tui/mod.rs`
 - Create: `src_app/tui/store.rs`
 - Delete: `src_app/tui.rs`
+- Modify: `src_app/config.rs` (➕ config path disabled under `cfg!(test)` so tests never read/overwrite `~/.config/macmon.json`)
 
-- [ ] move `src_app/tui.rs` to `src_app/tui/mod.rs`; move `RatioSeries`, `FreqSample`, `FreqStore`, `CoreId`, `CpuFreqStore`, `PowerStore`, `MemoryStore`, `TempStore`, `FanStore` to `src_app/tui/store.rs` unchanged
-- [ ] replace per-key `Event` variants with `Event::Key(KeyEvent)`; handle keys in `App::handle_key` (same behavior as today)
-- [ ] write tests for stores (`PowerStore` avg/max, `TempStore` zero fallback, `CpuFreqStore` missing core push)
-- [ ] write tests for `App::handle_key` mapping (q, Ctrl-C, c, v, d, r, +, =, -)
-- [ ] write render smoke test with `TestBackend` and synthetic `Metrics` (current layout, 120x40)
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] move `src_app/tui.rs` to `src_app/tui/mod.rs`; move `RatioSeries`, `FreqSample`, `FreqStore`, `CoreId`, `CpuFreqStore`, `PowerStore`, `MemoryStore`, `TempStore`, `FanStore` to `src_app/tui/store.rs` unchanged (plus `avg2`, `MAX_SPARKLINE`, `MAX_TEMPS` which only stores use)
+- [x] replace per-key `Event` variants with `Event::Key(KeyEvent)`; handle keys in `App::handle_key` (same behavior as today; returns `ControlFlow::Break` on quit)
+- [x] write tests for stores (`PowerStore` avg/max, `TempStore` zero fallback, `CpuFreqStore` missing core push)
+- [x] write tests for `App::handle_key` mapping (q, Ctrl-C, c, v, d, r, +, =, -)
+- [x] write render smoke test with `TestBackend` and synthetic `Metrics` (current layout, 120x40)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 2: Themes, gradients and config migration
 
