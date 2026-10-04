@@ -101,14 +101,19 @@
 - Panel keys: `1` cpu, `2` gpu, `3` mem, `4` power, `5` proc. Hidden proc panel → left column takes full width. Only proc visible → full width.
 - Auto-hide: proc panel hidden when width < `PROC_MIN_WIDTH` (≈ 100) or height < `PROC_MIN_HEIGHT` (≈ 20); thresholds are consts, covered by tests.
 
-### Themes
-- Built-in: `default`, `nord`, `dracula`, `gruvbox`, `tokyo-night`, `mono` (ANSI/terminal default colors only).
-- `c` cycles themes; saved as `theme: String` in config; unknown name → `default`.
+### Colors: terminal palette (user decision after Task 11 — replaces built-in themes)
+- No own themes and no `c` key: every color comes from the terminal — default fg/bg (`Color::Reset`) and the 16 ANSI colors, so macmon follows the user's terminal theme.
+- Borders and dim text: ANSI bright black (8). Selected process row: reverse video.
+- Load gradient (graphs, meters, values): terminal green (2) → yellow (3) → red (1).
+- At startup (raw mode on, before the input thread starts) query the real palette: OSC 4 for indexes 1/2/3 (+ OSC 10/11 for fg/bg), followed by a DA1 (`ESC [ c`) sentinel so terminals that ignore OSC 4 don't cost the full timeout; overall timeout ≈ 150 ms; drain late replies so they never reach the key handler. Parse `ESC ] 4 ; n ; rgb:R/G/B` with 1–4 hex digits per channel, terminated by BEL or ST.
+- Palette known + truecolor (`COLORTERM` = `truecolor`/`24bit`) → smooth RGB interpolation between the terminal's own green/yellow/red. Otherwise → discrete steps (green / yellow / red ANSI indexes), still the terminal's colors.
+
+### Graph style (user decision after Task 11)
+- Braille only: no `v` key and no block mode. Power-column mini graphs are braille too. Core bars (one `▁`…`█` cell per core) stay — they show current values, not history.
 
 ### Config migration
-- `color` field dropped (serde ignores unknown fields, old files keep loading).
-- `view_type`: `Sparkline` → `Braille`, `Gauge` → `Block` via `#[serde(alias)]`.
-- New: `theme`, `panels` (5 bools, default all on), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
+- `color`, `theme`, `view_type` fields dropped (serde ignores unknown fields, old files keep loading).
+- New: `panels` (5 bools, default all on), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
 
 ### Process sampling (`src_app/procs.rs`)
 - `ProcInfo { pid, ppid, name, user, cpu_pct, mem_bytes, power_w: Option<f32>, gpu_pct }`.
@@ -127,7 +132,7 @@
 - Unavailable values render as `-` in dim color; values colored by theme gradient.
 
 ### Keys (final)
-- `q` / `Ctrl-C` quit · `c` theme · `v` graph style · `d` per-core · `r` ratio mode · `-`/`+` interval · `1`–`5` panels · `/` filter · `s`/`S` sort · arrows / PgUp / PgDn / Home / End selection · `Esc` cancel.
+- `q` / `Ctrl-C` quit · `d` per-core · `r` ratio mode · `-`/`+` interval · `1`–`5` panels · `/` filter · `s`/`S` sort · arrows / PgUp / PgDn / Home / End selection · `Esc` cancel.
 
 ## What Goes Where
 - **Implementation Steps** (`[ ]` checkboxes): code, tests, docs in this repo.
@@ -296,14 +301,35 @@ User decision after Task 10: process list full width at the bottom (60% of the h
 - [x] write render tests for core configs with synthetic data: M1 (4E+4P), M4 Max (4E+12P), three clusters like M6 (6E+4P+2S), M3 Ultra (8E+24P, 2 dies), M5 Ultra (24P+12S, 2 dies) at widths 72 and 100 — every core bar rendered, nothing overflows the box, die wrap when one line doesn't fit (Ultras wrap per die at 72, one line at 100)
 - [x] run `make test` and `make check` - must pass before next task
 
-### Task 12: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented (all old metrics visible, themes, braille, panels, process list with POWER/GPU)
-- [ ] verify edge cases: tiny window, no swap, no fans, multi-die, theme fallback without truecolor
+### Task 12: ➕ Terminal palette colors and braille-only graphs
+
+User decision after Task 11: follow the terminal's color scheme instead of built-in themes, and keep one canonical braille style. See "Colors: terminal palette" and "Graph style" in Technical Details.
+
+**Files:**
+- Create: `src_app/tui/palette.rs` (terminal palette query + reply parsing; may replace `theme.rs`)
+- Modify: `src_app/tui/theme.rs` (or delete if fully replaced)
+- Modify: `src_app/tui/widgets.rs`
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/proc_view.rs`
+- Modify: `src_app/tui/mod.rs`
+- Modify: `src_app/config.rs`
+
+- [ ] replace built-in themes with one terminal-palette theme (default fg/bg + ANSI 16; borders/dim = bright black; selected row = reverse video); remove `c` and the `theme` config field
+- [ ] startup palette query: OSC 4 (1/2/3) + OSC 10/11 with a DA1 sentinel and ≈150 ms timeout, run before the input thread; drain late replies; smooth gradient between the queried colors when truecolor, discrete ANSI green/yellow/red otherwise
+- [ ] braille only: remove `ViewType`, `v`, the `view_type` config field, the block fallback in `Graph`, `Meter` block chars and `bar_set()`; power-column mini graphs use braille
+- [ ] write tests for OSC reply parsing: BEL and ST terminators, 1–4 hex digits per channel, several replies in one buffer, garbage, partial/truncated replies, DA1 sentinel
+- [ ] write tests for the gradient: palette + truecolor → RGB between the queried colors; no palette or no truecolor → only ANSI indexed colors (no RGB anywhere in a rendered frame)
+- [ ] write tests: old configs with `color` / `theme` / `view_type` still load; `c` and `v` do nothing; update render tests that relied on themes or block mode
+- [ ] run `make test` and `make check` - must pass before next task
+
+### Task 13: Verify acceptance criteria
+- [ ] verify all requirements from Overview are implemented (all old metrics visible, terminal palette colors, braille, panels, process list with POWER/GPU)
+- [ ] verify edge cases: tiny window, no swap, no fans, multi-die, palette query unanswered / no truecolor
 - [ ] run full test suite: `make test`
 - [ ] run `make check`
 - [ ] run `cargo run --release` manually and walk through every key
 
-### Task 13: [Final] Update documentation
+### Task 14: [Final] Update documentation
 - [ ] update `readme.md`: features list, Controls section, note on process data without sudo
 - [ ] add entry to `changelog.md`
 - [ ] move this plan to `docs/plans/completed/`
@@ -312,7 +338,7 @@ User decision after Task 10: process list full width at the bottom (60% of the h
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
 **Manual verification**:
-- Ghostty / iTerm2 / Apple Terminal (truecolor and 256-color paths), light and dark terminal backgrounds.
+- Ghostty / iTerm2 / Apple Terminal / inside tmux: palette query answered vs not (smooth vs stepped gradient), no stray characters from late replies, light and dark terminal themes.
 - Small window (e.g. 60x15) and huge window; resize while running.
 - M-series with many cores (Max/Ultra) for the per-core grid; Mac without fans (MacBook Air).
 - Compare CPU% / MEM / GPU% for a few processes with Activity Monitor.
