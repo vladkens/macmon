@@ -488,7 +488,7 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> Option<(Vec<u32>, Vec<u
     // obj_val is pairs of (freq, voltage) 4 bytes each
     let items_count = (obj_len / 8) as usize;
     let [mut freqs, mut volts] = [vec![0u32; items_count], vec![0u32; items_count]];
-    for (i, x) in obj_val.chunks_exact(8).enumerate() {
+    for (i, x) in obj_val.as_chunks::<8>().0.iter().enumerate() {
       volts[i] = u32::from_le_bytes([x[4], x[5], x[6], x[7]]);
       freqs[i] = u32::from_le_bytes([x[0], x[1], x[2], x[3]]);
     }
@@ -504,7 +504,7 @@ pub fn get_dvfs_mhz(dict: CFDictionaryRef, key: &str) -> Option<(Vec<u32>, Vec<u
 // type 0 (E-core cluster) is absent and the two active tiers are 1 and 2.
 fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
   let mut clusters: Vec<(u8, String)> = Vec::new();
-  for chunk in data.chunks_exact(8) {
+  for chunk in data.as_chunks::<8>().0 {
     clusters.push((chunk[1], format!("voltage-states{}-sram", chunk[0])));
   }
   clusters.sort_by_key(|c| c.0);
