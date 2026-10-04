@@ -326,6 +326,7 @@ User decision after Task 11: follow the terminal's color scheme instead of built
 ### Task 13: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (all old metrics visible, terminal palette colors, braille, panels, process list with POWER/GPU)
 - [ ] verify edge cases: tiny window, no swap, no fans, multi-die, palette query unanswered / no truecolor
+- [ ] ➕ skip the palette query in SSH sessions (`SSH_TTY` / `SSH_CONNECTION` set): replies later than ~650 ms leak into the key handler (found in Task 12), and high latency links are where that happens; fall back to ANSI steps there; add a unit test for the skip decision
 - [ ] run full test suite: `make test`
 - [ ] run `make check`
 - [ ] run `cargo run --release` manually and walk through every key
