@@ -1,26 +1,33 @@
-//! Metric panels (CPU, GPU, MEM, POWER) and the box frame they share: rounded borders, titles
-//! fitted on the top border and key hints on the bottom border.
+//! Metrics box (CPU cluster / GPU / RAM / SWAP strips, per-core bars, power column) and the box
+//! frame it shares with the process list: rounded borders, titles fitted on the top border and
+//! key hints on the bottom border.
 
 use std::borrow::Cow;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
 
 use super::App;
-use super::layout::LayoutPlan;
-use super::store::{CpuFreqStore, PowerStore};
-use super::widgets::{Meter, graph};
-use crate::config::ViewType;
+use super::layout::{
+  CORE_RUN_GAP, ClusterCores, Content, CoreLine, LayoutPlan, Strip, compute_layout, die_label,
+};
+use super::store::FreqStore;
+use super::widgets::{Meter, core_bar, graph};
+use crate::config::{RatioMode, ViewType};
 
 const GB: f64 = (1u64 << 30) as f64;
-/// Narrowest history graph next to a POWER row; avg / max columns are dropped to keep it.
-const POWER_GRAPH_MIN_WIDTH: u16 = 8;
 /// Blank cells between key hints on the bottom border.
 const HINT_GAP: u16 = 2;
+/// Narrowest detail column of the strips (`1.8GHz`, `20/36G`).
+const DETAIL_MIN_WIDTH: usize = 6;
+/// Label of the per-core bars, in the strip label column of the first cores line.
+const CORES_LABEL: &str = "cores";
+/// Strip labels besides the CPU clusters', for the label column width.
+const STRIP_LABELS: [&str; 4] = ["GPU", "RAM", "SWAP", CORES_LABEL];
 
 pub(super) fn ratio(value: f64, total: f64) -> f64 {
   if total == 0.0 { 0.0 } else { value / total }
@@ -35,19 +42,32 @@ fn width_u16(line: &Line) -> u16 {
   line.width().min(u16::MAX as usize) as u16
 }
 
-/// Pads `labels` with spaces to the widest one so bars next to them line up.
-fn pad_labels(labels: &[String]) -> Vec<String> {
-  let width = labels.iter().map(|label| label.chars().count()).max().unwrap_or(0);
-  labels.iter().map(|label| format!("{label:<width$}")).collect()
+/// Strip label of a CPU cluster: `E-CPU`.
+fn cluster_name(label: &str) -> String {
+  format!("{label}-CPU")
 }
 
-/// Titles on the top border of a box. When the border is too short, the first left title is
-/// truncated, while later left titles, the right title and the center title (in this order of
-/// priority) are dropped, so titles never overlap.
+/// Frequency as `1.8GHz`.
+fn format_ghz(mhz: u64) -> String {
+  format!("{:.1}GHz", mhz as f64 / 1000.0)
+}
+
+/// Size in GB without a needless fraction: `1.2`, `4`, `21`.
+fn format_gb(bytes: u64) -> String {
+  let gb = bytes as f64 / GB;
+  let text = if gb >= 10.0 { format!("{gb:.0}") } else { format!("{gb:.1}") };
+  match text.strip_suffix(".0") {
+    Some(whole) => whole.to_string(),
+    None => text,
+  }
+}
+
+/// Titles on the top border of a box: left titles and an optional right one. When the border is
+/// too short, the first left title is truncated, while later left titles and then the right
+/// title are dropped, so titles never overlap.
 #[derive(Default)]
 pub(super) struct Titles<'a> {
   left: Vec<Line<'a>>,
-  center: Option<Line<'a>>,
   right: Option<Line<'a>>,
 }
 
@@ -59,11 +79,6 @@ impl<'a> Titles<'a> {
   /// Adds a title after the existing left titles.
   pub(super) fn left(mut self, title: impl Into<Line<'a>>) -> Self {
     self.left.push(title.into());
-    self
-  }
-
-  pub(super) fn center(mut self, title: impl Into<Line<'a>>) -> Self {
-    self.center = Some(title.into());
     self
   }
 
@@ -82,25 +97,17 @@ impl<'a> Titles<'a> {
     };
 
     let left: Vec<Line> = self.left.into_iter().map(pad).collect();
-    let center = self.center.map(pad);
     let right = self.right.map(pad);
 
     let widths: Vec<u16> = left.iter().map(width_u16).collect();
-    let slots = place_titles(
-      area.width,
-      &widths,
-      center.as_ref().map(width_u16),
-      right.as_ref().map(width_u16),
-    );
+    let slots = place_titles(area.width, &widths, right.as_ref().map(width_u16));
 
     for (line, (x, width)) in left.iter().zip(slots.left) {
       buf.set_line(area.x + x, area.y, line, width);
     }
 
-    for (line, x) in [(center, slots.center), (right, slots.right)] {
-      if let (Some(line), Some(x)) = (line, x) {
-        buf.set_line(area.x + x, area.y, &line, width_u16(&line));
-      }
+    if let (Some(line), Some(x)) = (right, slots.right) {
+      buf.set_line(area.x + x, area.y, &line, width_u16(&line));
     }
   }
 }
@@ -110,18 +117,17 @@ impl<'a> Titles<'a> {
 struct TitleSlots {
   /// `(x, visible width)` of the left titles that fit.
   left: Vec<(u16, u16)>,
-  center: Option<u16>,
   right: Option<u16>,
 }
 
 /// Fits titles of the given widths on a border `width` cells wide. Titles keep at least one border
 /// cell between each other and next to the corners. The first left title is truncated to fit; the
-/// other titles are placed in full or dropped: left ones first, then right, then center.
-fn place_titles(width: u16, left: &[u16], center: Option<u16>, right: Option<u16>) -> TitleSlots {
+/// other titles are placed in full or dropped: left ones first, then the right one.
+fn place_titles(width: u16, left: &[u16], right: Option<u16>) -> TitleSlots {
   let mut slots = TitleSlots::default();
   // free cells for titles: [start, end)
   let mut start = 2;
-  let mut end = width.saturating_sub(2);
+  let end = width.saturating_sub(2);
 
   for (i, &title) in left.iter().enumerate() {
     let room = end.saturating_sub(start);
@@ -139,18 +145,6 @@ fn place_titles(width: u16, left: &[u16], center: Option<u16>, right: Option<u16
     && start.saturating_add(title) <= end
   {
     slots.right = Some(end - title);
-    end = (end - title).saturating_sub(1);
-  }
-
-  if let Some(title) = center
-    && title > 0
-    && start.saturating_add(title) <= end
-  {
-    // centered on the whole border when possible, in the gap between the other titles otherwise
-    let centered = (width - title) / 2;
-    let gap_center = start + (end - start - title) / 2;
-    let fits = centered >= start && centered + title <= end;
-    slots.center = Some(if fits { centered } else { gap_center });
   }
 
   slots
@@ -170,28 +164,40 @@ fn fit_count(room: u16, items: &[u16], gap: u16) -> usize {
   items.len()
 }
 
-/// One-row cells of a column-major grid for `count` items: as many rows as `area` has, as few
-/// columns as needed (balanced), one blank column between columns. Empty when the columns don't
-/// fit.
-fn grid_cells(area: Rect, count: usize) -> Vec<Rect> {
-  if area.is_empty() || count == 0 {
-    return vec![];
-  }
+/// Text and body of one strip: `{label} {pct}% {detail} {graph or meter}`.
+struct StripData<'a> {
+  label: String,
+  ratio: f64,
+  detail: String,
+  /// Percent history drawn as a graph; `None` draws a meter of `ratio` instead.
+  history: Option<&'a [u64]>,
+}
 
-  let cols = count.div_ceil(area.height as usize);
-  let rows = count.div_ceil(cols);
-  let Ok(cols) = u16::try_from(cols) else { return vec![] };
-  let col_width = area.width.saturating_sub(cols - 1) / cols;
-  if col_width == 0 {
-    return vec![];
+/// Strip of a frequency / usage history (CPU cluster, GPU).
+fn freq_strip(label: String, freq: &FreqStore, mode: RatioMode) -> StripData<'_> {
+  let series = freq.ratio(mode);
+  StripData {
+    label,
+    ratio: series.ratio,
+    detail: format_ghz(freq.freq_mhz),
+    history: Some(&series.items),
   }
+}
 
-  (0..count)
-    .map(|i| {
-      let (col, row) = ((i / rows) as u16, (i % rows) as u16);
-      Rect::new(area.x + col * (col_width + 1), area.y + row, col_width, 1)
-    })
-    .collect()
+/// Meter strip of a used / total size (RAM, SWAP).
+fn size_strip(label: &str, used: u64, total: u64) -> StripData<'static> {
+  StripData {
+    label: label.to_string(),
+    ratio: ratio(used as f64, total as f64),
+    detail: format!("{}/{}G", format_gb(used), format_gb(total)),
+    history: None,
+  }
+}
+
+/// One row of the power column: text and an optional history graph after it.
+struct PowerRow<'a> {
+  text: Line<'static>,
+  history: Option<&'a [u64]>,
 }
 
 impl App {
@@ -208,9 +214,9 @@ impl App {
     Span::styled(text, self.theme.dim)
   }
 
-  /// Temperature colored by the load gradient.
+  /// Temperature colored by the load gradient, 5 cells wide (` 45°C`).
   fn temp<'a>(&self, celsius: f32) -> Span<'a> {
-    Span::styled(format!("{celsius:.0}°C"), self.theme.gradient(temp_ratio(celsius)))
+    Span::styled(format!("{celsius:>3.0}°C"), self.theme.gradient(temp_ratio(celsius)))
   }
 
   fn block_meters(&self) -> bool {
@@ -287,261 +293,239 @@ impl App {
     Some(start + width_u16(&line))
   }
 
-  /// CPU box: chip info, clock and version in the title, E-CPU / P-CPU graphs and the optional
-  /// per-core meter grid.
-  pub(super) fn render_cpu_box(&self, f: &mut Frame, plan: &LayoutPlan) {
-    let Some(area) = plan.cpu else { return };
-    let soc = &self.soc;
+  /// Screen layout for the visible panels and the current metrics.
+  pub(super) fn layout(&self, area: Rect) -> LayoutPlan {
+    let clusters: Vec<ClusterCores> = self
+      .clusters
+      .items
+      .iter()
+      .map(|c| ClusterCores { label: &c.label, dies: c.freq.dies() })
+      .collect();
+    let content = Content {
+      clusters: &clusters,
+      swap: self.mem.swap_total > 0,
+      power_rows: self.power_rows().len() as u16,
+      cores_indent: self.cores_indent() as u16,
+    };
 
-    let mut name = vec![self.heading("cpu")];
-    let temp = self.cpu_temp.last();
-    if temp > 0.0 {
-      name.extend([Span::raw(" "), self.temp(temp)]);
+    compute_layout(area, self.cfg.panels, self.cfg.per_core_view, &content)
+  }
+
+  /// Width of the strip label column: the widest strip label.
+  fn label_width(&self) -> usize {
+    let clusters = self.clusters.items.iter().map(|c| cluster_name(&c.label).chars().count());
+    STRIP_LABELS.iter().map(|label| label.len()).chain(clusters).max().unwrap_or(0)
+  }
+
+  /// Cells before the bars on a cores line: the label column and the space before the percent,
+  /// so the bars start under the digits of `" 42%"`.
+  fn cores_indent(&self) -> usize {
+    self.label_width() + 2
+  }
+
+  /// Metrics box: chip summary, clock and version in the title, strips, cores lines and the power
+  /// column inside.
+  pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
+    let Some(area) = plan.top else { return };
+    self.draw_box(f, area, self.metrics_titles(area.width));
+    let buf = f.buffer_mut();
+
+    let label_width = self.label_width();
+    let strips: Vec<(StripData, Rect)> =
+      plan.strips.iter().filter_map(|(strip, r)| Some((self.strip_data(*strip)?, *r))).collect();
+    let details = strips.iter().map(|(strip, _)| strip.detail.chars().count());
+    let detail_width = details.max().unwrap_or(0).max(DETAIL_MIN_WIDTH);
+    for (strip, area) in strips {
+      self.render_strip(buf, strip, area, label_width, detail_width);
     }
 
-    let chip = format!(
-      "{} · {}{}+{}{} · {}GPU · {}GB",
-      soc.chip_name,
-      soc.ecpu_cores,
-      soc.ecpu_label,
-      soc.pcpu_cores,
-      soc.pcpu_label,
-      soc.gpu_cores,
-      soc.memory_gb,
-    );
+    for (i, (line, area)) in plan.cores.iter().enumerate() {
+      self.render_core_line(buf, line, *area, i == 0);
+    }
+
+    if let Some(sep) = plan.separator {
+      for y in sep.top()..sep.bottom() {
+        buf[(sep.x, y)].set_symbol("│").set_fg(self.theme.border);
+      }
+    }
+
+    if let Some(power) = plan.power {
+      self.render_power(buf, power);
+    }
+  }
+
+  /// Chip summary left (`M3 Pro · 6E+6P · 18GPU · 36GB`), clock and version right. The version
+  /// gives way to the chip summary first, the clock stays as long as it fits.
+  fn metrics_titles(&self, width: u16) -> Titles<'static> {
+    let chip = self.chip_title();
     let clock = chrono::Local::now().format("%H:%M:%S").to_string();
-    let brand = format!(
-      "{} v{} · {}ms",
+    let full = format!(
+      "{clock} · {} v{} · {}ms",
       env!("CARGO_PKG_NAME"),
       env!("CARGO_PKG_VERSION"),
       self.cfg.interval
     );
 
-    let titles = Titles::new(name).left(chip).center(clock).right(brand);
-    self.draw_box(f, area, titles);
-
-    if let Some(graphs) = plan.cpu_graphs {
-      self.render_cpu_graphs(f, graphs);
-    }
-
-    if let Some(cores) = plan.cores {
-      self.render_core_grid(f, cores);
-    }
+    let full_width = Line::from(full.as_str()).width() as u16;
+    let fits = place_titles(width, &[width_u16(&chip) + 2], Some(full_width + 2)).right.is_some();
+    Titles::new(chip).right(self.text(if fits { full } else { clock }))
   }
 
-  /// E-CPU and P-CPU history graphs, stacked (side by side when there is only one row).
-  fn render_cpu_graphs(&self, f: &mut Frame, area: Rect) {
-    let constraints = [Constraint::Fill(1); 2];
-    let [ecpu, pcpu] = if area.height >= 2 {
-      Layout::vertical(constraints).areas(area)
-    } else {
-      Layout::horizontal(constraints).spacing(1).areas(area)
-    };
+  /// `M3 Pro · 6E+6P · 18GPU · 36GB`; core counts come from the CPU clusters, so a third tier
+  /// shows up as `6E+4P+2S`.
+  fn chip_title(&self) -> Line<'static> {
+    let soc = &self.soc;
+    let name = soc.chip_name.strip_prefix("Apple ").unwrap_or(&soc.chip_name);
+    let counts: Vec<String> =
+      self.clusters.items.iter().map(|c| format!("{}{}", c.count, c.label)).collect();
 
-    self.render_cluster_graph(f, ecpu, &self.soc.ecpu_label, &self.ecpu_freq);
-    self.render_cluster_graph(f, pcpu, &self.soc.pcpu_label, &self.pcpu_freq);
-  }
-
-  fn render_cluster_graph(&self, f: &mut Frame, area: Rect, cluster: &str, store: &CpuFreqStore) {
-    let freq = &store.aggregate;
-    let series = freq.ratio(self.cfg.ratio_mode);
-    let label = Line::from(vec![
-      self.heading(format!("{cluster}-CPU")),
-      self.text(format!(" {:.0}% @ {} MHz", series.ratio * 100.0, freq.freq_mhz)),
-    ]);
-
-    let w = graph(self.cfg.view_type, &series.items, &self.theme).max(100).label(label);
-    f.render_widget(w, area);
-  }
-
-  /// Per-core meters, E cores then P cores, in as many columns as needed.
-  fn render_core_grid(&self, f: &mut Frame, area: Rect) {
-    // one blank column between the graphs and the grid
-    let area = Rect { x: area.x + 1, width: area.width.saturating_sub(1), ..area };
-
-    let mode = self.cfg.ratio_mode;
-    let with_die = self.ecpu_freq.has_multiple_dies() || self.pcpu_freq.has_multiple_dies();
-    let mut cores = self.ecpu_freq.core_ratios(&self.soc.ecpu_label, mode, with_die);
-    cores.extend(self.pcpu_freq.core_ratios(&self.soc.pcpu_label, mode, with_die));
-
-    let (labels, ratios): (Vec<String>, Vec<f64>) = cores.into_iter().unzip();
-    let cells = grid_cells(area, labels.len());
-    for ((cell, label), ratio) in cells.into_iter().zip(pad_labels(&labels)).zip(ratios) {
-      let meter = Meter::new(label, ratio, &self.theme).block_chars(self.block_meters());
-      f.render_widget(meter, cell);
+    let mut parts = vec![];
+    if !name.is_empty() {
+      parts.push(self.heading(name.to_string()));
     }
-  }
-
-  /// GPU box: usage, frequency and temperature in the title, usage history inside.
-  pub(super) fn render_gpu_box(&self, f: &mut Frame, area: Rect) {
-    let freq = &self.igpu_freq;
-    let series = freq.ratio(self.cfg.ratio_mode);
-
-    let mut title = vec![
-      self.heading("gpu"),
-      self.text(format!(" {:.0}% @ {} MHz", series.ratio * 100.0, freq.freq_mhz)),
-    ];
-    let temp = self.gpu_temp.last();
-    if temp > 0.0 {
-      title.extend([self.dim(" · "), self.temp(temp)]);
+    if !counts.is_empty() {
+      parts.push(self.text(counts.join("+")));
+    }
+    if soc.gpu_cores > 0 {
+      parts.push(self.text(format!("{}GPU", soc.gpu_cores)));
+    }
+    if soc.memory_gb > 0 {
+      parts.push(self.text(format!("{}GB", soc.memory_gb)));
+    }
+    if parts.is_empty() {
+      parts.push(self.heading(env!("CARGO_PKG_NAME")));
     }
 
-    let inner = self.draw_box(f, area, Titles::new(title));
-    f.render_widget(graph(self.cfg.view_type, &series.items, &self.theme).max(100), inner);
-  }
-
-  /// MEM box: RAM and SWAP (when present) meters, RAM history below them.
-  pub(super) fn render_mem_box(&self, f: &mut Frame, area: Rect) {
-    let inner = self.draw_box(f, area, Titles::new(self.heading("mem")));
-    let mem = &self.mem;
-
-    let mut meters = vec![("RAM", mem.ram_usage, mem.ram_total)];
-    if mem.swap_total > 0 {
-      meters.push(("SWAP", mem.swap_usage, mem.swap_total));
-    }
-
-    let labels: Vec<String> = meters
-      .iter()
-      .map(|(name, used, total)| {
-        format!("{name:<4} {:>5.2}/{:.1} GB", *used as f64 / GB, *total as f64 / GB)
-      })
-      .collect();
-
-    let mut rest = inner;
-    for ((_, used, total), label) in meters.iter().zip(pad_labels(&labels)) {
-      if rest.is_empty() {
-        return;
+    let mut spans = vec![];
+    for (i, part) in parts.into_iter().enumerate() {
+      if i > 0 {
+        spans.push(self.dim(" · "));
       }
-
-      let value = ratio(*used as f64, *total as f64);
-      let meter = Meter::new(label, value, &self.theme).block_chars(self.block_meters());
-      f.render_widget(meter, Rect { height: 1, ..rest });
-      rest = Rect { y: rest.y + 1, height: rest.height - 1, ..rest };
+      spans.push(part);
     }
-
-    if !rest.is_empty() {
-      f.render_widget(graph(self.cfg.view_type, &mem.items, &self.theme).max(mem.ram_total), rest);
-    }
+    Line::from(spans)
   }
 
-  /// POWER box: total power with avg / max in the title, CPU / GPU / ANE rows with history graphs
-  /// and a SYS / fans footer when those sensors are available.
-  pub(super) fn render_power_box(&self, f: &mut Frame, area: Rect) {
-    let all = &self.all_power;
-    let title = vec![
-      self.heading("power"),
-      self.text(format!(" {:.2}W", all.top_value)),
-      self.dim(" · avg "),
-      self.text(format!("{:.2}W", all.avg_value)),
-      self.dim(" · max "),
-      self.text(format!("{:.2}W", all.max_value)),
-    ];
+  fn strip_data(&self, strip: Strip) -> Option<StripData<'_>> {
+    let mode = self.cfg.ratio_mode;
+    let mem = &self.mem;
+    Some(match strip {
+      Strip::Cluster(i) => {
+        let cluster = self.clusters.items.get(i)?;
+        freq_strip(cluster_name(&cluster.label), &cluster.freq.aggregate, mode)
+      }
+      Strip::Gpu => freq_strip("GPU".to_string(), &self.igpu_freq, mode),
+      Strip::Ram => size_strip("RAM", mem.ram_usage, mem.ram_total),
+      Strip::Swap => size_strip("SWAP", mem.swap_usage, mem.swap_total),
+    })
+  }
 
-    let inner = self.draw_box(f, area, Titles::new(title));
-    if inner.is_empty() {
+  /// One strip: text on its first row, the graph (over all its rows) or meter after the text.
+  fn render_strip(
+    &self,
+    buf: &mut Buffer,
+    strip: StripData,
+    area: Rect,
+    label_width: usize,
+    detail_width: usize,
+  ) {
+    let line = Line::from(vec![
+      self.heading(format!("{:<label_width$}", strip.label)),
+      Span::styled(format!(" {:>3.0}% ", strip.ratio * 100.0), self.theme.gradient(strip.ratio)),
+      self.text(format!("{:<detail_width$} ", strip.detail)),
+    ]);
+    buf.set_line(area.x, area.y, &line, area.width);
+
+    let text_width = width_u16(&line);
+    if area.width <= text_width {
       return;
     }
 
+    let body = Rect { x: area.x + text_width, width: area.width - text_width, ..area };
+    match strip.history {
+      Some(items) => graph(self.cfg.view_type, items, &self.theme).max(100).render(body, buf),
+      None => {
+        Meter::new(strip.ratio, &self.theme).block_chars(self.block_meters()).render(body, buf)
+      }
+    }
+  }
+
+  /// One line of core bars: `cores  E ▃▅▂▁  P ▇▆█▅`, `D1` prefix on multi-die lines.
+  fn render_core_line(&self, buf: &mut Buffer, line: &CoreLine, area: Rect, first: bool) {
+    let indent = self.cores_indent();
+    let label = if first { CORES_LABEL } else { "" };
+    let mut spans = vec![self.heading(format!("{label:<indent$}"))];
+    if let Some(die) = line.die {
+      spans.push(self.dim(format!("{} ", die_label(die))));
+    }
+
+    let mode = self.cfg.ratio_mode;
+    for (i, run) in line.runs.iter().enumerate() {
+      let Some(cluster) = self.clusters.items.get(run.cluster) else { continue };
+      if i > 0 {
+        spans.push(Span::raw(" ".repeat(CORE_RUN_GAP)));
+      }
+
+      // a wrapped cluster keeps its label cells blank, so the bars line up
+      let blank = || " ".repeat(cluster.label.chars().count());
+      let label = if run.label { cluster.label.clone() } else { blank() };
+      spans.push(self.heading(format!("{label} ")));
+
+      let ratios = cluster.freq.core_ratios(mode);
+      for &ratio in ratios.get(run.cores.clone()).unwrap_or_default() {
+        spans.push(Span::styled(core_bar(ratio), self.theme.gradient(ratio)));
+      }
+    }
+
+    buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+  }
+
+  /// CPU / GPU / ANE power with temperature and history, SYS power and fans (when available) and
+  /// the total with its average and maximum.
+  fn power_rows(&self) -> Vec<PowerRow<'_>> {
     let units = [
       ("CPU", &self.cpu_power, self.cpu_temp.last()),
       ("GPU", &self.gpu_power, self.gpu_temp.last()),
       ("ANE", &self.ane_power, 0.0),
     ];
 
-    // avg / max columns only when a short graph still fits next to them
-    let full = width_u16(&Line::from(self.power_row(units[0].0, units[0].1, units[0].2, true)));
-    let stats = inner.width >= full + 1 + POWER_GRAPH_MIN_WIDTH;
-    let footer = self.power_footer(stats);
-    let buf = f.buffer_mut();
+    let mut rows: Vec<PowerRow> = units
+      .into_iter()
+      .map(|(label, store, temp)| {
+        // a missing sensor leaves the cells blank, so the graphs line up
+        let temp = if temp > 0.0 { self.temp(temp) } else { Span::raw("     ") };
+        let text = Line::from(vec![
+          self.heading(format!("{label:<4}")),
+          self.text(format!("{:>6.2}W ", store.top_value)),
+          temp,
+          Span::raw(" "),
+        ]);
+        PowerRow { text, history: Some(&store.items) }
+      })
+      .collect();
 
-    // too low for a row per unit: all of them on the first row, footer below when it fits
-    if inner.height < units.len() as u16 {
-      let mut spans = vec![];
-      for (i, (label, store, temp)) in units.into_iter().enumerate() {
-        if i > 0 {
-          spans.push(self.dim(" · "));
-        }
-        spans.extend([self.heading(label), self.text(format!(" {:.2}W", store.top_value))]);
-        if temp > 0.0 {
-          spans.extend([Span::raw(" "), self.temp(temp)]);
-        }
-      }
+    rows.extend(self.sys_fans_row().map(|text| PowerRow { text, history: None }));
 
-      buf.set_line(inner.x, inner.y, &Line::from(spans), inner.width);
-      if let Some(footer) = footer
-        && inner.height > 1
-      {
-        buf.set_line(inner.x, inner.y + 1, &footer, inner.width);
-      }
-      return;
-    }
-
-    let footer_height = u16::from(footer.is_some() && inner.height > units.len() as u16);
-    let body = Rect { height: inner.height - footer_height, ..inner };
-    let rows: [Rect; 3] = Layout::vertical([Constraint::Fill(1); 3]).areas(body);
-
-    for (row, (label, store, temp)) in rows.into_iter().zip(units) {
-      let line = Line::from(self.power_row(label, store, temp, stats));
-      let text_width = width_u16(&line);
-      buf.set_line(row.x, row.y, &line, row.width);
-
-      // history graph right of the text, over the full row height
-      if row.width > text_width + 1 {
-        let x = row.x + text_width + 1;
-        let graph_area = Rect { x, width: row.right() - x, ..row };
-        graph(self.cfg.view_type, &store.items, &self.theme).render(graph_area, buf);
-      }
-    }
-
-    if let Some(footer) = footer
-      && footer_height == 1
-    {
-      buf.set_line(inner.x, inner.bottom() - 1, &footer, inner.width);
-    }
-  }
-
-  /// Fixed-width POWER row text: name, watts, optional avg / max and temperature (blank when the
-  /// sensor is missing, so rows stay aligned).
-  fn power_row(
-    &self,
-    label: &str,
-    store: &PowerStore,
-    temp: f32,
-    stats: bool,
-  ) -> Vec<Span<'static>> {
-    let mut spans =
-      vec![self.heading(format!("{label:<4}")), self.text(format!("{:>6.2}W", store.top_value))];
-    if stats {
-      spans.extend(self.power_stats(store));
-    }
-
-    if temp > 0.0 {
-      spans.extend([Span::raw("  "), self.temp(temp)]);
-    } else {
-      spans.push(Span::raw("      "));
-    }
-    spans
-  }
-
-  fn power_stats<'a>(&self, store: &PowerStore) -> [Span<'a>; 4] {
-    [
+    let all = &self.all_power;
+    let total = Line::from(vec![
+      self.heading("all "),
+      self.text(format!("{:>6.2}W", all.top_value)),
       self.dim(" avg "),
-      self.text(format!("{:>5.2}", store.avg_value)),
+      self.text(format!("{:.1}", all.avg_value)),
       self.dim(" max "),
-      self.text(format!("{:>5.2}", store.max_value)),
-    ]
+      self.text(format!("{:.1}", all.max_value)),
+    ]);
+    rows.push(PowerRow { text: total, history: None });
+    rows
   }
 
   /// SYS power and fan speeds, `None` when neither sensor is available.
-  fn power_footer(&self, stats: bool) -> Option<Line<'static>> {
+  fn sys_fans_row(&self) -> Option<Line<'static>> {
     let mut spans = vec![];
 
-    let sys = &self.sys_power;
-    if sys.top_value > 0.0 {
-      spans.extend([self.heading("SYS "), self.text(format!("{:>6.2}W", sys.top_value))]);
-      if stats {
-        spans.extend(self.power_stats(sys));
-      }
+    let sys = self.sys_power.top_value;
+    if sys > 0.0 {
+      spans.extend([self.heading("SYS "), self.text(format!("{sys:>6.2}W"))]);
     }
 
     let fans = self.fans.label();
@@ -554,69 +538,66 @@ impl App {
 
     if spans.is_empty() { None } else { Some(Line::from(spans)) }
   }
+
+  /// Power rows top-down in `area`, history graphs right of the text.
+  fn render_power(&self, buf: &mut Buffer, area: Rect) {
+    for (row, y) in self.power_rows().into_iter().zip(area.top()..area.bottom()) {
+      buf.set_line(area.x, y, &row.text, area.width);
+
+      let width = width_u16(&row.text);
+      if let Some(items) = row.history
+        && area.width > width
+      {
+        let graph_area = Rect::new(area.x + width, y, area.width - width, 1);
+        graph(self.cfg.view_type, items, &self.theme).render(graph_area, buf);
+      }
+    }
+  }
 }
 
 #[cfg(test)]
 mod tests {
-  use ratatui::layout::Rect;
+  use super::{TitleSlots, fit_count, format_gb, format_ghz, place_titles, temp_ratio};
 
-  use super::{TitleSlots, fit_count, grid_cells, pad_labels, place_titles, temp_ratio};
-
-  fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
-    Rect::new(x, y, width, height)
-  }
+  const GB: u64 = 1 << 30;
 
   #[test]
   fn titles_fit_on_wide_border() {
-    // left at 2, right ends 2 cells before the box edge, center in the middle
-    let slots = place_titles(60, &[10, 8], Some(6), Some(12));
+    // left at 2, right ends 2 cells before the box edge
+    let slots = place_titles(60, &[10, 8], Some(12));
     assert_eq!(slots.left, vec![(2, 10), (13, 8)]);
     assert_eq!(slots.right, Some(46));
-    assert_eq!(slots.center, Some(27));
   }
 
   #[test]
   fn right_title_dropped_instead_of_overlapping_left() {
-    // the 40%-wide POWER box case: left and right don't fit together
-    let slots = place_titles(40, &[30], None, Some(20));
-    assert_eq!(slots, TitleSlots { left: vec![(2, 30)], center: None, right: None });
+    let slots = place_titles(40, &[30], Some(20));
+    assert_eq!(slots, TitleSlots { left: vec![(2, 30)], right: None });
 
     // exactly one border cell between them still fits
-    let slots = place_titles(40, &[15], None, Some(20));
+    let slots = place_titles(40, &[15], Some(20));
     assert_eq!(slots.right, Some(18));
     assert_eq!(2 + 15 + 1, 18);
   }
 
   #[test]
   fn first_left_title_is_truncated_others_dropped() {
-    let slots = place_titles(20, &[30, 4], Some(4), Some(4));
-    assert_eq!(slots, TitleSlots { left: vec![(2, 16)], center: None, right: None });
+    let slots = place_titles(20, &[30, 4], Some(4));
+    assert_eq!(slots, TitleSlots { left: vec![(2, 16)], right: None });
 
     // a later left title is dropped when it doesn't fit in full
-    let slots = place_titles(20, &[10, 8], None, None);
+    let slots = place_titles(20, &[10, 8], None);
     assert_eq!(slots.left, vec![(2, 10)]);
-  }
-
-  #[test]
-  fn center_title_moves_aside_or_drops() {
-    // a long left title moves the center title to the middle of the free cells [23, 38)
-    let slots = place_titles(40, &[20], Some(6), None);
-    assert_eq!(slots.center, Some(27));
-
-    // no room left between left and right titles
-    let slots = place_titles(40, &[20], Some(6), Some(10));
-    assert_eq!(slots.right, Some(28));
-    assert_eq!(slots.center, None);
   }
 
   #[test]
   fn tiny_borders_place_nothing() {
     for width in 0..=4 {
-      let slots = place_titles(width, &[5], Some(3), Some(3));
-      assert!(slots.center.is_none() && slots.right.is_none(), "width {width}");
+      let slots = place_titles(width, &[5], Some(3));
+      assert!(slots.right.is_none(), "width {width}");
       assert!(slots.left.iter().all(|(x, w)| x + w <= width.saturating_sub(2)), "width {width}");
     }
-    assert_eq!(place_titles(5, &[5], None, None).left, vec![(2, 1)]);
+    assert_eq!(place_titles(5, &[5], None).left, vec![(2, 1)]);
   }
 
   #[test]
@@ -624,13 +605,12 @@ mod tests {
     let sizes = [0, 1, 3, 6, 9, 14, 20, 33];
     for width in 0..=120 {
       for (a, b) in sizes.iter().flat_map(|a| sizes.map(|b| (*a, b))) {
-        for (center, right) in [(None, None), (Some(a), Some(b)), (Some(b), Some(a))] {
-          let slots = place_titles(width, &[a, b], center, right);
+        for right in [None, Some(a), Some(b)] {
+          let slots = place_titles(width, &[a, b], right);
           let mut spans: Vec<(u16, u16)> = slots.left.clone();
-          spans.extend(slots.center.zip(center));
           spans.extend(slots.right.zip(right));
 
-          let ctx = format!("width {width} left [{a}, {b}] center {center:?} right {right:?}");
+          let ctx = format!("width {width} left [{a}, {b}] right {right:?}");
           for (i, &(x, w)) in spans.iter().enumerate() {
             assert!(x >= 2 && x + w + 2 <= width, "{ctx}: ({x}, {w}) off the border");
             for &(x2, w2) in &spans[i + 1..] {
@@ -653,43 +633,17 @@ mod tests {
   }
 
   #[test]
-  fn grid_single_column_when_rows_suffice() {
-    let cells = grid_cells(rect(10, 5, 30, 14), 12);
-    assert_eq!(cells.len(), 12);
-    assert_eq!(cells[0], rect(10, 5, 30, 1));
-    assert_eq!(cells[11], rect(10, 16, 30, 1));
-  }
+  fn strip_details() {
+    assert_eq!(format_ghz(1800), "1.8GHz");
+    assert_eq!(format_ghz(3228), "3.2GHz");
+    assert_eq!(format_ghz(0), "0.0GHz");
 
-  #[test]
-  fn grid_fills_columns_top_down_and_balances_rows() {
-    // 12 cores in 5 rows: 3 columns of 4, one blank column between columns
-    let cells = grid_cells(rect(0, 0, 32, 5), 12);
-    assert_eq!(cells.len(), 12);
-    assert_eq!(cells[0], rect(0, 0, 10, 1));
-    assert_eq!(cells[3], rect(0, 3, 10, 1));
-    assert_eq!(cells[4], rect(11, 0, 10, 1));
-    assert_eq!(cells[11], rect(22, 3, 10, 1));
-
-    // 32 cores (M3 Ultra) in 6 rows: 6 columns of 9 cells
-    let cells = grid_cells(rect(0, 0, 60, 6), 32);
-    assert_eq!(cells.len(), 32);
-    assert_eq!(cells.last(), Some(&rect(50, 1, 9, 1)));
-  }
-
-  #[test]
-  fn grid_empty_cases() {
-    assert!(grid_cells(rect(0, 0, 30, 10), 0).is_empty());
-    assert!(grid_cells(rect(0, 0, 0, 10), 4).is_empty());
-    assert!(grid_cells(rect(0, 0, 30, 0), 4).is_empty());
-    // 12 columns of 1 row don't fit in 10 cells
-    assert!(grid_cells(rect(0, 0, 10, 1), 12).is_empty());
-  }
-
-  #[test]
-  fn labels_are_padded_to_widest() {
-    let labels = ["E0".to_string(), "D1 P11".to_string()];
-    assert_eq!(pad_labels(&labels), ["E0    ", "D1 P11"]);
-    assert!(pad_labels(&[]).is_empty());
+    assert_eq!(format_gb(21 * GB), "21");
+    assert_eq!(format_gb(4 * GB), "4");
+    assert_eq!(format_gb(GB + GB / 5), "1.2");
+    assert_eq!(format_gb(GB * 99 / 10), "9.9");
+    assert_eq!(format_gb(GB * 1001 / 100), "10");
+    assert_eq!(format_gb(0), "0");
   }
 
   #[test]

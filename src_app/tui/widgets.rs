@@ -1,12 +1,9 @@
-//! Custom widgets: history graphs and horizontal meters.
-
-use std::borrow::Cow;
+//! Custom widgets: history graphs, horizontal meters and per-core bars.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::symbols;
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{RenderDirection, Sparkline, SparklineBar, Widget};
 
 use super::theme::Theme;
@@ -18,6 +15,8 @@ const LEFT_DOTS: [u32; 5] = [0x00, 0x40, 0x44, 0x46, 0x47];
 const RIGHT_DOTS: [u32; 5] = [0x00, 0x80, 0xa0, 0xb0, 0xb8];
 const BRAILLE_BLANK: u32 = 0x2800;
 const DOTS_PER_ROW: u64 = 4;
+/// Vertical bars of the per-core row, lowest first; an idle core still shows the lowest one.
+pub const CORE_BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
 fn bar_set() -> symbols::bar::Set<'static> {
   match std::env::var("TERM_PROGRAM").as_deref() {
@@ -28,6 +27,12 @@ fn bar_set() -> symbols::bar::Set<'static> {
 
 fn clamp_ratio(ratio: f64) -> f64 {
   if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) }
+}
+
+/// One-cell vertical bar for a core load `ratio` (`▁` idle … `█` busy).
+pub fn core_bar(ratio: f64) -> &'static str {
+  let level = (clamp_ratio(ratio) * (CORE_BARS.len() - 1) as f64).round() as usize;
+  CORE_BARS[level.min(CORE_BARS.len() - 1)]
 }
 
 /// History graph for newest-first samples, right-aligned (newest sample on the right).
@@ -41,24 +46,17 @@ pub struct Graph<'a> {
   data: &'a [u64],
   max: Option<u64>,
   theme: &'a Theme,
-  label: Option<Line<'a>>,
 }
 
 /// Creates a history graph in the style selected by `view` (`v` key).
 pub fn graph<'a>(view: ViewType, data: &'a [u64], theme: &'a Theme) -> Graph<'a> {
-  Graph { view, data, max: None, theme, label: None }
+  Graph { view, data, max: None, theme }
 }
 
-impl<'a> Graph<'a> {
+impl Graph<'_> {
   /// Value drawn at full height. Defaults to the largest visible sample.
   pub fn max(mut self, max: u64) -> Self {
     self.max = Some(max);
-    self
-  }
-
-  /// Text drawn over the top-left corner of the graph.
-  pub fn label(mut self, label: impl Into<Line<'a>>) -> Self {
-    self.label = Some(label.into());
     self
   }
 
@@ -129,11 +127,6 @@ impl Widget for Graph<'_> {
       ViewType::Braille => self.render_braille(area, buf),
       ViewType::Block => self.render_blocks(area, buf),
     }
-
-    if let Some(mut label) = self.label {
-      label.style = Style::new().fg(self.theme.text).patch(label.style);
-      buf.set_line(area.x, area.y, &label, area.width);
-    }
   }
 }
 
@@ -147,37 +140,23 @@ fn dot_level(value: u64, max: u64, dots: u64) -> u64 {
   level.clamp(1, dots)
 }
 
-/// Horizontal meter: `label ▰▰▰▱▱ 42%` with the fill colored by the load gradient.
+/// Horizontal meter bar `▰▰▰▱▱` over the first row of its area, the fill colored by the load
+/// gradient.
 pub struct Meter<'a> {
-  label: Span<'a>,
   ratio: f64,
   theme: &'a Theme,
   symbols: (&'static str, &'static str),
 }
 
 impl<'a> Meter<'a> {
-  pub fn new(label: impl Into<Cow<'a, str>>, ratio: f64, theme: &'a Theme) -> Self {
-    Self { label: Span::raw(label), ratio, theme, symbols: ("▰", "▱") }
+  pub fn new(ratio: f64, theme: &'a Theme) -> Self {
+    Self { ratio, theme, symbols: ("▰", "▱") }
   }
 
   /// Uses block characters (`█` / `░`) instead of `▰` / `▱`.
   pub fn block_chars(mut self, on: bool) -> Self {
     self.symbols = if on { ("█", "░") } else { ("▰", "▱") };
     self
-  }
-}
-
-/// Widths of the meter label and bar for `width` cells. The value text is right-aligned and
-/// keeps priority: the bar is dropped first, then the label.
-fn meter_layout(width: u16, label: u16, value: u16) -> (u16, u16) {
-  let lead = if label > 0 { label.saturating_add(1) } else { 0 };
-  let text = lead.saturating_add(value);
-  if width > text.saturating_add(1) {
-    (label, width - text - 1)
-  } else if width >= text {
-    (label, 0)
-  } else {
-    (0, 0)
   }
 }
 
@@ -189,31 +168,12 @@ impl Widget for Meter<'_> {
     }
 
     let ratio = clamp_ratio(self.ratio);
-    let value = format!("{:>3.0}%", ratio * 100.0);
-    let label_width = self.label.width().min(u16::MAX as usize) as u16;
-    let (label_width, bar_width) = meter_layout(area.width, label_width, value.len() as u16);
-    let (x, y) = (area.x, area.y);
-
-    if label_width > 0 {
-      buf.set_stringn(x, y, &self.label.content, label_width as usize, self.theme.text);
-    }
-
-    if bar_width > 0 {
-      // the bar ends one cell before the right-aligned value
-      let bar_x = area.right() - value.len() as u16 - 1 - bar_width;
-      let filled = (ratio * bar_width as f64).round() as u16;
-      let (on, off) = self.symbols;
-      for i in 0..bar_width {
-        let (symbol, color) =
-          if i < filled { (on, self.theme.gradient(ratio)) } else { (off, self.theme.dim) };
-        buf[(bar_x + i, y)].set_symbol(symbol).set_fg(color);
-      }
-    }
-
-    // narrow areas drop the padding of the value text
-    let value = if value.len() > area.width as usize { value.trim_start() } else { value.as_str() };
-    if value.len() <= area.width as usize {
-      buf.set_string(area.right() - value.len() as u16, y, value, self.theme.text);
+    let filled = (ratio * f64::from(area.width)).round() as u16;
+    let (on, off) = self.symbols;
+    for i in 0..area.width {
+      let (symbol, color) =
+        if i < filled { (on, self.theme.gradient(ratio)) } else { (off, self.theme.dim) };
+      buf[(area.x + i, area.y)].set_symbol(symbol).set_fg(color);
     }
   }
 }
@@ -223,10 +183,9 @@ mod tests {
   use ratatui::buffer::Buffer;
   use ratatui::layout::Rect;
   use ratatui::style::Color;
-  use ratatui::text::Span;
   use ratatui::widgets::Widget;
 
-  use super::{Meter, dot_level, graph, meter_layout};
+  use super::{Meter, core_bar, dot_level, graph};
   use crate::config::ViewType;
   use crate::tui::theme::Theme;
 
@@ -245,9 +204,13 @@ mod tests {
     draw(graph(ViewType::Braille, data, &theme).max(max), width, height)
   }
 
-  fn meter(label: &str, ratio: f64, width: u16) -> Buffer {
+  fn meter_rows(ratio: f64, width: u16, height: u16) -> Buffer {
     let theme = Theme::default();
-    draw(Meter::new(label, ratio, &theme), width, 1)
+    draw(Meter::new(ratio, &theme), width, height)
+  }
+
+  fn meter(ratio: f64, width: u16) -> Buffer {
+    meter_rows(ratio, width, 1)
   }
 
   fn count(buf: &Buffer, symbol: &str) -> usize {
@@ -335,24 +298,10 @@ mod tests {
     let theme = Theme::default();
     for view in [ViewType::Braille, ViewType::Block] {
       for (w, h) in [(0, 0), (0, 3), (3, 0)] {
-        let buf = draw(graph(view, &[100; 8], &theme).label("CPU"), w, h);
+        let buf = draw(graph(view, &[100; 8], &theme), w, h);
         assert!(buf.content.is_empty());
       }
     }
-  }
-
-  #[test]
-  fn graph_label_overlays_top_left() {
-    let theme = Theme::new("nord", true);
-    let buf = draw(graph(ViewType::Braille, &[100; 12], &theme).max(100).label("CPU 42%"), 6, 2);
-    assert_eq!(row(&buf, 0), "CPU 42");
-    assert_eq!(row(&buf, 1), "⣿⣿⣿⣿⣿⣿");
-    assert_eq!(buf[(0, 0)].fg, theme.text);
-
-    let label = Span::styled("GPU", theme.dim);
-    let buf = draw(graph(ViewType::Braille, &[], &theme).label(label), 6, 1);
-    assert_eq!(row(&buf, 0), "GPU   ");
-    assert_eq!(buf[(0, 0)].fg, theme.dim);
   }
 
   #[test]
@@ -362,78 +311,77 @@ mod tests {
     assert_eq!(row(&buf, 0), " █ █");
     assert_eq!(buf[(3, 0)].fg, theme.gradient(1.0));
 
-    let buf = draw(graph(ViewType::Block, &[50, 100], &theme).max(100).label("x"), 3, 2);
+    let buf = draw(graph(ViewType::Block, &[50, 100], &theme).max(100), 3, 2);
     assert_eq!(buf[(2, 1)].symbol(), "█");
     assert_eq!(buf[(2, 1)].fg, theme.gradient(0.5));
-    assert_eq!(buf[(0, 0)].symbol(), "x");
+    assert_eq!(buf[(2, 0)].symbol(), " ");
+  }
+
+  #[test]
+  fn core_bars_by_load() {
+    assert_eq!(core_bar(0.0), "▁", "idle cores stay visible");
+    assert_eq!(core_bar(0.5), "▅");
+    assert_eq!(core_bar(1.0), "█");
+    assert_eq!(core_bar(0.07), "▁");
+    assert_eq!(core_bar(0.08), "▂");
+    // out of range values are clamped
+    assert_eq!(core_bar(-1.0), "▁");
+    assert_eq!(core_bar(f64::NAN), "▁");
+    assert_eq!(core_bar(2.0), "█");
   }
 
   #[test]
   fn meter_fill_at_0_50_100_percent() {
-    // "E0 " + 10 cells + " " + value
-    let buf = meter("E0", 0.0, 18);
-    assert_eq!(row(&buf, 0), "E0 ▱▱▱▱▱▱▱▱▱▱   0%");
-
-    let buf = meter("E0", 0.5, 18);
-    assert_eq!(row(&buf, 0), "E0 ▰▰▰▰▰▱▱▱▱▱  50%");
-
-    let buf = meter("E0", 1.0, 18);
-    assert_eq!(row(&buf, 0), "E0 ▰▰▰▰▰▰▰▰▰▰ 100%");
+    assert_eq!(row(&meter(0.0, 10), 0), "▱▱▱▱▱▱▱▱▱▱");
+    assert_eq!(row(&meter(0.5, 10), 0), "▰▰▰▰▰▱▱▱▱▱");
+    assert_eq!(row(&meter(1.0, 10), 0), "▰▰▰▰▰▰▰▰▰▰");
+    // rounded to the nearest cell
+    assert_eq!(row(&meter(0.42, 10), 0), "▰▰▰▰▱▱▱▱▱▱");
   }
 
   #[test]
   fn meter_colors_fill_by_ratio() {
     let theme = Theme::default();
-    let buf = draw(Meter::new("P1", 0.5, &theme), 18, 1);
-    assert_eq!(buf[(3, 0)].fg, theme.gradient(0.5));
-    assert_eq!(buf[(12, 0)].fg, theme.dim);
-    assert_eq!(buf[(0, 0)].fg, theme.text);
-    assert_eq!(buf[(17, 0)].fg, theme.text);
+    let buf = draw(Meter::new(0.5, &theme), 10, 1);
+    assert_eq!(buf[(0, 0)].fg, theme.gradient(0.5));
+    assert_eq!(buf[(4, 0)].fg, theme.gradient(0.5));
+    assert_eq!(buf[(5, 0)].fg, theme.dim);
   }
 
   #[test]
   fn meter_narrow_widths() {
-    assert_eq!(row(&meter("E0", 0.42, 9), 0), "E0 ▱  42%"); // one bar cell left
-    assert_eq!(row(&meter("E0", 0.42, 8), 0), "E0   42%"); // no room for the bar
-    assert_eq!(row(&meter("E0", 0.42, 5), 0), "  42%"); // no room for the label
-    assert_eq!(row(&meter("E0", 0.42, 3), 0), "42%"); // value without padding
-    assert_eq!(row(&meter("E0", 1.0, 3), 0), "   "); // "100%" doesn't fit
-    assert!(meter("E0", 0.42, 0).content.is_empty());
+    assert_eq!(row(&meter(0.42, 2), 0), "▰▱");
+    assert_eq!(row(&meter(0.2, 1), 0), "▱");
+    assert_eq!(row(&meter(0.6, 1), 0), "▰");
+    assert!(meter(0.42, 0).content.is_empty());
+
+    // only the first row is drawn
+    let buf = meter_rows(0.5, 4, 2);
+    assert_eq!((row(&buf, 0).as_str(), row(&buf, 1).as_str()), ("▰▰▱▱", "    "));
   }
 
   #[test]
-  fn meter_layout_priorities() {
-    assert_eq!(meter_layout(18, 2, 4), (2, 10));
-    assert_eq!(meter_layout(9, 2, 4), (2, 1));
-    assert_eq!(meter_layout(8, 2, 4), (2, 0));
-    assert_eq!(meter_layout(7, 2, 4), (2, 0));
-    assert_eq!(meter_layout(6, 2, 4), (0, 0));
-    assert_eq!(meter_layout(10, 0, 4), (0, 5));
-    assert_eq!(meter_layout(0, 2, 4), (0, 0));
-  }
-
-  #[test]
-  fn meter_without_label_and_clamped_ratio() {
-    assert_eq!(row(&meter("", 1.5, 10), 0), "▰▰▰▰▰ 100%");
-    assert_eq!(row(&meter("", -1.0, 10), 0), "▱▱▱▱▱   0%");
-    assert_eq!(row(&meter("", f64::NAN, 10), 0), "▱▱▱▱▱   0%");
+  fn meter_clamps_ratio() {
+    assert_eq!(row(&meter(1.5, 5), 0), "▰▰▰▰▰");
+    assert_eq!(row(&meter(-1.0, 5), 0), "▱▱▱▱▱");
+    assert_eq!(row(&meter(f64::NAN, 5), 0), "▱▱▱▱▱");
   }
 
   #[test]
   fn meter_block_chars() {
     let theme = Theme::default();
-    let buf = draw(Meter::new("E0", 0.5, &theme).block_chars(true), 18, 1);
-    assert_eq!(row(&buf, 0), "E0 █████░░░░░  50%");
+    let buf = draw(Meter::new(0.5, &theme).block_chars(true), 10, 1);
+    assert_eq!(row(&buf, 0), "█████░░░░░");
     assert_eq!(count(&buf, "▰") + count(&buf, "▱"), 0);
 
-    let buf = draw(Meter::new("E0", 0.5, &theme).block_chars(false), 18, 1);
+    let buf = draw(Meter::new(0.5, &theme).block_chars(false), 10, 1);
     assert_eq!(count(&buf, "▰"), 5);
   }
 
   #[test]
   fn meter_mono_theme_has_no_rgb() {
     let theme = Theme::new("mono", false);
-    let buf = draw(Meter::new("E0", 0.7, &theme), 18, 1);
+    let buf = draw(Meter::new(0.7, &theme), 10, 1);
     assert!(buf.content.iter().all(|cell| !matches!(cell.fg, Color::Rgb(..))));
   }
 }

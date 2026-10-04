@@ -284,16 +284,17 @@ User decision after Task 10: process list full width at the bottom (60% of the h
 - Modify: `src_app/tui/panels.rs`
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/tui/store.rs`
-- Modify: `src_app/config.rs` (only if panel semantics need it; old configs must keep loading)
+- Modify: `src_app/tui/widgets.rs` (➕ `Meter` is a plain bar, `Graph` label overlay removed, `core_bar`)
+- Modify: `src_app/config.rs` (only if panel semantics need it; old configs must keep loading) (➕ not needed: `Panels` fields map 1:1 to the V3 rows)
 
-- [ ] rework `compute_layout` for V3: top metrics box + full-width proc box with `PROC_HEIGHT_PCT = 60`, top box min content height, proc auto-hide by height only (`PROC_MIN_ROWS`), spare rows grow the graph strips
-- [ ] render strips from a generic list of CPU clusters (built from `Metrics` in the store, so tests can inject 3 clusters), then GPU, RAM, SWAP; power column on the right, moved under the strips on narrow widths
-- [ ] cores row: one bar per core grouped by cluster, wrap per die then per cluster; `d` toggles it
-- [ ] panel keys `1`–`5` mapped to CPU / GPU / MEM rows, power column, proc box
-- [ ] remove Layout A code that becomes unused (left column, CPU box with per-core meter grid, separate GPU / MEM / POWER boxes)
-- [ ] write layout tests at 200x50, 120x40, 100x30, 80x24, 72x24, 60x15: proc gets ~60% of the height, proc hidden → top box full height, all metrics hidden → proc full height, boxes inside the area and non-overlapping
-- [ ] write render tests for core configs with synthetic data: M1 (4E+4P), M4 Max (4E+12P), three clusters like M6 (6E+4P+2S), M3 Ultra (8E+24P, 2 dies), M5 Ultra (24P+12S, 2 dies) at widths 72 and 100 — every core bar rendered, nothing overflows the box, die wrap when one line doesn't fit
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] rework `compute_layout` for V3: top metrics box + full-width proc box with `PROC_HEIGHT_PCT = 60`, top box min content height, proc auto-hide by height only (`PROC_MIN_ROWS`), spare rows grow the graph strips (`compute_layout(area, panels, per_core, &Content)`; `PROC_MIN_ROWS = 3` process rows + borders + header; one padding cell inside the left / right border; spare rows split evenly over the cluster / GPU graphs, extra ones to the first; ➕ without graph strips the top box keeps only the rows it needs and the proc box takes the rest, so hidden rows really shrink it; `LayoutPlan::bottom()` = proc box, else top box)
+- [x] render strips from a generic list of CPU clusters (built from `Metrics` in the store, so tests can inject 3 clusters), then GPU, RAM, SWAP; power column on the right, moved under the strips on narrow widths (`store::CpuClusters` fed by `cluster_samples(soc, metrics)`; strip = `E-CPU  42% 1.8GHz {graph}`, RAM / SWAP `56% 20/36G {meter}`, percent colored by the gradient; power column `POWER_WIDTH = 30` behind a ` │ ` separator when the box is ≥ `POWER_SIDE_MIN_WIDTH = 70` wide; rows `CPU 4.50W 45°C {graph}`, GPU, ANE, `SYS 12.00W  fan 1200rpm` (only when available), `all 6.60W avg 6.6 max 6.6`; title: chip summary left (`M3 Pro · 6E+6P · 18GPU · 36GB`, core counts from the clusters), `clock · macmon vX · 1000ms` right, only the clock when that doesn't fit)
+- [x] cores row: one bar per core grouped by cluster, wrap per die then per cluster; `d` toggles it (`layout::core_lines`: one line → one per die (`D0 …`) → one per die and cluster → clusters wrapped in balanced chunks; `cores` label on the first line, bars `▁`…`█` aligned under the percent digits)
+- [x] panel keys `1`–`5` mapped to CPU / GPU / MEM rows, power column, proc box (`1` hides the cluster strips and the cores row)
+- [x] remove Layout A code that becomes unused (left column, CPU box with per-core meter grid, separate GPU / MEM / POWER boxes) (➕ also `Titles` center title, `grid_cells`, `pad_labels`, `CpuFreqStore::has_multiple_dies`, `MemoryStore` RAM history)
+- [x] write layout tests at 200x50, 120x40, 100x30, 80x24, 72x24, 60x15: proc gets ~60% of the height, proc hidden → top box full height, all metrics hidden → proc full height, boxes inside the area and non-overlapping (plus `core_lines` wrap levels, every core exactly once at widths 0..60, 3 clusters)
+- [x] write render tests for core configs with synthetic data: M1 (4E+4P), M4 Max (4E+12P), three clusters like M6 (6E+4P+2S), M3 Ultra (8E+24P, 2 dies), M5 Ultra (24P+12S, 2 dies) at widths 72 and 100 — every core bar rendered, nothing overflows the box, die wrap when one line doesn't fit (Ultras wrap per die at 72, one line at 100)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 12: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (all old metrics visible, themes, braille, panels, process list with POWER/GPU)
