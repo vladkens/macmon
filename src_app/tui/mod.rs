@@ -2,6 +2,7 @@
 
 mod layout;
 mod panels;
+mod proc_view;
 mod store;
 mod theme;
 mod widgets;
@@ -24,7 +25,7 @@ use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS};
 use crate::procs::{ProcInfo, ProcSampler};
 use layout::compute_layout;
 use macmon::{Metrics, Sampler, SocInfo};
-use panels::Titles;
+use proc_view::ProcView;
 use store::{CpuFreqStore, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
 use theme::Theme;
 
@@ -161,8 +162,8 @@ pub struct App {
   pcpu_freq: CpuFreqStore,
   igpu_freq: FreqStore,
 
-  /// Latest process list, `None` until the first sample with rates arrives.
-  procs: Option<Vec<ProcInfo>>,
+  /// Process panel state with the latest process list (none until the first sample with rates).
+  proc_view: ProcView,
   /// Set while the process panel is on screen; the process thread samples only then.
   procs_active: Arc<AtomicBool>,
 }
@@ -172,7 +173,8 @@ impl App {
     let soc = SocInfo::new()?;
     let cfg = Config::load();
     let theme = Theme::new(&cfg.theme, theme::detect_truecolor());
-    Ok(Self { cfg, theme, soc, ..Default::default() })
+    let proc_view = ProcView::new(cfg.proc_sort, cfg.proc_sort_desc);
+    Ok(Self { cfg, theme, soc, proc_view, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -197,27 +199,48 @@ impl App {
     self.mem.push(data.memory);
   }
 
+  fn procs_visible(&self) -> bool {
+    self.procs_active.load(Ordering::Relaxed)
+  }
+
   /// Follows the process panel visibility (toggled or auto-hidden). A hidden panel drops its
-  /// list, so it reads "collecting…" when shown again instead of showing stale rows.
+  /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
+  /// filter input, so keys don't go to a filter that isn't on screen.
   fn set_procs_visible(&mut self, visible: bool) {
     self.procs_active.store(visible, Ordering::Relaxed);
     if !visible {
-      self.procs = None;
+      self.proc_view.clear();
     }
   }
 
   /// Stores a process sample; one still in flight when the panel got hidden is dropped.
   fn update_procs(&mut self, procs: Vec<ProcInfo>) {
-    if self.procs_active.load(Ordering::Relaxed) {
-      self.procs = Some(procs);
+    if self.procs_visible() {
+      self.proc_view.set_procs(procs);
     }
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit.
+  /// Keys of the process panel (only while it is on screen) take precedence; while a filter is
+  /// typed every key except Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
+    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+      return ControlFlow::Break(());
+    }
+
+    if self.procs_visible() {
+      let sort = (self.proc_view.sort, self.proc_view.sort_desc);
+      let used = self.proc_view.handle_key(key);
+      if (self.proc_view.sort, self.proc_view.sort_desc) != sort {
+        self.cfg.set_proc_sort(self.proc_view.sort, self.proc_view.sort_desc);
+      }
+      if used {
+        return ControlFlow::Continue(());
+      }
+    }
+
     match key.code {
       KeyCode::Char('q') => return ControlFlow::Break(()),
-      KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return ControlFlow::Break(()),
       KeyCode::Char('c') => {
         self.theme = self.theme.next();
         self.cfg.set_theme(self.theme.name);
@@ -238,18 +261,6 @@ impl App {
   fn render_all_hidden(&self, f: &mut Frame, area: Rect) {
     let text = "all panels hidden · press 1-5 to show · q quit";
     let row = area.centered_vertically(Constraint::Length(1));
-    f.render_widget(Line::from(Span::styled(text, self.theme.dim)).centered(), row);
-  }
-
-  /// Process panel: "collecting…" until the first sample with rates arrives.
-  fn render_proc_box(&self, f: &mut Frame, area: Rect) {
-    let inner = self.draw_box(f, area, Titles::new(self.heading("proc")));
-    let text = match &self.procs {
-      Some(procs) => format!("{} processes", procs.len()),
-      None => "collecting…".to_string(),
-    };
-
-    let row = inner.centered_vertically(Constraint::Length(1));
     f.render_widget(Line::from(Span::styled(text, self.theme.dim)).centered(), row);
   }
 
@@ -275,9 +286,21 @@ impl App {
       self.render_proc_box(f, r);
     }
 
-    match plan.bottom_left() {
+    let bottom_left = plan.bottom_left();
+    let hints_end = match bottom_left {
       Some(r) => self.render_key_hints(f, r),
-      None => self.render_all_hidden(f, f.area()),
+      None => {
+        self.render_all_hidden(f, f.area());
+        None
+      }
+    };
+
+    // process hints follow the global ones when both share the bottom border
+    if let Some(r) = plan.proc {
+      let start = if bottom_left == Some(r) { hints_end.map(|end| end + 1) } else { Some(2) };
+      if let Some(start) = start {
+        self.render_proc_hints(f, r, start);
+      }
     }
   }
 
@@ -330,7 +353,7 @@ mod tests {
 
   use super::theme::{THEMES, Theme};
   use super::{App, Event, run_procs_thread};
-  use crate::config::{Panels, RatioMode, TUI_MIN_MS, ViewType};
+  use crate::config::{Panels, ProcSort, RatioMode, TUI_MIN_MS, ViewType};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -815,6 +838,8 @@ mod tests {
     for (width, height) in sizes {
       for bits in 0..32u8 {
         let mut app = test_app();
+        app.proc_view.set_procs(test_procs());
+        app.proc_view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         app.cfg.per_core_view = bits % 3 == 0;
         app.cfg.panels = Panels {
           cpu: bits & 1 != 0,
@@ -924,12 +949,14 @@ mod tests {
     assert!(screen.contains(" proc ") && screen.contains("collecting…"));
 
     app.update_procs(test_procs());
-    assert_eq!(app.procs, Some(test_procs()));
+    assert_eq!(app.proc_view.procs(), Some(test_procs().as_slice()));
     let screen = render_to_string(&mut app, 200, 50);
-    assert!(screen.contains("3 processes") && !screen.contains("collecting"));
+    assert!(screen.contains(" proc 3 ") && screen.contains("WindowServer"));
+    assert!(!screen.contains("collecting"));
 
     app.update_procs(vec![]);
-    assert!(render_to_string(&mut app, 200, 50).contains("0 processes"));
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains(" proc 0 ") && !screen.contains("WindowServer"));
   }
 
   #[test]
@@ -937,22 +964,292 @@ mod tests {
     let mut app = test_app();
     // samples arriving before the first frame are dropped
     app.update_procs(test_procs());
-    assert_eq!(app.procs, None);
+    assert_eq!(app.proc_view.procs(), None);
 
     render_buffer(&mut app, 200, 50);
     app.update_procs(test_procs());
-    assert!(app.procs.is_some());
+    assert!(app.proc_view.procs().is_some());
 
     // hiding drops the list and a sample still in flight
     render_buffer(&mut app, 80, 24);
-    assert_eq!(app.procs, None);
+    assert_eq!(app.proc_view.procs(), None);
     app.update_procs(test_procs());
-    assert_eq!(app.procs, None);
+    assert_eq!(app.proc_view.procs(), None);
 
     // shown again: collecting until the next sample instead of stale rows
     assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
     app.update_procs(test_procs());
-    assert!(render_to_string(&mut app, 200, 50).contains("3 processes"));
+    assert!(render_to_string(&mut app, 200, 50).contains(" proc 3 "));
+  }
+
+  /// App with the process panel on screen at 200x50 and `procs` in it.
+  fn app_with_procs(procs: Vec<ProcInfo>) -> App {
+    let mut app = test_app();
+    render_buffer(&mut app, 200, 50);
+    app.update_procs(procs);
+    app
+  }
+
+  /// Screen column where the process box starts in a 200x50 window.
+  const PROC_X: u16 = 80;
+
+  /// Text of row `y` inside the process box of a 200x50 window.
+  fn proc_row(buf: &Buffer, y: u16) -> String {
+    (PROC_X..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+  }
+
+  fn varied_procs() -> Vec<ProcInfo> {
+    let proc = |pid: i32, name: &str, cpu, mem_mb: u64, power_w, gpu_pct| ProcInfo {
+      pid,
+      ppid: 1,
+      name: name.to_string(),
+      user: if pid < 100 { "root" } else { "vlad" }.to_string(),
+      cpu_pct: cpu,
+      mem_bytes: mem_mb << 20,
+      power_w,
+      gpu_pct,
+    };
+    vec![
+      proc(1, "launchd", 0.0, 20, None, 0.0),
+      proc(631, "WindowServer", 25.0, 300, Some(1.5), 40.0),
+      proc(2301, "Safari", 12.0, 1536, Some(0.8), 5.0),
+    ]
+  }
+
+  #[test]
+  fn proc_table_renders_rows() {
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+
+    // title: count left, sort key right
+    let title = proc_row(&buf, 16);
+    assert!(title.starts_with("╭─ proc 3 ─"), "{title}");
+    assert!(title.ends_with(" cpu ↓ ─╮"), "{title}");
+
+    let header = proc_row(&buf, 17);
+    let words: Vec<&str> = header.split_whitespace().collect();
+    assert_eq!(words, ["│", "PID", "NAME", "USER", "CPU%", "MEM", "POWER", "GPU%", "│"]);
+
+    // sorted by CPU, descending; numbers right-aligned
+    let rows: Vec<String> = (18..21).map(|y| proc_row(&buf, y)).collect();
+    let row_words = |row: &str| row.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    assert_eq!(
+      row_words(&rows[0]),
+      ["│", "631", "WindowServer", "vlad", "25.0", "300M", "1.50W", "40.0", "│"]
+    );
+    assert_eq!(
+      row_words(&rows[1]),
+      ["│", "2301", "Safari", "vlad", "12.0", "1.5G", "0.80W", "5.0", "│"]
+    );
+    assert_eq!(row_words(&rows[2]), ["│", "1", "launchd", "root", "0.0", "20M", "-", "0.0", "│"]);
+    assert!(rows[0].starts_with("│  631 WindowServer"), "{}", rows[0]);
+    // one blank cell before the right border
+    assert!(rows[0].ends_with("  25.0   300M  1.50W  40.0 │"), "{}", rows[0]);
+
+    // gradient colors for load values, dim zeros and missing power
+    let x_of =
+      |row: &str, text: &str| PROC_X + row[..row.find(text).unwrap()].chars().count() as u16;
+    let cell = |y: u16, row: &str, text: &str| buf[(x_of(row, text), y)].fg;
+    assert_eq!(cell(18, &rows[0], "25.0"), app.theme.gradient(0.25));
+    assert_eq!(cell(18, &rows[0], "40.0"), app.theme.gradient(0.4));
+    assert_eq!(cell(20, &rows[2], "-"), app.theme.dim);
+    assert_eq!(cell(20, &rows[2], "0.0"), app.theme.dim);
+    assert_eq!(cell(20, &rows[2], "launchd"), app.theme.text);
+    // the sorted column header stands out
+    assert_eq!(cell(17, &header, "CPU%"), app.theme.title);
+    assert_eq!(cell(17, &header, "MEM"), app.theme.dim);
+  }
+
+  #[test]
+  fn narrow_proc_panel_drops_columns() {
+    let mut app = test_app();
+    app.cfg.panels = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
+    render_buffer(&mut app, 40, 20);
+    app.update_procs(varied_procs());
+
+    let buf = render_buffer(&mut app, 40, 20);
+    let header = row(&buf, 1);
+    for (label, shown) in [
+      ("PID", true),
+      ("NAME", true),
+      ("CPU%", true),
+      ("MEM", true),
+      ("GPU%", true),
+      ("POWER", false),
+      ("USER", false),
+    ] {
+      assert_eq!(header.contains(label), shown, "{label} in {header}");
+    }
+    // NAME gets the 11 cells left: truncated
+    assert!(row(&buf, 2).starts_with("│  631 WindowServe   25.0"), "{}", row(&buf, 2));
+
+    // very narrow: PID and NAME only, nothing drawn over the border
+    let buf = render_buffer(&mut app, 18, 20);
+    assert_eq!(row(&buf, 1), "│  PID NAME      │");
+    assert_eq!(row(&buf, 2), "│  631 WindowSer │");
+  }
+
+  #[test]
+  fn proc_sort_keys_persist_in_config() {
+    let mut app = app_with_procs(varied_procs());
+    assert!(app.handle_key(key('s')).is_continue());
+    assert_eq!(app.cfg.proc_sort, ProcSort::Mem);
+    assert!(app.cfg.proc_sort_desc);
+
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 16).ends_with(" mem ↓ ─╮"));
+    assert!(proc_row(&buf, 18).contains("Safari"), "largest memory first");
+
+    assert!(app.handle_key(key('S')).is_continue());
+    assert!(!app.cfg.proc_sort_desc);
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 16).ends_with(" mem ↑ ─╮"));
+    assert!(proc_row(&buf, 18).contains("launchd"));
+  }
+
+  #[test]
+  fn typing_filter_ignores_global_keys() {
+    let mut app = app_with_procs(varied_procs());
+    assert!(app.handle_key(key('/')).is_continue());
+
+    for c in ['q', 'c', 'v', 'd', 'r', '5', '+', '-', 's'] {
+      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
+    }
+    assert_eq!(app.proc_view.filter(), "qcvdr5+-s");
+    assert_eq!(app.theme.name, "default");
+    assert_eq!(app.cfg.view_type, ViewType::Braille);
+    assert!(!app.cfg.per_core_view);
+    assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
+    assert_eq!(app.cfg.interval, 1000);
+    assert_eq!(app.cfg.panels, Panels::default());
+    assert_eq!(app.cfg.proc_sort, ProcSort::Cpu);
+
+    // the filter shows in the title with a cursor, no process matches it
+    let buf = render_buffer(&mut app, 200, 50);
+    let title = proc_row(&buf, 16);
+    assert!(title.starts_with("╭─ proc 0/3 ─ /qcvdr5+-s█ ─"), "{title}");
+
+    // ctrl-c still quits
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
+
+    // esc leaves input mode, then q quits again
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_continue());
+    assert!(!app.proc_view.typing());
+    assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+  }
+
+  #[test]
+  fn filter_narrows_the_table() {
+    let mut app = app_with_procs(varied_procs());
+    for c in "/SAF".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
+
+    let buf = render_buffer(&mut app, 200, 50);
+    let title = proc_row(&buf, 16);
+    assert!(title.starts_with("╭─ proc 1/3 ─ /SAF ─"), "{title}");
+    assert!(proc_row(&buf, 18).contains("Safari"));
+    assert!(!proc_row(&buf, 19).contains("WindowServer"));
+  }
+
+  #[test]
+  fn proc_keys_ignored_while_panel_hidden() {
+    let mut app = test_app();
+    render_buffer(&mut app, 80, 24); // auto-hidden
+
+    assert!(app.handle_key(key('/')).is_continue());
+    assert!(!app.proc_view.typing());
+    assert!(app.handle_key(key('s')).is_continue());
+    assert_eq!(app.cfg.proc_sort, ProcSort::Cpu);
+    assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+
+    // hiding the panel while typing ends the input mode
+    let mut app = app_with_procs(varied_procs());
+    assert!(app.handle_key(key('/')).is_continue());
+    assert!(app.proc_view.typing());
+    render_buffer(&mut app, 80, 24);
+    assert!(!app.proc_view.typing());
+    assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+  }
+
+  #[test]
+  fn selected_row_is_highlighted_and_scrolled_into_view() {
+    let procs: Vec<ProcInfo> = (0..100)
+      .map(|i| ProcInfo { pid: 1000 + i, name: format!("proc{i}"), ..test_procs()[0].clone() })
+      .collect();
+    let mut app = app_with_procs(procs);
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+    // same CPU everywhere: ordered by pid
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 18).contains("proc0 "));
+    assert!(buf.content.iter().all(|cell| cell.bg != app.theme.selection), "no selection yet");
+
+    assert!(app.handle_key(down).is_continue());
+    assert!(app.handle_key(down).is_continue());
+    assert_eq!(app.proc_view.selected_pid(), Some(1001));
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 19).contains("proc1 "));
+    for x in [PROC_X + 1, 150, 198] {
+      assert_eq!(buf[(x, 19)].bg, app.theme.selection, "x {x}");
+    }
+    assert_ne!(buf[(PROC_X + 1, 18)].bg, app.theme.selection);
+    assert_ne!(buf[(PROC_X, 19)].bg, app.theme.selection, "border not highlighted");
+
+    // End: the last process is on the last row (49 is the border)
+    assert!(app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 48).contains("proc99 "));
+    assert_eq!(buf[(PROC_X + 1, 48)].bg, app.theme.selection);
+    assert!(proc_row(&buf, 18).contains("proc69 "), "{}", proc_row(&buf, 18));
+
+    // esc clears the selection, the table goes back to the top
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 18).contains("proc0 "));
+  }
+
+  #[test]
+  fn proc_hints_on_proc_box_border() {
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+    let bottom = row(&buf, 49);
+    assert!(bottom.starts_with("╰─ q quit"), "{bottom}");
+    let proc_bottom = proc_row(&buf, 49);
+    assert!(
+      proc_bottom.starts_with("╰─ / filter  s sort  S reverse  ↑↓ select ─"),
+      "{proc_bottom}"
+    );
+    assert!(!proc_bottom.contains("esc"));
+
+    // esc hint once there is something to clear
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 49).contains("↑↓ select  esc clear"));
+
+    // input mode hints
+    assert!(app.handle_key(key('/')).is_continue());
+    let proc_bottom = proc_row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(proc_bottom.starts_with("╰─ enter keep  esc clear  ↑↓ select ─"), "{proc_bottom}");
+  }
+
+  #[test]
+  fn proc_hints_follow_global_hints_on_shared_border() {
+    // without the left column, the process box holds the global hints too
+    let mut app = test_app();
+    app.cfg.panels = Panels { cpu: true, proc: true, gpu: false, mem: false, power: false };
+    let buf = render_buffer(&mut app, 120, 40);
+    let bottom = row(&buf, 39);
+    let global = "╰─ q quit  c default  v braille  d cores  r scaled  -/+ 1000ms  1-5 panels ─";
+    assert!(bottom.starts_with(global), "{bottom}");
+    assert!(bottom[global.len()..].starts_with(" / filter  s sort  S reverse  ↑↓ select "));
+    assert!(bottom.ends_with("─╯"), "{bottom}");
+
+    // narrower: the process hints give way first
+    let buf = render_buffer(&mut app, 100, 40);
+    let bottom = row(&buf, 39);
+    assert!(bottom.starts_with(global) && !bottom.contains("select"), "{bottom}");
   }
 
   #[test]

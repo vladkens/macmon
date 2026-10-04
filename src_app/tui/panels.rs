@@ -22,7 +22,7 @@ const POWER_GRAPH_MIN_WIDTH: u16 = 8;
 /// Blank cells between key hints on the bottom border.
 const HINT_GAP: u16 = 2;
 
-fn ratio(value: f64, total: f64) -> f64 {
+pub(super) fn ratio(value: f64, total: f64) -> f64 {
   if total == 0.0 { 0.0 } else { value / total }
 }
 
@@ -200,11 +200,11 @@ impl App {
     Span::styled(text, Style::new().fg(self.theme.title).add_modifier(Modifier::BOLD))
   }
 
-  fn text<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  pub(super) fn text<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
     Span::styled(text, self.theme.text)
   }
 
-  fn dim<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  pub(super) fn dim<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
     Span::styled(text, self.theme.dim)
   }
 
@@ -227,8 +227,9 @@ impl App {
   }
 
   /// Draws the global key hints over the bottom border of box `area`. Hints that don't fit are
-  /// dropped from the end, so `q quit` stays visible as long as possible.
-  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) {
+  /// dropped from the end, so `q quit` stays visible as long as possible. Returns where the hints
+  /// end, as for `draw_hints`.
+  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) -> Option<u16> {
     let view = match self.cfg.view_type {
       ViewType::Braille => "braille",
       ViewType::Block => "block",
@@ -243,17 +244,32 @@ impl App {
       ("1-5", "panels".to_string()),
     ];
 
+    self.draw_hints(f, area, 2, &hints)
+  }
+
+  /// Draws `(key, label)` hints over the bottom border of box `area`, starting `start` cells from
+  /// its left edge. Hints that don't fit are dropped from the end. Returns the offset from the left
+  /// edge where the drawn hints end, `None` when none fit.
+  pub(super) fn draw_hints(
+    &self,
+    f: &mut Frame,
+    area: Rect,
+    start: u16,
+    hints: &[(&str, String)],
+  ) -> Option<u16> {
     let items: Vec<[Span; 2]> = hints
-      .into_iter()
-      .map(|(key, label)| [self.heading(key), self.text(format!(" {label}"))])
+      .iter()
+      .map(|(key, label)| [self.heading(*key), self.text(format!(" {label}"))])
       .collect();
     let widths: Vec<u16> =
       items.iter().map(|[key, label]| (key.width() + label.width()) as u16).collect();
 
-    // corner, border cell and padding space on both sides
-    let count = fit_count(area.width.saturating_sub(6), &widths, HINT_GAP);
+    // the line keeps a border cell and the corner on the right, hints get a padding space on
+    // both sides
+    let room = area.width.saturating_sub(start).saturating_sub(2);
+    let count = fit_count(room.saturating_sub(2), &widths, HINT_GAP);
     if count == 0 {
-      return;
+      return None;
     }
 
     let gap = " ".repeat(HINT_GAP as usize);
@@ -267,7 +283,8 @@ impl App {
     spans.push(Span::raw(" "));
 
     let line = Line::from(spans).style(self.theme.text);
-    f.buffer_mut().set_line(area.x + 2, area.bottom() - 1, &line, area.width - 4);
+    f.buffer_mut().set_line(area.x + start, area.bottom() - 1, &line, room);
+    Some(start + width_u16(&line))
   }
 
   /// CPU box: chip info, clock and version in the title, E-CPU / P-CPU graphs and the optional

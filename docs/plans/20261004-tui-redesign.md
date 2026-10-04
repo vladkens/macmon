@@ -240,14 +240,14 @@
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/config.rs`
 
-- [ ] `ProcView` state: sort key/direction (persisted), filter string, input mode, selected pid, scroll offset
-- [ ] table rendering with column priority by width, gradient-colored values, `-` for unavailable, selected row highlight, title with filter and sort
-- [ ] keys: `/` input mode (chars, Backspace, Enter, Esc), `s`/`S`, arrows/PgUp/PgDn/Home/End, `Esc` clears selection; normal-mode keys ignored while typing
-- [ ] proc key hints in the bottom border of the proc box
-- [ ] write tests for sorting by each key and direction, filter by name/pid (case-insensitive), selection follows pid after re-sort, clamp when list shrinks, scroll keeps selection visible
-- [ ] write tests for column dropping at narrow widths and render of the panel with synthetic `ProcInfo`
-- [ ] write tests that `q`/`c` while typing a filter add characters instead of quitting/changing theme
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] `ProcView` state: sort key/direction (persisted), filter string, input mode, selected pid, scroll offset (`ProcView` owns the latest list, replacing `App::procs`; sort changes are saved via `Config::set_proc_sort`, ➕ `ProcSort::next` / `label`; ties sort by pid, processes without power go last when sorted by power; a selected process that disappears hands the selection to the row at the same position, clamped to the last row)
+- [x] table rendering with column priority by width, gradient-colored values, `-` for unavailable, selected row highlight, title with filter and sort (title `proc 412` / `proc 12/412`, `/filter█` while typing, `cpu ↓` right; NAME min 8 cells, takes the rest; one blank cell before the right border; zero values dim; CPU / GPU gradient by %/100, MEM by share of RAM, POWER by W/10; sorted column header in title color)
+- [x] keys: `/` input mode (chars, Backspace, Enter, Esc), `s`/`S`, arrows/PgUp/PgDn/Home/End, `Esc` clears selection; normal-mode keys ignored while typing (➕ proc keys act only while the panel is on screen, hiding it ends input mode; Ctrl-C quits even while typing; `Esc` in normal mode clears the filter when nothing is selected; navigation keys also work while typing; no selection → the table shows its top)
+- [x] proc key hints in the bottom border of the proc box (➕ `draw_hints` shared with the global hints; when the proc box also holds the global hints, the proc hints follow them and give way first)
+- [x] write tests for sorting by each key and direction, filter by name/pid (case-insensitive), selection follows pid after re-sort, clamp when list shrinks, scroll keeps selection visible
+- [x] write tests for column dropping at narrow widths and render of the panel with synthetic `ProcInfo`
+- [x] write tests that `q`/`c` while typing a filter add characters instead of quitting/changing theme
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 11: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (all old metrics visible, themes, braille, panels, process list with POWER/GPU)

@@ -66,7 +66,7 @@ impl Panels {
 }
 
 /// Process list sort key.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub enum ProcSort {
   Cpu,
   Mem,
@@ -74,6 +74,31 @@ pub enum ProcSort {
   Gpu,
   Pid,
   Name,
+}
+
+impl ProcSort {
+  /// Next key in the `s` cycle: CPU → MEM → POWER → GPU → PID → NAME → CPU.
+  pub fn next(self) -> Self {
+    match self {
+      Self::Cpu => Self::Mem,
+      Self::Mem => Self::Power,
+      Self::Power => Self::Gpu,
+      Self::Gpu => Self::Pid,
+      Self::Pid => Self::Name,
+      Self::Name => Self::Cpu,
+    }
+  }
+
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Cpu => "cpu",
+      Self::Mem => "mem",
+      Self::Power => "power",
+      Self::Gpu => "gpu",
+      Self::Pid => "pid",
+      Self::Name => "name",
+    }
+  }
 }
 
 #[serde_inline_default]
@@ -199,6 +224,12 @@ impl Config {
     if self.panels.toggle(key) {
       self.save();
     }
+  }
+
+  pub fn set_proc_sort(&mut self, sort: ProcSort, desc: bool) {
+    self.proc_sort = sort;
+    self.proc_sort_desc = desc;
+    self.save();
   }
 }
 
@@ -351,5 +382,24 @@ mod tests {
     let mut cfg = Config::default();
     cfg.set_theme("dracula");
     assert_eq!(cfg.theme, "dracula");
+  }
+
+  #[test]
+  fn proc_sort_cycle_wraps() {
+    let mut sort = ProcSort::Cpu;
+    let mut labels = vec![sort.label()];
+    for _ in 0..6 {
+      sort = sort.next();
+      labels.push(sort.label());
+    }
+    assert_eq!(labels, ["cpu", "mem", "power", "gpu", "pid", "name", "cpu"]);
+  }
+
+  #[test]
+  fn set_proc_sort_updates_both_fields() {
+    let mut cfg = Config::default();
+    cfg.set_proc_sort(ProcSort::Name, false);
+    assert_eq!(cfg.proc_sort, ProcSort::Name);
+    assert!(!cfg.proc_sort_desc);
   }
 }
