@@ -160,12 +160,13 @@
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/config.rs`
 
-- [ ] implement `compute_layout(area, panels, per_core) -> LayoutPlan` (optional rects for cpu, gpu, mem, power, proc, per-core grid)
-- [ ] auto-hide proc panel below `PROC_MIN_WIDTH`/`PROC_MIN_HEIGHT`; left column full width when proc hidden; proc full width when it's the only panel
-- [ ] keys `1`–`5` toggle panels and persist in config
-- [ ] write tests: 200x50 all panels, 80x24 (proc auto-hidden), only proc, only cpu, all hidden, per-core off
-- [ ] write tests: rects never overlap and stay inside the area for a grid of sizes
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] implement `compute_layout(area, panels, per_core) -> LayoutPlan` (optional rects for cpu, gpu, mem, power, proc, per-core grid) (CPU box = 1/3 of the height, min 6; `cpu_graphs` / `cores` are inside the CPU box borders, cores take the right half; left column 40% wide; POWER keeps 6 rows, GPU / MEM share the rest; zero-size boxes are `None`)
+- [x] auto-hide proc panel below `PROC_MIN_WIDTH`/`PROC_MIN_HEIGHT`; left column full width when proc hidden; proc full width when it's the only panel (proc is never auto-hidden when it's the only visible panel)
+- [x] keys `1`–`5` toggle panels and persist in config
+- [x] ➕ `LayoutPlan::bottom_left()` picks the box for the global key hints; current render code switched to `compute_layout` (interim boxes, empty `proc` placeholder, "all panels hidden" hint)
+- [x] write tests: 200x50 all panels, 80x24 (proc auto-hidden), only proc, only cpu, all hidden, per-core off
+- [x] write tests: rects never overlap and stay inside the area for a grid of sizes
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 5: Render metric panels in the new layout
 

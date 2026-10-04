@@ -47,6 +47,24 @@ impl Default for Panels {
   }
 }
 
+impl Panels {
+  /// Flips the panel bound to key `1`–`5` (cpu, gpu, mem, power, proc).
+  /// Returns `false` and changes nothing for other keys.
+  pub fn toggle(&mut self, key: char) -> bool {
+    let shown = match key {
+      '1' => &mut self.cpu,
+      '2' => &mut self.gpu,
+      '3' => &mut self.mem,
+      '4' => &mut self.power,
+      '5' => &mut self.proc,
+      _ => return false,
+    };
+
+    *shown = !*shown;
+    true
+  }
+}
+
 /// Process list sort key.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub enum ProcSort {
@@ -175,6 +193,13 @@ impl Config {
     };
     self.save();
   }
+
+  /// Shows / hides the panel bound to key `1`–`5`; other keys are ignored.
+  pub fn toggle_panel(&mut self, key: char) {
+    if self.panels.toggle(key) {
+      self.save();
+    }
+  }
 }
 
 #[cfg(test)]
@@ -288,6 +313,37 @@ mod tests {
     ] {
       assert_eq!(parse(&format!(r#"{{"proc_sort": "{name}"}}"#)).proc_sort, key);
     }
+  }
+
+  #[test]
+  fn toggle_panel_flips_one_panel() {
+    let all = Panels::default();
+    let cases = [
+      ('1', Panels { cpu: false, ..all }),
+      ('2', Panels { gpu: false, ..all }),
+      ('3', Panels { mem: false, ..all }),
+      ('4', Panels { power: false, ..all }),
+      ('5', Panels { proc: false, ..all }),
+    ];
+
+    for (key, hidden) in cases {
+      let mut cfg = Config::default();
+      cfg.toggle_panel(key);
+      assert_eq!(cfg.panels, hidden, "key {key}");
+      cfg.toggle_panel(key);
+      assert_eq!(cfg.panels, all, "key {key}");
+    }
+  }
+
+  #[test]
+  fn toggle_panel_ignores_other_keys() {
+    let mut panels = Panels::default();
+    for key in ['0', '6', '9', 'a', ' '] {
+      assert!(!panels.toggle(key));
+    }
+    assert_eq!(panels, Panels::default());
+    assert!(panels.toggle('5'));
+    assert!(!panels.proc);
   }
 
   #[test]
