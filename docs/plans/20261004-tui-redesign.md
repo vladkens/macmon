@@ -57,7 +57,33 @@
 
 ## Technical Details
 
-### Layout (A)
+### Layout V3 (user decision after Task 10 — replaces Layout A below)
+```
+╭─ M3 Pro · 6E+6P · 18GPU · 36GB ───────────────────── 14:32 · macmon ─╮
+│ E-CPU  42% 1.8GHz ⣀⣠⣤⣴⣶⣾⣿⣷⣶⣤⣀⣀⣠⣤⣶⣿⣿⣷⣶⣤⣀⣠ │ CPU  4.2W 58°C ▁▂▃▅▇▅▃    │
+│ P-CPU  77% 3.2GHz ⣿⣿⣷⣶⣤⣀⣀⣠⣤⣶⣿⣿⣷⣶⣤⣀⣠⣴⣾⣿⣿⣷ │ GPU  1.1W 45°C ▁▁▂▃▂▁▁    │
+│ GPU    23% 1.4GHz ⣀⣀⣀⣠⣤⣤⣀⣀⣀⣀⣠⣤⣴⣶⣤⣀⣀⣀⣀⣀⣀⣠ │ ANE  0.0W      ▁▁▁▁▁▁▁    │
+│ RAM    59% 21/36G ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱ │ SYS 18.3W  fan 1200rpm    │
+│ SWAP    4% 1.2/4G ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ all 12.4W avg 9 max 21    │
+│ cores  E ▃▅▂▁▂▁  P ▇▆█▅▃▇                │                           │
+╰──────────────────────────────────────────────────────────────────────╯
+╭─ proc 612 ── /filter ──────────────────────────────────────── cpu ↓ ─╮
+│ PID    NAME                USER      CPU%     MEM   POWER   GPU%     │
+│ ...  (full width, ~60% of the screen height)                         │
+╰─ q quit · c theme · … · ↑↓ select · / filter · s sort ───────────────╯
+```
+- Two full-width boxes: metrics on top, process list at the bottom with `PROC_HEIGHT_PCT = 60` of the height. The top box gets the rest but never less than its minimum content height; if the proc box would get fewer than `PROC_MIN_ROWS` rows it auto-hides (height only — width no longer matters).
+- Top box title: chip info left (`M3 Pro · 6E+6P · 18GPU · 36GB`), clock + `macmon vX · interval` right.
+- Left part = one strip per row: `{label} {pct}% {freq/usage} {graph or meter}`:
+  - one strip per CPU cluster, rendered from a generic list of clusters (2 today: E/P on M1–M4, P/S on M5; a third tier appears without layout changes once the library exposes it — M6 has 6E + 4P + 2S);
+  - GPU strip; RAM meter strip; SWAP meter strip only when `swap_total > 0`;
+  - when the top box has spare rows (tall terminal or proc hidden), the extra rows go to the graph strips (clusters + GPU) so graphs grow taller; the label stays on the strip's first row.
+- Cores row(s) (`d` toggles): one vertical bar per core (`▁`…`█`, gradient-colored), grouped by cluster (`E ▃▅▂▁  P ▇▆█▅`). Core counts range from 8 (M1: 4E+4P) to 36 (M5 Ultra: 24P+12S); M3 Ultra has 32 (8E+24P). If one line doesn't fit: one line per die on multi-die chips (`D0 …`, `D1 …`), then wrap per cluster. Each wrap adds a row to the top box.
+- Right part = power column (~28 cells): CPU W + temp + sparkline, GPU W + temp + sparkline, ANE W + sparkline, SYS W + fans (only when available), total W with avg / max. On narrow widths (< ~70) the power rows move under the strips.
+- Panel keys: `1` CPU strips + cores, `2` GPU strip, `3` RAM/SWAP strips, `4` power column, `5` proc box. Hidden rows shrink the top box; with every metric hidden the proc box takes the full height; with proc hidden the top box takes the full height.
+- Key hints: global + proc hints on the bottom border of the bottom-most box (proc hints drop first, `q quit` always stays).
+
+### Layout (A) — superseded by Layout V3
 ```
 ╭─ cpu ── M3 Pro · 6E+6P · 18GPU · 36GB ── 14:32 ── macmon v0.9 · 1000ms ─╮
 │ E-CPU 42% @ 1.8GHz  ⣀⣠⣤⣴⣶⣾⣿⣷⣶   │ E0 ▰▰▰▱▱ 42%   P0 ▰▰▰▰▱ 77%         │
@@ -249,14 +275,34 @@
 - [x] write tests that `q`/`c` while typing a filter add characters instead of quitting/changing theme
 - [x] run `make test` and `make check` - must pass before next task
 
-### Task 11: Verify acceptance criteria
+### Task 11: ➕ Switch to Layout V3 (full-width proc list at the bottom)
+
+User decision after Task 10: process list full width at the bottom (60% of the height), all metrics compacted into one strips box on top. See "Layout V3" in Technical Details.
+
+**Files:**
+- Modify: `src_app/tui/layout.rs`
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/mod.rs`
+- Modify: `src_app/tui/store.rs`
+- Modify: `src_app/config.rs` (only if panel semantics need it; old configs must keep loading)
+
+- [ ] rework `compute_layout` for V3: top metrics box + full-width proc box with `PROC_HEIGHT_PCT = 60`, top box min content height, proc auto-hide by height only (`PROC_MIN_ROWS`), spare rows grow the graph strips
+- [ ] render strips from a generic list of CPU clusters (built from `Metrics` in the store, so tests can inject 3 clusters), then GPU, RAM, SWAP; power column on the right, moved under the strips on narrow widths
+- [ ] cores row: one bar per core grouped by cluster, wrap per die then per cluster; `d` toggles it
+- [ ] panel keys `1`–`5` mapped to CPU / GPU / MEM rows, power column, proc box
+- [ ] remove Layout A code that becomes unused (left column, CPU box with per-core meter grid, separate GPU / MEM / POWER boxes)
+- [ ] write layout tests at 200x50, 120x40, 100x30, 80x24, 72x24, 60x15: proc gets ~60% of the height, proc hidden → top box full height, all metrics hidden → proc full height, boxes inside the area and non-overlapping
+- [ ] write render tests for core configs with synthetic data: M1 (4E+4P), M4 Max (4E+12P), three clusters like M6 (6E+4P+2S), M3 Ultra (8E+24P, 2 dies), M5 Ultra (24P+12S, 2 dies) at widths 72 and 100 — every core bar rendered, nothing overflows the box, die wrap when one line doesn't fit
+- [ ] run `make test` and `make check` - must pass before next task
+
+### Task 12: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (all old metrics visible, themes, braille, panels, process list with POWER/GPU)
 - [ ] verify edge cases: tiny window, no swap, no fans, multi-die, theme fallback without truecolor
 - [ ] run full test suite: `make test`
 - [ ] run `make check`
 - [ ] run `cargo run --release` manually and walk through every key
 
-### Task 12: [Final] Update documentation
+### Task 13: [Final] Update documentation
 - [ ] update `readme.md`: features list, Controls section, note on process data without sudo
 - [ ] add entry to `changelog.md`
 - [ ] move this plan to `docs/plans/completed/`
@@ -274,3 +320,7 @@
 **Release**:
 - new screenshot for `assets` branch / README.
 - Phase 2 (separate plan): kill / signals, process tree, details on Enter.
+
+**Library follow-up** (separate plan):
+- M6 has three CPU tiers (6E + 4P + 2S). The library exposes only two clusters (`ecpu_*` / `pcpu_*`): `cpu_tier_counts` reads perflevel0 and the last perflevel only, and `MCPU` channels are classified as the E slot, so on M6 the P and E tiers most likely merge into one cluster with a wrong label. Needs a verified fix on real M6 hardware and a public API for N clusters; the TUI strips are already generic over clusters.
+- Per-process watts looked low in a spot check (ghostty ~20% CPU → ~0.06 W): compare `ri_energy_nj` against Activity Monitor / `powermetrics --show-process-energy`.
