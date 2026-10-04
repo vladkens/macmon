@@ -3,7 +3,7 @@
 use core_foundation::base::{CFRelease, CFShow};
 use std::time::Duration;
 
-use crate::shared::ioreport_channels_filter;
+use crate::shared::{ioreport_channels_filter, is_pmp_ane_channel};
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
   cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
@@ -12,11 +12,12 @@ use crate::sources::{
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
-fn debug_channels(group: &str, _subgroup: &str, _channel: &str, _unit: &str) -> bool {
+fn debug_channels(group: &str, subgroup: &str, channel: &str, unit: &str) -> bool {
   group == "Energy Model"
     || group == "Energy Counters"
     || group == "CPU Stats"
     || group == "GPU Stats"
+    || is_pmp_ane_channel(group, subgroup, channel, unit)
 }
 
 fn print_divider(msg: &str) {

@@ -44,7 +44,9 @@ enum StressMode {
   Cpu,
   /// Continuous GPU-only load
   Gpu,
-  /// Continuous CPU and GPU load
+  /// Repeated OCR with its main compute stage assigned to the Neural Engine
+  Ane,
+  /// Continuous CPU, GPU, and ANE load
   All,
 }
 
@@ -90,11 +92,11 @@ enum Commands {
     #[arg(value_enum, default_value = "pulse")]
     mode: StressMode,
 
-    /// Number of CPU worker threads. Ignored in GPU mode
+    /// Number of CPU worker threads. Ignored in GPU and ANE modes
     #[arg(short, long)]
     workers: Option<usize>,
 
-    /// Stop after this many seconds. Runs until Ctrl-C when omitted
+    /// Stop after this many seconds (after ANE warmup in ane/all). Runs until Ctrl-C when omitted
     #[arg(short, long)]
     duration: Option<u64>,
   },
@@ -122,11 +124,16 @@ fn run_stress(
   workers: Option<usize>,
   duration: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
+  let uses_ane = matches!(mode, StressMode::Ane | StressMode::All);
+  if uses_ane && duration == Some(0) {
+    return Ok(());
+  }
+
   let cpu_count = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
   let workers = match mode {
     StressMode::Pulse => workers.unwrap_or(cpu_count.div_ceil(2)),
     StressMode::Cpu | StressMode::All => workers.unwrap_or(cpu_count),
-    StressMode::Gpu => 1,
+    StressMode::Gpu | StressMode::Ane => 1,
   }
   .max(1);
   let plural = if workers == 1 { "" } else { "s" };
@@ -134,9 +141,11 @@ fn run_stress(
     StressMode::Pulse => format!("CPU pulse · {workers} worker{plural}"),
     StressMode::Cpu => format!("CPU · {workers} worker{plural}"),
     StressMode::Gpu => "GPU".to_string(),
-    StressMode::All => format!("CPU + GPU · {workers} CPU worker{plural}"),
+    StressMode::Ane => "ANE OCR".to_string(),
+    StressMode::All => format!("CPU + GPU + ANE · {workers} CPU worker{plural}"),
   };
 
+  let mut ane = if uses_ane { Some(stress::AneLoad::prepare()?) } else { None };
   let started = Instant::now();
   let spinner = io::stderr().is_terminal().then(|| {
     let (done, receiver) = mpsc::channel();
@@ -177,7 +186,10 @@ fn run_stress(
       Ok(())
     }
     StressMode::Gpu => stress::run_gpu(duration),
-    StressMode::All => stress::run_all(workers, duration),
+    StressMode::Ane => ane.as_mut().expect("ANE workload prepared").run(duration),
+    StressMode::All => {
+      stress::run_all(workers, duration, ane.as_mut().expect("ANE workload prepared"))
+    }
   };
 
   if let Some((done, handle)) = spinner {
@@ -186,6 +198,14 @@ fn run_stress(
     let mut stderr = io::stderr().lock();
     let _ = write!(stderr, "\r\x1b[2K");
     let _ = stderr.flush();
+  }
+
+  if let Some(ane) = ane {
+    eprintln!(
+      "ANE OCR · {} requests completed in {:.1}s",
+      ane.completed_requests(),
+      started.elapsed().as_secs_f64()
+    );
   }
 
   result
@@ -261,4 +281,25 @@ fn main() -> Result<(), Box<dyn Error>> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn parses_ane_stress_duration() {
+    let cli = Cli::try_parse_from(["macmon", "stress", "ane", "--duration", "5"]).unwrap();
+    assert!(matches!(
+      cli.command,
+      Some(Commands::Stress { mode: StressMode::Ane, workers: None, duration: Some(5) })
+    ));
+  }
+
+  #[test]
+  fn zero_duration_ane_and_all_skip_warmup() {
+    for mode in [StressMode::Ane, StressMode::All] {
+      run_stress(mode, None, Some(0)).unwrap();
+    }
+  }
 }
