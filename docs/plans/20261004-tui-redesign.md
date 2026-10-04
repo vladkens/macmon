@@ -2,7 +2,7 @@
 
 ## Overview
 - Redesign the interactive TUI in a btop-inspired style: a full-width CPU box on top, a left column with GPU / MEM / POWER boxes, and a process list on the right.
-- Replace single-accent coloring with themes and load gradients (green → yellow → red), and use braille history graphs by default.
+- Replace single-accent coloring with load gradients (green → yellow → red) in the terminal's own colors (built-in themes until Task 12), and use braille history graphs.
 - Add a process list (PID, NAME, USER, CPU%, MEM, POWER W, GPU%) with sorting, filtering and selection, so macmon covers the "what is eating my Mac" use case that currently requires btop/htop/Activity Monitor.
 - Differentiators vs btop: per-process power (W) and per-process GPU %, both sudoless.
 - All existing metrics stay: E-CPU / P-CPU (aggregate + per-core, scaled/active ratio), GPU, RAM / SWAP, CPU / GPU / ANE / total / system power with avg/max, CPU / GPU temperature, fans.
@@ -50,8 +50,8 @@
 ## Solution Overview
 - Split `src_app/tui.rs` into `src_app/tui/` modules so the redesign doesn't produce a 2k-line file.
 - Input thread forwards raw key events (`Event::Key`); the app interprets them by mode (normal / filter input), so typing a filter doesn't trigger `q`/`c`/etc.
-- Theme = named palette (border, title, text, dim, selection, 3-stop load gradient). Colors are RGB; when the terminal doesn't advertise truecolor (`COLORTERM` ≠ `truecolor`/`24bit`) they are mapped to the nearest xterm-256 index.
-- Custom widgets: `BrailleGraph` (filled area graph, 2 samples per cell, 4 dots per row, vertical gradient) and `Meter` (horizontal bar with gradient fill). `v` switches graphs to the current block-style `Sparkline`.
+- ~~Theme = named palette (border, title, text, dim, selection, 3-stop load gradient). Colors are RGB; when the terminal doesn't advertise truecolor (`COLORTERM` ≠ `truecolor`/`24bit`) they are mapped to the nearest xterm-256 index.~~ Superseded in Task 12 by "Colors: terminal palette".
+- Custom widgets: `BrailleGraph` (filled area graph, 2 samples per cell, 4 dots per row, vertical gradient) and `Meter` (horizontal bar with gradient fill). ~~`v` switches graphs to the current block-style `Sparkline`.~~ Braille only since Task 12.
 - A pure `compute_layout(area, panels, per_core) -> LayoutPlan` decides box rectangles; panels toggle with `1`–`5`; the process panel auto-hides below a minimum size so macmon still works in a small window.
 - Process data comes from a separate `procs` thread (own `ProcSampler`), paused while the process panel is hidden, so users who don't need it pay nothing.
 
@@ -107,6 +107,7 @@
 - Load gradient (graphs, meters, values): terminal green (2) → yellow (3) → red (1).
 - At startup (raw mode on, before the input thread starts) query the real palette: OSC 4 for indexes 1/2/3 (+ OSC 10/11 for fg/bg), followed by a DA1 (`ESC [ c`) sentinel so terminals that ignore OSC 4 don't cost the full timeout; overall timeout ≈ 150 ms; drain late replies so they never reach the key handler. Parse `ESC ] 4 ; n ; rgb:R/G/B` with 1–4 hex digits per channel, terminated by BEL or ST.
 - Palette known + truecolor (`COLORTERM` = `truecolor`/`24bit`) → smooth RGB interpolation between the terminal's own green/yellow/red. Otherwise → discrete steps (green / yellow / red ANSI indexes), still the terminal's colors.
+- ➕ As built (Task 12): the query runs only with truecolor (otherwise the palette is unused); OSC 10/11 are not queried, since nothing uses fg/bg (borders / dim are ANSI 8, selection is reverse video, titles and text are the default fg). Replies are read from `/dev/tty` with `select(2)` (macOS `poll(2)` doesn't support devices). Colors count only within 150 ms; without the DA1 reply by then, input is read and dropped until it arrives, at most 500 ms more, so replies up to ~650 ms late can't become key presses (later ones still could). Discrete steps: green up to 1/3, yellow up to 2/3, red above.
 
 ### Graph style (user decision after Task 11)
 - Braille only: no `v` key and no block mode. Power-column mini graphs are braille too. Core bars (one `▁`…`█` cell per core) stay — they show current values, not history.
@@ -314,13 +315,13 @@ User decision after Task 11: follow the terminal's color scheme instead of built
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/config.rs`
 
-- [ ] replace built-in themes with one terminal-palette theme (default fg/bg + ANSI 16; borders/dim = bright black; selected row = reverse video); remove `c` and the `theme` config field
-- [ ] startup palette query: OSC 4 (1/2/3) + OSC 10/11 with a DA1 sentinel and ≈150 ms timeout, run before the input thread; drain late replies; smooth gradient between the queried colors when truecolor, discrete ANSI green/yellow/red otherwise
-- [ ] braille only: remove `ViewType`, `v`, the `view_type` config field, the block fallback in `Graph`, `Meter` block chars and `bar_set()`; power-column mini graphs use braille
-- [ ] write tests for OSC reply parsing: BEL and ST terminators, 1–4 hex digits per channel, several replies in one buffer, garbage, partial/truncated replies, DA1 sentinel
-- [ ] write tests for the gradient: palette + truecolor → RGB between the queried colors; no palette or no truecolor → only ANSI indexed colors (no RGB anywhere in a rendered frame)
-- [ ] write tests: old configs with `color` / `theme` / `view_type` still load; `c` and `v` do nothing; update render tests that relied on themes or block mode
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] replace built-in themes with one terminal-palette theme (default fg/bg + ANSI 16; borders/dim = bright black; selected row = reverse video); remove `c` and the `theme` config field (`theme.rs` kept for `Theme`: border / dim `DarkGray` (ANSI 8), title / text `Reset` (titles stay bold), `selected` = default fg + `REVERSED` so a selected row reads as one bar instead of reversing each gradient color; xterm-256 mapping and the 6 themes removed)
+- [x] startup palette query: OSC 4 (1/2/3) + OSC 10/11 with a DA1 sentinel and ≈150 ms timeout, run before the input thread; drain late replies; smooth gradient between the queried colors when truecolor, discrete ANSI green/yellow/red otherwise (➕ new `palette.rs`; ⚠️ OSC 10/11 dropped: nothing uses fg/bg; query skipped without truecolor; `run_loop` now enters raw mode, queries, then starts the input thread; drain = read until the DA1 reply, at most 500 ms after the 150 ms timeout; I/O behind a `TimedRead` trait, real `Tty` = `/dev/tty` + `select(2)`; checked end to end with a scripted fake terminal on a pty: answered → RGB from the queried colors, late (300 ms) / silent → ANSI steps and no leaked key presses, no `COLORTERM` → no query)
+- [x] braille only: remove `ViewType`, `v`, the `view_type` config field, the block fallback in `Graph`, `Meter` block chars and `bar_set()`; power-column mini graphs use braille (`graph()` → `Graph::new(data, theme)`; key hints now `q quit  d cores  r scaled  -/+ 1000ms  1-5 panels`)
+- [x] write tests for OSC reply parsing: BEL and ST terminators, 1–4 hex digits per channel, several replies in one buffer, garbage, partial/truncated replies, DA1 sentinel (➕ also query flow on a fake terminal: query bytes, replies byte by byte, DA1-only stops early, drain stops at DA1 and leaves later input, read error; and on a real pty: `select` timeout, answered query, late replies drained)
+- [x] write tests for the gradient: palette + truecolor → RGB between the queried colors; no palette or no truecolor → only ANSI indexed colors (no RGB anywhere in a rendered frame) (rendered frames with strips, cores, power, procs and a selected row at 200x50 / 80x24 / 60x15: only `Reset` / `DarkGray` / green / yellow / red, all three load colors present; smooth: every RGB cell between green–yellow or yellow–red, the rest `Reset` / `DarkGray`)
+- [x] write tests: old configs with `color` / `theme` / `view_type` still load; `c` and `v` do nothing; update render tests that relied on themes or block mode (selection test checks `REVERSED` over the whole row; `graphs_are_braille` replaces the view-type tests)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 13: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (all old metrics visible, terminal palette colors, braille, panels, process list with POWER/GPU)

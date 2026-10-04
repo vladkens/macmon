@@ -432,8 +432,9 @@ impl App {
       let row = Rect { y: body.y + i as u16, height: 1, ..body };
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
       draw_row(buf, row, &columns, cells);
+      // reverse video in the default colors, so the row reads as one bar
       if selected {
-        buf.set_style(row, Style::new().bg(self.theme.selection));
+        buf.set_style(row, self.theme.selected);
       }
     }
   }

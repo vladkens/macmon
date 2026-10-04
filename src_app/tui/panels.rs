@@ -16,8 +16,8 @@ use super::layout::{
   CORE_RUN_GAP, ClusterCores, Content, CoreLine, LayoutPlan, Strip, compute_layout, die_label,
 };
 use super::store::FreqStore;
-use super::widgets::{Meter, core_bar, graph};
-use crate::config::{RatioMode, ViewType};
+use super::widgets::{Graph, Meter, core_bar};
+use crate::config::RatioMode;
 
 const GB: f64 = (1u64 << 30) as f64;
 /// Blank cells between key hints on the bottom border.
@@ -219,10 +219,6 @@ impl App {
     Span::styled(format!("{celsius:>3.0}°C"), self.theme.gradient(temp_ratio(celsius)))
   }
 
-  fn block_meters(&self) -> bool {
-    self.cfg.view_type == ViewType::Block
-  }
-
   /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders.
   pub(super) fn draw_box(&self, f: &mut Frame, area: Rect, titles: Titles) -> Rect {
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(self.theme.border);
@@ -236,14 +232,8 @@ impl App {
   /// dropped from the end, so `q quit` stays visible as long as possible. Returns where the hints
   /// end, as for `draw_hints`.
   pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) -> Option<u16> {
-    let view = match self.cfg.view_type {
-      ViewType::Braille => "braille",
-      ViewType::Block => "block",
-    };
     let hints = [
       ("q", "quit".to_string()),
-      ("c", self.theme.name.to_string()),
-      ("v", view.to_string()),
       ("d", "cores".to_string()),
       ("r", self.cfg.ratio_mode.label().to_string()),
       ("-/+", format!("{}ms", self.cfg.interval)),
@@ -443,10 +433,8 @@ impl App {
 
     let body = Rect { x: area.x + text_width, width: area.width - text_width, ..area };
     match strip.history {
-      Some(items) => graph(self.cfg.view_type, items, &self.theme).max(100).render(body, buf),
-      None => {
-        Meter::new(strip.ratio, &self.theme).block_chars(self.block_meters()).render(body, buf)
-      }
+      Some(items) => Graph::new(items, &self.theme).max(100).render(body, buf),
+      None => Meter::new(strip.ratio, &self.theme).render(body, buf),
     }
   }
 
@@ -549,7 +537,7 @@ impl App {
         && area.width > width
       {
         let graph_area = Rect::new(area.x + width, y, area.width - width, 1);
-        graph(self.cfg.view_type, items, &self.theme).render(graph_area, buf);
+        Graph::new(items, &self.theme).render(graph_area, buf);
       }
     }
   }

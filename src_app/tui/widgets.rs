@@ -2,12 +2,9 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::symbols;
-use ratatui::widgets::{RenderDirection, Sparkline, SparklineBar, Widget};
+use ratatui::widgets::Widget;
 
 use super::theme::Theme;
-use crate::config::ViewType;
 
 /// Braille dot bits of the left column, filled bottom-up (index = number of dots).
 const LEFT_DOTS: [u32; 5] = [0x00, 0x40, 0x44, 0x46, 0x47];
@@ -17,13 +14,6 @@ const BRAILLE_BLANK: u32 = 0x2800;
 const DOTS_PER_ROW: u64 = 4;
 /// Vertical bars of the per-core row, lowest first; an idle core still shows the lowest one.
 pub const CORE_BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-
-fn bar_set() -> symbols::bar::Set<'static> {
-  match std::env::var("TERM_PROGRAM").as_deref() {
-    Ok("Apple_Terminal") => symbols::bar::THREE_LEVELS,
-    _ => symbols::bar::NINE_LEVELS,
-  }
-}
 
 fn clamp_ratio(ratio: f64) -> f64 {
   if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) }
@@ -35,25 +25,20 @@ pub fn core_bar(ratio: f64) -> &'static str {
   CORE_BARS[level.min(CORE_BARS.len() - 1)]
 }
 
-/// History graph for newest-first samples, right-aligned (newest sample on the right).
-///
-/// `ViewType::Braille` draws a filled braille area graph: 2 samples per cell, 4 dot levels per
-/// row, each row colored by its height on the theme gradient (capped by the cell's own value so
-/// one-row graphs still reflect the load). `ViewType::Block` falls back to ratatui's block
-/// `Sparkline` with every bar colored by its value.
+/// Braille history graph for newest-first samples, right-aligned (newest sample on the right): a
+/// filled area with 2 samples per cell and 4 dot levels per row, each row colored by its height on
+/// the load gradient (capped by the cell's own value so one-row graphs still reflect the load).
 pub struct Graph<'a> {
-  view: ViewType,
   data: &'a [u64],
   max: Option<u64>,
   theme: &'a Theme,
 }
 
-/// Creates a history graph in the style selected by `view` (`v` key).
-pub fn graph<'a>(view: ViewType, data: &'a [u64], theme: &'a Theme) -> Graph<'a> {
-  Graph { view, data, max: None, theme }
-}
+impl<'a> Graph<'a> {
+  pub fn new(data: &'a [u64], theme: &'a Theme) -> Self {
+    Self { data, max: None, theme }
+  }
 
-impl Graph<'_> {
   /// Value drawn at full height. Defaults to the largest visible sample.
   pub fn max(mut self, max: u64) -> Self {
     self.max = Some(max);
@@ -65,8 +50,15 @@ impl Graph<'_> {
       self.max.unwrap_or_else(|| self.data.iter().take(visible).copied().max().unwrap_or(0));
     max.max(1)
   }
+}
 
-  fn render_braille(&self, area: Rect, buf: &mut Buffer) {
+impl Widget for Graph<'_> {
+  fn render(self, area: Rect, buf: &mut Buffer) {
+    let area = area.intersection(buf.area);
+    if area.is_empty() {
+      return;
+    }
+
     let width = area.width as usize;
     let max = self.scale_max(width * 2);
     let rows = area.height as u64;
@@ -99,35 +91,6 @@ impl Graph<'_> {
       }
     }
   }
-
-  fn render_blocks(&self, area: Rect, buf: &mut Buffer) {
-    let max = self.scale_max(area.width as usize);
-    let bars = self.data.iter().take(area.width as usize).map(|&value| {
-      let color = self.theme.gradient(value as f64 / max as f64);
-      SparklineBar::from(value).style(Style::new().fg(color))
-    });
-
-    Sparkline::default()
-      .direction(RenderDirection::RightToLeft)
-      .data(bars)
-      .max(max)
-      .bar_set(bar_set())
-      .render(area, buf);
-  }
-}
-
-impl Widget for Graph<'_> {
-  fn render(self, area: Rect, buf: &mut Buffer) {
-    let area = area.intersection(buf.area);
-    if area.is_empty() {
-      return;
-    }
-
-    match self.view {
-      ViewType::Braille => self.render_braille(area, buf),
-      ViewType::Block => self.render_blocks(area, buf),
-    }
-  }
 }
 
 /// Number of filled dots (of `dots`) for `value`. Non-zero values get at least one dot.
@@ -145,18 +108,11 @@ fn dot_level(value: u64, max: u64, dots: u64) -> u64 {
 pub struct Meter<'a> {
   ratio: f64,
   theme: &'a Theme,
-  symbols: (&'static str, &'static str),
 }
 
 impl<'a> Meter<'a> {
   pub fn new(ratio: f64, theme: &'a Theme) -> Self {
-    Self { ratio, theme, symbols: ("▰", "▱") }
-  }
-
-  /// Uses block characters (`█` / `░`) instead of `▰` / `▱`.
-  pub fn block_chars(mut self, on: bool) -> Self {
-    self.symbols = if on { ("█", "░") } else { ("▰", "▱") };
-    self
+    Self { ratio, theme }
   }
 }
 
@@ -169,10 +125,9 @@ impl Widget for Meter<'_> {
 
     let ratio = clamp_ratio(self.ratio);
     let filled = (ratio * f64::from(area.width)).round() as u16;
-    let (on, off) = self.symbols;
     for i in 0..area.width {
       let (symbol, color) =
-        if i < filled { (on, self.theme.gradient(ratio)) } else { (off, self.theme.dim) };
+        if i < filled { ("▰", self.theme.gradient(ratio)) } else { ("▱", self.theme.dim) };
       buf[(area.x + i, area.y)].set_symbol(symbol).set_fg(color);
     }
   }
@@ -185,9 +140,15 @@ mod tests {
   use ratatui::style::Color;
   use ratatui::widgets::Widget;
 
-  use super::{Meter, core_bar, dot_level, graph};
-  use crate::config::ViewType;
+  use super::{Graph, Meter, core_bar, dot_level};
+  use crate::tui::palette::Palette;
   use crate::tui::theme::Theme;
+
+  /// Theme with a smooth gradient, so every load level has its own color.
+  fn smooth() -> Theme {
+    let palette = Palette { green: (0, 255, 0), yellow: (255, 255, 0), red: (255, 0, 0) };
+    Theme::new(Some(palette), true)
+  }
 
   fn draw(widget: impl Widget, width: u16, height: u16) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -201,7 +162,7 @@ mod tests {
 
   fn braille(data: &[u64], max: u64, width: u16, height: u16) -> Buffer {
     let theme = Theme::default();
-    draw(graph(ViewType::Braille, data, &theme).max(max), width, height)
+    draw(Graph::new(data, &theme).max(max), width, height)
   }
 
   fn meter_rows(ratio: f64, width: u16, height: u16) -> Buffer {
@@ -211,10 +172,6 @@ mod tests {
 
   fn meter(ratio: f64, width: u16) -> Buffer {
     meter_rows(ratio, width, 1)
-  }
-
-  fn count(buf: &Buffer, symbol: &str) -> usize {
-    buf.content.iter().filter(|cell| cell.symbol() == symbol).count()
   }
 
   #[test]
@@ -237,15 +194,22 @@ mod tests {
 
   #[test]
   fn braille_rows_follow_vertical_gradient() {
-    let theme = Theme::default();
-    let buf = draw(graph(ViewType::Braille, &[100; 8], &theme).max(100), 4, 4);
-    for (y, t) in [(0, 1.0), (1, 0.75), (2, 0.5), (3, 0.25)] {
-      assert_eq!(buf[(0, y)].fg, theme.gradient(t), "row {y}");
+    for theme in [smooth(), Theme::default()] {
+      let buf = draw(Graph::new(&[100; 8], &theme).max(100), 4, 4);
+      for (y, t) in [(0, 1.0), (1, 0.75), (2, 0.5), (3, 0.25)] {
+        assert_eq!(buf[(0, y)].fg, theme.gradient(t), "row {y}");
+      }
+
+      // a one-row graph is colored by the value, not by the (full) row height
+      let buf = draw(Graph::new(&[20, 20], &theme).max(100), 1, 1);
+      assert_eq!(buf[(0, 0)].fg, theme.gradient(0.2));
     }
 
-    // a one-row graph is colored by the value, not by the (full) row height
-    let buf = draw(graph(ViewType::Braille, &[20, 20], &theme).max(100), 1, 1);
-    assert_eq!(buf[(0, 0)].fg, theme.gradient(0.2));
+    // the terminal's green / yellow / red without a palette
+    let theme = Theme::default();
+    let buf = draw(Graph::new(&[100; 2], &theme).max(100), 1, 3);
+    let colors: Vec<Color> = (0..3).map(|y| buf[(0, y)].fg).collect();
+    assert_eq!(colors, [Color::Red, Color::Yellow, Color::Green]);
   }
 
   #[test]
@@ -285,10 +249,10 @@ mod tests {
   fn braille_scales_to_visible_samples() {
     let theme = Theme::default();
     // only the 2 newest samples fit in one cell, older peaks don't affect the scale
-    let buf = draw(graph(ViewType::Braille, &[10, 10, 100, 100], &theme), 1, 1);
+    let buf = draw(Graph::new(&[10, 10, 100, 100], &theme), 1, 1);
     assert_eq!(row(&buf, 0), "⣿");
 
-    let buf = draw(graph(ViewType::Braille, &[10, 20], &theme), 1, 2);
+    let buf = draw(Graph::new(&[10, 20], &theme), 1, 2);
     assert_eq!(row(&buf, 0), "⡇"); // older 20 is full height, newer 10 is half
     assert_eq!(row(&buf, 1), "⣿");
   }
@@ -296,25 +260,10 @@ mod tests {
   #[test]
   fn graph_zero_size_area_does_not_panic() {
     let theme = Theme::default();
-    for view in [ViewType::Braille, ViewType::Block] {
-      for (w, h) in [(0, 0), (0, 3), (3, 0)] {
-        let buf = draw(graph(view, &[100; 8], &theme), w, h);
-        assert!(buf.content.is_empty());
-      }
+    for (w, h) in [(0, 0), (0, 3), (3, 0)] {
+      let buf = draw(Graph::new(&[100; 8], &theme), w, h);
+      assert!(buf.content.is_empty());
     }
-  }
-
-  #[test]
-  fn block_view_renders_sparkline() {
-    let theme = Theme::default();
-    let buf = draw(graph(ViewType::Block, &[100, 0, 100], &theme).max(100), 4, 1);
-    assert_eq!(row(&buf, 0), " █ █");
-    assert_eq!(buf[(3, 0)].fg, theme.gradient(1.0));
-
-    let buf = draw(graph(ViewType::Block, &[50, 100], &theme).max(100), 3, 2);
-    assert_eq!(buf[(2, 1)].symbol(), "█");
-    assert_eq!(buf[(2, 1)].fg, theme.gradient(0.5));
-    assert_eq!(buf[(2, 0)].symbol(), " ");
   }
 
   #[test]
@@ -341,11 +290,16 @@ mod tests {
 
   #[test]
   fn meter_colors_fill_by_ratio() {
+    for theme in [smooth(), Theme::default()] {
+      let buf = draw(Meter::new(0.5, &theme), 10, 1);
+      assert_eq!(buf[(0, 0)].fg, theme.gradient(0.5));
+      assert_eq!(buf[(4, 0)].fg, theme.gradient(0.5));
+      assert_eq!(buf[(5, 0)].fg, theme.dim);
+    }
+
     let theme = Theme::default();
-    let buf = draw(Meter::new(0.5, &theme), 10, 1);
-    assert_eq!(buf[(0, 0)].fg, theme.gradient(0.5));
-    assert_eq!(buf[(4, 0)].fg, theme.gradient(0.5));
-    assert_eq!(buf[(5, 0)].fg, theme.dim);
+    let buf = draw(Meter::new(0.7, &theme), 10, 1);
+    assert_eq!((buf[(0, 0)].fg, buf[(9, 0)].fg), (Color::Red, Color::DarkGray));
   }
 
   #[test]
@@ -365,23 +319,5 @@ mod tests {
     assert_eq!(row(&meter(1.5, 5), 0), "▰▰▰▰▰");
     assert_eq!(row(&meter(-1.0, 5), 0), "▱▱▱▱▱");
     assert_eq!(row(&meter(f64::NAN, 5), 0), "▱▱▱▱▱");
-  }
-
-  #[test]
-  fn meter_block_chars() {
-    let theme = Theme::default();
-    let buf = draw(Meter::new(0.5, &theme).block_chars(true), 10, 1);
-    assert_eq!(row(&buf, 0), "█████░░░░░");
-    assert_eq!(count(&buf, "▰") + count(&buf, "▱"), 0);
-
-    let buf = draw(Meter::new(0.5, &theme).block_chars(false), 10, 1);
-    assert_eq!(count(&buf, "▰"), 5);
-  }
-
-  #[test]
-  fn meter_mono_theme_has_no_rgb() {
-    let theme = Theme::new("mono", false);
-    let buf = draw(Meter::new(0.7, &theme), 10, 1);
-    assert!(buf.content.iter().all(|cell| !matches!(cell.fg, Color::Rgb(..))));
   }
 }

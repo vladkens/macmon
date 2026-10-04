@@ -1,6 +1,7 @@
 //! Terminal user interface.
 
 mod layout;
+mod palette;
 mod panels;
 mod proc_view;
 mod store;
@@ -142,6 +143,7 @@ fn run_procs_thread(
 #[derive(Debug, Default)]
 pub struct App {
   cfg: Config,
+  /// Terminal colors; the gradient steps through ANSI colors until `run_loop` queries the palette.
   theme: Theme,
 
   soc: SocInfo,
@@ -171,9 +173,8 @@ impl App {
   pub fn new() -> WithError<Self> {
     let soc = SocInfo::new()?;
     let cfg = Config::load();
-    let theme = Theme::new(&cfg.theme, theme::detect_truecolor());
     let proc_view = ProcView::new(cfg.proc_sort, cfg.proc_sort_desc);
-    Ok(Self { cfg, theme, soc, proc_view, ..Default::default() })
+    Ok(Self { cfg, soc, proc_view, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -236,11 +237,6 @@ impl App {
 
     match key.code {
       KeyCode::Char('q') => return ControlFlow::Break(()),
-      KeyCode::Char('c') => {
-        self.theme = self.theme.next();
-        self.cfg.set_theme(self.theme.name);
-      }
-      KeyCode::Char('v') => self.cfg.next_view_type(),
       KeyCode::Char('d') => self.cfg.toggle_per_core_view(),
       KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
       KeyCode::Char('+') => self.cfg.inc_interval(),
@@ -288,11 +284,17 @@ impl App {
     let msec = Arc::new(RwLock::new(self.cfg.interval));
 
     let (tx, rx) = mpsc::channel::<Event>();
-    run_inputs_thread(tx.clone(), 250);
     run_sampler_thread(tx.clone(), msec.clone());
     run_procs_thread(tx.clone(), msec.clone(), self.procs_active.clone());
 
     let mut term = enter_term();
+
+    // raw mode is on and the input thread doesn't read the terminal yet, so the palette replies
+    // can't turn into key presses; the palette only matters for a smooth (truecolor) gradient
+    let truecolor = theme::detect_truecolor();
+    let palette = if truecolor { palette::query_terminal() } else { None };
+    self.theme = Theme::new(palette, truecolor);
+    run_inputs_thread(tx.clone(), 250);
 
     loop {
       term.draw(|f| self.render(f)).unwrap();
@@ -328,14 +330,15 @@ mod tests {
   use ratatui::buffer::Buffer;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
-  use ratatui::style::Color;
+  use ratatui::style::{Color, Modifier};
 
   use super::layout::Strip;
+  use super::palette::{Palette, Rgb};
   use super::store::{ClusterSample, CpuClusters, FreqSample};
-  use super::theme::{THEMES, Theme};
+  use super::theme::Theme;
   use super::widgets::core_bar;
   use super::{App, Event, run_procs_thread};
-  use crate::config::{Panels, ProcSort, RatioMode, TUI_MIN_MS, ViewType};
+  use crate::config::{Panels, ProcSort, RatioMode, TUI_MIN_MS};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -425,35 +428,23 @@ mod tests {
 
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
-    // ctrl-c doesn't change the theme
-    assert_eq!(app.theme.name, "default");
-    assert_eq!(app.cfg.theme, "default");
   }
 
   #[test]
-  fn c_cycles_themes() {
-    let mut app = App::default();
-    assert_eq!(app.theme.name, "default");
-
-    assert_eq!(app.handle_key(key('c')), ControlFlow::Continue(()));
-    assert_eq!(app.theme.name, "nord");
-    assert_eq!(app.cfg.theme, "nord");
-
-    for _ in 1..THEMES.len() {
-      assert_eq!(app.handle_key(key('c')), ControlFlow::Continue(()));
+  fn c_and_v_do_nothing() {
+    // no theme switching and no graph style switching: the keys are free
+    let mut app = app_with_procs(varied_procs());
+    let cfg = serde_json::to_string(&app.cfg).unwrap();
+    let theme = app.theme;
+    for c in ['c', 'v', 'C', 'V'] {
+      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?}");
     }
-    assert_eq!(app.theme.name, "default");
-    assert_eq!(app.cfg.theme, "default");
-  }
 
-  #[test]
-  fn v_toggles_view_type() {
-    let mut app = App::default();
-    assert_eq!(app.cfg.view_type, ViewType::Braille);
-    assert_eq!(app.handle_key(key('v')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.view_type, ViewType::Block);
-    assert_eq!(app.handle_key(key('v')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.view_type, ViewType::Braille);
+    assert_eq!(serde_json::to_string(&app.cfg).unwrap(), cfg);
+    assert_eq!(app.theme, theme);
+    assert!(!app.proc_view.typing() && app.proc_view.filter().is_empty());
+    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(bottom.starts_with(GLOBAL_HINTS), "{bottom}");
   }
 
   #[test]
@@ -495,36 +486,84 @@ mod tests {
       assert_eq!(app.handle_key(event), ControlFlow::Continue(()));
     }
 
-    assert_eq!(app.theme.name, "default");
-    assert_eq!(app.cfg.view_type, ViewType::Braille);
     assert!(!app.cfg.per_core_view);
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!(app.cfg.interval, 1000);
+    assert_eq!(app.cfg.panels, Panels::default());
+  }
+
+  /// Solarized-like terminal palette, as a terminal would answer the palette query.
+  const PALETTE: Palette =
+    Palette { green: (0x85, 0x99, 0x00), yellow: (0xb5, 0x89, 0x00), red: (0xdc, 0x32, 0x2f) };
+
+  /// App with every kind of colored cell on screen: strips, cores row, power column, processes
+  /// with a selected row.
+  fn colorful_app(theme: Theme) -> App {
+    let mut app = app_with_procs(varied_procs());
+    app.theme = theme;
+    app.cfg.per_core_view = true;
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
+    app
+  }
+
+  fn frame_colors(buf: &Buffer) -> impl Iterator<Item = Color> + '_ {
+    buf.content.iter().flat_map(|cell| [cell.fg, cell.bg])
   }
 
   #[test]
-  fn renders_with_every_theme() {
-    for truecolor in [true, false] {
-      for theme in THEMES {
-        for view_type in [ViewType::Braille, ViewType::Block] {
-          let mut app = test_app();
-          app.theme = Theme::new(theme.name, truecolor);
-          app.cfg.view_type = view_type;
-
-          let buf = render_buffer(&mut app, 120, 40);
-          // top-left corner is the outer box border
-          assert_eq!(buf[(0, 0)].symbol(), "╭");
-          assert_eq!(buf[(0, 0)].fg, app.theme.border, "theme {}", theme.name);
-
-          let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
-          assert!(screen.contains(&format!("c {}", theme.name)));
-          if !truecolor {
-            let is_rgb = |c: Color| matches!(c, Color::Rgb(..));
-            assert!(buf.content.iter().all(|cell| !is_rgb(cell.fg) && !is_rgb(cell.bg)));
-          }
+  fn renders_terminal_colors_without_smooth_palette() {
+    // no palette, no truecolor, or neither: ANSI colors only
+    let themes = [Theme::new(None, true), Theme::new(Some(PALETTE), false), Theme::default()];
+    let ansi = [Color::Reset, Color::DarkGray, Color::Green, Color::Yellow, Color::Red];
+    for theme in themes {
+      let mut app = colorful_app(theme);
+      for (width, height) in [(200, 50), (80, 24), (60, 15)] {
+        let buf = render_buffer(&mut app, width, height);
+        let ctx = format!("{theme:?} at {width}x{height}");
+        assert_eq!((buf[(0, 0)].symbol(), buf[(0, 0)].fg), ("╭", Color::DarkGray), "{ctx}");
+        for color in frame_colors(&buf) {
+          assert!(ansi.contains(&color), "{color:?} in {ctx}");
         }
       }
+
+      // all load levels show up: GPU 23%, E-CPU 42%, P-CPU 77%
+      let buf = render_buffer(&mut app, 200, 50);
+      for color in [Color::Green, Color::Yellow, Color::Red] {
+        assert!(frame_colors(&buf).any(|c| c == color), "no {color:?} in {theme:?}");
+      }
     }
+  }
+
+  #[test]
+  fn smooth_gradient_blends_queried_colors() {
+    let theme = Theme::new(Some(PALETTE), true);
+    let mut app = colorful_app(theme);
+    let buf = render_buffer(&mut app, 200, 50);
+
+    // every RGB color lies between the terminal's green and yellow or its yellow and red
+    let between = |c: Rgb, a: Rgb, b: Rgb| {
+      let within = |x: u8, y: u8, z: u8| x.min(y) <= z && z <= x.max(y);
+      within(a.0, b.0, c.0) && within(a.1, b.1, c.1) && within(a.2, b.2, c.2)
+    };
+    let mut rgb = vec![];
+    for color in frame_colors(&buf) {
+      match color {
+        Color::Rgb(r, g, b) => rgb.push((r, g, b)),
+        // the rest of the UI stays in terminal colors
+        color => assert!([Color::Reset, Color::DarkGray].contains(&color), "{color:?}"),
+      }
+    }
+    assert!(rgb.len() > 100, "{} RGB colors", rgb.len());
+    let Palette { green, yellow, red } = PALETTE;
+    for color in &rgb {
+      assert!(between(*color, green, yellow) || between(*color, yellow, red), "{color:?}");
+    }
+
+    // percent values sit exactly on the gradient
+    let line = row(&buf, 1);
+    let x = line.find(" 42% ").map(|i| line[..i].chars().count() as u16 + 1).unwrap();
+    assert_eq!(buf[(x, 1)].fg, theme.gradient(test_metrics().ecpu_scaled_ratio.into()));
+    assert_eq!(buf[(0, 0)].fg, Color::DarkGray, "borders stay terminal colors");
   }
 
   /// Text that only the given panel renders (with `test_metrics`).
@@ -541,24 +580,21 @@ mod tests {
     let sizes = [(200, 50, true), (120, 40, true), (100, 30, true), (80, 24, true), (72, 24, true)];
     for (width, height, proc) in sizes.into_iter().chain([(60, 15, false)]) {
       for per_core_view in [false, true] {
-        for view_type in [ViewType::Braille, ViewType::Block] {
-          let mut app = test_app();
-          app.cfg.per_core_view = per_core_view;
-          app.cfg.view_type = view_type;
+        let mut app = test_app();
+        app.cfg.per_core_view = per_core_view;
 
-          let screen = render_to_string(&mut app, width, height);
-          let ctx = format!("{width}x{height} per_core_view={per_core_view} {view_type:?}");
-          for label in ["M3 Pro · 6E+6P", "SYS  12.00W  fan 1200rpm", "q quit"] {
-            assert!(screen.contains(label), "missing {label:?} ({ctx})");
-          }
-          for (_, markers) in PANEL_MARKERS {
-            for marker in markers {
-              assert!(screen.contains(marker), "missing {marker:?} ({ctx})");
-            }
-          }
-          assert_eq!(screen.contains("cores  E ▄▄▄▄▄▄  P ▆▆▆▆▆▆"), per_core_view, "{ctx}");
-          assert_eq!(screen.contains(" proc "), proc, "{ctx}");
+        let screen = render_to_string(&mut app, width, height);
+        let ctx = format!("{width}x{height} per_core_view={per_core_view}");
+        for label in ["M3 Pro · 6E+6P", "SYS  12.00W  fan 1200rpm", "q quit"] {
+          assert!(screen.contains(label), "missing {label:?} ({ctx})");
         }
+        for (_, markers) in PANEL_MARKERS {
+          for marker in markers {
+            assert!(screen.contains(marker), "missing {marker:?} ({ctx})");
+          }
+        }
+        assert_eq!(screen.contains("cores  E ▄▄▄▄▄▄  P ▆▆▆▆▆▆"), per_core_view, "{ctx}");
+        assert_eq!(screen.contains(" proc "), proc, "{ctx}");
       }
     }
   }
@@ -646,7 +682,7 @@ mod tests {
 
   #[test]
   fn key_hints_degrade_at_narrow_widths() {
-    let full = "q quit  c default  v braille  d cores  r scaled  -/+ 1000ms  1-5 panels";
+    let full = "q quit  d cores  r scaled  -/+ 1000ms  1-5 panels";
     let only_power = Panels { cpu: false, gpu: false, mem: false, power: true, proc: false };
     for width in [200, 120, 80, 60, 45, 30, 20, 14, 12] {
       let mut app = test_app();
@@ -866,10 +902,6 @@ mod tests {
     assert!(app.handle_key(key('-')).is_continue());
     assert!(app.handle_key(key('-')).is_continue());
     assert!(render_to_string(&mut app, 200, 50).contains("-/+ 750ms"));
-
-    // v: graph style in the hints
-    assert!(app.handle_key(key('v')).is_continue());
-    assert!(render_to_string(&mut app, 200, 50).contains("v block"));
   }
 
   #[test]
@@ -1008,28 +1040,28 @@ mod tests {
   }
 
   #[test]
-  fn meters_follow_view_type() {
-    for (view_type, filled, empty) in [(ViewType::Braille, "▰", "▱"), (ViewType::Block, "█", "░")]
-    {
-      let mut app = test_app();
-      app.cfg.view_type = view_type;
-
-      let screen = render_to_string(&mut app, 120, 40);
-      let ram = screen.split("RAM    56% 20/36G ").nth(1).expect("ram strip");
-      assert!(ram.starts_with(filled), "{view_type:?}");
-      assert!(screen.contains(filled) && screen.contains(empty), "{view_type:?}");
-    }
-  }
-
-  #[test]
-  fn view_type_switches_graph_style() {
+  fn graphs_are_braille() {
     let mut app = test_app();
-    assert!(render_to_string(&mut app, 120, 40).chars().any(is_braille));
+    for _ in 0..40 {
+      app.update_metrics(test_metrics());
+    }
 
-    app.cfg.view_type = ViewType::Block;
-    let screen = render_to_string(&mut app, 120, 40);
-    assert!(!screen.chars().any(is_braille));
-    assert!(screen.contains('█'));
+    for (width, height) in [(200, 50), (120, 40), (60, 15)] {
+      let buf = render_buffer(&mut app, width, height);
+      let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+      let ctx = format!("{width}x{height}");
+
+      // strip and power graphs in braille, meters in ▰▱, no block characters (cores row off)
+      assert!(screen.chars().filter(|c| is_braille(*c)).count() > 40, "{ctx}");
+      let ram = screen.split("RAM    56% 20/36G ").nth(1).expect("ram strip");
+      assert!(ram.starts_with('▰') && screen.contains('▱'), "{ctx}");
+      let block = |c: char| ('▁'..='█').contains(&c) || c == '░';
+      assert!(!screen.chars().any(block), "{ctx}");
+      for row in &power_rows(&app, &buf)[..3] {
+        let graph: String = row.chars().skip(18).filter(|c| *c != ' ').collect();
+        assert!(!graph.is_empty() && graph.chars().all(is_braille), "{ctx}: {row}");
+      }
+    }
   }
 
   #[test]
@@ -1268,8 +1300,6 @@ mod tests {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
     }
     assert_eq!(app.proc_view.filter(), "qcvdr5+-s");
-    assert_eq!(app.theme.name, "default");
-    assert_eq!(app.cfg.view_type, ViewType::Braille);
     assert!(!app.cfg.per_core_view);
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!(app.cfg.interval, 1000);
@@ -1334,27 +1364,39 @@ mod tests {
     let mut app = app_with_procs(procs);
     let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
 
+    // reverse video in the default colors
+    let selected = |buf: &Buffer, x: u16, y: u16| {
+      let cell = &buf[(x, PROC_Y + y)];
+      cell.modifier.contains(Modifier::REVERSED) && cell.fg == Color::Reset
+    };
+
     // same CPU everywhere: ordered by pid
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc0 "));
-    assert!(buf.content.iter().all(|cell| cell.bg != app.theme.selection), "no selection yet");
+    let reversed = |cell: &ratatui::buffer::Cell| cell.modifier.contains(Modifier::REVERSED);
+    assert!(!buf.content.iter().any(reversed), "no selection yet");
 
     assert!(app.handle_key(down).is_continue());
     assert!(app.handle_key(down).is_continue());
     assert_eq!(app.proc_view.selected_pid(), Some(1001));
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(proc_row(&buf, 3).contains("proc1 "));
-    for x in [1, 100, 198] {
-      assert_eq!(buf[(x, PROC_Y + 3)].bg, app.theme.selection, "x {x}");
+    let line = proc_row(&buf, 3);
+    assert!(line.contains("proc1 "));
+    // the whole row, gradient-colored CPU% too
+    let cpu = line[..line.find("12.5").unwrap()].chars().count() as u16;
+    for x in [1, 100, cpu, 198] {
+      assert!(selected(&buf, x, 3), "x {x}");
     }
-    assert_ne!(buf[(1, PROC_Y + 2)].bg, app.theme.selection);
-    assert_ne!(buf[(0, PROC_Y + 3)].bg, app.theme.selection, "border not highlighted");
+    assert_eq!(buf[(cpu, PROC_Y + 2)].fg, app.theme.gradient(0.125));
+    assert!(!selected(&buf, 1, 2));
+    assert!(!selected(&buf, 0, 3), "border not highlighted");
+    assert_eq!(buf.content.iter().filter(|cell| reversed(cell)).count(), 198);
 
     // End: the last process is on the last row (29 is the border); 27 rows on screen
     assert!(app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)).is_continue());
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 28).contains("proc99 "));
-    assert_eq!(buf[(1, PROC_Y + 28)].bg, app.theme.selection);
+    assert!(selected(&buf, 1, 28));
     assert!(proc_row(&buf, 2).contains("proc73 "), "{}", proc_row(&buf, 2));
 
     // esc clears the selection, the table goes back to the top
@@ -1364,8 +1406,7 @@ mod tests {
   }
 
   /// Global key hints on the bottom border, before the process hints.
-  const GLOBAL_HINTS: &str =
-    "╰─ q quit  c default  v braille  d cores  r scaled  -/+ 1000ms  1-5 panels ─";
+  const GLOBAL_HINTS: &str = "╰─ q quit  d cores  r scaled  -/+ 1000ms  1-5 panels ─";
 
   #[test]
   fn proc_hints_follow_global_hints() {
@@ -1391,13 +1432,17 @@ mod tests {
   #[test]
   fn proc_hints_give_way_first() {
     let mut app = app_with_procs(varied_procs());
-    let buf = render_buffer(&mut app, 100, 40);
-    let bottom = row(&buf, 39);
-    assert!(bottom.starts_with(GLOBAL_HINTS) && !bottom.contains("select"), "{bottom}");
+    // room for the first process hints only
+    let bottom = row(&render_buffer(&mut app, 80, 40), 39);
+    assert!(bottom.starts_with(&format!("{GLOBAL_HINTS} / filter  s sort ─")), "{bottom}");
+    assert!(!bottom.contains("reverse"), "{bottom}");
+
+    let bottom = row(&render_buffer(&mut app, 60, 40), 39);
+    assert!(bottom.starts_with(GLOBAL_HINTS) && !bottom.contains("filter"), "{bottom}");
 
     // too narrow for the global hints: `q quit` stays, no process hints
     let bottom = row(&render_buffer(&mut app, 30, 40), 39);
-    assert!(bottom.starts_with("╰─ q quit  c default ─") && !bottom.contains("filter"));
+    assert!(bottom.starts_with("╰─ q quit  d cores ─") && !bottom.contains("filter"));
   }
 
   #[test]

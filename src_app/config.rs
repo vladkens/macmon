@@ -6,15 +6,6 @@ use serde_inline_default::serde_inline_default;
 pub(crate) const TUI_MIN_MS: u32 = 250;
 pub(crate) const TUI_MAX_MS: u32 = 10_000;
 
-/// Graph style. Old configs used `Sparkline` / `Gauge`, which load as `Braille` / `Block`.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
-pub enum ViewType {
-  #[serde(alias = "Sparkline")]
-  Braille,
-  #[serde(alias = "Gauge")]
-  Block,
-}
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub enum RatioMode {
   Scaled,
@@ -101,15 +92,11 @@ impl ProcSort {
   }
 }
 
+/// Settings saved in `~/.config/macmon.json`. Fields of older versions (`color`, `theme`,
+/// `view_type`) are ignored, so old files keep loading.
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-  #[serde_inline_default(ViewType::Braille)]
-  pub view_type: ViewType,
-
-  #[serde_inline_default("default".to_string())]
-  pub theme: String,
-
   #[serde_inline_default(1000)]
   pub interval: u32,
 
@@ -181,19 +168,6 @@ impl Config {
     }
   }
 
-  pub fn set_theme(&mut self, name: &str) {
-    self.theme = name.to_string();
-    self.save();
-  }
-
-  pub fn next_view_type(&mut self) {
-    self.view_type = match self.view_type {
-      ViewType::Braille => ViewType::Block,
-      ViewType::Block => ViewType::Braille,
-    };
-    self.save();
-  }
-
   pub fn dec_interval(&mut self) {
     let step = 250;
     self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(TUI_MIN_MS);
@@ -235,15 +209,13 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-  use super::{Config, Panels, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
+  use super::{Config, Panels, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS};
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
   }
 
   fn assert_defaults(cfg: &Config) {
-    assert_eq!(cfg.view_type, ViewType::Braille);
-    assert_eq!(cfg.theme, "default");
     assert_eq!(cfg.interval, 1000);
     assert!(!cfg.per_core_view);
     assert_eq!(cfg.ratio_mode, RatioMode::Scaled);
@@ -265,11 +237,12 @@ mod tests {
   fn malformed_json_loads_defaults() {
     assert_defaults(&parse(""));
     assert_defaults(&parse("not json"));
-    assert_defaults(&parse(r#"{"view_type": "Unknown"}"#));
+    assert_defaults(&parse(r#"{"interval": "fast"}"#));
   }
 
   #[test]
-  fn old_config_with_gauge_loads() {
+  fn old_config_fields_are_ignored() {
+    // config of released versions
     let cfg = parse(
       r#"{
         "view_type": "Gauge",
@@ -280,21 +253,24 @@ mod tests {
       }"#,
     );
 
-    assert_eq!(cfg.view_type, ViewType::Block);
-    assert_eq!(cfg.theme, "default");
     assert_eq!(cfg.interval, 500);
     assert!(cfg.per_core_view);
     assert_eq!(cfg.ratio_mode, RatioMode::Active);
     assert_eq!(cfg.panels, Panels::default());
     assert_eq!(cfg.proc_sort, ProcSort::Cpu);
     assert!(cfg.proc_sort_desc);
-  }
 
-  #[test]
-  fn old_config_with_sparkline_loads() {
-    let cfg = parse(r#"{"view_type": "Sparkline", "color": "Green"}"#);
-    assert_eq!(cfg.view_type, ViewType::Braille);
-    assert_eq!(cfg.theme, "default");
+    // themes and graph styles of earlier redesign builds, unknown values too
+    for json in [
+      r#"{"view_type": "Sparkline", "color": "Green"}"#,
+      r#"{"view_type": "Braille", "theme": "nord"}"#,
+      r#"{"view_type": "Block", "theme": "dracula"}"#,
+      r#"{"view_type": "Unknown", "theme": 42, "color": null}"#,
+    ] {
+      assert_defaults(&parse(json));
+    }
+    let cfg = parse(r#"{"view_type": "Block", "theme": "mono", "panels": {"gpu": false}}"#);
+    assert_eq!(cfg.panels, Panels { gpu: false, ..Panels::default() });
   }
 
   #[test]
@@ -312,8 +288,6 @@ mod tests {
   #[test]
   fn new_fields_round_trip() {
     let cfg = Config {
-      view_type: ViewType::Block,
-      theme: "nord".to_string(),
       panels: Panels { mem: false, ..Panels::default() },
       proc_sort: ProcSort::Power,
       proc_sort_desc: false,
@@ -321,12 +295,11 @@ mod tests {
     };
 
     let json = serde_json::to_string(&cfg).unwrap();
-    assert!(!json.contains("color"));
-    assert!(json.contains(r#""view_type":"Block""#));
+    for old in ["color", "theme", "view_type"] {
+      assert!(!json.contains(old), "{old} in {json}");
+    }
 
     let cfg = parse(&json);
-    assert_eq!(cfg.view_type, ViewType::Block);
-    assert_eq!(cfg.theme, "nord");
     assert_eq!(cfg.panels, Panels { mem: false, ..Panels::default() });
     assert_eq!(cfg.proc_sort, ProcSort::Power);
     assert!(!cfg.proc_sort_desc);
@@ -375,13 +348,6 @@ mod tests {
     assert_eq!(panels, Panels::default());
     assert!(panels.toggle('5'));
     assert!(!panels.proc);
-  }
-
-  #[test]
-  fn set_theme_updates_name() {
-    let mut cfg = Config::default();
-    cfg.set_theme("dracula");
-    assert_eq!(cfg.theme, "dracula");
   }
 
   #[test]
