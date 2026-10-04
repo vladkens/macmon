@@ -175,13 +175,13 @@
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/tui/store.rs`
 
-- [ ] CPU box: title with chip info / clock / version+interval, E-CPU and P-CPU graphs, per-core meter grid (multi-column, die prefix), CPU temp
-- [ ] GPU box, MEM box (RAM/SWAP meters + RAM graph), POWER box (CPU/GPU/ANE rows, SYS + fans footer, avg/max in title)
-- [ ] global key hints in the bottom border of the bottom-left box; `v`, `d`, `r`, `-`/`+` keep working
-- [ ] remove old render functions that are no longer used
-- [ ] write render tests at 200x50, 120x40, 80x24, 60x15: no panic, labels `E-CPU`, `P-CPU`, `GPU`, `RAM`, `ANE` present when their panels are visible
-- [ ] write render tests: multi-die cores show `D0`/`D1` prefix; SWAP row hidden when `swap_total == 0`; fans/SYS hidden when unavailable
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] CPU box: title with chip info / clock / version+interval, E-CPU and P-CPU graphs, per-core meter grid (multi-column, die prefix), CPU temp (titles `cpu 45°C` · chip info, clock centered, `macmon vX · 1000ms` right; ➕ `Titles` fits titles on the border without overlap: first left title truncated, then later left / right / center dropped; core grid is column-major with balanced rows, labels `E0` / `D1 P3`)
+- [x] GPU box, MEM box (RAM/SWAP meters + RAM graph), POWER box (CPU/GPU/ANE rows, SYS + fans footer, avg/max in title) (POWER rows show W, temp and a history graph, per-row avg/max only when a graph of ≥ 8 cells still fits; boxes with < 3 inner rows put CPU / GPU / ANE on one line; fans / SYS moved out of the title, fixing the overwritten `power` title in the 40%-wide box)
+- [x] global key hints in the bottom border of the bottom-left box; `v`, `d`, `r`, `-`/`+` keep working (hints that don't fit are dropped whole from the end, `q quit` stays first)
+- [x] remove old render functions that are no longer used (➕ also the unused `MemoryStore` swap history / max fields)
+- [x] write render tests at 200x50, 120x40, 80x24, 60x15: no panic, labels `E-CPU`, `P-CPU`, `GPU`, `RAM`, `ANE` present when their panels are visible
+- [x] write render tests: multi-die cores show `D0`/`D1` prefix; SWAP row hidden when `swap_total == 0`; fans/SYS hidden when unavailable
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 6: Own-process sampler (libproc + rusage v6)
 

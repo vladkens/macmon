@@ -106,6 +106,24 @@ impl CpuFreqStore {
     let Some(first) = self.cores.keys().next() else { return false };
     self.cores.keys().any(|id| id.die_id != first.die_id)
   }
+
+  /// Per-core meter labels (`E0`, or `D1 E0` with `with_die`) and latest ratios, in core order.
+  pub(super) fn core_ratios(
+    &self,
+    cluster: &str,
+    mode: RatioMode,
+    with_die: bool,
+  ) -> Vec<(String, f64)> {
+    let label = |id: &CoreId| {
+      if with_die {
+        format!("D{} {cluster}{}", id.die_id, id.core_id)
+      } else {
+        format!("{cluster}{}", id.core_id)
+      }
+    };
+
+    self.cores.iter().map(|(id, core)| (label(id), core.ratio(mode).ratio)).collect()
+  }
 }
 
 #[derive(Debug, Default)]
@@ -131,14 +149,12 @@ impl PowerStore {
 
 #[derive(Debug, Default)]
 pub(super) struct MemoryStore {
+  /// RAM usage history, newest first.
   pub(super) items: Vec<u64>,
-  pub(super) swap_items: Vec<u64>,
   pub(super) ram_usage: u64,
   pub(super) ram_total: u64,
   pub(super) swap_usage: u64,
   pub(super) swap_total: u64,
-  pub(super) max_ram: u64,
-  pub(super) max_swap: u64,
 }
 
 impl MemoryStore {
@@ -146,15 +162,10 @@ impl MemoryStore {
     self.items.insert(0, value.ram_usage);
     self.items.truncate(MAX_SPARKLINE);
 
-    self.swap_items.insert(0, value.swap_usage);
-    self.swap_items.truncate(MAX_SPARKLINE);
-
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
-    self.max_ram = self.items.iter().max().map_or(0, |v| *v);
-    self.max_swap = self.swap_items.iter().max().map_or(0, |v| *v);
   }
 }
 
@@ -356,16 +367,37 @@ mod tests {
   }
 
   #[test]
-  fn memory_store_tracks_usage_and_max() {
+  fn cpu_freq_store_core_ratios() {
+    let mut store = CpuFreqStore::default();
+    assert!(store.core_ratios("E", RatioMode::Scaled, false).is_empty());
+
+    let mut cores = [core(1, 0, 1000, 0.25), core(0, 1, 1000, 0.5), core(0, 0, 1000, 0.75)];
+    cores[0].active_ratio = 1.0;
+    store.push(FreqSample::default(), &cores);
+
+    // sorted by die, then core
+    let labels = |with_die| -> Vec<String> {
+      store.core_ratios("P", RatioMode::Scaled, with_die).into_iter().map(|(l, _)| l).collect()
+    };
+    assert_eq!(labels(false), ["P0", "P1", "P0"]);
+    assert_eq!(labels(true), ["D0 P0", "D0 P1", "D1 P0"]);
+
+    let ratios = |mode| -> Vec<f64> {
+      store.core_ratios("P", mode, false).into_iter().map(|(_, r)| r).collect()
+    };
+    assert_eq!(ratios(RatioMode::Scaled), [0.75, 0.5, 0.25]);
+    assert_eq!(ratios(RatioMode::Active), [0.75, 0.5, 1.0]);
+  }
+
+  #[test]
+  fn memory_store_tracks_usage_and_history() {
     let mut store = MemoryStore::default();
     store.push(MemMetrics { ram_total: 100, ram_usage: 60, swap_total: 10, swap_usage: 4 });
     store.push(MemMetrics { ram_total: 100, ram_usage: 40, swap_total: 10, swap_usage: 2 });
 
     assert_eq!(store.items, vec![40, 60]);
-    assert_eq!(store.swap_items, vec![2, 4]);
     assert_eq!((store.ram_usage, store.ram_total), (40, 100));
     assert_eq!((store.swap_usage, store.swap_total), (2, 10));
-    assert_eq!((store.max_ram, store.max_swap), (60, 4));
   }
 
   #[test]

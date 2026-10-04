@@ -1,6 +1,7 @@
 //! Terminal user interface.
 
 mod layout;
+mod panels;
 mod store;
 mod theme;
 mod widgets;
@@ -15,18 +16,16 @@ use ratatui::crossterm::{
   event::{self, KeyCode, KeyEvent, KeyModifiers},
   terminal,
 };
-use ratatui::{prelude::*, widgets::*};
+use ratatui::prelude::*;
 
-use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
-use layout::{LayoutPlan, compute_layout};
+use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS};
+use layout::compute_layout;
 use macmon::{Metrics, Sampler, SocInfo};
+use panels::Titles;
 use store::{CpuFreqStore, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
 use theme::Theme;
-use widgets::{Meter, graph};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
-
-const GB: u64 = 1024 * 1024 * 1024;
 
 // MARK: Term utils
 
@@ -46,16 +45,6 @@ fn enter_term() -> Terminal<impl Backend> {
 fn leave_term() {
   terminal::disable_raw_mode().unwrap();
   stdout().execute(terminal::LeaveAlternateScreen).unwrap();
-}
-
-// MARK: Components
-
-fn h_stack(area: Rect) -> [Rect; 2] {
-  Layout::horizontal([Constraint::Fill(1); 2]).areas(area)
-}
-
-fn v_stack(area: Rect) -> [Rect; 2] {
-  Layout::vertical([Constraint::Fill(1); 2]).areas(area)
 }
 
 // MARK: Threads
@@ -100,10 +89,6 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
       tx.send(Event::Update(Box::new(sampler.get_metrics(msec).unwrap()))).unwrap();
     }
   });
-}
-
-fn ratio(value: f64, total: f64) -> f64 {
-  if total == 0.0 { 0.0 } else { value / total }
 }
 
 // MARK: App
@@ -183,235 +168,6 @@ impl App {
     ControlFlow::Continue(())
   }
 
-  fn title_block<'a>(&self, label_l: &str, label_r: &str) -> Block<'a> {
-    let mut block = Block::new()
-      .borders(Borders::ALL)
-      .border_type(BorderType::Rounded)
-      .border_style(self.theme.border)
-      .title_style(self.theme.title)
-      .padding(Padding::ZERO);
-
-    if !label_l.is_empty() {
-      block = block.title_top(Line::from(format!(" {label_l} ")));
-    }
-
-    if !label_r.is_empty() {
-      block = block.title_top(Line::from(format!(" {label_r} ")).alignment(Alignment::Right));
-    }
-
-    block
-  }
-
-  /// Renders `block` with a history graph inside it (`max: None` scales to the visible data).
-  fn render_graph_block(
-    &self,
-    f: &mut Frame,
-    r: Rect,
-    block: Block,
-    data: &[u64],
-    max: Option<u64>,
-  ) {
-    let inner = block.inner(r);
-    f.render_widget(block, r);
-
-    let mut w = graph(self.cfg.view_type, data, &self.theme);
-    if let Some(max) = max {
-      w = w.max(max);
-    }
-    f.render_widget(w, inner);
-  }
-
-  fn render_power_block(&self, f: &mut Frame, r: Rect, label: &str, val: &PowerStore, temp: f32) {
-    let label_l =
-      format!("{} {:.2}W ({:.2}, {:.2})", label, val.top_value, val.avg_value, val.max_value);
-
-    let label_r = if temp > 0.0 { format!("{:.1}°C", temp) } else { "".to_string() };
-    let block = self.title_block(label_l.as_str(), label_r.as_str());
-    self.render_graph_block(f, r, block, &val.items, None);
-  }
-
-  fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
-    let ratio = val.ratio(self.cfg.ratio_mode);
-    let label = format!("{} {:3.0}% @ {:4.0} MHz", label, ratio.ratio * 100.0, val.freq_mhz);
-    let block = self.title_block(label.as_str(), "");
-    self.render_graph_block(f, r, block, &ratio.items, Some(100));
-  }
-
-  fn render_cores(&self, f: &mut Frame, r: Rect, label: &str, val: &CpuFreqStore) {
-    if val.cores.is_empty() {
-      return;
-    }
-
-    let aggregate_ratio = val.aggregate.ratio(self.cfg.ratio_mode);
-
-    let title = format!(
-      "{} {:3.0}% @ {:4.0} MHz ({} cores)",
-      label,
-      aggregate_ratio.ratio * 100.0,
-      val.aggregate.freq_mhz,
-      val.cores.len()
-    );
-    let block = self.title_block(title.as_str(), "");
-    let inner = block.inner(r);
-    f.render_widget(block, r);
-
-    // Create vertical layout for each core
-    let constraints: Vec<Constraint> = (0..val.cores.len()).map(|_| Constraint::Fill(1)).collect();
-
-    let core_areas =
-      Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
-
-    // Render each core
-    let show_die = val.has_multiple_dies();
-    for (i, (id, core)) in val.cores.iter().enumerate() {
-      if i >= core_areas.len() {
-        break;
-      }
-
-      let core = core.ratio(self.cfg.ratio_mode);
-      let core_label = if show_die {
-        format!("D{} Core {}", id.die_id, id.core_id)
-      } else {
-        format!("Core {}", id.core_id)
-      };
-
-      let w = Meter::new(core_label, core.ratio, &self.theme)
-        .block_chars(self.cfg.view_type == ViewType::Block);
-      f.render_widget(w, core_areas[i]);
-    }
-  }
-
-  fn render_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
-    let ram_usage_gb = val.ram_usage as f64 / GB as f64;
-    let ram_total_gb = val.ram_total as f64 / GB as f64;
-
-    let swap_usage_gb = val.swap_usage as f64 / GB as f64;
-    let swap_total_gb = val.swap_total as f64 / GB as f64;
-
-    let ram_pct = ratio(ram_usage_gb, ram_total_gb) * 100.0;
-    let label_l = format!("RAM {:4.2} / {:4.1} GB ({:.1}%)", ram_usage_gb, ram_total_gb, ram_pct);
-    let label_r = if val.swap_total > 0 {
-      format!("SWAP {:.2} / {:.1} GB", swap_usage_gb, swap_total_gb)
-    } else {
-      String::new()
-    };
-
-    let block = self.title_block(label_l.as_str(), label_r.as_str());
-    self.render_graph_block(f, r, block, &val.items, Some(val.ram_total));
-  }
-
-  fn render_split_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
-    let ram_usage_gb = val.ram_usage as f64 / GB as f64;
-    let ram_total_gb = val.ram_total as f64 / GB as f64;
-    let swap_usage_gb = val.swap_usage as f64 / GB as f64;
-    let swap_total_gb = val.swap_total as f64 / GB as f64;
-
-    let title = "Memory";
-    let block = self.title_block(title, "");
-    let inner = block.inner(r);
-    f.render_widget(block, r);
-
-    let constraints = if val.swap_total > 0 {
-      vec![Constraint::Fill(1), Constraint::Fill(1)]
-    } else {
-      vec![Constraint::Fill(1)]
-    };
-    let sections =
-      Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
-
-    let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
-    let w = graph(self.cfg.view_type, &val.items, &self.theme).max(val.ram_total).label(ram_label);
-    f.render_widget(w, sections[0]);
-
-    if val.swap_total == 0 {
-      return;
-    }
-
-    let swap_label = format!("SWAP {:4.2}/{:4.1} GB", swap_usage_gb, swap_total_gb);
-    let w =
-      graph(self.cfg.view_type, &val.swap_items, &self.theme).max(val.swap_total).label(swap_label);
-    f.render_widget(w, sections[1]);
-  }
-
-  /// CPU box: chip info in the title, E-CPU / P-CPU graphs and the optional per-core meters.
-  fn render_cpu_box(&self, f: &mut Frame, r: Rect, plan: &LayoutPlan) {
-    let label_l = format!(
-      "{} ({}{}+{}{}+{}GPU {}GB)",
-      self.soc.chip_name,
-      self.soc.ecpu_cores,
-      self.soc.ecpu_label,
-      self.soc.pcpu_cores,
-      self.soc.pcpu_label,
-      self.soc.gpu_cores,
-      self.soc.memory_gb,
-    );
-
-    let brand = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    f.render_widget(self.title_block(&label_l, &brand), r);
-
-    let ecpu_block_label = format!("{}-CPU", self.soc.ecpu_label);
-    let pcpu_block_label = format!("{}-CPU", self.soc.pcpu_label);
-
-    if let Some(graphs) = plan.cpu_graphs {
-      let [ecpu, pcpu] = v_stack(graphs);
-      self.render_freq_block(f, ecpu, &ecpu_block_label, &self.ecpu_freq.aggregate);
-      self.render_freq_block(f, pcpu, &pcpu_block_label, &self.pcpu_freq.aggregate);
-    }
-
-    if let Some(cores) = plan.cores {
-      let [ecpu, pcpu] = h_stack(cores);
-      self.render_cores(f, ecpu, &ecpu_block_label, &self.ecpu_freq);
-      self.render_cores(f, pcpu, &pcpu_block_label, &self.pcpu_freq);
-    }
-  }
-
-  fn render_power_box(&self, f: &mut Frame, r: Rect) {
-    let label_l = format!(
-      "Power: {:.2}W (avg {:.2}W, max {:.2}W)",
-      self.all_power.top_value, self.all_power.avg_value, self.all_power.max_value,
-    );
-
-    // Show labels only if sensors are available
-    let fan_label = self.fans.label();
-    let sys_label = if self.sys_power.top_value > 0.0 {
-      Some(format!(
-        "Total {:.2}W ({:.2}, {:.2})",
-        self.sys_power.top_value, self.sys_power.avg_value, self.sys_power.max_value
-      ))
-    } else {
-      None
-    };
-    let label_r = match (!fan_label.is_empty(), sys_label) {
-      (true, Some(sys_label)) => format!("{fan_label} | {sys_label}"),
-      (true, None) => fan_label,
-      (false, Some(sys_label)) => sys_label,
-      (false, None) => "".to_string(),
-    };
-
-    let block = self.title_block(&label_l, &label_r);
-    let iarea = block.inner(r);
-    f.render_widget(block, r);
-
-    let [cpu, gpu, ane] = Layout::horizontal([Constraint::Fill(1); 3]).areas(iarea);
-    self.render_power_block(f, cpu, "CPU", &self.cpu_power, self.cpu_temp.last());
-    self.render_power_block(f, gpu, "GPU", &self.gpu_power, self.gpu_temp.last());
-    self.render_power_block(f, ane, "ANE", &self.ane_power, 0.0);
-  }
-
-  /// Draws the global key hints over the bottom border of box `r`.
-  fn render_key_hints(&self, f: &mut Frame, r: Rect) {
-    let usage = format!(
-      " q quit | c {} | v chart | d detail | r {} | -/+ {}ms | 1-5 panels ",
-      self.theme.name,
-      self.cfg.ratio_mode.label(),
-      self.cfg.interval,
-    );
-
-    // keep the corners, the start of the hints stays visible in narrow boxes
-    let row = Rect { x: r.x + 1, y: r.bottom() - 1, width: r.width.saturating_sub(2), height: 1 };
-    f.render_widget(Line::from(Span::styled(usage, self.theme.title)), row);
-  }
-
   fn render_all_hidden(&self, f: &mut Frame, area: Rect) {
     let text = "all panels hidden · press 1-5 to show · q quit";
     let row = area.centered_vertically(Constraint::Length(1));
@@ -421,20 +177,14 @@ impl App {
   fn render(&mut self, f: &mut Frame) {
     let plan = compute_layout(f.area(), self.cfg.panels, self.cfg.per_core_view);
 
-    if let Some(r) = plan.cpu {
-      self.render_cpu_box(f, r, &plan);
-    }
+    self.render_cpu_box(f, &plan);
 
     if let Some(r) = plan.gpu {
-      self.render_freq_block(f, r, "GPU", &self.igpu_freq);
+      self.render_gpu_box(f, r);
     }
 
     if let Some(r) = plan.mem {
-      if self.cfg.per_core_view {
-        self.render_split_mem_block(f, r, &self.mem);
-      } else {
-        self.render_mem_block(f, r, &self.mem);
-      }
+      self.render_mem_box(f, r);
     }
 
     if let Some(r) = plan.power {
@@ -443,7 +193,7 @@ impl App {
 
     // placeholder until the process list lands
     if let Some(r) = plan.proc {
-      f.render_widget(self.title_block("proc", ""), r);
+      self.draw_box(f, r, Titles::new(self.heading("proc")));
     }
 
     match plan.bottom_left() {
@@ -549,12 +299,19 @@ mod tests {
     }
   }
 
-  fn test_app() -> App {
+  /// App with a few samples of `test_metrics` changed by `edit`.
+  fn test_app_with(edit: impl Fn(&mut Metrics)) -> App {
     let mut app = App { soc: test_soc(), ..Default::default() };
     for _ in 0..3 {
-      app.update_metrics(test_metrics());
+      let mut metrics = test_metrics();
+      edit(&mut metrics);
+      app.update_metrics(metrics);
     }
     app
+  }
+
+  fn test_app() -> App {
+    test_app_with(|_| {})
   }
 
   fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -565,6 +322,15 @@ mod tests {
 
   fn render_to_string(app: &mut App, width: u16, height: u16) -> String {
     render_buffer(app, width, height).content.iter().map(|cell| cell.symbol()).collect()
+  }
+
+  fn row(buf: &Buffer, y: u16) -> String {
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+  }
+
+  /// Text of the box row starting at the screen row containing `marker`.
+  fn row_with(buf: &Buffer, marker: &str) -> Option<String> {
+    (0..buf.area.height).map(|y| row(buf, y)).find(|row| row.contains(marker))
   }
 
   #[test]
@@ -676,28 +442,210 @@ mod tests {
     }
   }
 
+  /// Text that only the given panel renders (with `test_metrics`).
+  const PANEL_MARKERS: [(char, &[&str]); 4] = [
+    ('1', &["E-CPU 42% @ 1800 MHz", "P-CPU 77% @ 3200 MHz", "cpu 45°C", "Apple M3 Pro"]),
+    ('2', &["gpu 23% @ 1400 MHz · 40°C"]),
+    ('3', &[" mem ", "RAM  20.00/36.0 GB"]),
+    ('4', &["power 6.60W", "ANE"]),
+  ];
+
   #[test]
-  fn renders_metric_panels() {
+  fn renders_metric_panels_at_common_sizes() {
     // (width, height, process panel shown)
-    for (width, height, proc) in [(200, 50, true), (120, 40, false)] {
+    for (width, height, proc) in
+      [(200, 50, true), (120, 40, true), (80, 24, false), (60, 15, false)]
+    {
       for per_core_view in [false, true] {
         for view_type in [ViewType::Braille, ViewType::Block] {
           let mut app = test_app();
-          app.cfg.panels.proc = proc;
           app.cfg.per_core_view = per_core_view;
           app.cfg.view_type = view_type;
 
           let screen = render_to_string(&mut app, width, height);
           let ctx = format!("{width}x{height} per_core_view={per_core_view} {view_type:?}");
-          for label in ["Apple M3 Pro", "E-CPU", "P-CPU", "GPU", "RAM", "Power", "CPU", "ANE"] {
+          for label in ["E-CPU", "P-CPU", "GPU", "RAM", "ANE", "CPU", "45°C", "40°C", "q quit"] {
             assert!(screen.contains(label), "missing {label:?} ({ctx})");
           }
-          assert!(screen.contains("Fan 1200 RPM"), "{ctx}");
-          assert!(screen.contains("q quit") && screen.contains("1-5 panels"), "{ctx}");
+          for (_, markers) in PANEL_MARKERS {
+            for marker in markers {
+              assert!(screen.contains(marker), "missing {marker:?} ({ctx})");
+            }
+          }
           assert_eq!(screen.contains(" proc "), proc, "{ctx}");
         }
       }
     }
+  }
+
+  #[test]
+  fn panel_labels_follow_visibility() {
+    for (key, _) in PANEL_MARKERS {
+      let mut app = test_app();
+      assert_eq!(app.handle_key(self::key(key)), ControlFlow::Continue(()));
+
+      for (width, height) in [(200, 50), (80, 24)] {
+        let screen = render_to_string(&mut app, width, height);
+        for (other, other_markers) in PANEL_MARKERS {
+          for marker in other_markers {
+            let ctx = format!("panel {key} hidden, {marker:?} at {width}x{height}");
+            assert_eq!(screen.contains(marker), other != key, "{ctx}");
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn cpu_box_title_has_chip_clock_and_version() {
+    let mut app = test_app();
+    let buf = render_buffer(&mut app, 200, 50);
+    let top = row(&buf, 0);
+    assert!(top.starts_with("╭─ cpu 45°C ─ Apple M3 Pro · 6E+6P · 18GPU · 36GB ─"), "{top}");
+    assert!(top.ends_with(&format!(" macmon v{} · 1000ms ─╮", env!("CARGO_PKG_VERSION"))));
+    let is_clock = |word: &str| word.len() == 8 && word.chars().filter(|c| *c == ':').count() == 2;
+    assert!(top.split_whitespace().any(is_clock), "no clock in {top}");
+
+    // narrow: chip info and clock are dropped instead of overlapping
+    let buf = render_buffer(&mut app, 40, 12);
+    let top = row(&buf, 0);
+    assert!(top.starts_with("╭─ cpu 45°C ─"), "{top}");
+    assert!(!top.contains("Apple") && !top.contains(':'), "{top}");
+  }
+
+  #[test]
+  fn power_title_is_not_overwritten() {
+    // 100 columns: the POWER box is 40 cells wide next to the process panel
+    let mut app = test_app_with(|m| {
+      m.fans =
+        (0..2).map(|i| FanMetric { name: format!("fan{i}"), rpm: 2000, max_rpm: None }).collect()
+    });
+    let buf = render_buffer(&mut app, 100, 30);
+    let title = row_with(&buf, " power ").expect("power box");
+    assert!(title.starts_with("╭─ power 6.60W · avg 6.60W · max 6.60W"), "{title}");
+    assert!(!title.contains("Fan") && !title.contains("SYS"), "{title}");
+
+    // SYS and fans go to the footer row instead
+    let footer = row_with(&buf, "SYS ").expect("footer");
+    assert!(footer.starts_with("│SYS  12.00W  Fans 2000/2000 RPM"), "{footer}");
+  }
+
+  #[test]
+  fn key_hints_degrade_at_narrow_widths() {
+    let full = "q quit  c default  v braille  d cores  r scaled  -/+ 1000ms  1-5 panels";
+    let only_power = Panels { cpu: false, gpu: false, mem: false, power: true, proc: false };
+    for width in [200, 120, 80, 60, 45, 30, 20, 14, 12] {
+      let mut app = test_app();
+      app.cfg.panels = only_power;
+      let buf = render_buffer(&mut app, width, 24);
+      let bottom = row(&buf, 23);
+      let ctx = format!("width {width}: {bottom}");
+
+      assert!(bottom.starts_with("╰─ q quit") && bottom.ends_with("─╯"), "{ctx}");
+      // only whole hints are shown
+      let shown = bottom.trim_start_matches("╰─ ").trim_end_matches(['─', '╯']).trim_end();
+      assert!(full.starts_with(shown), "{ctx}");
+      assert!(shown.len() == full.len() || full[shown.len()..].starts_with("  "), "{ctx}");
+    }
+
+    // too narrow for any hint: plain border
+    let mut app = test_app();
+    app.cfg.panels = only_power;
+    let buf = render_buffer(&mut app, 11, 24);
+    assert_eq!(row(&buf, 23), "╰─────────╯");
+  }
+
+  #[test]
+  fn multi_die_cores_show_die_prefix() {
+    let mut app = test_app_with(|m| {
+      let core = |die_id, core_id| CpuCoreMetrics { die_id, ..core(core_id, 0.5) };
+      m.ecpu_cores = vec![core(0, 0), core(1, 0)];
+      m.pcpu_cores = vec![core(0, 0), core(0, 1), core(1, 0), core(1, 1)];
+    });
+    app.cfg.per_core_view = true;
+
+    let screen = render_to_string(&mut app, 200, 50);
+    for label in ["D0 E0", "D1 E0", "D0 P0", "D0 P1", "D1 P0", "D1 P1"] {
+      assert!(screen.contains(label), "missing {label}");
+    }
+
+    // single die: no prefix
+    let mut app = test_app();
+    app.cfg.per_core_view = true;
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains("E0 ") && screen.contains("P5 "));
+    assert!(!screen.contains("D0 "));
+  }
+
+  #[test]
+  fn swap_row_hidden_without_swap() {
+    let mut app = test_app();
+    assert!(render_to_string(&mut app, 120, 40).contains("SWAP  1.00/2.0 GB"));
+
+    let mut app = test_app_with(|m| m.memory.swap_total = 0);
+    let screen = render_to_string(&mut app, 120, 40);
+    assert!(screen.contains("RAM  20.00/36.0 GB ▰"));
+    assert!(!screen.contains("SWAP"));
+  }
+
+  #[test]
+  fn fans_and_sys_hidden_when_unavailable() {
+    let mut app = test_app();
+    let screen = render_to_string(&mut app, 80, 24);
+    assert!(screen.contains("SYS  12.00W") && screen.contains("Fan 1200 RPM"));
+
+    let mut app = test_app_with(|m| {
+      m.fans.clear();
+      m.sys_power = 0.0;
+    });
+    let buf = render_buffer(&mut app, 80, 24);
+    let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(!screen.contains("SYS") && !screen.contains("Fan"));
+    // the rows keep the space, the footer row stays blank
+    let ane = row_with(&buf, "ANE").expect("ane row");
+    assert!(ane.starts_with("│ANE   0.10W"), "{ane}");
+
+    // only one of them: no separator left behind
+    let mut app = test_app_with(|m| m.sys_power = 0.0);
+    let footer = row_with(&render_buffer(&mut app, 80, 24), "Fan").expect("fans footer");
+    assert!(footer.starts_with("│Fan 1200 RPM "), "{footer}");
+  }
+
+  #[test]
+  fn low_power_box_puts_units_on_one_row() {
+    let mut app = test_app();
+    let screen = render_to_string(&mut app, 60, 15);
+    assert!(screen.contains("CPU 4.50W 45°C · GPU 2.00W 40°C · ANE 0.10W"));
+  }
+
+  #[test]
+  fn keys_update_rendered_panels() {
+    let mut app = test_app();
+    let screen = render_to_string(&mut app, 120, 40);
+    assert!(screen.contains("E-CPU 42%") && screen.contains("gpu 23%"));
+    assert!(!screen.contains("E5 "), "per-core grid is off by default");
+
+    // r: active ratios
+    assert!(app.handle_key(key('r')).is_continue());
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains("E-CPU 50%") && screen.contains("P-CPU 80%"));
+    assert!(screen.contains("gpu 30%") && screen.contains("r active"));
+
+    // d: per-core grid
+    assert!(app.handle_key(key('d')).is_continue());
+    assert!(render_to_string(&mut app, 120, 40).contains("E5 "));
+
+    // +/-: interval in the CPU title and the hints
+    assert!(app.handle_key(key('+')).is_continue());
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains("· 1250ms ─╮") && screen.contains("-/+ 1250ms"));
+    assert!(app.handle_key(key('-')).is_continue());
+    assert!(app.handle_key(key('-')).is_continue());
+    assert!(render_to_string(&mut app, 200, 50).contains("-/+ 750ms"));
+
+    // v: graph style in the hints
+    assert!(app.handle_key(key('v')).is_continue());
+    assert!(render_to_string(&mut app, 200, 50).contains("v block"));
   }
 
   #[test]
@@ -734,7 +682,7 @@ mod tests {
     let screen = render_to_string(&mut app, 200, 50);
     assert!(!screen.contains("Apple M3 Pro"), "cpu box still shown");
     assert!(!screen.contains("1400 MHz"), "gpu box still shown");
-    assert!(screen.contains("RAM") && screen.contains("Power") && screen.contains(" proc "));
+    assert!(screen.contains("RAM") && screen.contains("power") && screen.contains(" proc "));
   }
 
   #[test]
@@ -752,18 +700,14 @@ mod tests {
 
   #[test]
   fn key_hints_follow_bottom_left_box() {
-    let row = |buf: &Buffer, y: u16| -> String {
-      (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
-    };
-
     let mut app = test_app();
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 49).starts_with("╰ q quit"), "hints on the power box");
+    assert!(row(&buf, 49).starts_with("╰─ q quit"), "hints on the power box");
 
     // without POWER the hints move to MEM, which now ends at the bottom too
     app.cfg.panels.power = false;
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 49).starts_with("╰ q quit"), "hints on the mem box");
+    assert!(row(&buf, 49).starts_with("╰─ q quit"), "hints on the mem box");
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert_eq!(screen.matches("q quit").count(), 1);
   }
@@ -808,7 +752,7 @@ mod tests {
       app.cfg.view_type = view_type;
 
       let screen = render_to_string(&mut app, 120, 40);
-      assert!(screen.contains("Core 5"));
+      assert!(screen.contains("E5 ") && screen.contains("P5 "));
       assert!(screen.contains(" 40%") && screen.contains(" 70%"));
       assert!(screen.contains(filled) && screen.contains(empty), "{view_type:?}");
     }
@@ -830,6 +774,7 @@ mod tests {
   fn renders_without_metrics() {
     let mut app = App::default();
     let screen = render_to_string(&mut app, 120, 40);
-    assert!(screen.contains("Power"));
+    assert!(screen.contains("power 0.00W") && screen.contains("RAM"));
+    assert!(!screen.contains("°C") && !screen.contains("SYS") && !screen.contains("Fan"));
   }
 }
