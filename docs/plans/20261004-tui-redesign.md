@@ -213,12 +213,12 @@
 **Files:**
 - Modify: `src_app/procs.rs`
 
-- [ ] IOKit FFI in app: match `IOAccelerator`, iterate children, read `IOUserClientCreator` and `AppUsage`
-- [ ] parse creator string `"pid <n>, <name>"`; sum `accumulatedGPUTime` per pid; GPU % from delta / elapsed, clamped to 0..=100
-- [ ] release all IOKit/CF objects (no leaks per tick)
-- [ ] write tests for creator string parsing (valid, missing pid, garbage) and per-pid aggregation/delta
-- [ ] write test that reading IORegistry doesn't error on the CI machine (result may be empty)
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] IOKit FFI in app: match `IOAccelerator`, iterate children, read `IOUserClientCreator` and `AppUsage` (children walked in the service plane, the clients are `!registered`; ➕ walk retried up to 3 times when `IOIteratorIsValid` reports a registry change mid-walk; read once per tick next to the tick timestamp)
+- [x] parse creator string `"pid <n>, <name>"`; sum `accumulatedGPUTime` per pid; GPU % from delta / elapsed, clamped to 0..=100 (GPU time is `Counters::gpu_ns`, so pid reuse / exec follow the same no-spike rules; missing time on either side or time going backwards (a client closed) → 0 % without touching CPU %)
+- [x] release all IOKit/CF objects (no leaks per tick) (`IoObject` / `IoIter` release on drop, CF values use `core-foundation` wrappers; checked manually: 30000 reads keep the task's mach send rights flat and the footprint doesn't grow with the iteration count; one read ≈ 0.6 ms)
+- [x] write tests for creator string parsing (valid, missing pid, garbage) and per-pid aggregation/delta (➕ also `AppUsage` parsing on synthetic CF arrays and `update()` GPU rates)
+- [x] write test that reading IORegistry doesn't error on the CI machine (result may be empty)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 9: Process sampling thread
 

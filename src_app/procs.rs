@@ -1,7 +1,8 @@
 //! Per-process resource usage (CPU, memory, energy) sampled without sudo.
 //!
 //! libproc reads processes of the current user (all of them as root). Other users' processes come
-//! from the setuid `/bin/ps`, which has CPU time and RSS but no energy counter.
+//! from the setuid `/bin/ps`, which has CPU time and RSS but no energy counter. GPU time of every
+//! process comes from the GPU's user clients in the IORegistry.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -9,8 +10,15 @@ use std::mem;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use core_foundation::array::CFArray;
+use core_foundation::base::{CFAllocatorRef, CFType, CFTypeRef, TCFType, kCFAllocatorDefault};
+use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+use core_foundation::number::CFNumber;
+use core_foundation::string::{CFString, CFStringRef};
+
 const RUSAGE_INFO_V4: c_int = 4;
 const RUSAGE_INFO_V6: c_int = 6;
+const KERN_FAILURE: c_int = 5;
 
 /// `ps` output columns; `comm` goes last as it may contain spaces.
 const PS_COLUMNS: &str = "pid=,ppid=,uid=,rss=,time=,comm=";
@@ -86,6 +94,18 @@ unsafe extern "C" {
   fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
 }
 
+#[link(name = "IOKit", kind = "framework")]
+#[rustfmt::skip]
+unsafe extern "C" {
+  fn IOServiceMatching(name: *const c_char) -> CFDictionaryRef;
+  fn IOServiceGetMatchingServices(main_port: u32, matching: CFDictionaryRef, existing: *mut u32) -> c_int;
+  fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32) -> c_int;
+  fn IORegistryEntryCreateCFProperty(entry: u32, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
+  fn IOIteratorNext(iterator: u32) -> u32;
+  fn IOIteratorIsValid(iterator: u32) -> c_int;
+  fn IOObjectRelease(object: u32) -> c_int;
+}
+
 /// One row of the process list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcInfo {
@@ -96,7 +116,7 @@ pub struct ProcInfo {
   pub cpu_pct: f32,         // 100% = one fully busy core, as in Activity Monitor.
   pub mem_bytes: u64,       // Physical footprint, as Activity Monitor's "Memory".
   pub power_w: Option<f32>, // None when the energy counter isn't readable.
-  pub gpu_pct: f32,
+  pub gpu_pct: f32,         // Share of the interval the GPU spent on the process, 0..=100.
 }
 
 /// Cumulative counters of one process; rates come from two snapshots.
@@ -105,6 +125,7 @@ struct Counters {
   start: u64,             // Process start time, tells a reused pid apart.
   cpu_ns: u64,            // User + system CPU time.
   energy_nj: Option<u64>, // Lifetime energy, None when unavailable.
+  gpu_ns: Option<u64>,    // GPU time of the process' GPU clients, None without clients.
 }
 
 /// Process state read from libproc or `ps`, before rates are computed.
@@ -123,12 +144,24 @@ struct Raw {
 struct Usage {
   cpu_pct: f32,
   power_w: Option<f32>,
+  gpu_pct: f32,
+}
+
+/// GPU share from GPU time snapshots `elapsed_ns` apart. Missing time on either side (no GPU
+/// clients, unreadable IORegistry) and time going backwards (a client closed) read as idle.
+fn gpu_pct(prev: Option<u64>, cur: Option<u64>, elapsed_ns: u64) -> f32 {
+  match (prev, cur) {
+    (Some(prev), Some(cur)) if cur > prev && elapsed_ns > 0 => {
+      ((cur - prev) as f64 / elapsed_ns as f64 * 100.0).min(100.0) as f32
+    }
+    _ => 0.0,
+  }
 }
 
 /// Rates between two snapshots taken `elapsed_ns` apart. A first sample, a reused pid (different
 /// start time) or a counter going backwards reads as idle instead of a spike.
 fn usage(prev: Option<&Counters>, cur: &Counters, elapsed_ns: u64) -> Usage {
-  let idle = Usage { cpu_pct: 0.0, power_w: cur.energy_nj.map(|_| 0.0) };
+  let idle = Usage { cpu_pct: 0.0, power_w: cur.energy_nj.map(|_| 0.0), gpu_pct: 0.0 };
   let Some(prev) = prev else { return idle };
   if elapsed_ns == 0 || prev.start != cur.start || cur.cpu_ns < prev.cpu_ns {
     return idle;
@@ -141,10 +174,12 @@ fn usage(prev: Option<&Counters>, cur: &Counters, elapsed_ns: u64) -> Usage {
     (_, None) => None,
   };
 
+  let gpu_pct = gpu_pct(prev.gpu_ns, cur.gpu_ns, elapsed_ns);
   let elapsed_ns = elapsed_ns as f64;
   Usage {
     cpu_pct: ((cur.cpu_ns - prev.cpu_ns) as f64 / elapsed_ns * 100.0) as f32,
     power_w: energy_nj.map(|nj| (nj as f64 / elapsed_ns) as f32), // nJ per ns = W
+    gpu_pct,
   }
 }
 
@@ -221,6 +256,7 @@ fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<R
       start: ru.ri_proc_start_abstime,
       cpu_ns: ticks_to_ns(ru.ri_user_time + ru.ri_system_time, numer, denom),
       energy_nj: (flavor == RUSAGE_INFO_V6).then_some(ru.ri_energy_nj),
+      gpu_ns: None,
     },
     fallback: if name.is_empty() { comm.clone() } else { name },
     comm,
@@ -292,7 +328,7 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
     uid,
     mem_bytes: rss_kib.saturating_mul(1024),
     // ps has no start time, a reused pid is told apart by its command.
-    counters: Counters { start: 0, cpu_ns, energy_nj: None },
+    counters: Counters { start: 0, cpu_ns, energy_nj: None, gpu_ns: None },
     fallback: basename(&comm).unwrap_or(&comm).to_string(),
     comm,
   })
@@ -348,6 +384,140 @@ fn user_name(uid: u32) -> String {
   }
 }
 
+// MARK: GPU
+
+/// IOKit object handle, released on drop.
+struct IoObject(u32);
+
+impl Drop for IoObject {
+  fn drop(&mut self) {
+    if self.0 != 0 {
+      unsafe { IOObjectRelease(self.0) };
+    }
+  }
+}
+
+impl IoObject {
+  /// Copy of a registry entry property, None when it's missing.
+  fn property(&self, key: &CFString) -> Option<CFType> {
+    let key = key.as_concrete_TypeRef();
+    let value = unsafe { IORegistryEntryCreateCFProperty(self.0, key, kCFAllocatorDefault, 0) };
+    (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) })
+  }
+}
+
+/// IOKit iterator yielding owned objects.
+struct IoIter(IoObject);
+
+impl IoIter {
+  /// False when the registry changed during iteration and objects may have been skipped.
+  fn is_valid(&self) -> bool {
+    unsafe { IOIteratorIsValid(self.0.0) != 0 }
+  }
+}
+
+impl Iterator for IoIter {
+  type Item = IoObject;
+
+  fn next(&mut self) -> Option<IoObject> {
+    let next = unsafe { IOIteratorNext(self.0.0) };
+    (next != 0).then_some(IoObject(next))
+  }
+}
+
+/// Services of an IOKit class, its subclasses included.
+fn matching_services(class: &CStr) -> Result<IoIter, c_int> {
+  let matching = unsafe { IOServiceMatching(class.as_ptr()) };
+  if matching.is_null() {
+    return Err(KERN_FAILURE);
+  }
+
+  let mut iter = 0;
+  // Takes ownership of `matching`.
+  match unsafe { IOServiceGetMatchingServices(0, matching, &mut iter) } {
+    0 => Ok(IoIter(IoObject(iter))),
+    err => Err(err),
+  }
+}
+
+/// Children of a registry entry in the service plane.
+fn children(entry: &IoObject) -> Result<IoIter, c_int> {
+  let mut iter = 0;
+  match unsafe { IORegistryEntryGetChildIterator(entry.0, c"IOService".as_ptr(), &mut iter) } {
+    0 => Ok(IoIter(IoObject(iter))),
+    err => Err(err),
+  }
+}
+
+/// Pid from a user client's `IOUserClientCreator`: `"pid 631, WindowServer"`.
+fn parse_creator(creator: &str) -> Option<i32> {
+  let rest = creator.strip_prefix("pid ")?;
+  let pid = rest.split_once(',').map_or(rest, |(pid, _)| pid);
+  digits(pid).and_then(|pid| i32::try_from(pid).ok())
+}
+
+/// Total `accumulatedGPUTime` (ns) of a client's `AppUsage`, an array with one dict per command
+/// queue. Entries without a non-negative number are skipped.
+fn app_usage_ns(usage: &CFType) -> u64 {
+  let Some(entries) = usage.downcast::<CFArray>() else { return 0 };
+  let key = CFString::from_static_string("accumulatedGPUTime");
+
+  let entry_ns = |entry: *const c_void| {
+    let entry = (!entry.is_null()).then(|| unsafe { CFType::wrap_under_get_rule(entry) })?;
+    let entry = entry.downcast_into::<CFDictionary>()?;
+    let value = *entry.find(key.as_CFTypeRef())?;
+    let value = (!value.is_null()).then(|| unsafe { CFType::wrap_under_get_rule(value) })?;
+    u64::try_from(value.downcast_into::<CFNumber>()?.to_i64()?).ok()
+  };
+  entries.iter().filter_map(|entry| entry_ns(*entry)).fold(0, u64::saturating_add)
+}
+
+/// `(pid, GPU time in ns)` of every GPU user client. The clients are unregistered children of
+/// the `IOAccelerator` services, so they're only found by walking the service plane.
+fn read_gpu_clients() -> Result<Vec<(i32, u64)>, c_int> {
+  let creator_key = CFString::from_static_string("IOUserClientCreator");
+  let usage_key = CFString::from_static_string("AppUsage");
+  let mut clients = Vec::new();
+
+  for gpu in matching_services(c"IOAccelerator")? {
+    // Clients come and go; a registry change mid-walk invalidates the iterator, so walk again.
+    for attempt in 0..3 {
+      let start = clients.len();
+      let mut iter = children(&gpu)?;
+      for client in iter.by_ref() {
+        let creator = client.property(&creator_key).and_then(|v| v.downcast_into::<CFString>());
+        let Some(pid) = creator.and_then(|creator| parse_creator(&creator.to_string())) else {
+          continue;
+        };
+        let gpu_ns = client.property(&usage_key).map_or(0, |usage| app_usage_ns(&usage));
+        clients.push((pid, gpu_ns));
+      }
+
+      if iter.is_valid() || attempt == 2 {
+        break;
+      }
+      clients.truncate(start);
+    }
+  }
+
+  Ok(clients)
+}
+
+/// GPU time per pid; a process may own several clients.
+fn sum_gpu_times(clients: impl IntoIterator<Item = (i32, u64)>) -> HashMap<i32, u64> {
+  let mut times = HashMap::new();
+  for (pid, gpu_ns) in clients {
+    let total: &mut u64 = times.entry(pid).or_default();
+    *total = total.saturating_add(gpu_ns);
+  }
+  times
+}
+
+/// GPU time per pid, empty when the IORegistry isn't readable.
+fn gpu_times() -> HashMap<i32, u64> {
+  read_gpu_clients().map(sum_gpu_times).unwrap_or_default()
+}
+
 /// A process seen on the previous tick.
 struct Known {
   counters: Counters,
@@ -395,6 +565,7 @@ impl ProcSampler {
     let now = Instant::now();
     let elapsed_ns = self.last.map_or(0, |last| now.duration_since(last).as_nanos() as u64);
     self.last = Some(now);
+    let gpu = gpu_times(); // Read next to `now`: the counters carry no timestamp of their own.
 
     list_pids(&mut self.pids);
     let mut rows = Vec::with_capacity(self.pids.len());
@@ -408,6 +579,9 @@ impl ProcSampler {
 
     if unreadable && self.use_ps {
       rows = merge(rows, run_ps());
+    }
+    for raw in &mut rows {
+      raw.counters.gpu_ns = gpu.get(&raw.pid).copied();
     }
     self.update(rows, elapsed_ns)
   }
@@ -438,7 +612,7 @@ impl ProcSampler {
         cpu_pct: usage.cpu_pct,
         mem_bytes: raw.mem_bytes,
         power_w: usage.power_w,
-        gpu_pct: 0.0,
+        gpu_pct: usage.gpu_pct,
       });
       known.insert(raw.pid, Known { counters: raw.counters, comm: raw.comm, name });
     }
@@ -457,7 +631,7 @@ mod tests {
   const SEC: u64 = 1_000_000_000;
 
   fn counters(cpu_ns: u64, energy_nj: Option<u64>) -> Counters {
-    Counters { start: 42, cpu_ns, energy_nj }
+    Counters { start: 42, cpu_ns, energy_nj, gpu_ns: None }
   }
 
   #[test]
@@ -480,7 +654,7 @@ mod tests {
   #[test]
   fn idle_is_zero() {
     let usage = usage(Some(&counters(SEC, Some(10))), &counters(SEC, Some(10)), SEC);
-    assert_eq!(usage, Usage { cpu_pct: 0.0, power_w: Some(0.0) });
+    assert_eq!(usage, Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 });
   }
 
   #[test]
@@ -494,7 +668,7 @@ mod tests {
 
   #[test]
   fn negative_delta_is_zero() {
-    let idle = Usage { cpu_pct: 0.0, power_w: Some(0.0) };
+    let idle = Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 };
     let cpu_back = usage(Some(&counters(2 * SEC, Some(0))), &counters(SEC, Some(SEC)), SEC);
     assert_eq!(cpu_back, idle);
 
@@ -505,7 +679,7 @@ mod tests {
   #[test]
   fn new_process_has_no_spike() {
     let cur = counters(100 * SEC, Some(100 * SEC));
-    assert_eq!(usage(None, &cur, SEC), Usage { cpu_pct: 0.0, power_w: Some(0.0) });
+    assert_eq!(usage(None, &cur, SEC), Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 });
     assert_eq!(usage(None, &counters(SEC, None), SEC), Usage::default());
 
     // Same pid, different start time: a new process reusing the pid.
@@ -516,13 +690,13 @@ mod tests {
   #[test]
   fn zero_elapsed_is_zero() {
     let usage = usage(Some(&counters(0, Some(0))), &counters(SEC, Some(SEC)), 0);
-    assert_eq!(usage, Usage { cpu_pct: 0.0, power_w: Some(0.0) });
+    assert_eq!(usage, Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 });
   }
 
   #[test]
   fn energy_counter_appearing_reads_zero() {
     let usage = usage(Some(&counters(0, None)), &counters(SEC, Some(SEC)), SEC);
-    assert_eq!(usage, Usage { cpu_pct: 100.0, power_w: Some(0.0) });
+    assert_eq!(usage, Usage { cpu_pct: 100.0, power_w: Some(0.0), gpu_pct: 0.0 });
   }
 
   #[test]
@@ -579,6 +753,7 @@ mod tests {
     let me = second.iter().find(|p| p.pid == pid).expect("own process is sampled");
     assert!(me.cpu_pct > 0.0, "cpu_pct = {}", me.cpu_pct);
     assert!(me.power_w.is_none_or(|w| w >= 0.0));
+    assert!(second.iter().all(|p| (0.0..=100.0).contains(&p.gpu_pct)));
     assert_eq!(sampler.known.len(), second.len());
   }
 
@@ -633,7 +808,10 @@ mod tests {
     assert_eq!(raw.ppid, 2002);
     assert_eq!(raw.uid, 501);
     assert_eq!(raw.mem_bytes, 182976 * 1024);
-    assert_eq!(raw.counters, Counters { start: 0, cpu_ns: 62_500_000_000, energy_nj: None });
+    assert_eq!(
+      raw.counters,
+      Counters { start: 0, cpu_ns: 62_500_000_000, energy_nj: None, gpu_ns: None }
+    );
     assert_eq!(raw.comm, chrome);
     assert_eq!(raw.fallback, "Google Chrome Helper (GPU)");
 
@@ -675,7 +853,7 @@ mod tests {
       ppid: 1,
       uid: 0,
       mem_bytes: 1024,
-      counters: Counters { start: 0, cpu_ns, energy_nj },
+      counters: Counters { start: 0, cpu_ns, energy_nj, gpu_ns: None },
       comm: comm.to_string(),
       fallback: comm.to_string(),
     }
@@ -726,5 +904,135 @@ mod tests {
   fn user_names() {
     assert_eq!(user_name(0), "root");
     assert_eq!(user_name(1_999_999_999), "1999999999");
+  }
+
+  #[test]
+  fn creator_strings() {
+    assert_eq!(parse_creator("pid 631, WindowServer"), Some(631));
+    assert_eq!(parse_creator("pid 2013, Siri AI"), Some(2013));
+    assert_eq!(parse_creator("pid 7, a, b"), Some(7));
+    assert_eq!(parse_creator("pid 0, kernel_task"), Some(0));
+    assert_eq!(parse_creator("pid 42"), Some(42));
+
+    let bad = [
+      "",
+      "pid",
+      "pid ",
+      "pid , WindowServer", // missing pid
+      "pid -1, x",
+      "pid +1, x",
+      "pid 12a, x",
+      "pid 1 , x",
+      "pid 99999999999, x", // doesn't fit i32
+      "PID 1, x",
+      " pid 1, x",
+      "WindowServer",
+      "631, WindowServer",
+    ];
+    for creator in bad {
+      assert_eq!(parse_creator(creator), None, "{creator:?}");
+    }
+  }
+
+  fn app_usage(entries: &[CFType]) -> CFType {
+    CFArray::from_CFTypes(entries).into_CFType()
+  }
+
+  fn usage_entry(pairs: &[(&str, CFType)]) -> CFType {
+    let pairs: Vec<(CFType, CFType)> =
+      pairs.iter().map(|(key, value)| (CFString::new(key).into_CFType(), value.clone())).collect();
+    CFDictionary::from_CFType_pairs(&pairs).into_CFType()
+  }
+
+  #[test]
+  fn app_usage_sums_gpu_time() {
+    let num = |n: i64| CFNumber::from(n).into_CFType();
+    let gpu_time = |ns: i64| {
+      let api = CFString::new("Metal").into_CFType();
+      usage_entry(&[("API", api), ("lastSubmittedTime", num(9)), ("accumulatedGPUTime", num(ns))])
+    };
+
+    let usage = app_usage(&[gpu_time(400), gpu_time(0), gpu_time(6)]);
+    assert_eq!(app_usage_ns(&usage), 406);
+
+    let text = |s: &str| CFString::new(s).into_CFType();
+    let skipped = [
+      gpu_time(-5),                                      // negative
+      usage_entry(&[("lastSubmittedTime", num(9))]),     // no GPU time
+      usage_entry(&[("accumulatedGPUTime", text("1"))]), // not a number
+      text("garbage"),                                   // not a dict
+      gpu_time(10),
+    ];
+    assert_eq!(app_usage_ns(&app_usage(&skipped)), 10);
+
+    assert_eq!(app_usage_ns(&app_usage(&[])), 0);
+    let huge = app_usage(&[gpu_time(i64::MAX), gpu_time(i64::MAX), gpu_time(i64::MAX)]);
+    assert_eq!(app_usage_ns(&huge), u64::MAX);
+    assert_eq!(app_usage_ns(&num(5)), 0); // not an array
+    assert_eq!(app_usage_ns(&gpu_time(5)), 0);
+  }
+
+  #[test]
+  fn gpu_times_per_pid() {
+    let times = sum_gpu_times([(631, 10), (735, 5), (631, 7), (1, 0)]);
+    assert_eq!(times, HashMap::from([(631, 17), (735, 5), (1, 0)]));
+    assert_eq!(sum_gpu_times([(1, u64::MAX), (1, 1)]), HashMap::from([(1, u64::MAX)]));
+    assert!(sum_gpu_times([]).is_empty());
+  }
+
+  #[test]
+  fn gpu_delta() {
+    assert_eq!(gpu_pct(Some(0), Some(SEC / 2), SEC), 50.0);
+    assert_eq!(gpu_pct(Some(SEC), Some(SEC + SEC / 4), SEC / 2), 50.0);
+    assert_eq!(gpu_pct(Some(0), Some(3 * SEC), SEC), 100.0); // several queues busy at once
+    assert_eq!(gpu_pct(Some(5), Some(5), SEC), 0.0);
+    assert_eq!(gpu_pct(Some(SEC), Some(0), SEC), 0.0); // a client closed
+    assert_eq!(gpu_pct(None, Some(SEC), SEC), 0.0); // first GPU client: no baseline
+    assert_eq!(gpu_pct(Some(0), None, SEC), 0.0); // GPU clients gone
+    assert_eq!(gpu_pct(None, None, SEC), 0.0);
+    assert_eq!(gpu_pct(Some(0), Some(SEC), 0), 0.0);
+
+    let gpu = |cpu_ns: u64, gpu_ns: Option<u64>| Counters { gpu_ns, ..counters(cpu_ns, None) };
+    let busy = usage(Some(&gpu(0, Some(0))), &gpu(SEC, Some(SEC / 4)), SEC);
+    assert_eq!((busy.cpu_pct, busy.gpu_pct), (100.0, 25.0));
+
+    // GPU time going backwards doesn't affect the CPU rate.
+    let closed = usage(Some(&gpu(0, Some(SEC))), &gpu(SEC, Some(0)), SEC);
+    assert_eq!((closed.cpu_pct, closed.gpu_pct), (100.0, 0.0));
+
+    // New process under the same pid: no spike from its GPU time.
+    let reused = Counters { start: 43, ..gpu(SEC, Some(SEC)) };
+    assert_eq!(usage(Some(&gpu(0, Some(0))), &reused, SEC).gpu_pct, 0.0);
+    assert_eq!(usage(None, &gpu(SEC, Some(SEC)), SEC).gpu_pct, 0.0);
+  }
+
+  #[test]
+  fn update_gpu_rates() {
+    const A: i32 = 1_000_001;
+    let gpu_row = |gpu_ns: Option<u64>, comm: &str| {
+      let mut raw = row(A, 0, None, comm);
+      raw.counters.gpu_ns = gpu_ns;
+      raw
+    };
+    let mut sampler = ProcSampler::new();
+
+    assert_eq!(sampler.update(vec![gpu_row(Some(SEC), "a")], 0)[0].gpu_pct, 0.0);
+    assert_eq!(sampler.update(vec![gpu_row(Some(2 * SEC), "a")], 2 * SEC)[0].gpu_pct, 50.0);
+    assert_eq!(sampler.update(vec![gpu_row(None, "a")], SEC)[0].gpu_pct, 0.0);
+    assert_eq!(sampler.update(vec![gpu_row(Some(3 * SEC), "a")], SEC)[0].gpu_pct, 0.0);
+    assert_eq!(sampler.update(vec![gpu_row(Some(4 * SEC), "b")], SEC)[0].gpu_pct, 0.0); // exec
+  }
+
+  #[test]
+  fn reads_gpu_clients() {
+    // CI VMs may have no GPU clients at all; the IORegistry walk itself must work.
+    let clients = read_gpu_clients().expect("IORegistry is readable");
+    assert!(clients.iter().all(|&(pid, _)| pid >= 0), "{clients:?}");
+
+    let pids: HashSet<i32> = clients.iter().map(|&(pid, _)| pid).collect();
+    assert_eq!(sum_gpu_times(clients).len(), pids.len());
+    for _ in 0..3 {
+      assert!(read_gpu_clients().is_ok());
+    }
   }
 }
