@@ -143,13 +143,15 @@
 
 **Files:**
 - Create: `src_app/tui/widgets.rs`
+- Modify: `src_app/tui/mod.rs` (➕ current render code switched to the new widgets so they aren't dead code)
 
-- [ ] implement `BrailleGraph` widget: newest-first data, max value, right-aligned, 2 samples per cell, 4 levels per row, per-row gradient color, optional overlay label
-- [ ] implement `Meter` widget: label, filled `▰`/empty `▱` (or block chars), gradient color by ratio, right-aligned percent
-- [ ] keep block-style fallback via ratatui `Sparkline` behind one `graph()` helper selected by `ViewType`
-- [ ] write tests rendering into a `Buffer`: empty data, full data (`⣿`), half height, odd sample count, zero-size area
-- [ ] write tests for `Meter` fill width at 0%, 50%, 100% and narrow widths
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] implement `BrailleGraph` widget: newest-first data, max value, right-aligned, 2 samples per cell, 4 levels per row, per-row gradient color, optional overlay label (implemented as `widgets::Graph`, braille is the default style; row color is capped by the cell's value so 1-row graphs still reflect load; non-zero values get at least one dot; auto max = largest visible sample)
+- [x] implement `Meter` widget: label, filled `▰`/empty `▱` (or block chars), gradient color by ratio, right-aligned percent (`block_chars(true)` → `█`/`░`, used in `ViewType::Block`; narrow widths drop the bar first, then the label)
+- [x] keep block-style fallback via ratatui `Sparkline` behind one `graph()` helper selected by `ViewType` (bars colored by value)
+- [x] ➕ migrate current render functions to `graph()` / `Meter` (old `Gauge` mode removed, per-core view shows meters, `bar_set()` moved to widgets)
+- [x] write tests rendering into a `Buffer`: empty data, full data (`⣿`), half height, odd sample count, zero-size area
+- [x] write tests for `Meter` fill width at 0%, 50%, 100% and narrow widths
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 4: Layout engine with panel toggles and auto-hide
 

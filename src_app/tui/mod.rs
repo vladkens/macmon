@@ -2,6 +2,7 @@
 
 mod store;
 mod theme;
+mod widgets;
 
 use std::ops::ControlFlow;
 use std::sync::{Arc, RwLock};
@@ -19,6 +20,7 @@ use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
 use macmon::{Metrics, Sampler, SocInfo};
 use store::{CpuFreqStore, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
 use theme::Theme;
+use widgets::{Meter, graph};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -42,13 +44,6 @@ fn enter_term() -> Terminal<impl Backend> {
 fn leave_term() {
   terminal::disable_raw_mode().unwrap();
   stdout().execute(terminal::LeaveAlternateScreen).unwrap();
-}
-
-fn bar_set() -> symbols::bar::Set<'static> {
-  match std::env::var("TERM_PROGRAM").as_deref() {
-    Ok("Apple_Terminal") => symbols::bar::THREE_LEVELS,
-    _ => symbols::bar::NINE_LEVELS,
-  }
 }
 
 // MARK: Components
@@ -205,54 +200,39 @@ impl App {
     block
   }
 
-  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
-    let label_l = format!(
-      "{} {:.2}W ({:.2}, {:.2})",
-      // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
-      // "{} {:.2}W (~{:.2}W ^{:.2}W)",
-      label,
-      val.top_value,
-      val.avg_value,
-      val.max_value
-    );
+  /// Renders `block` with a history graph inside it (`max: None` scales to the visible data).
+  fn render_graph_block(
+    &self,
+    f: &mut Frame,
+    r: Rect,
+    block: Block,
+    data: &[u64],
+    max: Option<u64>,
+  ) {
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    let mut w = graph(self.cfg.view_type, data, &self.theme);
+    if let Some(max) = max {
+      w = w.max(max);
+    }
+    f.render_widget(w, inner);
+  }
+
+  fn render_power_block(&self, f: &mut Frame, r: Rect, label: &str, val: &PowerStore, temp: f32) {
+    let label_l =
+      format!("{} {:.2}W ({:.2}, {:.2})", label, val.top_value, val.avg_value, val.max_value);
 
     let label_r = if temp > 0.0 { format!("{:.1}°C", temp) } else { "".to_string() };
-
-    Sparkline::default()
-      .block(self.title_block(label_l.as_str(), label_r.as_str()))
-      .direction(RenderDirection::RightToLeft)
-      .data(&val.items)
-      .style(self.theme.gradient(0.0))
-      .bar_set(bar_set())
+    let block = self.title_block(label_l.as_str(), label_r.as_str());
+    self.render_graph_block(f, r, block, &val.items, None);
   }
 
   fn render_freq_block(&self, f: &mut Frame, r: Rect, label: &str, val: &FreqStore) {
     let ratio = val.ratio(self.cfg.ratio_mode);
     let label = format!("{} {:3.0}% @ {:4.0} MHz", label, ratio.ratio * 100.0, val.freq_mhz);
     let block = self.title_block(label.as_str(), "");
-    let color = self.theme.gradient(ratio.ratio);
-
-    match self.cfg.view_type {
-      ViewType::Braille => {
-        let w = Sparkline::default()
-          .block(block)
-          .direction(RenderDirection::RightToLeft)
-          .data(&ratio.items)
-          .max(100)
-          .style(color)
-          .bar_set(bar_set());
-        f.render_widget(w, r);
-      }
-      ViewType::Block => {
-        let w = Gauge::default()
-          .block(block)
-          .gauge_style(color)
-          .style(self.theme.text)
-          .label("")
-          .ratio(ratio.ratio);
-        f.render_widget(w, r);
-      }
-    }
+    self.render_graph_block(f, r, block, &ratio.items, Some(100));
   }
 
   fn render_cores(&self, f: &mut Frame, r: Rect, label: &str, val: &CpuFreqStore) {
@@ -288,45 +268,14 @@ impl App {
 
       let core = core.ratio(self.cfg.ratio_mode);
       let core_label = if show_die {
-        format!("D{} Core {} {:3.0}%", id.die_id, id.core_id, core.ratio * 100.0)
+        format!("D{} Core {}", id.die_id, id.core_id)
       } else {
-        format!("Core {} {:3.0}%", id.core_id, core.ratio * 100.0)
+        format!("Core {}", id.core_id)
       };
 
-      let color = self.theme.gradient(core.ratio);
-      match self.cfg.view_type {
-        ViewType::Braille => {
-          let w = Sparkline::default()
-            .direction(RenderDirection::RightToLeft)
-            .data(&core.items)
-            .max(100)
-            .style(color)
-            .bar_set(bar_set());
-
-          // Add a small label for the core
-          let label_len = core_label.len();
-          let label_span = Span::styled(core_label, Style::default().fg(self.theme.text));
-          let mut area = core_areas[i];
-
-          // Render core label at the start
-          if area.width > label_len as u16 {
-            let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
-            f.render_widget(Paragraph::new(label_span), label_area);
-            area.x += label_len as u16 + 1;
-            area.width = area.width.saturating_sub(label_len as u16 + 1);
-          }
-
-          f.render_widget(w, area);
-        }
-        ViewType::Block => {
-          let w = Gauge::default()
-            .gauge_style(color)
-            .style(self.theme.text)
-            .label(core_label)
-            .ratio(core.ratio);
-          f.render_widget(w, core_areas[i]);
-        }
-      }
+      let w = Meter::new(core_label, core.ratio, &self.theme)
+        .block_chars(self.cfg.view_type == ViewType::Block);
+      f.render_widget(w, core_areas[i]);
     }
   }
 
@@ -346,34 +295,7 @@ impl App {
     };
 
     let block = self.title_block(label_l.as_str(), label_r.as_str());
-    let ram_ratio = ratio(ram_usage_gb, ram_total_gb);
-    let color = self.theme.gradient(ram_ratio);
-    match self.cfg.view_type {
-      ViewType::Braille => {
-        let w = Sparkline::default()
-          .block(block)
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.items)
-          .max(val.ram_total)
-          .style(color)
-          .bar_set(bar_set());
-        f.render_widget(w, r);
-      }
-      ViewType::Block => {
-        let w = Gauge::default()
-          .block(block)
-          .gauge_style(color)
-          .style(self.theme.text)
-          .label("")
-          .ratio(ram_ratio);
-        f.render_widget(w, r);
-      }
-    }
-  }
-
-  fn gauge_label(&self, label: String, ratio: f64) -> Span<'static> {
-    let fg = if ratio > 0.5 { Color::Black } else { self.theme.text };
-    Span::styled(label, Style::default().fg(fg))
+    self.render_graph_block(f, r, block, &val.items, Some(val.ram_total));
   }
 
   fn render_split_mem_block(&self, f: &mut Frame, r: Rect, val: &MemoryStore) {
@@ -395,81 +317,18 @@ impl App {
     let sections =
       Layout::default().direction(Direction::Vertical).constraints(constraints).split(inner);
 
-    // RAM section
     let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
-    let ram_ratio = ratio(ram_usage_gb, ram_total_gb);
-    let color = self.theme.gradient(ram_ratio);
-    match self.cfg.view_type {
-      ViewType::Braille => {
-        let w = Sparkline::default()
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.items)
-          .max(val.ram_total)
-          .style(color)
-          .bar_set(bar_set());
-
-        let label_len = ram_label.len();
-        let label_span = Span::styled(ram_label, Style::default().fg(self.theme.text));
-        let mut area = sections[0];
-
-        if area.width > label_len as u16 {
-          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
-          f.render_widget(Paragraph::new(label_span), label_area);
-          area.x += label_len as u16 + 1;
-          area.width = area.width.saturating_sub(label_len as u16 + 1);
-        }
-
-        f.render_widget(w, area);
-      }
-      ViewType::Block => {
-        let w = Gauge::default()
-          .gauge_style(color)
-          .style(self.theme.text)
-          .label(self.gauge_label(ram_label, ram_ratio))
-          .ratio(ram_ratio);
-        f.render_widget(w, sections[0]);
-      }
-    }
+    let w = graph(self.cfg.view_type, &val.items, &self.theme).max(val.ram_total).label(ram_label);
+    f.render_widget(w, sections[0]);
 
     if val.swap_total == 0 {
       return;
     }
 
-    // SWAP section
     let swap_label = format!("SWAP {:4.2}/{:4.1} GB", swap_usage_gb, swap_total_gb);
-    let swap_ratio = ratio(swap_usage_gb, swap_total_gb);
-    let color = self.theme.gradient(swap_ratio);
-    match self.cfg.view_type {
-      ViewType::Braille => {
-        let w = Sparkline::default()
-          .direction(RenderDirection::RightToLeft)
-          .data(&val.swap_items)
-          .max(val.swap_total.max(1)) // Avoid division by zero if no swap
-          .style(color)
-          .bar_set(bar_set());
-
-        let label_len = swap_label.len();
-        let label_span = Span::styled(swap_label, Style::default().fg(self.theme.text));
-        let mut area = sections[1];
-
-        if area.width > label_len as u16 {
-          let label_area = Rect { x: area.x, y: area.y, width: label_len as u16 + 1, height: 1 };
-          f.render_widget(Paragraph::new(label_span), label_area);
-          area.x += label_len as u16 + 1;
-          area.width = area.width.saturating_sub(label_len as u16 + 1);
-        }
-
-        f.render_widget(w, area);
-      }
-      ViewType::Block => {
-        let w = Gauge::default()
-          .gauge_style(color)
-          .style(self.theme.text)
-          .label(self.gauge_label(swap_label, swap_ratio))
-          .ratio(swap_ratio);
-        f.render_widget(w, sections[1]);
-      }
-    }
+    let w =
+      graph(self.cfg.view_type, &val.swap_items, &self.theme).max(val.swap_total).label(swap_label);
+    f.render_widget(w, sections[1]);
   }
 
   fn render(&mut self, f: &mut Frame) {
@@ -559,9 +418,9 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
-    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
-    f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
+    self.render_power_block(f, ha[0], "CPU", &self.cpu_power, self.cpu_temp.last());
+    self.render_power_block(f, ha[1], "GPU", &self.gpu_power, self.gpu_temp.last());
+    self.render_power_block(f, ha[2], "ANE", &self.ane_power, 0.0);
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
@@ -804,6 +663,33 @@ mod tests {
         assert!(screen.contains("q quit"));
       }
     }
+  }
+
+  #[test]
+  fn per_core_view_renders_meters() {
+    for (view_type, filled, empty) in [(ViewType::Braille, "▰", "▱"), (ViewType::Block, "█", "░")]
+    {
+      let mut app = test_app();
+      app.cfg.per_core_view = true;
+      app.cfg.view_type = view_type;
+
+      let screen = render_to_string(&mut app, 120, 40);
+      assert!(screen.contains("Core 5"));
+      assert!(screen.contains(" 40%") && screen.contains(" 70%"));
+      assert!(screen.contains(filled) && screen.contains(empty), "{view_type:?}");
+    }
+  }
+
+  #[test]
+  fn view_type_switches_graph_style() {
+    let is_braille = |c: char| ('\u{2801}'..='\u{28ff}').contains(&c);
+    let mut app = test_app();
+    assert!(render_to_string(&mut app, 120, 40).chars().any(is_braille));
+
+    app.cfg.view_type = ViewType::Block;
+    let screen = render_to_string(&mut app, 120, 40);
+    assert!(!screen.chars().any(is_braille));
+    assert!(screen.contains('█'));
   }
 
   #[test]
