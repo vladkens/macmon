@@ -32,6 +32,7 @@ enum Mode {
 struct WorkloadControl {
   start_at: Instant,
   stop_at: Option<Instant>,
+  pulse: Option<Duration>,
   cancelled: Arc<AtomicBool>,
 }
 
@@ -40,6 +41,7 @@ impl WorkloadControl {
     Self {
       start_at,
       stop_at: duration_sec.map(|seconds| start_at + Duration::from_secs(seconds)),
+      pulse: None,
       cancelled: Arc::new(AtomicBool::new(false)),
     }
   }
@@ -51,6 +53,34 @@ impl WorkloadControl {
 
   fn cancel(&self) {
     self.cancelled.store(true, Ordering::Relaxed);
+  }
+
+  fn idle_for(&self, now: Instant) -> Duration {
+    let Some(elapsed) = now.checked_duration_since(self.start_at) else {
+      return self.start_at.duration_since(now);
+    };
+    let Some(phase) = self.pulse else { return Duration::ZERO };
+    let phase_ns = phase.as_nanos();
+    let offset = elapsed.as_nanos() % (2 * phase_ns);
+    if offset < phase_ns {
+      Duration::ZERO
+    } else {
+      let remaining = 2 * phase_ns - offset;
+      Duration::new((remaining / 1_000_000_000) as u64, (remaining % 1_000_000_000) as u32)
+    }
+  }
+
+  fn wait_for_active(&self) -> bool {
+    while self.running() {
+      let now = Instant::now();
+      let idle = self.idle_for(now);
+      if idle.is_zero() {
+        return true;
+      }
+      let remaining = self.stop_at.map(|end| end.saturating_duration_since(now)).unwrap_or(idle);
+      thread::sleep(idle.min(remaining).min(Duration::from_millis(50)));
+    }
+    false
   }
 }
 
@@ -94,7 +124,7 @@ const FULL_GPU_WORK_ITEMS: usize = 1_048_576;
 const FULL_GPU_ITERATIONS: u32 = 4096;
 const FULL_GPU_INFLIGHT: usize = 3;
 // Vision OCR also schedules auxiliary GPU work. Short, single in-flight batches
-// let it progress alongside the GPU stress kernel.
+// let it progress alongside the GPU stress kernel and keep pulse tails bounded.
 const SHARED_GPU_ITERATIONS: u32 = 256;
 
 const GPU_SHADER: &str = r#"
@@ -157,7 +187,7 @@ fn worker(mode: Mode, control: WorkloadControl, seed: u64) {
         }
       }
       Mode::Full => {
-        while control.running() {
+        while control.wait_for_active() {
           state = cpu_work(state);
         }
       }
@@ -227,9 +257,11 @@ pub fn run_gpu(duration_sec: Option<u64>) -> Result<(), Box<dyn Error>> {
 pub fn run_all(
   workers: usize,
   duration_sec: Option<u64>,
+  pulse_sec: Option<u64>,
   ane: &mut AneLoad,
 ) -> Result<(), Box<dyn Error>> {
-  let control = WorkloadControl::new(Instant::now(), duration_sec);
+  let mut control = WorkloadControl::new(Instant::now(), duration_sec);
+  control.pulse = pulse_sec.map(Duration::from_secs);
   run_combined(
     workers,
     control,
@@ -237,7 +269,7 @@ pub fn run_all(
       run_gpu_workload(Mode::Full, FULL_GPU_WORK_ITEMS, SHARED_GPU_ITERATIONS, 1, control)
         .map_err(|error| error.to_string())
     },
-    |control| ane.run_while(|| control.running()),
+    |control| ane.run_while(|| control.wait_for_active()),
   )
 }
 
@@ -486,6 +518,17 @@ fn run_gpu_workload(
         let now = Instant::now();
         if !control.running() {
           break;
+        }
+        if !control.idle_for(now).is_zero() {
+          // Finish submitted commands before the shared idle phase; do not queue
+          // more GPU work while CPU and ANE have stopped submitting theirs.
+          for command in pending.drain(..) {
+            command.wait();
+          }
+          if !control.wait_for_active() {
+            break;
+          }
+          continue;
         }
         if matches!(mode, Mode::Cyclic) && now >= busy_until {
           break;
@@ -852,6 +895,36 @@ impl AneLoad {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn pulse_phases_share_an_epoch_and_preserve_full_load_without_the_flag() {
+    let start = Instant::now();
+    let mut control = WorkloadControl::new(start, None);
+    assert_eq!(control.idle_for(start + Duration::from_secs(100)), Duration::ZERO);
+    for seconds in [1, 2, 3] {
+      let phase = Duration::from_secs(seconds);
+      control.pulse = Some(phase);
+      assert_eq!(control.idle_for(start), Duration::ZERO);
+      assert_eq!(control.idle_for(start + phase - Duration::from_nanos(1)), Duration::ZERO);
+      assert_eq!(control.idle_for(start + phase), phase);
+      assert_eq!(control.idle_for(start + phase * 2), Duration::ZERO);
+      assert_eq!(control.idle_for(start + phase * 3), phase);
+    }
+    assert_eq!(control.idle_for(start - Duration::from_secs(1)), Duration::from_secs(1));
+  }
+
+  #[test]
+  fn pulse_wait_obeys_deadline_and_cancellation_during_idle() {
+    let start = Instant::now() - Duration::from_secs(2);
+    let mut control = WorkloadControl::new(start, None);
+    control.pulse = Some(Duration::from_secs(2));
+    control.cancel();
+    assert!(!control.wait_for_active());
+
+    let mut control = WorkloadControl::new(start, Some(2));
+    control.pulse = Some(Duration::from_secs(2));
+    assert!(!control.wait_for_active());
+  }
 
   #[test]
   fn combined_ane_error_stops_gpu_and_cpu() {

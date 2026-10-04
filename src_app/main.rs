@@ -99,6 +99,11 @@ enum Commands {
     /// Stop after this many seconds (after ANE warmup in ane/all). Runs until Ctrl-C when omitted
     #[arg(short, long)]
     duration: Option<u64>,
+
+    /// Pulse all workloads: SECONDS busy, then SECONDS idle (default: 2 when enabled)
+    #[arg(long, value_name = "SECONDS", num_args = 0..=1, default_missing_value = "2",
+      value_parser = clap::value_parser!(u64).range(1..))]
+    pulse: Option<u64>,
   },
 }
 
@@ -123,7 +128,14 @@ fn run_stress(
   mode: StressMode,
   workers: Option<usize>,
   duration: Option<u64>,
+  pulse: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
+  if pulse.is_some() && mode != StressMode::All {
+    return Err(
+      "--pulse is supported with 'stress all'; use 'stress pulse' for the CPU-only pattern".into(),
+    );
+  }
+
   let uses_ane = matches!(mode, StressMode::Ane | StressMode::All);
   if uses_ane && duration == Some(0) {
     return Ok(());
@@ -137,13 +149,16 @@ fn run_stress(
   }
   .max(1);
   let plural = if workers == 1 { "" } else { "s" };
-  let label = match mode {
+  let mut label = match mode {
     StressMode::Pulse => format!("CPU pulse · {workers} worker{plural}"),
     StressMode::Cpu => format!("CPU · {workers} worker{plural}"),
     StressMode::Gpu => "GPU".to_string(),
     StressMode::Ane => "ANE OCR".to_string(),
     StressMode::All => format!("CPU + GPU + ANE · {workers} CPU worker{plural}"),
   };
+  if let Some(seconds) = pulse {
+    label.push_str(&format!(" · {seconds}s busy / {seconds}s idle"));
+  }
 
   let mut ane = if uses_ane { Some(stress::AneLoad::prepare()?) } else { None };
   let started = Instant::now();
@@ -188,7 +203,7 @@ fn run_stress(
     StressMode::Gpu => stress::run_gpu(duration),
     StressMode::Ane => ane.as_mut().expect("ANE workload prepared").run(duration),
     StressMode::All => {
-      stress::run_all(workers, duration, ane.as_mut().expect("ANE workload prepared"))
+      stress::run_all(workers, duration, pulse, ane.as_mut().expect("ANE workload prepared"))
     }
   };
 
@@ -266,7 +281,9 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => print_debug()?,
-    Some(Commands::Stress { mode, workers, duration }) => run_stress(*mode, *workers, *duration)?,
+    Some(Commands::Stress { mode, workers, duration, pulse }) => {
+      run_stress(*mode, *workers, *duration, *pulse)?;
+    }
     _ => {
       let mut app = App::new()?;
 
@@ -288,18 +305,34 @@ mod tests {
   use super::*;
 
   #[test]
-  fn parses_ane_stress_duration() {
-    let cli = Cli::try_parse_from(["macmon", "stress", "ane", "--duration", "5"]).unwrap();
-    assert!(matches!(
-      cli.command,
-      Some(Commands::Stress { mode: StressMode::Ane, workers: None, duration: Some(5) })
-    ));
+  fn zero_duration_ane_and_all_skip_warmup() {
+    for mode in [StressMode::Ane, StressMode::All] {
+      run_stress(mode, None, Some(0), None).unwrap();
+    }
   }
 
   #[test]
-  fn zero_duration_ane_and_all_skip_warmup() {
-    for mode in [StressMode::Ane, StressMode::All] {
-      run_stress(mode, None, Some(0)).unwrap();
+  fn parses_optional_pulse_interval_for_all() {
+    for (args, expected) in [
+      (vec!["macmon", "stress", "all"], None),
+      (vec!["macmon", "stress", "all", "--pulse"], Some(2)),
+      (vec!["macmon", "stress", "all", "--pulse", "3"], Some(3)),
+      (vec!["macmon", "stress", "all", "--pulse", "--duration", "10"], Some(2)),
+    ] {
+      let cli = Cli::try_parse_from(args).unwrap();
+      let Some(Commands::Stress { mode: StressMode::All, pulse, .. }) = cli.command else {
+        panic!("expected stress all");
+      };
+      assert_eq!(pulse, expected);
     }
+    for value in ["0", "-1", "nope"] {
+      assert!(Cli::try_parse_from(["macmon", "stress", "all", "--pulse", value]).is_err());
+    }
+  }
+
+  #[test]
+  fn pulse_requires_all_and_zero_duration_skips_load() {
+    assert!(run_stress(StressMode::Cpu, None, Some(0), Some(2)).is_err());
+    run_stress(StressMode::All, None, Some(0), Some(2)).unwrap();
   }
 }
