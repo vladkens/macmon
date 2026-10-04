@@ -189,12 +189,12 @@
 - Create: `src_app/procs.rs`
 - Modify: `src_app/main.rs`
 
-- [ ] define `rusage_info_v6` (`#[repr(C)]`, per SDK), `ProcInfo`, `ProcSampler`
-- [ ] collect pids, bsd info, rusage; mach timebase conversion; name from `proc_pidpath` basename
-- [ ] pure delta function: (prev counters, cur counters, elapsed) → cpu %, power W; handle first sample, negative delta, pid reuse
-- [ ] write tests for delta math (1 core busy = 100%, idle = 0, energy 1e9 nJ over 1 s = 1 W, negative delta → 0, new pid → no spike)
-- [ ] write test that sampling the current process returns its own pid with non-empty name (runs on macOS CI)
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] define `rusage_info_v6` (`#[repr(C)]`, per SDK), `ProcInfo`, `ProcSampler` (layout checked by a test: 464 bytes, `rusage_info_v4` prefix; ➕ `mod procs` is `#[allow(dead_code)]` in `main.rs` until Task 9 wires it in)
+- [x] collect pids, bsd info, rusage; mach timebase conversion; name from `proc_pidpath` basename (➕ falls back to `RUSAGE_INFO_V4` without energy → `power_w = None` on macOS < 13; name cached per pid while start time and `pbi_comm` stay the same; `user` is the numeric uid until Task 7, `gpu_pct` is 0 until Task 8; pid identity = `ri_proc_start_abstime`)
+- [x] pure delta function: (prev counters, cur counters, elapsed) → cpu %, power W; handle first sample, negative delta, pid reuse (`usage()`; first sample / reuse / backwards counter / zero elapsed → 0 % and 0 W)
+- [x] write tests for delta math (1 core busy = 100%, idle = 0, energy 1e9 nJ over 1 s = 1 W, negative delta → 0, new pid → no spike)
+- [x] write test that sampling the current process returns its own pid with non-empty name (runs on macOS CI) (also checks ppid, uid, memory, and CPU % > 0 after a 50 ms busy loop)
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 7: Foreign processes via `ps` fallback and user names
 
@@ -224,10 +224,12 @@
 
 **Files:**
 - Modify: `src_app/tui/mod.rs`
+- Modify: `src_app/main.rs` (➕)
 
 - [ ] `run_procs_thread(tx, msec, active: Arc<AtomicBool>)` sending `Event::Procs`; sleeps while inactive
 - [ ] `active` follows proc panel visibility (toggle + auto-hide) on every render
 - [ ] app state stores latest `Vec<ProcInfo>`; panel shows "collecting…" until the first delta sample
+- [ ] ➕ remove `#[allow(dead_code)]` from `mod procs` in `src_app/main.rs` (`ProcSampler::sample()` returns zero CPU / power on its first call)
 - [ ] write tests for the visibility → active flag logic
 - [ ] run `make test` and `make check` - must pass before next task
 
