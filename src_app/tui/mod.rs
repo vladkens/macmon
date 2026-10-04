@@ -1,6 +1,7 @@
 //! Terminal user interface.
 
 mod store;
+mod theme;
 
 use std::ops::ControlFlow;
 use std::sync::{Arc, RwLock};
@@ -17,6 +18,7 @@ use ratatui::{prelude::*, widgets::*};
 use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS, ViewType};
 use macmon::{Metrics, Sampler, SocInfo};
 use store::{CpuFreqStore, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
+use theme::Theme;
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -113,6 +115,7 @@ fn ratio(value: f64, total: f64) -> f64 {
 #[derive(Debug, Default)]
 pub struct App {
   cfg: Config,
+  theme: Theme,
 
   soc: SocInfo,
   mem: MemoryStore,
@@ -136,7 +139,8 @@ impl App {
   pub fn new() -> WithError<Self> {
     let soc = SocInfo::new()?;
     let cfg = Config::load();
-    Ok(Self { cfg, soc, ..Default::default() })
+    let theme = Theme::new(&cfg.theme, theme::detect_truecolor());
+    Ok(Self { cfg, theme, soc, ..Default::default() })
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -166,7 +170,10 @@ impl App {
     match key.code {
       KeyCode::Char('q') => return ControlFlow::Break(()),
       KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return ControlFlow::Break(()),
-      KeyCode::Char('c') => self.cfg.next_color(),
+      KeyCode::Char('c') => {
+        self.theme = self.theme.next();
+        self.cfg.set_theme(self.theme.name);
+      }
       KeyCode::Char('v') => self.cfg.next_view_type(),
       KeyCode::Char('d') => self.cfg.toggle_per_core_view(),
       KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
@@ -183,8 +190,8 @@ impl App {
     let mut block = Block::new()
       .borders(Borders::ALL)
       .border_type(BorderType::Rounded)
-      .border_style(self.cfg.color)
-      // .title_style(Style::default().gray())
+      .border_style(self.theme.border)
+      .title_style(self.theme.title)
       .padding(Padding::ZERO);
 
     if !label_l.is_empty() {
@@ -215,7 +222,7 @@ impl App {
       .block(self.title_block(label_l.as_str(), label_r.as_str()))
       .direction(RenderDirection::RightToLeft)
       .data(&val.items)
-      .style(self.cfg.color)
+      .style(self.theme.gradient(0.0))
       .bar_set(bar_set())
   }
 
@@ -223,23 +230,24 @@ impl App {
     let ratio = val.ratio(self.cfg.ratio_mode);
     let label = format!("{} {:3.0}% @ {:4.0} MHz", label, ratio.ratio * 100.0, val.freq_mhz);
     let block = self.title_block(label.as_str(), "");
+    let color = self.theme.gradient(ratio.ratio);
 
     match self.cfg.view_type {
-      ViewType::Sparkline => {
+      ViewType::Braille => {
         let w = Sparkline::default()
           .block(block)
           .direction(RenderDirection::RightToLeft)
           .data(&ratio.items)
           .max(100)
-          .style(self.cfg.color)
+          .style(color)
           .bar_set(bar_set());
         f.render_widget(w, r);
       }
-      ViewType::Gauge => {
+      ViewType::Block => {
         let w = Gauge::default()
           .block(block)
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
+          .gauge_style(color)
+          .style(self.theme.text)
           .label("")
           .ratio(ratio.ratio);
         f.render_widget(w, r);
@@ -285,18 +293,19 @@ impl App {
         format!("Core {} {:3.0}%", id.core_id, core.ratio * 100.0)
       };
 
+      let color = self.theme.gradient(core.ratio);
       match self.cfg.view_type {
-        ViewType::Sparkline => {
+        ViewType::Braille => {
           let w = Sparkline::default()
             .direction(RenderDirection::RightToLeft)
             .data(&core.items)
             .max(100)
-            .style(self.cfg.color)
+            .style(color)
             .bar_set(bar_set());
 
           // Add a small label for the core
           let label_len = core_label.len();
-          let label_span = Span::styled(core_label, Style::default().fg(self.cfg.color));
+          let label_span = Span::styled(core_label, Style::default().fg(self.theme.text));
           let mut area = core_areas[i];
 
           // Render core label at the start
@@ -309,10 +318,10 @@ impl App {
 
           f.render_widget(w, area);
         }
-        ViewType::Gauge => {
+        ViewType::Block => {
           let w = Gauge::default()
-            .gauge_style(self.cfg.color)
-            .style(self.cfg.color)
+            .gauge_style(color)
+            .style(self.theme.text)
             .label(core_label)
             .ratio(core.ratio);
           f.render_widget(w, core_areas[i]);
@@ -337,31 +346,33 @@ impl App {
     };
 
     let block = self.title_block(label_l.as_str(), label_r.as_str());
+    let ram_ratio = ratio(ram_usage_gb, ram_total_gb);
+    let color = self.theme.gradient(ram_ratio);
     match self.cfg.view_type {
-      ViewType::Sparkline => {
+      ViewType::Braille => {
         let w = Sparkline::default()
           .block(block)
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(val.ram_total)
-          .style(self.cfg.color)
+          .style(color)
           .bar_set(bar_set());
         f.render_widget(w, r);
       }
-      ViewType::Gauge => {
+      ViewType::Block => {
         let w = Gauge::default()
           .block(block)
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
+          .gauge_style(color)
+          .style(self.theme.text)
           .label("")
-          .ratio(ratio(ram_usage_gb, ram_total_gb));
+          .ratio(ram_ratio);
         f.render_widget(w, r);
       }
     }
   }
 
   fn gauge_label(&self, label: String, ratio: f64) -> Span<'static> {
-    let fg = if ratio > 0.5 { Color::Black } else { self.cfg.color };
+    let fg = if ratio > 0.5 { Color::Black } else { self.theme.text };
     Span::styled(label, Style::default().fg(fg))
   }
 
@@ -386,17 +397,19 @@ impl App {
 
     // RAM section
     let ram_label = format!("RAM {:4.2}/{:4.1} GB", ram_usage_gb, ram_total_gb);
+    let ram_ratio = ratio(ram_usage_gb, ram_total_gb);
+    let color = self.theme.gradient(ram_ratio);
     match self.cfg.view_type {
-      ViewType::Sparkline => {
+      ViewType::Braille => {
         let w = Sparkline::default()
           .direction(RenderDirection::RightToLeft)
           .data(&val.items)
           .max(val.ram_total)
-          .style(self.cfg.color)
+          .style(color)
           .bar_set(bar_set());
 
         let label_len = ram_label.len();
-        let label_span = Span::styled(ram_label, Style::default().fg(self.cfg.color));
+        let label_span = Span::styled(ram_label, Style::default().fg(self.theme.text));
         let mut area = sections[0];
 
         if area.width > label_len as u16 {
@@ -408,13 +421,12 @@ impl App {
 
         f.render_widget(w, area);
       }
-      ViewType::Gauge => {
-        let ratio = ratio(ram_usage_gb, ram_total_gb);
+      ViewType::Block => {
         let w = Gauge::default()
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
-          .label(self.gauge_label(ram_label, ratio))
-          .ratio(ratio);
+          .gauge_style(color)
+          .style(self.theme.text)
+          .label(self.gauge_label(ram_label, ram_ratio))
+          .ratio(ram_ratio);
         f.render_widget(w, sections[0]);
       }
     }
@@ -425,17 +437,19 @@ impl App {
 
     // SWAP section
     let swap_label = format!("SWAP {:4.2}/{:4.1} GB", swap_usage_gb, swap_total_gb);
+    let swap_ratio = ratio(swap_usage_gb, swap_total_gb);
+    let color = self.theme.gradient(swap_ratio);
     match self.cfg.view_type {
-      ViewType::Sparkline => {
+      ViewType::Braille => {
         let w = Sparkline::default()
           .direction(RenderDirection::RightToLeft)
           .data(&val.swap_items)
           .max(val.swap_total.max(1)) // Avoid division by zero if no swap
-          .style(self.cfg.color)
+          .style(color)
           .bar_set(bar_set());
 
         let label_len = swap_label.len();
-        let label_span = Span::styled(swap_label, Style::default().fg(self.cfg.color));
+        let label_span = Span::styled(swap_label, Style::default().fg(self.theme.text));
         let mut area = sections[1];
 
         if area.width > label_len as u16 {
@@ -447,13 +461,12 @@ impl App {
 
         f.render_widget(w, area);
       }
-      ViewType::Gauge => {
-        let ratio = ratio(swap_usage_gb, swap_total_gb);
+      ViewType::Block => {
         let w = Gauge::default()
-          .gauge_style(self.cfg.color)
-          .style(self.cfg.color)
-          .label(self.gauge_label(swap_label, ratio))
-          .ratio(ratio);
+          .gauge_style(color)
+          .style(self.theme.text)
+          .label(self.gauge_label(swap_label, swap_ratio))
+          .ratio(swap_ratio);
         f.render_widget(w, sections[1]);
       }
     }
@@ -532,7 +545,8 @@ impl App {
 
     let block = self.title_block(&label_l, &label_r);
     let usage = format!(
-      " q quit | c color | v chart | d detail | r {} | -/+ {}ms ",
+      " q quit | c {} | v chart | d detail | r {} | -/+ {}ms ",
+      self.theme.name,
       self.cfg.ratio_mode.label(),
       self.cfg.interval,
     );
@@ -588,10 +602,12 @@ mod tests {
   use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
+  use ratatui::buffer::Buffer;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::style::Color;
 
   use super::App;
+  use super::theme::{THEMES, Theme};
   use crate::config::{RatioMode, ViewType};
 
   fn key(c: char) -> KeyEvent {
@@ -653,10 +669,14 @@ mod tests {
     app
   }
 
-  fn render_to_string(app: &mut App, width: u16, height: u16) -> String {
+  fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
     let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
     term.draw(|f| app.render(f)).unwrap();
-    term.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+    term.backend().buffer().clone()
+  }
+
+  fn render_to_string(app: &mut App, width: u16, height: u16) -> String {
+    render_buffer(app, width, height).content.iter().map(|cell| cell.symbol()).collect()
   }
 
   #[test]
@@ -666,25 +686,35 @@ mod tests {
 
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
-    assert_eq!(app.cfg.color, Color::Green); // ctrl-c doesn't change color
+    // ctrl-c doesn't change the theme
+    assert_eq!(app.theme.name, "default");
+    assert_eq!(app.cfg.theme, "default");
   }
 
   #[test]
-  fn c_cycles_color() {
+  fn c_cycles_themes() {
     let mut app = App::default();
-    assert_eq!(app.cfg.color, Color::Green);
+    assert_eq!(app.theme.name, "default");
+
     assert_eq!(app.handle_key(key('c')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.color, Color::Yellow);
+    assert_eq!(app.theme.name, "nord");
+    assert_eq!(app.cfg.theme, "nord");
+
+    for _ in 1..THEMES.len() {
+      assert_eq!(app.handle_key(key('c')), ControlFlow::Continue(()));
+    }
+    assert_eq!(app.theme.name, "default");
+    assert_eq!(app.cfg.theme, "default");
   }
 
   #[test]
   fn v_toggles_view_type() {
     let mut app = App::default();
-    assert_eq!(app.cfg.view_type, ViewType::Sparkline);
+    assert_eq!(app.cfg.view_type, ViewType::Braille);
     assert_eq!(app.handle_key(key('v')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.view_type, ViewType::Gauge);
+    assert_eq!(app.cfg.view_type, ViewType::Block);
     assert_eq!(app.handle_key(key('v')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.view_type, ViewType::Sparkline);
+    assert_eq!(app.cfg.view_type, ViewType::Braille);
   }
 
   #[test]
@@ -726,17 +756,42 @@ mod tests {
       assert_eq!(app.handle_key(event), ControlFlow::Continue(()));
     }
 
-    assert_eq!(app.cfg.color, Color::Green);
-    assert_eq!(app.cfg.view_type, ViewType::Sparkline);
+    assert_eq!(app.theme.name, "default");
+    assert_eq!(app.cfg.view_type, ViewType::Braille);
     assert!(!app.cfg.per_core_view);
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!(app.cfg.interval, 1000);
   }
 
   #[test]
+  fn renders_with_every_theme() {
+    for truecolor in [true, false] {
+      for theme in THEMES {
+        for view_type in [ViewType::Braille, ViewType::Block] {
+          let mut app = test_app();
+          app.theme = Theme::new(theme.name, truecolor);
+          app.cfg.view_type = view_type;
+
+          let buf = render_buffer(&mut app, 120, 40);
+          // top-left corner is the outer box border
+          assert_eq!(buf[(0, 0)].symbol(), "╭");
+          assert_eq!(buf[(0, 0)].fg, app.theme.border, "theme {}", theme.name);
+
+          let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+          assert!(screen.contains(&format!("c {}", theme.name)));
+          if !truecolor {
+            let is_rgb = |c: Color| matches!(c, Color::Rgb(..));
+            assert!(buf.content.iter().all(|cell| !is_rgb(cell.fg) && !is_rgb(cell.bg)));
+          }
+        }
+      }
+    }
+  }
+
+  #[test]
   fn renders_current_layout() {
     for per_core_view in [false, true] {
-      for view_type in [ViewType::Sparkline, ViewType::Gauge] {
+      for view_type in [ViewType::Braille, ViewType::Block] {
         let mut app = test_app();
         app.cfg.per_core_view = per_core_view;
         app.cfg.view_type = view_type;

@@ -1,19 +1,18 @@
 //! Persistent terminal UI settings.
 
-use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;
-
-const COLORS_OPTIONS: [Color; 7] =
-  [Color::Green, Color::Yellow, Color::Red, Color::Blue, Color::Magenta, Color::Cyan, Color::Reset];
 
 pub(crate) const TUI_MIN_MS: u32 = 250;
 pub(crate) const TUI_MAX_MS: u32 = 10_000;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+/// Graph style. Old configs used `Sparkline` / `Gauge`, which load as `Braille` / `Block`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub enum ViewType {
-  Sparkline,
-  Gauge,
+  #[serde(alias = "Sparkline")]
+  Braille,
+  #[serde(alias = "Gauge")]
+  Block,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
@@ -31,14 +30,42 @@ impl RatioMode {
   }
 }
 
+/// Visible TUI panels. Fields missing in the config file default to visible.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+#[serde(default)]
+pub struct Panels {
+  pub cpu: bool,
+  pub gpu: bool,
+  pub mem: bool,
+  pub power: bool,
+  pub proc: bool,
+}
+
+impl Default for Panels {
+  fn default() -> Self {
+    Self { cpu: true, gpu: true, mem: true, power: true, proc: true }
+  }
+}
+
+/// Process list sort key.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
+pub enum ProcSort {
+  Cpu,
+  Mem,
+  Power,
+  Gpu,
+  Pid,
+  Name,
+}
+
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-  #[serde_inline_default(ViewType::Sparkline)]
+  #[serde_inline_default(ViewType::Braille)]
   pub view_type: ViewType,
 
-  #[serde_inline_default(COLORS_OPTIONS[0])]
-  pub color: Color,
+  #[serde_inline_default("default".to_string())]
+  pub theme: String,
 
   #[serde_inline_default(1000)]
   pub interval: u32,
@@ -48,6 +75,15 @@ pub struct Config {
 
   #[serde_inline_default(RatioMode::Scaled)]
   pub ratio_mode: RatioMode,
+
+  #[serde(default)]
+  pub panels: Panels,
+
+  #[serde_inline_default(ProcSort::Cpu)]
+  pub proc_sort: ProcSort,
+
+  #[serde_inline_default(true)]
+  pub proc_sort_desc: bool,
 }
 
 impl Default for Config {
@@ -78,19 +114,16 @@ impl Config {
     Some(filepath)
   }
 
+  /// Parses a config file; malformed content falls back to defaults.
+  fn from_reader(reader: impl std::io::Read) -> Self {
+    serde_json::from_reader::<_, Self>(reader).unwrap_or_default().normalize()
+  }
+
   pub fn load() -> Self {
-    if let Some(path) = Self::get_config_path() {
-      let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return Self::default().normalize(),
-      };
-
-      let reader = std::io::BufReader::new(file);
-      let cfg: Self = serde_json::from_reader(reader).unwrap_or_default();
-      return cfg.normalize();
+    match Self::get_config_path().and_then(|path| std::fs::File::open(path).ok()) {
+      Some(file) => Self::from_reader(std::io::BufReader::new(file)),
+      None => Self::default().normalize(),
     }
-
-    Self::default().normalize()
   }
 
   pub fn save(&self) {
@@ -105,18 +138,15 @@ impl Config {
     }
   }
 
-  pub fn next_color(&mut self) {
-    self.color = match COLORS_OPTIONS.iter().position(|&c| c == self.color) {
-      Some(idx) => COLORS_OPTIONS[(idx + 1) % COLORS_OPTIONS.len()],
-      None => COLORS_OPTIONS[0],
-    };
+  pub fn set_theme(&mut self, name: &str) {
+    self.theme = name.to_string();
     self.save();
   }
 
   pub fn next_view_type(&mut self) {
     self.view_type = match self.view_type {
-      ViewType::Sparkline => ViewType::Gauge,
-      ViewType::Gauge => ViewType::Sparkline,
+      ViewType::Braille => ViewType::Block,
+      ViewType::Block => ViewType::Braille,
     };
     self.save();
   }
@@ -144,5 +174,126 @@ impl Config {
       RatioMode::Active => RatioMode::Scaled,
     };
     self.save();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{Config, Panels, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
+
+  fn parse(json: &str) -> Config {
+    Config::from_reader(json.as_bytes())
+  }
+
+  fn assert_defaults(cfg: &Config) {
+    assert_eq!(cfg.view_type, ViewType::Braille);
+    assert_eq!(cfg.theme, "default");
+    assert_eq!(cfg.interval, 1000);
+    assert!(!cfg.per_core_view);
+    assert_eq!(cfg.ratio_mode, RatioMode::Scaled);
+    assert_eq!(cfg.panels, Panels::default());
+    assert_eq!(cfg.proc_sort, ProcSort::Cpu);
+    assert!(cfg.proc_sort_desc);
+  }
+
+  #[test]
+  fn empty_json_loads_defaults() {
+    assert_defaults(&parse("{}"));
+    assert_defaults(&Config::default());
+
+    let panels = Panels::default();
+    assert!(panels.cpu && panels.gpu && panels.mem && panels.power && panels.proc);
+  }
+
+  #[test]
+  fn malformed_json_loads_defaults() {
+    assert_defaults(&parse(""));
+    assert_defaults(&parse("not json"));
+    assert_defaults(&parse(r#"{"view_type": "Unknown"}"#));
+  }
+
+  #[test]
+  fn old_config_with_gauge_loads() {
+    let cfg = parse(
+      r#"{
+        "view_type": "Gauge",
+        "color": "Red",
+        "interval": 500,
+        "per_core_view": true,
+        "ratio_mode": "Active"
+      }"#,
+    );
+
+    assert_eq!(cfg.view_type, ViewType::Block);
+    assert_eq!(cfg.theme, "default");
+    assert_eq!(cfg.interval, 500);
+    assert!(cfg.per_core_view);
+    assert_eq!(cfg.ratio_mode, RatioMode::Active);
+    assert_eq!(cfg.panels, Panels::default());
+    assert_eq!(cfg.proc_sort, ProcSort::Cpu);
+    assert!(cfg.proc_sort_desc);
+  }
+
+  #[test]
+  fn old_config_with_sparkline_loads() {
+    let cfg = parse(r#"{"view_type": "Sparkline", "color": "Green"}"#);
+    assert_eq!(cfg.view_type, ViewType::Braille);
+    assert_eq!(cfg.theme, "default");
+  }
+
+  #[test]
+  fn interval_is_clamped_on_load() {
+    assert_eq!(parse(r#"{"interval": 10}"#).interval, TUI_MIN_MS);
+    assert_eq!(parse(r#"{"interval": 999999}"#).interval, TUI_MAX_MS);
+  }
+
+  #[test]
+  fn partial_panels_default_to_visible() {
+    let cfg = parse(r#"{"panels": {"proc": false, "gpu": false}}"#);
+    assert_eq!(cfg.panels, Panels { gpu: false, proc: false, ..Panels::default() });
+  }
+
+  #[test]
+  fn new_fields_round_trip() {
+    let cfg = Config {
+      view_type: ViewType::Block,
+      theme: "nord".to_string(),
+      panels: Panels { mem: false, ..Panels::default() },
+      proc_sort: ProcSort::Power,
+      proc_sort_desc: false,
+      ..Config::default()
+    };
+
+    let json = serde_json::to_string(&cfg).unwrap();
+    assert!(!json.contains("color"));
+    assert!(json.contains(r#""view_type":"Block""#));
+
+    let cfg = parse(&json);
+    assert_eq!(cfg.view_type, ViewType::Block);
+    assert_eq!(cfg.theme, "nord");
+    assert_eq!(cfg.panels, Panels { mem: false, ..Panels::default() });
+    assert_eq!(cfg.proc_sort, ProcSort::Power);
+    assert!(!cfg.proc_sort_desc);
+  }
+
+  #[test]
+  fn all_sort_keys_parse() {
+    for (name, key) in [
+      ("Cpu", ProcSort::Cpu),
+      ("Mem", ProcSort::Mem),
+      ("Power", ProcSort::Power),
+      ("Gpu", ProcSort::Gpu),
+      ("Pid", ProcSort::Pid),
+      ("Name", ProcSort::Name),
+    ] {
+      assert_eq!(parse(&format!(r#"{{"proc_sort": "{name}"}}"#)).proc_sort, key);
+    }
+  }
+
+  #[test]
+  fn set_theme_updates_name() {
+    let mut cfg = Config::default();
+    cfg.set_theme("dracula");
+    assert_eq!(cfg.theme, "dracula");
   }
 }

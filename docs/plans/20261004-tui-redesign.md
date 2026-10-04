@@ -131,13 +131,13 @@
 - Modify: `src_app/config.rs`
 - Modify: `src_app/tui/mod.rs`
 
-- [ ] add `Theme` struct and 6 built-in themes; `gradient(t: f64) -> Color` with 3-stop interpolation
-- [ ] add truecolor detection and RGB → xterm-256 fallback
-- [ ] config: replace `color` with `theme`, rename `ViewType` variants to `Braille`/`Block` with serde aliases, add `panels`, `proc_sort`, `proc_sort_desc`; `c` cycles themes
-- [ ] apply theme to current widgets (borders, titles, graph colors) so the app stays usable mid-refactor
-- [ ] write tests for gradient endpoints/midpoint, 256 mapping (pure colors, grays), theme cycle wrap, unknown theme fallback
-- [ ] write tests for loading old config JSON (`color`, `view_type: "Gauge"`/`"Sparkline"`) and empty JSON defaults
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] add `Theme` struct and 6 built-in themes; `gradient(t: f64) -> Color` with 3-stop interpolation
+- [x] add truecolor detection and RGB → xterm-256 fallback
+- [x] config: replace `color` with `theme`, rename `ViewType` variants to `Braille`/`Block` with serde aliases, add `panels`, `proc_sort`, `proc_sort_desc`; `c` cycles themes
+- [x] apply theme to current widgets (borders, titles, graph colors) so the app stays usable mid-refactor
+- [x] write tests for gradient endpoints/midpoint, 256 mapping (pure colors, grays), theme cycle wrap, unknown theme fallback
+- [x] write tests for loading old config JSON (`color`, `view_type: "Gauge"`/`"Sparkline"`) and empty JSON defaults
+- [x] run `make test` and `make check` - must pass before next task
 
 ### Task 3: Braille graph and meter widgets
 
