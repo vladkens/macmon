@@ -352,7 +352,54 @@ The user asked at the start to keep every existing label. The old UI showed avg 
 ### Task 15: [Final] Update documentation
 - [x] update `readme.md`: features list, Controls section, note on process data without sudo (features: per-core load, braille charts, process list, terminal colors, toggleable panels; `c` / `v` gone; Controls split into global keys and process list keys as in the key handlers; settings file and auto-hide noted; "Process data without sudo": CPU % / memory / GPU % for every process, power only for the current user's processes (`-` otherwise, all with `sudo`), CPU % as in Activity Monitor; screenshot left for Post-Completion)
 - [x] add entry to `changelog.md` (no "Unreleased" convention in the file: added an `## Unreleased` entry in the same style without a version or date, Full Changelog link `v0.8.2...main`; to be renamed at release)
-- [x] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/` (➕ moved back to `docs/plans/` for Task 16)
+
+### Task 16: ➕ Polish V3 after user review
+
+User review of the running app (M2, ~110x26): the stretched strips left ugly blank space, graphs covered only half the strip, the header clock / interval and the hint line were noise, and the cores row / panel keys were never wanted. Decisions:
+- Top box height = its content rows (one row per strip, one per power row); the process list takes all remaining height. No `PROC_HEIGHT_PCT`, no growing strips.
+- Graph history long enough to fill the widest strip; avg / max keep the original 128-sample window.
+- Header: chip info left, `macmon vX` right — no clock, no interval.
+- Hints: original style, right-aligned on the bottom border of the bottom-most box: `q quit | r scaled | -/+ 1000ms`, plus `/ filter | s sort` when the process list is visible. Other keys (`S`, arrows, PgUp/PgDn, Home/End, Esc) keep working but aren't listed.
+- Power labels as in the original UI: `Power` = CPU + GPU + ANE (`all_power`), `Total` = system (`sys_power`).
+- No cores row and no `d`; no panel keys `1`–`5`. New `p` shows / hides the process list (persisted); metrics are always visible.
+
+Target (100 columns):
+```
+╭─ M2 · 4E+4P · 10GPU · 24GB ────────────────────────────────────────────────────── macmon v0.8.2 ─╮
+│ E-CPU  22% 1.7GHz ⣀⣀⣠⣤⣀⣀⣀⣠⣀⣀⣀⣀⣠⣤⣴⣤⣀⣀⣀⣀⣀⣀⣀⣠⣤⣀⣀  │ CPU    0.00W avg  0.00 max  0.00  43°C ⣀⣀⣀⣠⣀⣀⣀⣀ │
+│ P-CPU   6% 1.6GHz ⣤⣀⣀⣀⣠⣀⣀⣀⣀⣠⣤⣴⣤⣀⣀⣀⣀⣀⣀⣀⣠⣤⣀⣀⣀⣀⣀  │ GPU    0.12W avg  0.03 max  0.17  41°C ⣀⣀⣀⣠⣀⣀⣀⣀ │
+│ GPU     9% 0.4GHz ⣀⣠⣀⣀⣀⣀⣠⣤⣴⣤⣀⣀⣀⣀⣀⣀⣀⣠⣤⣀⣀⣀⣀⣀⣠⣤⣴  │ ANE    0.00W avg  0.00 max  0.00       ⣀⣀⣀⣠⣀⣀⣀⣀ │
+│ RAM    71% 17/24G ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱  │ Power  0.12W avg  0.03 max  0.17                │
+│                                                │ Total  7.46W avg  8.77 max 22.85  fan 0rpm      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ proc 952 ─────────────────────────────────────────────────────────────────────────────── cpu ↓ ─╮
+│   PID  NAME                                      USER          CPU%    MEM   POWER   GPU%        │
+│   631  WindowServer                              _windowser    47.8   115M       -   14.7        │
+│   ...  (all remaining height)                                                                    │
+╰───────────────────────────────────────────── q quit | r scaled | -/+ 1000ms | / filter | s sort ─╯
+```
+
+**Files:**
+- Modify: `src_app/tui/layout.rs`
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/widgets.rs`
+- Modify: `src_app/tui/store.rs`
+- Modify: `src_app/tui/proc_view.rs`
+- Modify: `src_app/tui/mod.rs`
+- Modify: `src_app/config.rs`
+- Modify: `readme.md`
+- Modify: `changelog.md`
+
+- [ ] top box height = max(strip rows, power rows) + borders; process box gets all remaining height; remove `PROC_HEIGHT_PCT` and spare-row growth; process list auto-hides only when the remaining height is below `PROC_MIN_ROWS`
+- [ ] graph history sized to fill the widest possible strip (newest on the right, full width once enough samples exist); `PowerStore` avg / max still over the last 128 samples
+- [ ] header: chip info left, `macmon vX` right; remove the clock and the interval
+- [ ] hints: right-aligned on the bottom border of the bottom-most box, ` q quit | r scaled | -/+ 1000ms ` (+ ` / filter | s sort ` when the process list is visible); drop items from the end when narrow, `q quit` always stays
+- [ ] power labels `Power` (all_power) and `Total` (sys_power); fans on the Total row or their own row when they don't fit
+- [ ] remove the cores row, `d`, the `per_core` config field and the core-bar code; remove keys `1`–`5` and the `panels` config field; add `p` to show / hide the process list, persisted in config (old configs with `panels` / `per_core` still load)
+- [ ] update `readme.md` Controls / features and the `changelog.md` Unreleased entry for the key changes
+- [ ] write tests: top box height equals its content rows at 200x50, 120x40, 80x24 and the process box gets the rest; graph fills the full strip width once history is full; header has no clock / interval; hint text and right alignment, narrow-width truncation; `d` and `1`–`5` do nothing; `p` toggles and persists; old configs with `panels` / `per_core` load
+- [ ] run `make test` and `make check` - must pass before next task
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
