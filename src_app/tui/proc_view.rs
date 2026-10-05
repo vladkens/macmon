@@ -1,11 +1,14 @@
-//! Process panel: a process table with sorting, filtering and a selection that follows its pid.
+//! Process panel: a process table with sorting, filtering and a selection that follows its pid,
+//! driven by keys and the mouse.
 
 use std::cmp::Ordering;
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Constraint, Rect};
+use ratatui::crossterm::event::{
+  KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Constraint, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -20,6 +23,8 @@ const NAME_MIN_WIDTH: u16 = 8;
 const POWER_HOT_W: f64 = 10.0;
 /// Cursor shown after the filter text while typing it.
 const FILTER_CURSOR: &str = "█";
+/// Rows one wheel step moves the selection and scrolls the table.
+const WHEEL_ROWS: usize = 3;
 
 /// Process table column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +59,8 @@ impl Column {
     }
   }
 
-  /// Column width; NAME's is its minimum, it takes the space other columns leave.
+  /// Column width; NAME's is its minimum, it takes the space other columns leave. Every column
+  /// fits its header with the sort arrow (`POWER ↓`), so sorting doesn't move the columns.
   fn width(self) -> u16 {
     match self {
       Self::Pid => 5,
@@ -62,8 +68,8 @@ impl Column {
       Self::User => 10,
       Self::Cpu => 6,
       Self::Mem => 6,
-      Self::Power => 6,
-      Self::Gpu => 5,
+      Self::Power => 7,
+      Self::Gpu => 6,
     }
   }
 
@@ -71,15 +77,24 @@ impl Column {
     !matches!(self, Self::Name | Self::User)
   }
 
-  fn sort(self) -> Option<ProcSort> {
+  fn sort(self) -> ProcSort {
     match self {
-      Self::Pid => Some(ProcSort::Pid),
-      Self::Name => Some(ProcSort::Name),
-      Self::User => None,
-      Self::Cpu => Some(ProcSort::Cpu),
-      Self::Mem => Some(ProcSort::Mem),
-      Self::Power => Some(ProcSort::Power),
-      Self::Gpu => Some(ProcSort::Gpu),
+      Self::Pid => ProcSort::Pid,
+      Self::Name => ProcSort::Name,
+      Self::User => ProcSort::User,
+      Self::Cpu => ProcSort::Cpu,
+      Self::Mem => ProcSort::Mem,
+      Self::Power => ProcSort::Power,
+      Self::Gpu => ProcSort::Gpu,
+    }
+  }
+
+  /// Header text, with the sort arrow when the table is sorted by this column: `MEM ↓`.
+  fn header_text(self, sort: ProcSort, desc: bool) -> String {
+    match (self.sort() == sort, desc) {
+      (true, true) => format!("{} ↓", self.header()),
+      (true, false) => format!("{} ↑", self.header()),
+      (false, _) => self.header().to_string(),
     }
   }
 }
@@ -127,8 +142,8 @@ fn format_mem(bytes: u64) -> String {
 
 /// Order of `a` and `b` by the value of `sort`, ascending.
 fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
-  fn lower(p: &ProcInfo) -> impl Iterator<Item = char> + '_ {
-    p.name.chars().flat_map(char::to_lowercase)
+  fn lower(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().flat_map(char::to_lowercase)
   }
 
   match sort {
@@ -137,7 +152,8 @@ fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
     ProcSort::Power => a.power_w.unwrap_or(0.0).total_cmp(&b.power_w.unwrap_or(0.0)),
     ProcSort::Gpu => a.gpu_pct.total_cmp(&b.gpu_pct),
     ProcSort::Pid => a.pid.cmp(&b.pid),
-    ProcSort::Name => lower(a).cmp(lower(b)),
+    ProcSort::Name => lower(&a.name).cmp(lower(&b.name)),
+    ProcSort::User => lower(&a.user).cmp(lower(&b.user)),
   }
 }
 
@@ -206,6 +222,20 @@ struct Selection {
   index: usize,
 }
 
+/// Cells of the process box at the last render that react to the mouse. Empty until the box is
+/// rendered, and again once it is hidden.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Targets {
+  /// The whole box, borders included: the wheel works anywhere over it.
+  area: Rect,
+  /// `/ filter` (or the filter text) on the top border.
+  filter: Option<Rect>,
+  /// Header cells of each column on screen.
+  headers: Vec<(Column, Rect)>,
+  /// Table rows below the header, the first one showing row `offset`.
+  body: Rect,
+}
+
 /// State of the process panel.
 #[derive(Debug)]
 pub struct ProcView {
@@ -223,6 +253,7 @@ pub struct ProcView {
   offset: usize,
   /// Rows on screen at the last render, the PgUp / PgDn step.
   page: usize,
+  targets: Targets,
 }
 
 impl Default for ProcView {
@@ -243,6 +274,7 @@ impl ProcView {
       selected: None,
       offset: 0,
       page: 0,
+      targets: Targets::default(),
     }
   }
 
@@ -279,10 +311,12 @@ impl ProcView {
     self.refresh();
   }
 
-  /// Drops the list and ends filter input (the panel got hidden). The filter and sort stay.
+  /// Drops the list, ends filter input and forgets the mouse targets (the panel got hidden). The
+  /// filter and sort stay.
   pub fn clear(&mut self) {
     self.procs = None;
     self.typing = false;
+    self.targets = Targets::default();
     self.refresh();
   }
 
@@ -378,6 +412,56 @@ impl ProcView {
     self.refresh();
   }
 
+  /// Sorts by `sort` in the current direction; the current sort key reverses instead.
+  fn sort_by(&mut self, sort: ProcSort) {
+    if self.sort == sort {
+      self.sort_desc = !self.sort_desc;
+    } else {
+      self.sort = sort;
+    }
+    self.refresh();
+  }
+
+  /// Applies a mouse event to the cells of the last render: a click on a column header sorts by
+  /// it (again: reverses), on the filter label starts filter input, on a process selects it; the
+  /// wheel over the box moves the selection `WHEEL_ROWS` rows. Anything else is ignored.
+  pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+    let at = Position::new(mouse.column, mouse.row);
+    let over_box = self.targets.area.contains(at);
+    match mouse.kind {
+      MouseEventKind::Down(MouseButton::Left) => self.click(at),
+      MouseEventKind::ScrollUp if over_box => self.wheel(-(WHEEL_ROWS as isize)),
+      MouseEventKind::ScrollDown if over_box => self.wheel(WHEEL_ROWS as isize),
+      _ => {}
+    }
+  }
+
+  fn click(&mut self, at: Position) {
+    let targets = &self.targets;
+    if let Some(&(column, _)) = targets.headers.iter().find(|(_, cells)| cells.contains(at)) {
+      self.sort_by(column.sort());
+    } else if targets.filter.is_some_and(|label| label.contains(at)) {
+      self.typing = true;
+    } else if targets.body.contains(at) {
+      // blank rows below the last process select nothing
+      let index = self.offset + usize::from(at.y - targets.body.y);
+      if index < self.rows.len() {
+        self.select(index);
+      }
+    }
+  }
+
+  /// Moves the selection `rows` rows (negative: up) and scrolls the table as much, so the
+  /// selected row keeps its place on screen until the table hits its top or end. Without a
+  /// selection it starts from the top row on screen.
+  fn wheel(&mut self, rows: isize) {
+    let Some(last) = self.rows.len().checked_sub(1) else { return };
+    let from = self.selected.map_or(self.offset, |s| s.index);
+    let index = from.saturating_add_signed(rows).min(last);
+    self.offset = (self.offset + index).saturating_sub(from);
+    self.select(index);
+  }
+
   /// Filter input: characters and Backspace edit, Enter keeps the filter, Esc clears it.
   fn type_key(&mut self, key: KeyEvent) {
     match key.code {
@@ -403,17 +487,27 @@ impl ProcView {
 }
 
 impl App {
-  /// Process panel: count, filter and sort in the title, a header row and the process rows.
+  /// Process panel: count and filter in the title, a header row with the sort arrow and the
+  /// process rows. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
-    let inner = self.draw_box(f, area, self.proc_titles());
+    let (inner, titles) = self.draw_box(f, area, self.proc_titles());
+    let (headers, body) = self.render_proc_table(f, inner);
+    // the filter label is the second title, when it fits
+    let filter = titles.get(1).copied();
+    self.proc_view.targets = Targets { area, filter, headers, body };
+  }
+
+  /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the
+  /// header cells of the columns and the area of the process rows.
+  fn render_proc_table(&mut self, f: &mut Frame, inner: Rect) -> (Vec<(Column, Rect)>, Rect) {
     if self.proc_view.procs().is_none() {
       let row = inner.centered_vertically(Constraint::Length(1));
       f.render_widget(Line::from(self.dim("collecting…")).centered(), row);
-      return;
+      return Default::default();
     }
 
     if inner.is_empty() {
-      return;
+      return Default::default();
     }
 
     let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
@@ -423,12 +517,14 @@ impl App {
     let columns = fit_columns(table.width);
     let buf = f.buffer_mut();
 
+    let (sort, desc) = (self.proc_view.sort, self.proc_view.sort_desc);
     let header = columns.iter().map(|&(column, _)| {
-      let color =
-        if column.sort() == Some(self.proc_view.sort) { self.theme.title } else { self.theme.dim };
-      Span::styled(column.header(), Style::new().fg(color).add_modifier(Modifier::BOLD))
+      let color = if column.sort() == sort { self.theme.title } else { self.theme.dim };
+      let style = Style::new().fg(color).add_modifier(Modifier::BOLD);
+      Span::styled(column.header_text(sort, desc), style)
     });
-    draw_row(buf, Rect { height: 1, ..table }, &columns, header);
+    let header_row = Rect { height: 1, ..table };
+    draw_row(buf, header_row, &columns, header);
 
     for (i, (selected, proc)) in self.proc_view.page_rows().enumerate() {
       let y = body.y + i as u16;
@@ -439,9 +535,12 @@ impl App {
         buf.set_style(Rect { y, height: 1, ..inner }, self.theme.selected);
       }
     }
+
+    (column_areas(header_row, &columns), body)
   }
 
-  /// `proc 412` (`proc 12/412` with a filter), the filter and the sort key.
+  /// `proc 412` (`proc 12/412` with a filter), then `/ filter`, or the filter text once there is
+  /// one or it is being typed.
   fn proc_titles(&self) -> Titles<'static> {
     let view = &self.proc_view;
     let mut name = vec![self.heading("proc")];
@@ -454,17 +553,18 @@ impl App {
       name.push(self.text(count));
     }
 
-    let mut titles = Titles::new(name);
-    if view.typing() || !view.filter().is_empty() {
+    let filter = if view.typing() || !view.filter().is_empty() {
       let mut filter = vec![self.heading("/"), self.text(view.filter().to_string())];
       if view.typing() {
         filter.push(Span::styled(FILTER_CURSOR, self.theme.title));
       }
-      titles = titles.left(filter);
-    }
+      filter
+    } else {
+      // as a key hint: the key bold, the label plain
+      vec![self.heading("/"), self.text(" filter")]
+    };
 
-    let arrow = if view.sort_desc { "↓" } else { "↑" };
-    titles.right(self.text(format!("{} {arrow}", view.sort.label())))
+    Titles::new(name).left(filter)
   }
 
   /// Text of one table cell. Load values are colored by the gradient, zeros are dim and missing
@@ -501,6 +601,23 @@ impl App {
   }
 }
 
+/// Cells of each column in the one-row `area`, one blank cell between columns; columns are cut
+/// at the edge of `area`, those past it are left out.
+fn column_areas(area: Rect, columns: &[(Column, u16)]) -> Vec<(Column, Rect)> {
+  let mut x = area.x;
+  let mut areas = vec![];
+  for &(column, width) in columns {
+    let width = width.min(area.right().saturating_sub(x));
+    if width == 0 {
+      break;
+    }
+
+    areas.push((column, Rect { x, width, ..area }));
+    x = x.saturating_add(width).saturating_add(1);
+  }
+  areas
+}
+
 /// Draws one table row: `cells` in `columns`, numbers right-aligned, clipped to `area`.
 fn draw_row<'a>(
   buf: &mut Buffer,
@@ -508,29 +625,28 @@ fn draw_row<'a>(
   columns: &[(Column, u16)],
   cells: impl Iterator<Item = Span<'a>>,
 ) {
-  let mut x = area.x;
-  for (&(column, width), cell) in columns.iter().zip(cells) {
-    let room = area.right().saturating_sub(x);
-    if room == 0 {
-      break;
-    }
-
-    let cells = usize::from(width);
+  let areas = column_areas(area, columns);
+  for ((&(column, width), (_, cell_area)), cell) in columns.iter().zip(areas).zip(cells) {
+    let width = usize::from(width);
     let text = if column.right_aligned() {
-      format!("{:>cells$}", cell.content)
+      format!("{:>width$}", cell.content)
     } else {
       cell.content.into_owned()
     };
-    buf.set_stringn(x, area.y, text, cells.min(usize::from(room)), cell.style);
-    x = x.saturating_add(width).saturating_add(1);
+    buf.set_stringn(cell_area.x, cell_area.y, text, usize::from(cell_area.width), cell.style);
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+  };
+  use ratatui::layout::Rect;
 
-  use super::{Column, ProcView, fit_columns, format_mem, scroll_offset};
+  use super::{
+    COLUMNS, Column, ProcView, Targets, column_areas, fit_columns, format_mem, scroll_offset,
+  };
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
 
@@ -605,15 +721,31 @@ mod tests {
   }
 
   #[test]
+  fn sorts_by_user_ignoring_case() {
+    let mut procs = sample();
+    for (proc, user) in procs.iter_mut().zip(["root", "Vlad", "_spotlight", "vlad", "root"]) {
+      proc.user = user.to_string();
+    }
+
+    // `_` before letters; ties by pid in both directions
+    let mut view = ProcView::new(ProcSort::User, false);
+    view.set_procs(procs.clone());
+    assert_eq!(pids(&view), [2301, 1, 77, 631, 4410]);
+    let mut view = ProcView::new(ProcSort::User, true);
+    view.set_procs(procs);
+    assert_eq!(pids(&view), [631, 4410, 1, 77, 2301]);
+  }
+
+  #[test]
   fn s_cycles_sort_and_shift_s_reverses() {
     use ProcSort::*;
     let mut view = view();
     let mut sorts = vec![view.sort];
-    for _ in 0..6 {
+    for _ in 0..7 {
       assert!(press(&mut view, KeyCode::Char('s')));
       sorts.push(view.sort);
     }
-    assert_eq!(sorts, [Cpu, Mem, Power, Gpu, Pid, Name, Cpu]);
+    assert_eq!(sorts, [Cpu, Mem, Power, Gpu, Pid, Name, User, Cpu]);
     assert!(view.sort_desc, "s keeps the direction");
 
     assert!(press(&mut view, KeyCode::Char('S')));
@@ -890,15 +1022,15 @@ mod tests {
     use Column::*;
     let names = |width| fit_columns(width).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
 
-    let all = [(Pid, 5), (Name, 156), (User, 10), (Cpu, 6), (Mem, 6), (Power, 6), (Gpu, 5)];
+    let all = [(Pid, 5), (Name, 154), (User, 10), (Cpu, 6), (Mem, 6), (Power, 7), (Gpu, 6)];
     assert_eq!(fit_columns(200), all);
-    // 5 + 8 + 10 + 6 + 6 + 6 + 5 + 6 gaps
-    assert_eq!(names(52), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(51), [Pid, Name, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(41), [Pid, Name, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(40), [Pid, Name, Cpu, Mem, Gpu]);
-    assert_eq!(names(34), [Pid, Name, Cpu, Mem, Gpu]);
-    assert_eq!(names(33), [Pid, Name, Cpu, Mem]);
+    // 5 + 8 + 10 + 6 + 6 + 7 + 6 + 6 gaps
+    assert_eq!(names(54), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
+    assert_eq!(names(53), [Pid, Name, Cpu, Mem, Power, Gpu]);
+    assert_eq!(names(43), [Pid, Name, Cpu, Mem, Power, Gpu]);
+    assert_eq!(names(42), [Pid, Name, Cpu, Mem, Gpu]);
+    assert_eq!(names(35), [Pid, Name, Cpu, Mem, Gpu]);
+    assert_eq!(names(34), [Pid, Name, Cpu, Mem]);
     assert_eq!(names(28), [Pid, Name, Cpu, Mem]);
     assert_eq!(names(27), [Pid, Name, Cpu]);
     assert_eq!(names(21), [Pid, Name, Cpu]);
@@ -909,6 +1041,141 @@ mod tests {
     assert_eq!(fit_columns(10), [(Pid, 5), (Name, 4)]);
     assert_eq!(fit_columns(6), [(Pid, 5)]);
     assert_eq!(fit_columns(0), [(Pid, 5)]);
+  }
+
+  #[test]
+  fn sort_arrow_follows_the_sorted_column_and_fits_it() {
+    assert_eq!(Column::Mem.header_text(ProcSort::Mem, true), "MEM ↓");
+    assert_eq!(Column::Mem.header_text(ProcSort::Mem, false), "MEM ↑");
+    assert_eq!(Column::Mem.header_text(ProcSort::Cpu, true), "MEM");
+
+    // every column sorts by its own key and fits its header with the arrow
+    for column in COLUMNS {
+      let text = column.header_text(column.sort(), true);
+      assert!(text.chars().count() <= usize::from(column.width()), "{text}");
+      assert_eq!(COLUMNS.iter().filter(|c| c.sort() == column.sort()).count(), 1);
+    }
+  }
+
+  #[test]
+  fn column_areas_follow_the_columns_and_stop_at_the_edge() {
+    use Column::*;
+    let columns = [(Pid, 5), (Name, 10), (Cpu, 6), (Mem, 6)];
+    let cells = |width: u16| {
+      let areas = column_areas(Rect::new(2, 5, width, 1), &columns);
+      assert!(areas.iter().all(|(_, r)| r.y == 5 && r.height == 1));
+      areas.into_iter().map(|(c, r)| (c, r.x, r.width)).collect::<Vec<_>>()
+    };
+
+    // one blank cell between columns
+    assert_eq!(cells(30), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 6), (Mem, 26, 6)]);
+    // cut at the edge, left out past it
+    assert_eq!(cells(29), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 6), (Mem, 26, 5)]);
+    assert_eq!(cells(24), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 6)]);
+    assert_eq!(cells(20), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 3)]);
+    assert!(cells(0).is_empty());
+  }
+
+  fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+    MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
+  }
+
+  /// `view()` as if rendered in a box at (0, 0), 40x6: the filter label on the top border, the
+  /// header on row 1 and 3 process rows below it.
+  fn rendered_view() -> ProcView {
+    let mut view = view(); // [4410, 631, 2301, 1, 77]
+    view.fit(3);
+    view.targets = Targets {
+      area: Rect::new(0, 0, 40, 6),
+      filter: Some(Rect::new(12, 0, 8, 1)),
+      headers: column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36)),
+      body: Rect::new(1, 2, 38, 3),
+    };
+    view
+  }
+
+  #[test]
+  fn mouse_acts_on_the_rendered_targets() {
+    let left = MouseEventKind::Down(MouseButton::Left);
+
+    // header: PID at 2..7; a new key keeps the direction, the same key reverses it
+    let mut view = rendered_view();
+    view.handle_mouse(mouse(left, 6, 1));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, true));
+    view.handle_mouse(mouse(left, 2, 1));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
+    // the gap after PID
+    view.handle_mouse(mouse(left, 7, 1));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
+
+    // filter label
+    view.handle_mouse(mouse(left, 11, 0));
+    assert!(!view.typing());
+    view.handle_mouse(mouse(left, 19, 0));
+    assert!(view.typing());
+
+    // rows, the padding cells at the borders too
+    let mut view = rendered_view();
+    view.handle_mouse(mouse(left, 1, 3));
+    assert_eq!(view.selected_pid(), Some(631));
+    view.handle_mouse(mouse(left, 38, 4));
+    assert_eq!(view.selected_pid(), Some(2301));
+
+    // a blank row below the last process selects nothing
+    view.set_procs(sample()[..2].to_vec()); // [631, 1]
+    view.fit(3);
+    view.handle_mouse(mouse(left, 20, 2));
+    assert_eq!(view.selected_pid(), Some(631));
+    view.handle_mouse(mouse(left, 20, 4));
+    assert_eq!(view.selected_pid(), Some(631), "no process on that row");
+  }
+
+  #[test]
+  fn wheel_moves_selection_and_offset_together() {
+    let mut view = rendered_view(); // [4410, 631, 2301, 1, 77], 3 rows on screen
+    let page = |view: &ProcView| view.page_rows().map(|(sel, p)| (sel, p.pid)).collect::<Vec<_>>();
+    let wheel = |view: &mut ProcView, kind| {
+      view.handle_mouse(mouse(kind, 20, 3));
+      view.fit(3);
+    };
+    use MouseEventKind::{ScrollDown, ScrollUp};
+
+    wheel(&mut view, ScrollDown);
+    assert_eq!(page(&view), [(false, 2301), (true, 1), (false, 77)], "the end of the table");
+    wheel(&mut view, ScrollDown);
+    assert_eq!(page(&view), [(false, 2301), (false, 1), (true, 77)]);
+    // the top of the table: the selection moves up on screen
+    wheel(&mut view, ScrollUp);
+    assert_eq!(page(&view), [(false, 4410), (true, 631), (false, 2301)]);
+    wheel(&mut view, ScrollUp);
+    assert_eq!(page(&view), [(true, 4410), (false, 631), (false, 2301)]);
+
+    // outside the box
+    view.handle_mouse(mouse(ScrollDown, 20, 6));
+    view.fit(3);
+    assert_eq!(view.selected_pid(), Some(4410));
+
+    // an empty list
+    let mut view = rendered_view();
+    view.set_procs(vec![]);
+    wheel(&mut view, ScrollDown);
+    assert_eq!(view.selected_pid(), None);
+  }
+
+  #[test]
+  fn hidden_panel_forgets_mouse_targets() {
+    let mut view = rendered_view();
+    view.clear();
+    view.set_procs(sample());
+    for (kind, x, y) in [
+      (MouseEventKind::Down(MouseButton::Left), 6, 1),
+      (MouseEventKind::Down(MouseButton::Left), 19, 0),
+      (MouseEventKind::Down(MouseButton::Left), 20, 3),
+      (MouseEventKind::ScrollDown, 20, 3),
+    ] {
+      view.handle_mouse(mouse(kind, x, y));
+    }
+    assert_eq!((view.sort, view.typing(), view.selected_pid()), (ProcSort::Cpu, false, None));
   }
 
   #[test]

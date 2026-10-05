@@ -30,10 +30,11 @@ pub enum ProcSort {
   Gpu,
   Pid,
   Name,
+  User,
 }
 
 impl ProcSort {
-  /// Next key in the `s` cycle: CPU → MEM → POWER → GPU → PID → NAME → CPU.
+  /// Next key in the `s` cycle: CPU → MEM → POWER → GPU → PID → NAME → USER → CPU.
   pub fn next(self) -> Self {
     match self {
       Self::Cpu => Self::Mem,
@@ -41,18 +42,8 @@ impl ProcSort {
       Self::Power => Self::Gpu,
       Self::Gpu => Self::Pid,
       Self::Pid => Self::Name,
-      Self::Name => Self::Cpu,
-    }
-  }
-
-  pub fn label(self) -> &'static str {
-    match self {
-      Self::Cpu => "cpu",
-      Self::Mem => "mem",
-      Self::Power => "power",
-      Self::Gpu => "gpu",
-      Self::Pid => "pid",
-      Self::Name => "name",
+      Self::Name => Self::User,
+      Self::User => Self::Cpu,
     }
   }
 }
@@ -262,6 +253,7 @@ mod tests {
       ("Gpu", ProcSort::Gpu),
       ("Pid", ProcSort::Pid),
       ("Name", ProcSort::Name),
+      ("User", ProcSort::User),
     ] {
       assert_eq!(parse(&format!(r#"{{"proc_sort": "{name}"}}"#)).proc_sort, key);
     }
@@ -278,13 +270,12 @@ mod tests {
 
   #[test]
   fn proc_sort_cycle_wraps() {
-    let mut sort = ProcSort::Cpu;
-    let mut labels = vec![sort.label()];
-    for _ in 0..6 {
-      sort = sort.next();
-      labels.push(sort.label());
+    use ProcSort::*;
+    let mut sorts = vec![Cpu];
+    for _ in 0..7 {
+      sorts.push(sorts.last().unwrap().next());
     }
-    assert_eq!(labels, ["cpu", "mem", "power", "gpu", "pid", "name", "cpu"]);
+    assert_eq!(sorts, [Cpu, Mem, Power, Gpu, Pid, Name, User, Cpu]);
   }
 
   #[test]

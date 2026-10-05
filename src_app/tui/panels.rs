@@ -92,8 +92,10 @@ impl<'a> Titles<'a> {
     self
   }
 
-  /// Draws the titles over the top border of `area`; unstyled text gets `style`.
-  fn render(self, area: Rect, buf: &mut Buffer, style: Style) {
+  /// Draws the titles over the top border of `area`; unstyled text gets `style`. Returns the
+  /// cells of the text of the left titles that fit, in order, without the blank cell on both
+  /// sides.
+  fn render(self, area: Rect, buf: &mut Buffer, style: Style) -> Vec<Rect> {
     let pad = |line: Line<'a>| {
       let mut spans = vec![Span::raw(" ")];
       spans.extend(line.spans);
@@ -107,13 +109,19 @@ impl<'a> Titles<'a> {
     let widths: Vec<u16> = left.iter().map(width_u16).collect();
     let slots = place_titles(area.width, &widths, right.as_ref().map(width_u16));
 
+    let mut texts = vec![];
     for (line, (x, width)) in left.iter().zip(slots.left) {
       buf.set_line(area.x + x, area.y, line, width);
+      // a truncated first title loses its trailing blank and then its text
+      let text = (width_u16(line) - 2).min(width.saturating_sub(1));
+      texts.push(Rect::new(area.x + x + 1, area.y, text, 1));
     }
 
     if let (Some(line), Some(x)) = (right, slots.right) {
       buf.set_line(area.x + x, area.y, &line, width_u16(&line));
     }
+
+    texts
   }
 }
 
@@ -292,27 +300,26 @@ impl App {
     Span::styled(format!("{celsius:>3.0}°C"), self.theme.gradient(temp_ratio(celsius)))
   }
 
-  /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders.
-  pub(super) fn draw_box(&self, f: &mut Frame, area: Rect, titles: Titles) -> Rect {
+  /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders and
+  /// the cells of the left titles' text that fit (see `Titles::render`).
+  pub(super) fn draw_box(&self, f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<Rect>) {
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(self.theme.border);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    titles.render(area, f.buffer_mut(), Style::new().fg(self.theme.text));
-    inner
+    let texts = titles.render(area, f.buffer_mut(), Style::new().fg(self.theme.text));
+    (inner, texts)
   }
 
-  /// Draws the key hints right-aligned over the bottom border of box `area`: `q quit | r scaled |
-  /// -/+ 1000ms`, then `/ filter | s sort` while the process list is on screen. Hints that don't
-  /// fit are dropped from the end, so `q quit` stays as long as it fits.
-  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect, procs: bool) {
-    let mut hints = vec![
+  /// Draws the global key hints right-aligned over the bottom border of box `area`: `q quit |
+  /// p procs | r scaled | -/+ 1000ms`, with or without the process list (its own controls are in
+  /// its box). Hints that don't fit are dropped from the end, so `q quit` stays as long as it fits.
+  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) {
+    let hints = [
       ("q", "quit".to_string()),
+      ("p", "procs".to_string()),
       ("r", self.cfg.ratio_mode.label().to_string()),
       ("-/+", format!("{}ms", self.cfg.interval)),
     ];
-    if procs {
-      hints.extend([("/", "filter".to_string()), ("s", "sort".to_string())]);
-    }
 
     let items: Vec<[Span; 2]> = hints
       .into_iter()
@@ -585,9 +592,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+  use ratatui::buffer::Buffer;
+  use ratatui::layout::Rect;
+  use ratatui::style::Style;
+
   use super::{
-    PowerFit, PowerWidths, TitleSlots, fit_count, fit_power, format_gb, format_ghz, place_titles,
-    temp_ratio,
+    PowerFit, PowerWidths, TitleSlots, Titles, fit_count, fit_power, format_gb, format_ghz,
+    place_titles, temp_ratio,
   };
 
   const GB: u64 = 1 << 30;
@@ -677,6 +688,27 @@ mod tests {
     // a later left title is dropped when it doesn't fit in full
     let slots = place_titles(20, &[10, 8], None);
     assert_eq!(slots.left, vec![(2, 10)]);
+  }
+
+  #[test]
+  fn titles_return_the_cells_of_their_text() {
+    let render = |width: u16| {
+      let area = Rect::new(5, 2, width, 1);
+      let mut buf = Buffer::empty(Rect::new(0, 0, 60, 4));
+      let titles = Titles::new("proc 3").left("/ filter").right("cpu");
+      let cells = titles.render(area, &mut buf, Style::new());
+      let text = |r: &Rect| (r.left()..r.right()).map(|x| buf[(x, r.y)].symbol()).collect();
+      cells.iter().map(|r| (*r, text(r))).collect::<Vec<(Rect, String)>>()
+    };
+
+    // `╭─ proc 3 ─ / filter ─…`: the blank cells around the text aren't part of it
+    let cells = render(40);
+    assert_eq!(cells[0], (Rect::new(8, 2, 6, 1), "proc 3".to_string()));
+    assert_eq!(cells[1], (Rect::new(17, 2, 8, 1), "/ filter".to_string()));
+
+    // the second title doesn't fit, the first one is cut
+    assert_eq!(render(8), [(Rect::new(8, 2, 3, 1), "pro".to_string())]);
+    assert!(render(4).is_empty());
   }
 
   #[test]

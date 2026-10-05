@@ -90,13 +90,21 @@ Controls:
 
 Process list:
   /     - filter by name or PID (Enter - keep, Esc - clear)
-  s     - change sort column: CPU, MEM, POWER, GPU, PID, NAME
+  s     - change sort column: CPU, MEM, POWER, GPU, PID, NAME, USER
   S     - reverse sort order
   ↑ ↓   - select process (also PgUp / PgDn / Home / End)
   Esc   - clear selection, then filter
+
+Mouse (process list):
+  click a column header - sort by it, click again to reverse
+  click "/ filter"      - filter by name or PID
+  click a process       - select it
+  wheel                 - move the selection and scroll by 3 rows
 ```
 
 Settings (interval, ratio mode, process list, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
+
+While macmon runs, the terminal sends mouse input to it, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
 
 #### Process data without sudo
 

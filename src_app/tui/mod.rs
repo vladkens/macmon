@@ -8,16 +8,20 @@ mod store;
 mod theme;
 mod widgets;
 
+use std::io::{self, Stdout, Write, stdout};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
-use std::{io::stdout, time::Instant};
+use std::time::Instant;
 use std::{sync::mpsc, time::Duration};
 
 use ratatui::crossterm::{
   ExecutableCommand,
-  event::{self, KeyCode, KeyEvent, KeyModifiers},
+  event::{
+    self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
+  },
   terminal,
 };
 use ratatui::prelude::*;
@@ -33,22 +37,55 @@ type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 // MARK: Term utils
 
-fn enter_term() -> Terminal<impl Backend> {
+/// Set while the terminal is in raw mode on the alternate screen, possibly with mouse capture.
+static TERM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Restores the terminal when dropped, so an error return can't leave it in raw mode with mouse
+/// capture on. Panics restore it in the panic hook (release builds abort without unwinding).
+struct TermGuard;
+
+impl Drop for TermGuard {
+  fn drop(&mut self) {
+    leave_term();
+  }
+}
+
+/// Raw mode and the alternate screen; `run_loop` turns mouse capture on after the palette query.
+/// Whatever happens next, the terminal is restored by the guard, the panic hook or `leave_term`.
+fn enter_term() -> WithError<(Terminal<CrosstermBackend<Stdout>>, TermGuard)> {
   std::panic::set_hook(Box::new(|info| {
     leave_term();
     eprintln!("{}", info);
   }));
 
-  terminal::enable_raw_mode().unwrap();
-  stdout().execute(terminal::EnterAlternateScreen).unwrap();
-
-  let term = CrosstermBackend::new(std::io::stdout());
-  Terminal::new(term).unwrap()
+  // set before the first change, so a failure half-way still undoes what was done
+  TERM_ACTIVE.store(true, Ordering::SeqCst);
+  let guard = TermGuard;
+  terminal::enable_raw_mode()?;
+  stdout().execute(terminal::EnterAlternateScreen)?;
+  Ok((Terminal::new(CrosstermBackend::new(stdout()))?, guard))
 }
 
+/// Restores the terminal once, whichever comes first: the normal exit, an error return or a panic.
 fn leave_term() {
-  terminal::disable_raw_mode().unwrap();
-  stdout().execute(terminal::LeaveAlternateScreen).unwrap();
+  restore_term_once(&TERM_ACTIVE, &mut stdout(), terminal::disable_raw_mode);
+}
+
+/// Turns mouse capture off, leaves the alternate screen and turns raw mode off when `active` is
+/// set, and clears it. Every step runs even if an earlier one fails. Returns whether it ran.
+fn restore_term_once(
+  active: &AtomicBool,
+  out: &mut impl Write,
+  disable_raw_mode: impl FnOnce() -> io::Result<()>,
+) -> bool {
+  if !active.swap(false, Ordering::SeqCst) {
+    return false;
+  }
+
+  let _ = out.execute(DisableMouseCapture);
+  let _ = out.execute(terminal::LeaveAlternateScreen);
+  let _ = disable_raw_mode();
+  true
 }
 
 // MARK: Threads
@@ -57,7 +94,17 @@ enum Event {
   Update(Box<Metrics>),
   Procs(Vec<ProcInfo>),
   Key(KeyEvent),
+  Mouse(MouseEvent),
   Tick,
+}
+
+/// Mouse input the app acts on: left clicks and the wheel. Mouse capture reports every move too;
+/// moves, drags and releases are dropped in the input thread, so they don't cost a frame each.
+fn is_mouse_action(mouse: &MouseEvent) -> bool {
+  matches!(
+    mouse.kind,
+    MouseEventKind::Down(MouseButton::Left) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+  )
 }
 
 /// How often the paused process thread checks whether the panel is back.
@@ -75,6 +122,9 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
       if event::poll(Duration::from_millis(tick)).unwrap() {
         match event::read().unwrap() {
           event::Event::Key(key) => tx.send(Event::Key(key)).unwrap(),
+          event::Event::Mouse(mouse) if is_mouse_action(&mouse) => {
+            tx.send(Event::Mouse(mouse)).unwrap()
+          }
           _ => {}
         };
       }
@@ -224,15 +274,8 @@ impl App {
       return ControlFlow::Break(());
     }
 
-    if self.procs_visible() {
-      let sort = (self.proc_view.sort, self.proc_view.sort_desc);
-      let used = self.proc_view.handle_key(key);
-      if (self.proc_view.sort, self.proc_view.sort_desc) != sort {
-        self.cfg.set_proc_sort(self.proc_view.sort, self.proc_view.sort_desc);
-      }
-      if used {
-        return ControlFlow::Continue(());
-      }
+    if self.procs_visible() && self.update_proc_view(|view| view.handle_key(key)) {
+      return ControlFlow::Continue(());
     }
 
     match key.code {
@@ -248,6 +291,24 @@ impl App {
     ControlFlow::Continue(())
   }
 
+  /// Applies a mouse event to the process list (only while it is on screen), at the cells of the
+  /// last frame. Only the process list reacts to the mouse.
+  fn handle_mouse(&mut self, mouse: MouseEvent) {
+    if self.procs_visible() {
+      self.update_proc_view(|view| view.handle_mouse(mouse));
+    }
+  }
+
+  /// Runs `f` on the process panel state and saves a changed sort order.
+  fn update_proc_view<R>(&mut self, f: impl FnOnce(&mut ProcView) -> R) -> R {
+    let sort = (self.proc_view.sort, self.proc_view.sort_desc);
+    let result = f(&mut self.proc_view);
+    if (self.proc_view.sort, self.proc_view.sort_desc) != sort {
+      self.cfg.set_proc_sort(self.proc_view.sort, self.proc_view.sort_desc);
+    }
+    result
+  }
+
   fn render(&mut self, f: &mut Frame) {
     let plan = self.layout(f.area());
     self.set_procs_visible(plan.proc.is_some());
@@ -257,7 +318,7 @@ impl App {
       self.render_proc_box(f, r);
     }
     if let Some(r) = plan.bottom() {
-      self.render_key_hints(f, r, plan.proc.is_some());
+      self.render_key_hints(f, r);
     }
   }
 
@@ -270,7 +331,8 @@ impl App {
     run_sampler_thread(tx.clone(), msec.clone());
     run_procs_thread(tx.clone(), msec.clone(), self.procs_active.clone());
 
-    let mut term = enter_term();
+    // the guard restores the terminal on every way out of here, `?` included
+    let (mut term, _guard) = enter_term()?;
 
     // raw mode is on and the input thread doesn't read the terminal yet, so the palette replies
     // can't turn into key presses; the palette only matters for a smooth (truecolor) gradient,
@@ -278,10 +340,12 @@ impl App {
     let truecolor = theme::detect_truecolor();
     let palette = if palette::should_query(truecolor) { palette::query_terminal() } else { None };
     self.theme = Theme::new(palette, truecolor);
+    // after the query, so mouse reports can't mix with its replies
+    stdout().execute(EnableMouseCapture)?;
     run_inputs_thread(tx.clone(), 250);
 
     loop {
-      term.draw(|f| self.render(f)).unwrap();
+      term.draw(|f| self.render(f))?;
 
       match rx.recv()? {
         Event::Update(data) => self.update_metrics(*data),
@@ -292,17 +356,18 @@ impl App {
           }
           *msec.write().unwrap() = self.cfg.interval;
         }
+        Event::Mouse(mouse) => self.handle_mouse(mouse),
         Event::Tick => {}
       }
     }
 
-    leave_term();
     Ok(())
   }
 }
 
 #[cfg(test)]
 mod tests {
+  use std::io::{self, Write};
   use std::ops::ControlFlow;
   use std::sync::atomic::{AtomicBool, Ordering};
   use std::sync::{Arc, RwLock, mpsc};
@@ -312,7 +377,10 @@ mod tests {
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
-  use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use ratatui::crossterm::ExecutableCommand;
+  use ratatui::crossterm::event::{
+    EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+  };
   use ratatui::layout::Rect;
   use ratatui::style::{Color, Modifier};
 
@@ -320,12 +388,94 @@ mod tests {
   use super::palette::{Palette, Rgb};
   use super::store::{ClusterSample, CpuClusters, FreqSample};
   use super::theme::Theme;
-  use super::{App, Event, run_procs_thread};
+  use super::{App, Event, is_mouse_action, restore_term_once, run_procs_thread};
   use crate::config::{ProcSort, RatioMode, TUI_MIN_MS};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+  }
+
+  fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+    MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
+  }
+
+  fn click(app: &mut App, x: u16, y: u16) {
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+  }
+
+  /// Screen column where `text` starts in the rendered `line`.
+  fn x_of(line: &str, text: &str) -> u16 {
+    let i = line.find(text).unwrap_or_else(|| panic!("no {text:?} in {line}"));
+    line[..i].chars().count() as u16
+  }
+
+  #[test]
+  fn restoring_the_terminal_turns_mouse_capture_off_once() {
+    let active = AtomicBool::new(true);
+    let mut out = vec![];
+    let mut raw_off = 0;
+    assert!(restore_term_once(&active, &mut out, || {
+      raw_off += 1;
+      Ok(())
+    }));
+
+    // every mouse mode that mouse capture turns on goes off, then back to the main screen
+    let text = String::from_utf8(out).unwrap();
+    let mut on = vec![];
+    on.execute(EnableMouseCapture).unwrap();
+    let on = String::from_utf8(on).unwrap();
+    let modes: Vec<&str> = on.split("\x1b[?").filter_map(|mode| mode.strip_suffix('h')).collect();
+    assert_eq!(modes.len(), 5, "{on:?}");
+    for mode in modes {
+      assert!(text.contains(&format!("\x1b[?{mode}l")), "{mode} stays on: {text:?}");
+    }
+    assert!(text.ends_with("\x1b[?1049l"), "{text:?}");
+    assert_eq!(raw_off, 1);
+
+    // the normal exit, the guard of an error return and the panic hook can all get here: only
+    // the first one writes anything
+    let mut out = vec![];
+    assert!(!restore_term_once(&active, &mut out, || {
+      raw_off += 1;
+      Ok(())
+    }));
+    assert!(out.is_empty());
+    assert_eq!(raw_off, 1);
+  }
+
+  #[test]
+  fn restoring_the_terminal_runs_every_step_despite_errors() {
+    struct Closed;
+    impl Write for Closed {
+      fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("closed"))
+      }
+      fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::other("closed"))
+      }
+    }
+
+    let active = AtomicBool::new(true);
+    let mut raw_off = false;
+    let restored = restore_term_once(&active, &mut Closed, || {
+      raw_off = true;
+      Err(io::Error::other("not a tty"))
+    });
+    assert!(restored && raw_off && !active.load(Ordering::SeqCst));
+  }
+
+  #[test]
+  fn input_thread_forwards_clicks_and_wheel_only() {
+    use MouseButton::*;
+    use MouseEventKind::*;
+    for kind in [Down(Left), ScrollUp, ScrollDown] {
+      assert!(is_mouse_action(&mouse(kind, 3, 4)), "{kind:?}");
+    }
+    let ignored = [Down(Right), Down(Middle), Up(Left), Drag(Left), Moved, ScrollLeft, ScrollRight];
+    for kind in ignored {
+      assert!(!is_mouse_action(&mouse(kind, 3, 4)), "{kind:?}");
+    }
   }
 
   fn test_soc() -> SocInfo {
@@ -486,22 +636,24 @@ mod tests {
     let json = serde_json::to_string(&app.cfg).unwrap();
     assert!(json.contains(r#""show_procs":false"#), "{json}");
 
-    // the metrics box keeps its height, the hints move to its border without the process keys
+    // the metrics box keeps its height, the same hints move to its border
     let buf = render_buffer(&mut app, 200, 50);
     let plan = app.layout(buf.area);
     assert_eq!((plan.top.map(|r| r.height), plan.proc), (Some(7), None));
-    assert!(row(&buf, 6).ends_with("─ q quit | r scaled | -/+ 1000ms ─╯"), "{}", row(&buf, 6));
+    assert_eq!(row(&buf, 6), hints_border(200, 4));
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert!(!screen.contains(" proc ") && !screen.contains("WindowServer"));
     assert!((7..50).all(|y| row(&buf, y).trim().is_empty()), "nothing below the metrics");
     assert!(!procs_active(&app), "no process sampling while hidden");
 
-    // shown again: collecting until the next sample
+    // shown again: collecting until the next sample, its controls in its box
     assert_eq!(app.handle_key(key('p')), ControlFlow::Continue(()));
     assert!(app.cfg.show_procs);
-    let screen = render_to_string(&mut app, 200, 50);
-    assert!(screen.contains(" proc ") && screen.contains("collecting…"));
-    assert!(screen.contains("/ filter | s sort ─╯"));
+    let buf = render_buffer(&mut app, 200, 50);
+    let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(screen.contains("collecting…"));
+    assert!(proc_row(&buf, 0).starts_with("╭─ proc ─ / filter ─"), "{}", proc_row(&buf, 0));
+    assert_eq!(row(&buf, 49), hints_border(200, 4));
     assert!(procs_active(&app));
   }
 
@@ -663,11 +815,14 @@ mod tests {
     }
     assert_eq!(rows[6], format!("╰{}╯", "─".repeat(98)));
 
-    // the process list in the rest of the screen, the hints on its bottom border
-    assert!(rows[7].starts_with("╭─ proc 3 ─") && rows[7].ends_with(" cpu ↓ ─╮"), "{}", rows[7]);
-    assert!(rows[8].starts_with("│   PID NAME "), "{}", rows[8]);
+    // the process list in the rest of the screen: count and filter label on its top border, the
+    // sort arrow by the sorted column, the global hints on its bottom border
+    assert_eq!(rows[7], format!("╭─ proc 3 ─ / filter {}╮", "─".repeat(78)));
+    let header = "│   PID NAME";
+    let header_end = "USER       CPU% ↓    MEM   POWER   GPU% │";
+    assert!(rows[8].starts_with(header) && rows[8].ends_with(header_end), "{}", rows[8]);
     assert!(rows[9].starts_with("│   631 WindowServer "), "{}", rows[9]);
-    let hints = "─ q quit | r scaled | -/+ 1000ms | / filter | s sort ─╯";
+    let hints = "─ q quit | p procs | r scaled | -/+ 1000ms ─╯";
     assert!(rows[29].starts_with("╰───") && rows[29].ends_with(hints), "{}", rows[29]);
   }
 
@@ -878,8 +1033,8 @@ mod tests {
     }
   }
 
-  /// Key hints with the process list on screen.
-  const HINTS: [&str; 5] = ["q quit", "r scaled", "-/+ 1000ms", "/ filter", "s sort"];
+  /// Global key hints, in the order of the original UI.
+  const HINTS: [&str; 4] = ["q quit", "p procs", "r scaled", "-/+ 1000ms"];
 
   /// Bottom border of a box `width` cells wide with the first `count` of `HINTS` right-aligned.
   fn hints_border(width: usize, count: usize) -> String {
@@ -894,48 +1049,50 @@ mod tests {
   fn key_hints_right_aligned_on_bottom_border() {
     let mut app = app_with_procs(varied_procs());
     let buf = render_buffer(&mut app, 200, 50);
-    assert_eq!(row(&buf, 49), hints_border(200, 5));
+    assert_eq!(row(&buf, 49), hints_border(200, 4));
     assert_eq!(row(&buf, 6), hints_border(200, 0), "plain metrics box border");
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert_eq!(screen.matches("q quit").count(), 1);
+    // the process list controls live in its own box
+    assert!(!screen.contains("s sort") && screen.matches("/ filter").count() == 1);
+    assert!(proc_row(&buf, 0).contains(" / filter "));
 
     // keys bold, labels plain, separators dim
     let bottom = row(&buf, 49);
     let x = |text: &str| bottom[..bottom.find(text).unwrap()].chars().count() as u16;
     let cell = |x: u16| &buf[(x, 49)];
     assert!(cell(x("q quit")).modifier.contains(Modifier::BOLD));
+    assert!(cell(x("p procs")).modifier.contains(Modifier::BOLD));
     assert!(!cell(x("quit")).modifier.contains(Modifier::BOLD));
     assert_eq!(cell(x("quit")).fg, app.theme.text);
-    assert_eq!(cell(x("| r")).fg, app.theme.dim);
+    assert_eq!(cell(x("| p")).fg, app.theme.dim);
 
     // the current ratio mode and interval
     assert!(app.handle_key(key('r')).is_continue());
     assert!(app.handle_key(key('+')).is_continue());
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    assert!(bottom.contains(" q quit | r active | -/+ 1250ms | / filter "), "{bottom}");
+    assert!(bottom.ends_with("─ q quit | p procs | r active | -/+ 1250ms ─╯"), "{bottom}");
 
-    // without the process list: on the metrics box, without the process keys
+    // without the process list: the same hints on the metrics box
     app.cfg.show_procs = false;
     assert!(app.handle_key(key('-')).is_continue());
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 6).ends_with("─ q quit | r active | -/+ 1000ms ─╯"), "{}", row(&buf, 6));
+    let bottom = row(&buf, 6);
+    assert!(bottom.ends_with("─ q quit | p procs | r active | -/+ 1000ms ─╯"), "{bottom}");
   }
 
   #[test]
   fn key_hints_drop_from_the_end_when_narrow() {
     // (width, hints shown): `q quit` 6 cells, then 3 cells between hints and 1 at both ends,
     // plus `╰─` and `─╯`
-    let cases = [(200, 5), (56, 5), (55, 4), (47, 4), (46, 3), (36, 3), (35, 2), (23, 2), (22, 1)];
-    for (width, count) in cases.into_iter().chain([(12, 1), (11, 0), (5, 0)]) {
+    let cases = [(200, 4), (46, 4), (45, 3), (33, 3), (32, 2), (22, 2), (21, 1), (12, 1)];
+    for (width, count) in cases.into_iter().chain([(11, 0), (5, 0)]) {
       let mut app = test_app();
       let buf = render_buffer(&mut app, width, 60);
       let proc = app.layout(buf.area).proc.expect("process box");
       assert_eq!(row(&buf, proc.bottom() - 1), hints_border(width.into(), count), "{width}");
-    }
 
-    // without the process list only the first three are there to show
-    for (width, count) in [(200, 3), (46, 3), (35, 2), (22, 1), (11, 0)] {
-      let mut app = test_app();
+      // the same without the process list
       app.cfg.show_procs = false;
       let buf = render_buffer(&mut app, width, 60);
       let top = app.layout(buf.area).top.expect("metrics box");
@@ -1361,14 +1518,16 @@ mod tests {
     let mut app = app_with_procs(varied_procs());
     let buf = render_buffer(&mut app, 200, 50);
 
-    // title: count left, sort key right
+    // title: count and the filter label, nothing on the right
     let title = proc_row(&buf, 0);
-    assert!(title.starts_with("╭─ proc 3 ─"), "{title}");
-    assert!(title.ends_with(" cpu ↓ ─╮"), "{title}");
+    assert!(title.starts_with("╭─ proc 3 ─ / filter ─"), "{title}");
+    assert!(title.ends_with("───╮"), "{title}");
 
+    // the sort arrow next to the sorted column's header, right-aligned like its numbers
     let header = proc_row(&buf, 1);
     let words: Vec<&str> = header.split_whitespace().collect();
-    assert_eq!(words, ["│", "PID", "NAME", "USER", "CPU%", "MEM", "POWER", "GPU%", "│"]);
+    assert_eq!(words, ["│", "PID", "NAME", "USER", "CPU%", "↓", "MEM", "POWER", "GPU%", "│"]);
+    assert!(header.ends_with(" CPU% ↓    MEM   POWER   GPU% │"), "{header}");
 
     // sorted by CPU, descending; numbers right-aligned
     let rows: Vec<String> = (2..5).map(|y| proc_row(&buf, y)).collect();
@@ -1385,7 +1544,7 @@ mod tests {
     // one blank cell after the left border and before the right one
     assert!(header.starts_with("│   PID NAME "), "{header}");
     assert!(rows[0].starts_with("│   631 WindowServer"), "{}", rows[0]);
-    assert!(rows[0].ends_with("  25.0   300M  1.50W  40.0 │"), "{}", rows[0]);
+    assert!(rows[0].ends_with("  25.0   300M   1.50W   40.0 │"), "{}", rows[0]);
 
     // gradient colors for load values, dim zeros and missing power
     let x_of = |row: &str, text: &str| row[..row.find(text).unwrap()].chars().count() as u16;
@@ -1421,8 +1580,8 @@ mod tests {
     ] {
       assert_eq!(header.contains(label), shown, "{label} in {header}");
     }
-    // NAME gets the 10 cells left: truncated
-    assert!(row(&buf, 15).starts_with("│   631 WindowServ   25.0"), "{}", row(&buf, 15));
+    // NAME gets the 9 cells left: truncated
+    assert!(row(&buf, 15).starts_with("│   631 WindowSer   25.0"), "{}", row(&buf, 15));
 
     // very narrow: PID and NAME only, nothing drawn over the border
     let buf = render_buffer(&mut app, 18, 20);
@@ -1467,13 +1626,13 @@ mod tests {
     assert!(app.cfg.proc_sort_desc);
 
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(proc_row(&buf, 0).ends_with(" mem ↓ ─╮"));
+    assert!(proc_row(&buf, 1).contains(" CPU%  MEM ↓ "), "{}", proc_row(&buf, 1));
     assert!(proc_row(&buf, 2).contains("Safari"), "largest memory first");
 
     assert!(app.handle_key(key('S')).is_continue());
     assert!(!app.cfg.proc_sort_desc);
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(proc_row(&buf, 0).ends_with(" mem ↑ ─╮"));
+    assert!(proc_row(&buf, 1).contains(" CPU%  MEM ↑ "), "{}", proc_row(&buf, 1));
     assert!(proc_row(&buf, 2).contains("launchd"));
   }
 
@@ -1539,6 +1698,259 @@ mod tests {
     render_buffer(&mut app, 60, 15);
     assert!(!app.proc_view.typing());
     assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+  }
+
+  fn shown_pids(app: &App) -> Vec<i32> {
+    app.proc_view.rows().map(|p| p.pid).collect()
+  }
+
+  #[test]
+  fn click_on_header_sorts_and_again_reverses() {
+    use ProcSort::*;
+    let mut app = app_with_procs(varied_procs());
+
+    // (header, sort key, pids descending, pids ascending); a new column keeps the direction
+    let cases = [
+      ("PID", Pid, [2301, 631, 1], [1, 631, 2301]),
+      ("NAME", Name, [631, 2301, 1], [1, 2301, 631]),
+      // ties by pid
+      ("USER", User, [631, 2301, 1], [1, 631, 2301]),
+      ("MEM", Mem, [2301, 631, 1], [1, 631, 2301]),
+      // launchd has no power reading: last both ways
+      ("POWER", Power, [631, 2301, 1], [2301, 631, 1]),
+      ("GPU%", Gpu, [631, 2301, 1], [1, 2301, 631]),
+      ("CPU%", Cpu, [631, 2301, 1], [1, 2301, 631]),
+    ];
+    for (header, sort, desc, asc) in cases {
+      let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
+      click(&mut app, x_of(&line, header), PROC_Y + 1);
+      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, true), "{header}");
+      assert_eq!(shown_pids(&app), desc, "{header}");
+      let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
+      assert_eq!(line.matches('↓').count() + line.matches('↑').count(), 1, "{line}");
+
+      // again, on the arrow this time: the whole header cell counts
+      let arrow = x_of(&line, &format!("{header} ↓")) + header.len() as u16 + 1;
+      click(&mut app, arrow, PROC_Y + 1);
+      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, false), "{header}");
+      assert_eq!(shown_pids(&app), asc, "{header}");
+      let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
+      assert!(line.contains(&format!("{header} ↑")), "{line}");
+
+      // and back
+      click(&mut app, x_of(&line, header), PROC_Y + 1);
+      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, true), "{header}");
+    }
+
+    // saved like `s` / `S`
+    let json = serde_json::to_string(&app.cfg).unwrap();
+    assert!(json.contains(r#""proc_sort":"Cpu","proc_sort_desc":true"#), "{json}");
+  }
+
+  #[test]
+  fn click_on_filter_label_starts_typing() {
+    let mut app = app_with_procs(varied_procs());
+    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
+    let x = x_of(&title, "/ filter");
+
+    // the blank cells around the label and the count title don't count
+    for x in [x - 1, x + 8, x_of(&title, "proc 3")] {
+      click(&mut app, x, PROC_Y);
+      assert!(!app.proc_view.typing(), "x {x}: {title}");
+    }
+    click(&mut app, x + 7, PROC_Y);
+    assert!(app.proc_view.typing());
+
+    // keys go to the filter, which replaces the label
+    for c in "saf".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
+    assert!(title.starts_with("╭─ proc 1/3 ─ /saf█ ─"), "{title}");
+
+    // a kept filter: a click on its text edits it again
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
+    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
+    assert!(title.starts_with("╭─ proc 1/3 ─ /saf ─"), "{title}");
+    click(&mut app, x_of(&title, "/saf") + 2, PROC_Y);
+    assert!(app.proc_view.typing());
+    assert_eq!(app.proc_view.filter(), "saf");
+  }
+
+  /// App with 100 processes `proc0`… (pids 1000…) in the same order by CPU and pid; 40 of them
+  /// fit in a 200x50 window.
+  fn hundred_procs_app() -> App {
+    let procs: Vec<ProcInfo> = (0..100)
+      .map(|i| ProcInfo { pid: 1000 + i, name: format!("proc{i}"), ..test_procs()[0].clone() })
+      .collect();
+    let mut app = app_with_procs(procs);
+    render_buffer(&mut app, 200, 50);
+    app
+  }
+
+  #[test]
+  fn click_on_row_selects_its_process() {
+    let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+    render_buffer(&mut app, 200, 50);
+
+    // anywhere across the row, the blank cells at the borders too
+    for (x, row, pid) in [(100, 1, 2301), (1, 2, 1), (198, 0, 631)] {
+      click(&mut app, x, PROC_Y + 2 + row);
+      assert_eq!(app.proc_view.selected_pid(), Some(pid), "x {x}, row {row}");
+    }
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(buf[(100, PROC_Y + 2)].modifier.contains(Modifier::REVERSED));
+
+    // blank rows below the last process keep the selection
+    click(&mut app, 100, PROC_Y + 10);
+    assert_eq!(app.proc_view.selected_pid(), Some(631));
+
+    // a scrolled table: the row on screen, not the row from the top
+    let mut app = hundred_procs_app();
+    assert!(app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 2).contains("proc60 "));
+    click(&mut app, 50, PROC_Y + 2);
+    assert_eq!(app.proc_view.selected_pid(), Some(1060));
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 2).contains("proc60 "), "the table doesn't move");
+  }
+
+  #[test]
+  fn wheel_moves_selection_and_scrolls() {
+    let mut app = hundred_procs_app();
+    let wheel = |app: &mut App, kind| app.handle_mouse(mouse(kind, 100, PROC_Y + 10));
+    // (screen row of the selection, its process)
+    let selected = |app: &mut App| {
+      let buf = render_buffer(app, 200, 50);
+      let rows = (2..42).filter(|&y| buf[(1, PROC_Y + y)].modifier.contains(Modifier::REVERSED));
+      let rows: Vec<u16> = rows.map(|y| y - 2).collect();
+      assert_eq!(rows.len(), 1, "{rows:?}");
+      (rows[0], app.proc_view.selected_pid().unwrap() - 1000)
+    };
+    use MouseEventKind::{ScrollDown, ScrollUp};
+
+    // without a selection: from the top row, which scrolls away with the selection on it
+    wheel(&mut app, ScrollDown);
+    assert_eq!(selected(&mut app), (0, 3));
+    wheel(&mut app, ScrollDown);
+    assert_eq!(selected(&mut app), (0, 6));
+    wheel(&mut app, ScrollUp);
+    assert_eq!(selected(&mut app), (0, 3));
+    // the top of the table: the selection moves up on screen instead
+    wheel(&mut app, ScrollUp);
+    wheel(&mut app, ScrollUp);
+    assert_eq!(selected(&mut app), (0, 0));
+
+    // the selected row keeps its place on screen
+    for _ in 0..5 {
+      assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
+    }
+    assert_eq!(selected(&mut app), (5, 5));
+    wheel(&mut app, ScrollDown);
+    assert_eq!(selected(&mut app), (5, 8));
+    wheel(&mut app, ScrollUp);
+    assert_eq!(selected(&mut app), (5, 5));
+
+    // the end of the table: the selection moves down on screen, then stops
+    assert!(app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)).is_continue());
+    assert_eq!(selected(&mut app), (39, 99));
+    wheel(&mut app, ScrollUp);
+    assert_eq!(selected(&mut app), (39, 96));
+    wheel(&mut app, ScrollDown);
+    wheel(&mut app, ScrollDown);
+    assert_eq!(selected(&mut app), (39, 99));
+
+    // the wheel over the metrics box doesn't move the list
+    app.handle_mouse(mouse(ScrollUp, 100, 3));
+    assert_eq!(selected(&mut app), (39, 99));
+  }
+
+  #[test]
+  fn clicks_outside_targets_do_nothing() {
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+    let header = proc_row(&buf, 1);
+    let state = |app: &App| {
+      let view = &app.proc_view;
+      let cfg = serde_json::to_string(&app.cfg).unwrap();
+      (cfg, view.typing(), view.filter().to_string(), view.selected_pid(), shown_pids(app))
+    };
+    let before = state(&app);
+
+    let cells = [
+      // borders and the padding cells of the header row, the gaps between header cells
+      (0, PROC_Y + 1),
+      (1, PROC_Y + 1),
+      (198, PROC_Y + 1),
+      (199, PROC_Y + 3),
+      (x_of(&header, "CPU% ↓") - 1, PROC_Y + 1),
+      (x_of(&header, "USER") + 10, PROC_Y + 1),
+      // top border, the count title, the bottom border with the key hints
+      (100, PROC_Y),
+      (4, PROC_Y),
+      (100, 49),
+      (x_of(&row(&buf, 49), "q quit"), 49),
+      // metrics box
+      (0, 0),
+      (10, 2),
+      (100, 3),
+    ];
+    for (x, y) in cells {
+      click(&mut app, x, y);
+      assert_eq!(state(&app), before, "click at {x}, {y}");
+    }
+
+    // other buttons, releases, drags and moves over the targets
+    use MouseEventKind::*;
+    let kinds = [Down(MouseButton::Right), Up(MouseButton::Left), Drag(MouseButton::Left), Moved];
+    let targets = [(x_of(&header, "MEM"), PROC_Y + 1), (x_of(&proc_row(&buf, 0), "/"), PROC_Y)];
+    for kind in kinds {
+      for (x, y) in targets.into_iter().chain([(100, PROC_Y + 2)]) {
+        app.handle_mouse(mouse(kind, x, y));
+        assert_eq!(state(&app), before, "{kind:?} at {x}, {y}");
+      }
+    }
+    assert_eq!(
+      render_to_string(&mut app, 200, 50),
+      buf.content.iter().map(|c| c.symbol()).collect::<String>()
+    );
+  }
+
+  #[test]
+  fn mouse_does_nothing_while_process_list_hidden() {
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+    let mem = (x_of(&proc_row(&buf, 1), "MEM"), PROC_Y + 1);
+    let filter = (x_of(&proc_row(&buf, 0), "/ filter"), PROC_Y);
+    let row = (100, PROC_Y + 2);
+    let try_all = |app: &mut App| {
+      for (x, y) in [mem, filter, row] {
+        click(app, x, y);
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+      }
+      assert_eq!((app.cfg.proc_sort, app.proc_view.typing()), (ProcSort::Cpu, false));
+      assert_eq!(app.proc_view.selected_pid(), None);
+    };
+
+    // hidden with `p`, then auto-hidden in a small window
+    assert!(app.handle_key(key('p')).is_continue());
+    render_buffer(&mut app, 200, 50);
+    try_all(&mut app);
+
+    assert!(app.handle_key(key('p')).is_continue());
+    render_buffer(&mut app, 200, 50);
+    app.update_procs(varied_procs());
+    render_buffer(&mut app, 200, 50);
+    render_buffer(&mut app, 60, 15);
+    try_all(&mut app);
+
+    // back on screen, the same clicks work again
+    render_buffer(&mut app, 200, 50);
+    app.update_procs(varied_procs());
+    render_buffer(&mut app, 200, 50);
+    click(&mut app, mem.0, mem.1);
+    assert_eq!(app.cfg.proc_sort, ProcSort::Mem);
   }
 
   #[test]
