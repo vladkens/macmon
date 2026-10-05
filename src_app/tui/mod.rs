@@ -199,7 +199,7 @@ impl App {
     self.procs_active.load(Ordering::Relaxed)
   }
 
-  /// Follows the process panel visibility (toggled or auto-hidden). A hidden panel drops its
+  /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
   /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
   /// filter input, so keys don't go to a filter that isn't on screen.
   fn set_procs_visible(&mut self, visible: bool) {
@@ -237,22 +237,15 @@ impl App {
 
     match key.code {
       KeyCode::Char('q') => return ControlFlow::Break(()),
-      KeyCode::Char('d') => self.cfg.toggle_per_core_view(),
       KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
       KeyCode::Char('+') => self.cfg.inc_interval(),
       KeyCode::Char('=') => self.cfg.inc_interval(), // fallback to press without shift
       KeyCode::Char('-') => self.cfg.dec_interval(),
-      KeyCode::Char(c @ '1'..='5') => self.cfg.toggle_panel(c),
+      KeyCode::Char('p') => self.cfg.toggle_procs(),
       _ => {}
     }
 
     ControlFlow::Continue(())
-  }
-
-  fn render_all_hidden(&self, f: &mut Frame, area: Rect) {
-    let text = "all panels hidden · press 1-5 to show · q quit";
-    let row = area.centered_vertically(Constraint::Length(1));
-    f.render_widget(Line::from(Span::styled(text, self.theme.dim)).centered(), row);
   }
 
   fn render(&mut self, f: &mut Frame) {
@@ -263,18 +256,8 @@ impl App {
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
     }
-
-    let hints_end = match plan.bottom() {
-      Some(r) => self.render_key_hints(f, r),
-      None => {
-        self.render_all_hidden(f, f.area());
-        None
-      }
-    };
-
-    // the process box is the bottom one: its hints follow the global ones and give way first
-    if let (Some(r), Some(end)) = (plan.proc, hints_end) {
-      self.render_proc_hints(f, r, end + 1);
+    if let Some(r) = plan.bottom() {
+      self.render_key_hints(f, r, plan.proc.is_some());
     }
   }
 
@@ -325,7 +308,7 @@ mod tests {
   use std::sync::{Arc, RwLock, mpsc};
   use std::time::{Duration, Instant};
 
-  use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
+  use macmon::{FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
@@ -337,17 +320,12 @@ mod tests {
   use super::palette::{Palette, Rgb};
   use super::store::{ClusterSample, CpuClusters, FreqSample};
   use super::theme::Theme;
-  use super::widgets::core_bar;
   use super::{App, Event, run_procs_thread};
-  use crate::config::{Panels, ProcSort, RatioMode, TUI_MIN_MS};
+  use crate::config::{ProcSort, RatioMode, TUI_MIN_MS};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-  }
-
-  fn core(core_id: usize, ratio: f32) -> CpuCoreMetrics {
-    CpuCoreMetrics { die_id: 0, core_id, freq_mhz: 2000, scaled_ratio: ratio, active_ratio: ratio }
   }
 
   fn test_soc() -> SocInfo {
@@ -379,8 +357,6 @@ mod tests {
       pcpu_freq_mhz: 3200,
       pcpu_scaled_ratio: 0.77,
       pcpu_active_ratio: 0.8,
-      ecpu_cores: (0..6).map(|i| core(i, 0.4)).collect(),
-      pcpu_cores: (0..6).map(|i| core(i, 0.7)).collect(),
       gpu_freq_mhz: 1400,
       gpu_scaled_ratio: 0.23,
       gpu_active_ratio: 0.3,
@@ -393,15 +369,20 @@ mod tests {
     }
   }
 
-  /// App with a few samples of `test_metrics` changed by `edit`.
-  fn test_app_with(edit: impl Fn(&mut Metrics)) -> App {
+  /// App with `samples` samples of `test_metrics` changed by `edit`.
+  fn app_with_samples(samples: usize, edit: impl Fn(&mut Metrics)) -> App {
     let mut app = App { soc: test_soc(), ..Default::default() };
-    for _ in 0..3 {
+    for _ in 0..samples {
       let mut metrics = test_metrics();
       edit(&mut metrics);
       app.update_metrics(metrics);
     }
     app
+  }
+
+  /// App with a few samples of `test_metrics` changed by `edit`.
+  fn test_app_with(edit: impl Fn(&mut Metrics)) -> App {
+    app_with_samples(3, edit)
   }
 
   fn test_app() -> App {
@@ -422,6 +403,15 @@ mod tests {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
   }
 
+  /// Text of the one-row `area`.
+  fn text(buf: &Buffer, area: Rect) -> String {
+    (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect()
+  }
+
+  fn is_braille(c: char) -> bool {
+    ('\u{2801}'..='\u{28ff}').contains(&c)
+  }
+
   #[test]
   fn quit_keys_break() {
     let mut app = App::default();
@@ -432,28 +422,20 @@ mod tests {
   }
 
   #[test]
-  fn c_and_v_do_nothing() {
-    // no theme switching and no graph style switching: the keys are free
+  fn removed_keys_do_nothing() {
+    // no theme or graph style switches, no cores row, no panel keys
     let mut app = app_with_procs(varied_procs());
     let cfg = serde_json::to_string(&app.cfg).unwrap();
     let theme = app.theme;
-    for c in ['c', 'v', 'C', 'V'] {
+    let screen = render_to_string(&mut app, 200, 50);
+    for c in ['c', 'v', 'd', 'C', 'V', 'D', '0', '1', '2', '3', '4', '5', '6', '9'] {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?}");
     }
 
     assert_eq!(serde_json::to_string(&app.cfg).unwrap(), cfg);
     assert_eq!(app.theme, theme);
     assert!(!app.proc_view.typing() && app.proc_view.filter().is_empty());
-    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    assert!(bottom.starts_with(GLOBAL_HINTS), "{bottom}");
-  }
-
-  #[test]
-  fn d_toggles_per_core_view() {
-    let mut app = App::default();
-    assert!(!app.cfg.per_core_view);
-    assert_eq!(app.handle_key(key('d')), ControlFlow::Continue(()));
-    assert!(app.cfg.per_core_view);
+    assert_eq!(render_to_string(&mut app, 200, 50), screen);
   }
 
   #[test]
@@ -487,22 +469,50 @@ mod tests {
       assert_eq!(app.handle_key(event), ControlFlow::Continue(()));
     }
 
-    assert!(!app.cfg.per_core_view);
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!(app.cfg.interval, 1000);
-    assert_eq!(app.cfg.panels, Panels::default());
+    assert!(app.cfg.show_procs);
+  }
+
+  #[test]
+  fn p_toggles_process_list() {
+    let mut app = app_with_procs(varied_procs());
+    assert!(procs_active(&app));
+
+    assert_eq!(app.handle_key(key('p')), ControlFlow::Continue(()));
+    assert!(!app.cfg.show_procs);
+    // saved with the other settings
+    let json = serde_json::to_string(&app.cfg).unwrap();
+    assert!(json.contains(r#""show_procs":false"#), "{json}");
+
+    // the metrics box keeps its height, the hints move to its border without the process keys
+    let buf = render_buffer(&mut app, 200, 50);
+    let plan = app.layout(buf.area);
+    assert_eq!((plan.top.map(|r| r.height), plan.proc), (Some(7), None));
+    assert!(row(&buf, 6).ends_with("─ q quit | r scaled | -/+ 1000ms ─╯"), "{}", row(&buf, 6));
+    let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(!screen.contains(" proc ") && !screen.contains("WindowServer"));
+    assert!((7..50).all(|y| row(&buf, y).trim().is_empty()), "nothing below the metrics");
+    assert!(!procs_active(&app), "no process sampling while hidden");
+
+    // shown again: collecting until the next sample
+    assert_eq!(app.handle_key(key('p')), ControlFlow::Continue(()));
+    assert!(app.cfg.show_procs);
+    let screen = render_to_string(&mut app, 200, 50);
+    assert!(screen.contains(" proc ") && screen.contains("collecting…"));
+    assert!(screen.contains("/ filter | s sort ─╯"));
+    assert!(procs_active(&app));
   }
 
   /// Solarized-like terminal palette, as a terminal would answer the palette query.
   const PALETTE: Palette =
     Palette { green: (0x85, 0x99, 0x00), yellow: (0xb5, 0x89, 0x00), red: (0xdc, 0x32, 0x2f) };
 
-  /// App with every kind of colored cell on screen: strips, cores row, power column, processes
-  /// with a selected row.
+  /// App with every kind of colored cell on screen: strips, power column, processes with a
+  /// selected row.
   fn colorful_app(theme: Theme) -> App {
     let mut app = app_with_procs(varied_procs());
     app.theme = theme;
-    app.cfg.per_core_view = true;
     assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
     app
   }
@@ -554,7 +564,7 @@ mod tests {
         color => assert!([Color::Reset, Color::DarkGray].contains(&color), "{color:?}"),
       }
     }
-    assert!(rgb.len() > 100, "{} RGB colors", rgb.len());
+    assert!(rgb.len() > 50, "{} RGB colors", rgb.len());
     let Palette { green, yellow, red } = PALETTE;
     for color in &rgb {
       assert!(between(*color, green, yellow) || between(*color, yellow, red), "{color:?}");
@@ -567,97 +577,113 @@ mod tests {
     assert_eq!(buf[(0, 0)].fg, Color::DarkGray, "borders stay terminal colors");
   }
 
-  /// Text that only the given panel renders (with `test_metrics`).
-  const PANEL_MARKERS: [(char, &[&str]); 4] = [
-    ('1', &["E-CPU  42% 1.8GHz ", "P-CPU  77% 3.2GHz "]),
-    ('2', &["GPU    23% 1.4GHz "]),
-    ('3', &["RAM    56% 20/36G ", "SWAP   50% 1/2G   "]),
-    (
-      '4',
-      &[
-        "CPU   4.50W avg  4.50 max  4.50",
-        "GPU   2.00W avg  2.00 max  2.00",
-        "ANE   0.10W avg  0.10 max  0.10",
-        "SYS  12.00W avg 12.00 max 12.00",
-        "all   6.60W avg  6.60 max  6.60",
-      ],
-    ),
+  /// Strip and power row text of `test_metrics`.
+  const METRIC_MARKERS: [&str; 10] = [
+    "E-CPU  42% 1.8GHz ",
+    "P-CPU  77% 3.2GHz ",
+    "GPU    23% 1.4GHz ",
+    "RAM    56% 20/36G ",
+    "SWAP   50% 1/2G   ",
+    "CPU    4.50W avg  4.50 max  4.50",
+    "GPU    2.00W avg  2.00 max  2.00",
+    "ANE    0.10W avg  0.10 max  0.10",
+    "Power  6.60W avg  6.60 max  6.60",
+    "Total 12.00W avg 12.00 max 12.00",
   ];
 
   #[test]
-  fn renders_metric_panels_at_common_sizes() {
-    // (width, height, process panel shown)
+  fn renders_metrics_at_common_sizes() {
+    // (width, height, process list shown)
     let sizes = [(200, 50, true), (120, 40, true), (100, 30, true), (80, 24, true), (72, 24, true)];
     for (width, height, proc) in sizes.into_iter().chain([(60, 15, false)]) {
-      for per_core_view in [false, true] {
-        let mut app = test_app();
-        app.cfg.per_core_view = per_core_view;
-
-        let screen = render_to_string(&mut app, width, height);
-        let ctx = format!("{width}x{height} per_core_view={per_core_view}");
-        for label in ["M3 Pro · 6E+6P", "fan 1200rpm", "q quit"] {
-          assert!(screen.contains(label), "missing {label:?} ({ctx})");
-        }
-        for (_, markers) in PANEL_MARKERS {
-          for marker in markers {
-            assert!(screen.contains(marker), "missing {marker:?} ({ctx})");
-          }
-        }
-        assert_eq!(screen.contains("cores  E ▄▄▄▄▄▄  P ▆▆▆▆▆▆"), per_core_view, "{ctx}");
-        assert_eq!(screen.contains(" proc "), proc, "{ctx}");
-      }
-    }
-  }
-
-  #[test]
-  fn panel_labels_follow_visibility() {
-    for (key, _) in PANEL_MARKERS {
       let mut app = test_app();
-      assert_eq!(app.handle_key(self::key(key)), ControlFlow::Continue(()));
-
-      for (width, height) in [(200, 50), (80, 24)] {
-        let screen = render_to_string(&mut app, width, height);
-        for (other, other_markers) in PANEL_MARKERS {
-          for marker in other_markers {
-            let ctx = format!("panel {key} hidden, {marker:?} at {width}x{height}");
-            assert_eq!(screen.contains(marker), other != key, "{ctx}");
-          }
-        }
+      let screen = render_to_string(&mut app, width, height);
+      let ctx = format!("{width}x{height}");
+      for label in METRIC_MARKERS.iter().chain(&["M3 Pro · 6E+6P", "fan 1200rpm", "q quit"]) {
+        assert!(screen.contains(label), "missing {label:?} ({ctx})");
       }
+      assert_eq!(screen.contains(" proc "), proc, "{ctx}");
     }
   }
 
   #[test]
-  fn metrics_title_has_chip_clock_and_version() {
-    let is_clock = |word: &str| word.len() == 8 && word.chars().filter(|c| *c == ':').count() == 2;
+  fn metrics_title_has_chip_and_version() {
     let mut app = test_app();
-    let buf = render_buffer(&mut app, 200, 50);
-    let top = row(&buf, 0);
-    assert!(top.starts_with("╭─ M3 Pro · 6E+6P · 18GPU · 36GB ─"), "{top}");
-    let version = format!(" · macmon v{} · 1000ms ─╮", env!("CARGO_PKG_VERSION"));
-    assert!(top.ends_with(&version), "{top}");
-    let clock = top.trim_end_matches(&version).rsplit(' ').next().unwrap();
-    assert!(is_clock(clock), "no clock before the version in {top}");
+    let chip = "╭─ M3 Pro · 6E+6P · 18GPU · 36GB ─";
+    let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
+    for width in [200, 100, 60] {
+      let top = row(&render_buffer(&mut app, width, 30), 0);
+      assert!(top.starts_with(chip) && top.ends_with(&version), "{top}");
+      // no clock and no interval
+      assert!(!top.contains(':') && !top.contains("ms"), "{top}");
+    }
 
-    // narrower: the version is dropped, the clock stays
-    let top = row(&render_buffer(&mut app, 60, 15), 0);
-    assert!(top.starts_with("╭─ M3 Pro · 6E+6P · 18GPU · 36GB ─"), "{top}");
-    assert!(top.split_whitespace().any(is_clock) && !top.contains("macmon"), "{top}");
+    // narrower: the version is dropped
+    let top = row(&render_buffer(&mut app, 40, 30), 0);
+    assert_eq!(top, format!("╭─ M3 Pro · 6E+6P · 18GPU · 36GB {}╮", "─".repeat(6)));
 
     // narrowest: the chip summary is cut, nothing else fits
     let top = row(&render_buffer(&mut app, 24, 15), 0);
     assert_eq!(top, "╭─ M3 Pro · 6E+6P · 18─╮");
   }
 
+  #[test]
+  fn matches_target_layout_at_100_columns() {
+    // M3 Pro without swap, enough history to fill the strips
+    let mut app = app_with_samples(60, |m| m.memory.swap_total = 0);
+    render_buffer(&mut app, 100, 30);
+    app.update_procs(varied_procs());
+    let buf = render_buffer(&mut app, 100, 30);
+    let rows: Vec<String> = (0..30).map(|y| row(&buf, y)).collect();
+    let cells = |y: usize, skip: usize, take: usize| -> String {
+      rows[y].chars().skip(skip).take(take).collect()
+    };
+
+    let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
+    assert!(rows[0].starts_with("╭─ M3 Pro · 6E+6P · 18GPU · 36GB ──"), "{}", rows[0]);
+    assert!(rows[0].ends_with(&version), "{}", rows[0]);
+
+    // strips (46 cells) and the power column (47 cells) with ` │ ` between them
+    for y in 1..6 {
+      let frame: Vec<String> = [0, 1, 48, 49, 50, 98, 99].map(|x| cells(y, x, 1)).into();
+      assert_eq!(frame, ["│", " ", " ", "│", " ", " ", "│"], "{}", rows[y]);
+    }
+    let strips = [(1, "E-CPU  42% 1.8GHz "), (2, "P-CPU  77% 3.2GHz "), (3, "GPU    23% 1.4GHz ")];
+    for (y, label) in strips {
+      let strip = cells(y, 2, 46);
+      assert!(strip.starts_with(label), "{strip}");
+      assert!(strip.chars().skip(18).all(is_braille), "graph fills the strip: {strip}");
+    }
+    let ram = cells(4, 2, 46);
+    assert!(ram.starts_with("RAM    56% 20/36G ▰") && ram.ends_with('▱'), "{ram}");
+    assert_eq!(cells(5, 2, 46).trim(), "");
+
+    let power = [
+      "CPU    4.50W avg  4.50 max  4.50  45°C ",
+      "GPU    2.00W avg  2.00 max  2.00  40°C ",
+      "ANE    0.10W avg  0.10 max  0.10       ",
+    ];
+    for (y, text) in (1..).zip(power) {
+      assert_eq!(cells(y, 51, 39), text);
+      assert!(cells(y, 90, 8).chars().all(is_braille), "{}", rows[y]);
+    }
+    assert_eq!(cells(4, 51, 47).trim_end(), "Power  6.60W avg  6.60 max  6.60");
+    assert_eq!(cells(5, 51, 47).trim_end(), "Total 12.00W avg 12.00 max 12.00  fan 1200rpm");
+    assert_eq!(rows[6], format!("╰{}╯", "─".repeat(98)));
+
+    // the process list in the rest of the screen, the hints on its bottom border
+    assert!(rows[7].starts_with("╭─ proc 3 ─") && rows[7].ends_with(" cpu ↓ ─╮"), "{}", rows[7]);
+    assert!(rows[8].starts_with("│   PID NAME "), "{}", rows[8]);
+    assert!(rows[9].starts_with("│   631 WindowServer "), "{}", rows[9]);
+    let hints = "─ q quit | r scaled | -/+ 1000ms | / filter | s sort ─╯";
+    assert!(rows[29].starts_with("╰───") && rows[29].ends_with(hints), "{}", rows[29]);
+  }
+
   /// Text of the power rows in a rendered frame of `app`.
   fn power_rows(app: &App, buf: &Buffer) -> Vec<String> {
     let power = app.layout(buf.area).power.expect("power rows");
-    let text = |y| (power.left()..power.right()).map(|x| buf[(x, y)].symbol()).collect::<String>();
-    (power.top()..power.bottom()).map(|y| text(y).trim_end().to_string()).collect()
-  }
-
-  fn is_braille(c: char) -> bool {
-    ('\u{2801}'..='\u{28ff}').contains(&c)
+    let line = |y| text(buf, Rect { y, height: 1, ..power });
+    (power.top()..power.bottom()).map(|y| line(y).trim_end().to_string()).collect()
   }
 
   #[test]
@@ -671,33 +697,33 @@ mod tests {
 
     // numbers, temperature and a history graph for CPU / GPU / ANE, the graphs line up
     let units = [
-      "CPU   4.50W avg  4.50 max  4.50  45°C ",
-      "GPU   2.00W avg  2.00 max  2.00  40°C ",
-      "ANE   0.10W avg  0.10 max  0.10       ",
+      "CPU    4.50W avg  4.50 max  4.50  45°C ",
+      "GPU    2.00W avg  2.00 max  2.00  40°C ",
+      "ANE    0.10W avg  0.10 max  0.10       ",
     ];
     for (row, text) in rows.iter().zip(units) {
       // the newest sample is in the last cell
-      let graph: String = row.chars().skip(38).filter(|c| *c != ' ').collect();
+      let graph: String = row.chars().skip(39).filter(|c| *c != ' ').collect();
       assert!(row.starts_with(text), "{row}");
       assert!(!graph.is_empty() && graph.chars().all(is_braille), "{row}");
-      assert_eq!(row.chars().count(), 50, "{row}");
+      assert_eq!(row.chars().count(), 51, "{row}");
     }
-    // the column is as wide as the SYS row with both fans
-    assert_eq!(rows[3], "SYS  12.00W avg 12.00 max 12.00  fans 2000/2000rpm");
-    assert_eq!(rows[4], "all   6.60W avg  6.60 max  6.60");
-    assert!(rows[5..].iter().all(String::is_empty));
+    // Power, then Total with both fans: the column is as wide as that row
+    assert_eq!(rows[3], "Power  6.60W avg  6.60 max  6.60");
+    assert_eq!(rows[4], "Total 12.00W avg 12.00 max 12.00  fans 2000/2000rpm");
+    assert_eq!(rows.len(), 5);
 
     // right of the strips, a separator line between them
     let power = app.layout(buf.area).power.unwrap();
-    assert_eq!((power.x, power.width), (48, 50));
-    for y in 1..11 {
-      assert_eq!(buf[(46, y)].symbol(), "│", "row {y}");
+    assert_eq!((power.x, power.width), (47, 51));
+    for y in 1..6 {
+      assert_eq!(buf[(45, y)].symbol(), "│", "row {y}");
     }
   }
 
   /// App whose power samples differ, so the current value (the mean of the last two samples),
   /// average and maximum differ too: CPU 5 / 4 / 6 W, GPU 2.5 / 2 / 3, ANE 0.25 / 0.2 / 0.3,
-  /// SYS 16 / 14 / 20, total 9.5 / 8 / 12.
+  /// Power 9.5 / 8 / 12, Total 16 / 14 / 20.
   fn varied_power_app() -> App {
     let mut app = App { soc: test_soc(), ..Default::default() };
     let samples =
@@ -712,11 +738,11 @@ mod tests {
 
   /// Power rows of `varied_power_app` with every part shown, without the history graphs.
   const VARIED_POWER_ROWS: [&str; 5] = [
-    "CPU   5.00W avg  4.00 max  6.00  45°C",
-    "GPU   2.50W avg  2.00 max  3.00  40°C",
-    "ANE   0.25W avg  0.20 max  0.30",
-    "SYS  16.00W avg 14.00 max 20.00  fan 1200rpm",
-    "all   9.50W avg  8.00 max 12.00",
+    "CPU    5.00W avg  4.00 max  6.00  45°C",
+    "GPU    2.50W avg  2.00 max  3.00  40°C",
+    "ANE    0.25W avg  0.20 max  0.30",
+    "Power  9.50W avg  8.00 max 12.00",
+    "Total 16.00W avg 14.00 max 20.00  fan 1200rpm",
   ];
 
   /// Power row text without the history graph.
@@ -735,18 +761,18 @@ mod tests {
       // CPU / GPU / ANE: current, average, maximum, temperature, then at least 8 graph cells
       for (row, text) in rows.iter().zip(&VARIED_POWER_ROWS[..3]) {
         assert_eq!(without_graph(row), *text, "{ctx}");
-        let graph: String = row.chars().skip(38).collect();
+        let graph: String = row.chars().skip(39).collect();
         assert!(graph.chars().count() >= 8, "{ctx}");
         assert!(graph.trim_start().chars().all(is_braille), "{ctx}");
       }
-      // SYS with the fan on its row, the total
+      // Power, Total with the fan on its row
       assert_eq!(rows[3..5], VARIED_POWER_ROWS[3..], "{ctx}");
     }
   }
 
   #[test]
   fn narrow_power_column_drops_graph_then_temp_then_stats() {
-    // power rows with or without average / maximum, temperatures and the fans on the SYS row
+    // power rows with or without average / maximum, temperatures and the fans on the Total row
     let expected = |stats: bool, temp: bool, inline: bool| {
       let row = |head: &str, avg_max: &str, celsius: &str| {
         let avg_max = if stats { avg_max } else { "" };
@@ -754,33 +780,38 @@ mod tests {
         format!("{head}{avg_max}{celsius}")
       };
       let mut rows = vec![
-        row("CPU   5.00W", " avg  4.00 max  6.00", "  45°C"),
-        row("GPU   2.50W", " avg  2.00 max  3.00", "  40°C"),
-        row("ANE   0.25W", " avg  0.20 max  0.30", ""),
+        row("CPU    5.00W", " avg  4.00 max  6.00", "  45°C"),
+        row("GPU    2.50W", " avg  2.00 max  3.00", "  40°C"),
+        row("ANE    0.25W", " avg  0.20 max  0.30", ""),
+        row("Power  9.50W", " avg  8.00 max 12.00", ""),
       ];
-      let sys = row("SYS  16.00W", " avg 14.00 max 20.00", "");
+      let total = row("Total 16.00W", " avg 14.00 max 20.00", "");
       match inline {
-        true => rows.push(format!("{sys}  fan 1200rpm")),
-        false => rows.extend([sys, "fan 1200rpm".to_string()]),
+        true => rows.push(format!("{total}  fan 1200rpm")),
+        false => rows.extend([total, "fan 1200rpm".to_string()]),
       }
-      rows.push(row("all   9.50W", " avg  8.00 max 12.00", ""));
       rows
     };
 
     // (screen size, power column width, average / maximum, temperatures, graphs, fans inline)
     let cases = [
-      // next to the strips: the narrowest column with everything, then graphs go first; at 80
-      // columns the numbers and temperatures stay, the fans move to a row of their own
-      ((89, 24), 46, true, true, true, true),
+      // next to the strips: the narrowest column with everything, then graphs go first, the fan
+      // moves to a row of its own, temperatures go, the numbers stay
+      ((90, 24), 47, true, true, true, true),
+      ((89, 24), 46, true, true, false, true),
       ((88, 24), 45, true, true, false, true),
-      ((80, 24), 37, true, true, false, false),
-      ((72, 24), 31, true, false, false, false),
+      ((87, 24), 44, true, true, false, false),
+      ((81, 24), 38, true, true, false, false),
+      ((80, 24), 37, true, false, false, false),
+      ((72, 24), 32, true, false, false, false),
       // under the strips: everything fits at 60 columns, then the same order
       ((60, 15), 56, true, true, true, true),
-      ((48, 24), 44, true, true, false, true),
-      ((44, 24), 40, true, true, false, false),
-      ((40, 24), 36, true, false, false, false),
-      ((34, 24), 30, false, false, false, false),
+      ((50, 24), 46, true, true, false, true),
+      ((48, 24), 44, true, true, false, false),
+      ((42, 24), 38, true, true, false, false),
+      ((41, 24), 37, true, false, false, false),
+      ((36, 24), 32, true, false, false, false),
+      ((35, 24), 31, false, false, false, false),
     ];
     for ((width, height), column, stats, temp, graph, inline) in cases {
       let mut app = varied_power_app();
@@ -811,53 +842,83 @@ mod tests {
     }
   }
 
-  #[test]
-  fn key_hints_degrade_at_narrow_widths() {
-    let full = "q quit  d cores  r scaled  -/+ 1000ms  1-5 panels";
-    let only_power = Panels { cpu: false, gpu: false, mem: false, power: true, proc: false };
-    for width in [200, 120, 80, 60, 45, 30, 20, 14, 12] {
-      let mut app = test_app();
-      app.cfg.panels = only_power;
-      let buf = render_buffer(&mut app, width, 24);
-      let bottom = row(&buf, 23);
-      let ctx = format!("width {width}: {bottom}");
+  /// Key hints with the process list on screen.
+  const HINTS: [&str; 5] = ["q quit", "r scaled", "-/+ 1000ms", "/ filter", "s sort"];
 
-      assert!(bottom.starts_with("╰─ q quit") && bottom.ends_with("─╯"), "{ctx}");
-      // only whole hints are shown
-      let shown = bottom.trim_start_matches("╰─ ").trim_end_matches(['─', '╯']).trim_end();
-      assert!(full.starts_with(shown), "{ctx}");
-      assert!(shown.len() == full.len() || full[shown.len()..].starts_with("  "), "{ctx}");
+  /// Bottom border of a box `width` cells wide with the first `count` of `HINTS` right-aligned.
+  fn hints_border(width: usize, count: usize) -> String {
+    if count == 0 {
+      return format!("╰{}╯", "─".repeat(width - 2));
     }
-
-    // too narrow for any hint: plain border
-    let mut app = test_app();
-    app.cfg.panels = only_power;
-    let buf = render_buffer(&mut app, 11, 24);
-    assert_eq!(row(&buf, 23), "╰─────────╯");
+    let hints = format!(" {} ", HINTS[..count].join(" | "));
+    format!("╰{}{hints}─╯", "─".repeat(width - 3 - hints.chars().count()))
   }
 
-  /// App with synthetic CPU clusters of `(label, cores per die, load)` on `dies` dies and the
-  /// per-core row on.
-  fn chip_app(clusters: &[(&str, usize, f32)], dies: usize) -> App {
-    let cores: Vec<Vec<CpuCoreMetrics>> = clusters
-      .iter()
-      .map(|&(_, per_die, ratio)| {
-        let die =
-          move |die_id| (0..per_die).map(move |i| CpuCoreMetrics { die_id, ..core(i, ratio) });
-        (0..dies).flat_map(die).collect()
-      })
-      .collect();
+  #[test]
+  fn key_hints_right_aligned_on_bottom_border() {
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert_eq!(row(&buf, 49), hints_border(200, 5));
+    assert_eq!(row(&buf, 6), hints_border(200, 0), "plain metrics box border");
+    let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+    assert_eq!(screen.matches("q quit").count(), 1);
+
+    // keys bold, labels plain, separators dim
+    let bottom = row(&buf, 49);
+    let x = |text: &str| bottom[..bottom.find(text).unwrap()].chars().count() as u16;
+    let cell = |x: u16| &buf[(x, 49)];
+    assert!(cell(x("q quit")).modifier.contains(Modifier::BOLD));
+    assert!(!cell(x("quit")).modifier.contains(Modifier::BOLD));
+    assert_eq!(cell(x("quit")).fg, app.theme.text);
+    assert_eq!(cell(x("| r")).fg, app.theme.dim);
+
+    // the current ratio mode and interval
+    assert!(app.handle_key(key('r')).is_continue());
+    assert!(app.handle_key(key('+')).is_continue());
+    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(bottom.contains(" q quit | r active | -/+ 1250ms | / filter "), "{bottom}");
+
+    // without the process list: on the metrics box, without the process keys
+    app.cfg.show_procs = false;
+    assert!(app.handle_key(key('-')).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 6).ends_with("─ q quit | r active | -/+ 1000ms ─╯"), "{}", row(&buf, 6));
+  }
+
+  #[test]
+  fn key_hints_drop_from_the_end_when_narrow() {
+    // (width, hints shown): `q quit` 6 cells, then 3 cells between hints and 1 at both ends,
+    // plus `╰─` and `─╯`
+    let cases = [(200, 5), (56, 5), (55, 4), (47, 4), (46, 3), (36, 3), (35, 2), (23, 2), (22, 1)];
+    for (width, count) in cases.into_iter().chain([(12, 1), (11, 0), (5, 0)]) {
+      let mut app = test_app();
+      let buf = render_buffer(&mut app, width, 60);
+      let proc = app.layout(buf.area).proc.expect("process box");
+      assert_eq!(row(&buf, proc.bottom() - 1), hints_border(width.into(), count), "{width}");
+    }
+
+    // without the process list only the first three are there to show
+    for (width, count) in [(200, 3), (46, 3), (35, 2), (22, 1), (11, 0)] {
+      let mut app = test_app();
+      app.cfg.show_procs = false;
+      let buf = render_buffer(&mut app, width, 60);
+      let top = app.layout(buf.area).top.expect("metrics box");
+      assert_eq!(row(&buf, top.bottom() - 1), hints_border(width.into(), count), "{width}");
+    }
+  }
+
+  /// App with synthetic CPU clusters of `(label, cores, load)`.
+  fn clusters_app(clusters: &[(&str, usize, f32)]) -> App {
     let samples: Vec<ClusterSample> = clusters
       .iter()
-      .zip(&cores)
-      .map(|(&(label, _, ratio), cores)| {
-        let aggregate = FreqSample::new(2000, ratio, ratio);
-        ClusterSample { label, count: cores.len(), aggregate, cores }
+      .map(|&(label, count, ratio)| ClusterSample {
+        label,
+        count,
+        aggregate: FreqSample::new(2000, ratio, ratio),
       })
       .collect();
 
     let mut app = test_app();
-    app.cfg.per_core_view = true;
     app.clusters = CpuClusters::default();
     for _ in 0..3 {
       app.clusters.push(&samples);
@@ -866,99 +927,20 @@ mod tests {
   }
 
   #[test]
-  fn core_rows_for_real_chips() {
-    // (name, clusters with idle / busy / half loaded cores, dies, cores lines at 72 and 120)
-    type Lines = &'static [&'static str];
-    type Chip = (&'static str, &'static [(&'static str, usize, f32)], usize, Lines, Lines);
-    let chips: [Chip; 5] = [
-      (
-        "M1",
-        &[("E", 4, 0.0), ("P", 4, 1.0)],
-        1,
-        &["cores  E ▁▁▁▁  P ████"],
-        &["cores  E ▁▁▁▁  P ████"],
-      ),
-      (
-        "M4 Max",
-        &[("E", 4, 0.0), ("P", 12, 1.0)],
-        1,
-        &["cores  E ▁▁▁▁  P ████████████"],
-        &["cores  E ▁▁▁▁  P ████████████"],
-      ),
-      (
-        "M6",
-        &[("E", 6, 0.0), ("P", 4, 1.0), ("S", 2, 0.5)],
-        1,
-        &["cores  E ▁▁▁▁▁▁  P ████  S ▅▅"],
-        &["cores  E ▁▁▁▁▁▁  P ████  S ▅▅"],
-      ),
-      (
-        "M3 Ultra",
-        &[("E", 4, 0.0), ("P", 12, 1.0)],
-        2,
-        &["cores  D0 E ▁▁▁▁  P ████████████", "       D1 E ▁▁▁▁  P ████████████"],
-        &["cores  E ▁▁▁▁▁▁▁▁  P ████████████████████████"],
-      ),
-      (
-        "M5 Ultra",
-        &[("P", 12, 0.0), ("S", 6, 1.0)],
-        2,
-        &["cores  D0 P ▁▁▁▁▁▁▁▁▁▁▁▁  S ██████", "       D1 P ▁▁▁▁▁▁▁▁▁▁▁▁  S ██████"],
-        &["cores  P ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  S ████████████"],
-      ),
-    ];
-
-    for (name, clusters, dies, narrow, wide) in chips {
-      for (width, expected) in [(72, narrow), (120, wide)] {
-        let mut app = chip_app(clusters, dies);
-        let buf = render_buffer(&mut app, width, 30);
-        let plan = app.layout(buf.area);
-        let ctx = format!("{name} at {width}");
-
-        // one line per die when everything doesn't fit on one line
-        let text =
-          |r: Rect| (r.left()..r.right()).map(|x| buf[(x, r.y)].symbol()).collect::<String>();
-        let lines: Vec<String> =
-          plan.cores.iter().map(|(_, r)| text(*r).trim_end().to_string()).collect();
-        assert_eq!(lines, expected, "{ctx}");
-
-        // every core bar is drawn, all of them left of the power column separator
-        let top = plan.top.unwrap();
-        let sep = plan.separator.expect("power column on the side");
-        for (label, per_die, ratio) in clusters.iter() {
-          let bar = core_bar(f64::from(*ratio));
-          let cells: Vec<(u16, u16)> = (top.top()..top.bottom())
-            .flat_map(|y| (top.left()..top.right()).map(move |x| (x, y)))
-            .filter(|&(x, y)| buf[(x, y)].symbol() == bar)
-            .collect();
-          assert_eq!(cells.len(), per_die * dies, "{ctx}: {label} bars");
-          assert!(cells.iter().all(|&(x, _)| x < sep.x), "{ctx}: {label} bars overflow");
-        }
-
-        // nothing drawn over the box borders or the separator
-        for y in top.top() + 1..top.bottom() - 1 {
-          let line = row(&buf, y);
-          assert!(line.starts_with('│') && line.ends_with('│'), "{ctx}: {line}");
-          assert_eq!(buf[(sep.x, y)].symbol(), "│", "{ctx}: {line}");
-        }
-      }
-    }
-  }
-
-  #[test]
   fn three_clusters_get_strips_and_title() {
-    let mut app = chip_app(&[("E", 6, 0.2), ("P", 4, 0.4), ("S", 2, 0.6)], 1);
+    let mut app = clusters_app(&[("E", 6, 0.2), ("P", 4, 0.4), ("S", 2, 0.6)]);
     let screen = render_to_string(&mut app, 100, 30);
     for label in ["E-CPU  20% 2.0GHz", "P-CPU  40% 2.0GHz", "S-CPU  60% 2.0GHz"] {
       assert!(screen.contains(label), "missing {label}");
     }
     assert!(screen.contains("M3 Pro · 6E+4P+2S · 18GPU · 36GB"));
 
-    // the strips stack in cluster order above GPU
+    // the strips stack in cluster order above GPU, one row more than the power rows
     let plan = app.layout(Rect::new(0, 0, 100, 30));
     let strips: Vec<Strip> = plan.strips.iter().map(|(strip, _)| *strip).collect();
     use Strip::*;
     assert_eq!(strips, [Cluster(0), Cluster(1), Cluster(2), Gpu, Ram, Swap]);
+    assert_eq!(plan.top.map(|r| r.height), Some(8));
   }
 
   #[test]
@@ -973,56 +955,57 @@ mod tests {
   }
 
   #[test]
-  fn fans_and_sys_hidden_when_unavailable() {
-    // 80 columns: the fan doesn't fit after SYS, it gets a row of its own
+  fn fans_and_total_hidden_when_unavailable() {
+    // 80 columns: the fan doesn't fit after Total, it gets a row of its own
     let mut app = test_app();
     let buf = render_buffer(&mut app, 80, 24);
     let rows = power_rows(&app, &buf);
-    assert_eq!(rows[3..5], ["SYS  12.00W avg 12.00 max 12.00", "fan 1200rpm"]);
-    assert!(rows[5].starts_with("all   6.60W"), "{rows:?}");
+    assert!(rows[3].starts_with("Power  6.60W"), "{rows:?}");
+    assert_eq!(rows[4..6], ["Total 12.00W avg 12.00 max 12.00", "fan 1200rpm"]);
 
-    // neither: the total follows ANE
+    // neither: Power is the last row
     let mut app = test_app_with(|m| {
       m.fans.clear();
       m.sys_power = 0.0;
     });
     let buf = render_buffer(&mut app, 80, 24);
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
-    assert!(!screen.contains("SYS") && !screen.contains("fan"));
+    assert!(!screen.contains("Total") && !screen.contains("fan"));
     let rows = power_rows(&app, &buf);
-    assert!(rows[2].starts_with("ANE   0.10W") && rows[3].starts_with("all   6.60W"), "{rows:?}");
+    assert!(rows[2].starts_with("ANE    0.10W") && rows[3].starts_with("Power  6.60W"), "{rows:?}");
+    assert!(rows[4..].iter().all(String::is_empty), "{rows:?}");
 
     // only one of them: no gap left behind
     let mut app = test_app_with(|m| m.sys_power = 0.0);
     let buf = render_buffer(&mut app, 80, 24);
-    assert_eq!(power_rows(&app, &buf)[3], "fan 1200rpm");
+    assert_eq!(power_rows(&app, &buf)[4], "fan 1200rpm");
   }
 
   #[test]
   fn narrow_screen_puts_power_rows_under_strips() {
     let mut app = test_app();
     let buf = render_buffer(&mut app, 60, 15);
-    let rows: Vec<String> = (1..14).map(|y| row(&buf, y)).collect();
+    let rows: Vec<String> = (0..15).map(|y| row(&buf, y)).collect();
 
     // no separator: power rows span the full width right under the SWAP strip
-    assert!(rows.iter().all(|row| row.matches('│').count() == 2), "{rows:#?}");
-    let swap = rows.iter().position(|row| row.starts_with("│ SWAP   50% 1/2G   ▰")).unwrap();
-    let cpu = &rows[swap + 1];
-    assert!(cpu.starts_with("│ CPU   4.50W avg  4.50 max  4.50  45°C "), "{cpu}");
-    assert!(cpu.chars().any(is_braille), "{cpu}: room for the graph");
-    let sys = &rows[swap + 4];
-    assert!(sys.starts_with("│ SYS  12.00W avg 12.00 max 12.00  fan 1200rpm "), "{sys}");
-    let all = &rows[swap + 5];
-    assert!(all.starts_with("│ all   6.60W avg  6.60 max  6.60 "), "{all}");
-    assert_eq!(swap + 5, rows.len() - 1, "power rows end at the bottom border");
+    assert!(rows[1..11].iter().all(|row| row.matches('│').count() == 2), "{rows:#?}");
+    assert!(rows[5].starts_with("│ SWAP   50% 1/2G   ▰"), "{}", rows[5]);
+    assert!(rows[6].starts_with("│ CPU    4.50W avg  4.50 max  4.50  45°C "), "{}", rows[6]);
+    assert!(rows[6].chars().any(is_braille), "{}: room for the graph", rows[6]);
+    assert!(rows[9].starts_with("│ Power  6.60W avg  6.60 max  6.60 "), "{}", rows[9]);
+    let total = "│ Total 12.00W avg 12.00 max 12.00  fan 1200rpm ";
+    assert!(rows[10].starts_with(total), "{}", rows[10]);
+
+    // the box ends right after them, the process list is auto-hidden
+    assert!(rows[11].starts_with("╰─"), "{}", rows[11]);
+    assert!(rows[12..].iter().all(|row| row.trim().is_empty()), "{rows:#?}");
   }
 
   #[test]
-  fn keys_update_rendered_panels() {
+  fn keys_update_rendered_metrics() {
     let mut app = test_app();
     let screen = render_to_string(&mut app, 120, 40);
     assert!(screen.contains("E-CPU  42%") && screen.contains("GPU    23%"));
-    assert!(!screen.contains("cores  E"), "per-core row is off by default");
 
     // r: active ratios
     assert!(app.handle_key(key('r')).is_continue());
@@ -1030,76 +1013,33 @@ mod tests {
     assert!(screen.contains("E-CPU  50%") && screen.contains("P-CPU  80%"));
     assert!(screen.contains("GPU    30%") && screen.contains("r active"));
 
-    // d: per-core row
-    assert!(app.handle_key(key('d')).is_continue());
-    assert!(render_to_string(&mut app, 120, 40).contains("cores  E ▄▄▄▄▄▄  P ▆▆▆▆▆▆"));
-
-    // +/-: interval in the metrics title and the hints
+    // +/-: interval in the hints only
     assert!(app.handle_key(key('+')).is_continue());
     let screen = render_to_string(&mut app, 200, 50);
-    assert!(screen.contains("· 1250ms ─╮") && screen.contains("-/+ 1250ms"));
+    assert!(screen.contains("-/+ 1250ms") && screen.matches("1250ms").count() == 1);
     assert!(app.handle_key(key('-')).is_continue());
     assert!(app.handle_key(key('-')).is_continue());
     assert!(render_to_string(&mut app, 200, 50).contains("-/+ 750ms"));
   }
 
   #[test]
-  fn digit_keys_toggle_panels() {
-    let mut app = App::default();
-    for c in ['1', '2', '3', '4', '5'] {
-      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()));
+  fn metrics_box_fits_content_and_procs_take_the_rest() {
+    // (width, height, metrics box height): 5 strips next to 5 power rows; at 80 columns the fan
+    // moves to a row of its own
+    for (width, height, top) in [(200, 50, 7), (120, 40, 7), (80, 24, 8)] {
+      let mut app = test_app();
+      let buf = render_buffer(&mut app, width, height);
+      let plan = app.layout(buf.area);
+      let ctx = format!("{width}x{height}");
+      assert_eq!(plan.top, Some(Rect::new(0, 0, width, top)), "{ctx}");
+      assert_eq!(plan.proc, Some(Rect::new(0, top, width, height - top)), "{ctx}");
+
+      // no blank rows in the metrics box
+      let rows = power_rows(&app, &buf);
+      assert!(rows.iter().all(|row| !row.is_empty()), "{ctx}: {rows:#?}");
+      assert!(plan.strips.last().is_some_and(|(_, r)| r.bottom() < top), "{ctx}");
+      assert!(row(&buf, top).starts_with("╭─ proc"), "{ctx}");
     }
-    assert_eq!(
-      app.cfg.panels,
-      Panels { cpu: false, gpu: false, mem: false, power: false, proc: false }
-    );
-
-    assert_eq!(app.handle_key(key('3')), ControlFlow::Continue(()));
-    assert!(app.cfg.panels.mem);
-    assert!(!app.cfg.panels.cpu && !app.cfg.panels.proc);
-
-    // other digits don't touch the panels
-    for c in ['0', '6', '9'] {
-      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()));
-    }
-    assert!(app.cfg.panels.mem && !app.cfg.panels.gpu);
-  }
-
-  #[test]
-  fn hidden_panels_are_not_rendered() {
-    let mut app = test_app();
-    let screen = render_to_string(&mut app, 200, 50);
-    assert!(screen.contains("E-CPU") && screen.contains("1.4GHz"));
-
-    for c in ['1', '2'] {
-      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()));
-    }
-    let screen = render_to_string(&mut app, 200, 50);
-    assert!(!screen.contains("E-CPU"), "cpu strips still shown");
-    assert!(!screen.contains("1.4GHz"), "gpu strip still shown");
-    assert!(screen.contains("RAM") && screen.contains("all   6.60W") && screen.contains(" proc "));
-  }
-
-  #[test]
-  fn hidden_rows_shrink_metrics_box() {
-    let area = Rect::new(0, 0, 60, 25);
-    let top_height = |app: &App| app.layout(area).top.map(|r| r.height);
-    let mut app = test_app();
-    // 60 columns: 5 strips + 5 power rows under them need more than 40% of the height
-    assert_eq!(top_height(&app), Some(12));
-
-    // CPU strips, GPU strip (the last graph: the box keeps only the rows it needs), RAM / SWAP
-    for (key, height) in [('1', 10), ('2', 9), ('3', 7)] {
-      assert!(app.handle_key(self::key(key)).is_continue());
-      assert_eq!(top_height(&app), Some(height), "after {key}");
-      let proc = app.layout(area).proc.map(|r| r.height);
-      assert_eq!(proc, Some(25 - height), "after {key}");
-    }
-
-    // every metric hidden: the process box takes the full height
-    assert!(app.handle_key(key('4')).is_continue());
-    let plan = app.layout(area);
-    assert_eq!((plan.top, plan.proc), (None, Some(area)));
   }
 
   #[test]
@@ -1109,44 +1049,14 @@ mod tests {
     assert!(render_to_string(&mut app, 80, 24).contains(" proc "), "width doesn't matter");
     assert!(!render_to_string(&mut app, 60, 15).contains(" proc "));
     assert!(!render_to_string(&mut app, 200, 12).contains(" proc "));
-    assert!(app.cfg.panels.proc, "auto-hide must not change the config");
-
-    // the only visible panel is never auto-hidden
-    app.cfg.panels = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
-    let screen = render_to_string(&mut app, 60, 15);
-    assert!(screen.contains(" proc ") && screen.contains("q quit"));
+    assert!(render_to_string(&mut app, 200, 13).contains(" proc "));
+    assert!(app.cfg.show_procs, "auto-hide must not change the config");
   }
 
   #[test]
-  fn key_hints_on_bottom_box() {
-    let mut app = test_app();
-    let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 49).starts_with("╰─ q quit"), "hints on the process box");
-    assert!(row(&buf, 19).starts_with("╰───"), "plain metrics box border");
-
-    // without the process box the hints move to the metrics box
-    app.cfg.panels.proc = false;
-    let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 49).starts_with("╰─ q quit"), "hints on the metrics box");
-    let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
-    assert_eq!(screen.matches("q quit").count(), 1);
-  }
-
-  #[test]
-  fn all_panels_hidden_shows_hint() {
-    let mut app = test_app();
-    for c in ['1', '2', '3', '4', '5'] {
-      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()));
-    }
-
-    let screen = render_to_string(&mut app, 120, 40);
-    assert!(screen.contains("all panels hidden · press 1-5 to show"));
-    assert!(!screen.contains('╭'));
-  }
-
-  #[test]
-  fn renders_any_size_and_panel_set() {
+  fn renders_any_size() {
     let sizes = [
+      (400, 120),
       (200, 50),
       (120, 40),
       (100, 30),
@@ -1159,20 +1069,24 @@ mod tests {
       (5, 3),
       (1, 1),
     ];
-    let ultra = [("P", 12, 0.5), ("S", 6, 0.9)];
+    let three = [("E", 6, 0.2), ("P", 4, 0.6), ("S", 2, 0.9)];
     for (width, height) in sizes {
-      for bits in 0..64u8 {
-        let mut app = if bits & 32 != 0 { chip_app(&ultra, 2) } else { test_app() };
-        app.proc_view.set_procs(test_procs());
-        app.proc_view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        app.cfg.per_core_view = bits % 3 == 0;
-        app.cfg.panels = Panels {
-          cpu: bits & 1 != 0,
-          gpu: bits & 2 != 0,
-          mem: bits & 4 != 0,
-          power: bits & 8 != 0,
-          proc: bits & 16 != 0,
+      for bits in 0..16u8 {
+        let mut app = match bits & 3 {
+          0 => test_app(),
+          1 => clusters_app(&three),
+          2 => test_app_with(|m| {
+            m.memory.swap_total = 0;
+            m.fans.clear();
+            m.sys_power = 0.0;
+          }),
+          _ => App::default(),
         };
+        app.cfg.show_procs = bits & 4 != 0;
+        app.proc_view.set_procs(test_procs());
+        if bits & 8 != 0 {
+          app.proc_view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        }
         render_buffer(&mut app, width, height);
       }
     }
@@ -1190,16 +1104,48 @@ mod tests {
       let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
       let ctx = format!("{width}x{height}");
 
-      // strip and power graphs in braille, meters in ▰▱, no block characters (cores row off)
+      // strip and power graphs in braille, meters in ▰▱, no block characters
       assert!(screen.chars().filter(|c| is_braille(*c)).count() > 40, "{ctx}");
       let ram = screen.split("RAM    56% 20/36G ").nth(1).expect("ram strip");
       assert!(ram.starts_with('▰') && screen.contains('▱'), "{ctx}");
       let block = |c: char| ('▁'..='█').contains(&c) || c == '░';
       assert!(!screen.chars().any(block), "{ctx}");
       for row in &power_rows(&app, &buf)[..3] {
-        let graph: String = row.chars().skip(38).filter(|c| *c != ' ').collect();
+        let graph: String = row.chars().skip(39).filter(|c| *c != ' ').collect();
         assert!(!graph.is_empty() && graph.chars().all(is_braille), "{ctx}: {row}");
       }
+    }
+  }
+
+  #[test]
+  fn graphs_fill_strips_once_history_is_long_enough() {
+    // cells of the graph strips (clusters and GPU) with braille in them, and the graph width
+    let graph_cells = |app: &mut App, width: u16| -> Vec<(usize, usize)> {
+      let buf = render_buffer(app, width, 50);
+      let plan = app.layout(buf.area);
+      let graphs = plan.strips.iter().filter(|(s, _)| matches!(s, Strip::Cluster(_) | Strip::Gpu));
+      let cells = |r: &Rect| {
+        let text = text(&buf, *r);
+        (text.chars().filter(|c| is_braille(*c)).count(), r.width as usize - 18)
+      };
+      graphs.map(|(_, r)| cells(r)).collect()
+    };
+
+    // 3 samples: only the newest cells on the right
+    let mut app = test_app();
+    for (braille, _) in graph_cells(&mut app, 200) {
+      assert_eq!(braille, 2);
+    }
+
+    // a long history fills the strips of a wide terminal, newest sample on the right
+    for _ in 0..700 {
+      app.update_metrics(test_metrics());
+    }
+    assert_eq!(app.igpu_freq.ratio(RatioMode::Scaled).items.len(), 703);
+    // (screen width, graph cells): 64 cells was all the old 128 sample history could fill
+    for (width, graph) in [(100, 28), (200, 128), (400, 328)] {
+      let cells = graph_cells(&mut app, width);
+      assert_eq!(cells, [(graph, graph); 3], "width {width}");
     }
   }
 
@@ -1207,9 +1153,9 @@ mod tests {
   fn renders_without_metrics() {
     let mut app = App::default();
     let screen = render_to_string(&mut app, 120, 40);
-    assert!(screen.contains("all   0.00W") && screen.contains("RAM     0% 0/0G"));
+    assert!(screen.contains("Power  0.00W") && screen.contains("RAM    0% 0/0G"));
     assert!(screen.contains("╭─ macmon ─"), "title without chip info");
-    assert!(!screen.contains("°C") && !screen.contains("SYS") && !screen.contains("fan"));
+    assert!(!screen.contains("°C") && !screen.contains("Total") && !screen.contains("fan"));
   }
 
   fn test_procs() -> Vec<ProcInfo> {
@@ -1241,29 +1187,18 @@ mod tests {
     // auto-hidden in a small window, back when it grows
     render_buffer(&mut app, 60, 15);
     assert!(!procs_active(&app));
-    assert!(app.cfg.panels.proc);
+    assert!(app.cfg.show_procs);
     render_buffer(&mut app, 200, 50);
     assert!(procs_active(&app));
 
-    // `5` toggles the panel; the flag follows on the next frame
-    assert!(app.handle_key(key('5')).is_continue());
+    // `p` hides the list; the flag follows on the next frame
+    assert!(app.handle_key(key('p')).is_continue());
     assert!(procs_active(&app));
     render_buffer(&mut app, 200, 50);
     assert!(!procs_active(&app));
-    assert!(app.handle_key(key('5')).is_continue());
+    assert!(app.handle_key(key('p')).is_continue());
     render_buffer(&mut app, 200, 50);
     assert!(procs_active(&app));
-
-    // the only visible panel is never auto-hidden
-    app.cfg.panels = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
-    render_buffer(&mut app, 60, 15);
-    assert!(procs_active(&app));
-
-    for c in ['5', '1'] {
-      assert!(app.handle_key(key(c)).is_continue());
-      render_buffer(&mut app, 200, 50);
-      assert!(!procs_active(&app), "after {c}");
-    }
   }
 
   #[test]
@@ -1314,8 +1249,9 @@ mod tests {
     app
   }
 
-  /// Screen row where the process box starts in a 200x50 window (60% of the height, full width).
-  const PROC_Y: u16 = 20;
+  /// Screen row where the process box starts in a 200x50 window: right under the 7 rows of the
+  /// metrics box.
+  const PROC_Y: u16 = 7;
 
   /// Text of row `y` of the process box in a 200x50 window: 0 is the title, 1 the header.
   fn proc_row(buf: &Buffer, y: u16) -> String {
@@ -1387,12 +1323,13 @@ mod tests {
   #[test]
   fn narrow_proc_panel_drops_columns() {
     let mut app = test_app();
-    app.cfg.panels = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
     render_buffer(&mut app, 40, 20);
     app.update_procs(varied_procs());
 
+    // the process box under the 13 rows of metrics (power rows under the strips)
     let buf = render_buffer(&mut app, 40, 20);
-    let header = row(&buf, 1);
+    assert_eq!(app.layout(buf.area).proc, Some(Rect::new(0, 13, 40, 7)));
+    let header = row(&buf, 14);
     for (label, shown) in [
       ("PID", true),
       ("NAME", true),
@@ -1405,12 +1342,12 @@ mod tests {
       assert_eq!(header.contains(label), shown, "{label} in {header}");
     }
     // NAME gets the 10 cells left: truncated
-    assert!(row(&buf, 2).starts_with("│   631 WindowServ   25.0"), "{}", row(&buf, 2));
+    assert!(row(&buf, 15).starts_with("│   631 WindowServ   25.0"), "{}", row(&buf, 15));
 
     // very narrow: PID and NAME only, nothing drawn over the border
     let buf = render_buffer(&mut app, 18, 20);
-    assert_eq!(row(&buf, 1), "│   PID NAME     │");
-    assert_eq!(row(&buf, 2), "│   631 WindowSe │");
+    assert_eq!(row(&buf, 14), "│   PID NAME     │");
+    assert_eq!(row(&buf, 15), "│   631 WindowSe │");
   }
 
   #[test]
@@ -1422,12 +1359,7 @@ mod tests {
     let mut app = app_with_procs(procs);
     assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
 
-    let all = Panels::default();
-    let only_proc = Panels { proc: true, cpu: false, gpu: false, mem: false, power: false };
-    for (panels, width, height) in
-      [(all, 200, 50), (all, 80, 24), (only_proc, 40, 20), (only_proc, 18, 20)]
-    {
-      app.cfg.panels = panels;
+    for (width, height) in [(200, 50), (80, 24), (40, 20), (18, 20)] {
       let buf = render_buffer(&mut app, width, height);
       let proc = app.layout(buf.area).proc.expect("process box");
       for y in proc.top() + 1..proc.bottom() - 1 {
@@ -1470,20 +1402,19 @@ mod tests {
     let mut app = app_with_procs(varied_procs());
     assert!(app.handle_key(key('/')).is_continue());
 
-    for c in ['q', 'c', 'v', 'd', 'r', '5', '+', '-', 's'] {
+    for c in ['q', 'c', 'v', 'd', 'r', 'p', '5', '+', '-', 's'] {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
     }
-    assert_eq!(app.proc_view.filter(), "qcvdr5+-s");
-    assert!(!app.cfg.per_core_view);
+    assert_eq!(app.proc_view.filter(), "qcvdrp5+-s");
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!(app.cfg.interval, 1000);
-    assert_eq!(app.cfg.panels, Panels::default());
+    assert!(app.cfg.show_procs);
     assert_eq!(app.cfg.proc_sort, ProcSort::Cpu);
 
     // the filter shows in the title with a cursor, no process matches it
     let buf = render_buffer(&mut app, 200, 50);
     let title = proc_row(&buf, 0);
-    assert!(title.starts_with("╭─ proc 0/3 ─ /qcvdr5+-s█ ─"), "{title}");
+    assert!(title.starts_with("╭─ proc 0/3 ─ /qcvdrp5+-s█ ─"), "{title}");
 
     // ctrl-c still quits
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -1566,57 +1497,17 @@ mod tests {
     assert!(!selected(&buf, 0, 3), "border not highlighted");
     assert_eq!(buf.content.iter().filter(|cell| reversed(cell)).count(), 198);
 
-    // End: the last process is on the last row (29 is the border); 27 rows on screen
+    // End: the last process is on the last row (42 is the border); 40 rows on screen
     assert!(app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)).is_continue());
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(proc_row(&buf, 28).contains("proc99 "));
-    assert!(selected(&buf, 1, 28));
-    assert!(proc_row(&buf, 2).contains("proc73 "), "{}", proc_row(&buf, 2));
+    assert!(proc_row(&buf, 41).contains("proc99 "));
+    assert!(selected(&buf, 1, 41));
+    assert!(proc_row(&buf, 2).contains("proc60 "), "{}", proc_row(&buf, 2));
 
     // esc clears the selection, the table goes back to the top
     assert!(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_continue());
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc0 "));
-  }
-
-  /// Global key hints on the bottom border, before the process hints.
-  const GLOBAL_HINTS: &str = "╰─ q quit  d cores  r scaled  -/+ 1000ms  1-5 panels ─";
-
-  #[test]
-  fn proc_hints_follow_global_hints() {
-    let mut app = app_with_procs(varied_procs());
-    let buf = render_buffer(&mut app, 200, 50);
-    let bottom = row(&buf, 49);
-    assert!(bottom.starts_with(GLOBAL_HINTS), "{bottom}");
-    let proc_hints = &bottom[GLOBAL_HINTS.len()..];
-    assert!(proc_hints.starts_with(" / filter  s sort  S reverse  ↑↓ select ─"), "{bottom}");
-    assert!(bottom.ends_with("─╯") && !bottom.contains("esc"), "{bottom}");
-
-    // esc hint once there is something to clear
-    assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
-    assert!(row(&render_buffer(&mut app, 200, 50), 49).contains("↑↓ select  esc clear"));
-
-    // input mode hints
-    assert!(app.handle_key(key('/')).is_continue());
-    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    let proc_hints = &bottom[GLOBAL_HINTS.len()..];
-    assert!(proc_hints.starts_with(" enter keep  esc clear  ↑↓ select ─"), "{bottom}");
-  }
-
-  #[test]
-  fn proc_hints_give_way_first() {
-    let mut app = app_with_procs(varied_procs());
-    // room for the first process hints only
-    let bottom = row(&render_buffer(&mut app, 80, 40), 39);
-    assert!(bottom.starts_with(&format!("{GLOBAL_HINTS} / filter  s sort ─")), "{bottom}");
-    assert!(!bottom.contains("reverse"), "{bottom}");
-
-    let bottom = row(&render_buffer(&mut app, 60, 40), 39);
-    assert!(bottom.starts_with(GLOBAL_HINTS) && !bottom.contains("filter"), "{bottom}");
-
-    // too narrow for the global hints: `q quit` stays, no process hints
-    let bottom = row(&render_buffer(&mut app, 30, 40), 39);
-    assert!(bottom.starts_with("╰─ q quit  d cores ─") && !bottom.contains("filter"));
   }
 
   #[test]

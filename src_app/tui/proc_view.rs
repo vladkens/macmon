@@ -268,6 +268,7 @@ impl ProcView {
     self.typing
   }
 
+  #[cfg(test)]
   pub fn selected_pid(&self) -> Option<i32> {
     self.selected.map(|s| s.pid)
   }
@@ -497,23 +498,6 @@ impl App {
         load(gpu, gpu / 100.0, format!("{gpu:.1}"))
       }
     }
-  }
-
-  /// Key hints of the process panel over its bottom border, `start` cells from its left edge.
-  pub(super) fn render_proc_hints(&self, f: &mut Frame, area: Rect, start: u16) {
-    let view = &self.proc_view;
-    let mut hints = vec![];
-    if view.typing() {
-      hints.extend([("enter", "keep"), ("esc", "clear"), ("↑↓", "select")]);
-    } else {
-      hints.extend([("/", "filter"), ("s", "sort"), ("S", "reverse"), ("↑↓", "select")]);
-      if view.selected_pid().is_some() || !view.filter().is_empty() {
-        hints.push(("esc", "clear"));
-      }
-    }
-
-    let hints: Vec<(&str, String)> = hints.into_iter().map(|(k, l)| (k, l.to_string())).collect();
-    self.draw_hints(f, area, start, &hints);
   }
 }
 

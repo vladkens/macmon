@@ -21,41 +21,6 @@ impl RatioMode {
   }
 }
 
-/// Visible TUI panels. Fields missing in the config file default to visible.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
-#[serde(default)]
-pub struct Panels {
-  pub cpu: bool,
-  pub gpu: bool,
-  pub mem: bool,
-  pub power: bool,
-  pub proc: bool,
-}
-
-impl Default for Panels {
-  fn default() -> Self {
-    Self { cpu: true, gpu: true, mem: true, power: true, proc: true }
-  }
-}
-
-impl Panels {
-  /// Flips the panel bound to key `1`–`5` (cpu, gpu, mem, power, proc).
-  /// Returns `false` and changes nothing for other keys.
-  pub fn toggle(&mut self, key: char) -> bool {
-    let shown = match key {
-      '1' => &mut self.cpu,
-      '2' => &mut self.gpu,
-      '3' => &mut self.mem,
-      '4' => &mut self.power,
-      '5' => &mut self.proc,
-      _ => return false,
-    };
-
-    *shown = !*shown;
-    true
-  }
-}
-
 /// Process list sort key.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub enum ProcSort {
@@ -93,21 +58,19 @@ impl ProcSort {
 }
 
 /// Settings saved in `~/.config/macmon.json`. Fields of older versions (`color`, `theme`,
-/// `view_type`) are ignored, so old files keep loading.
+/// `view_type`, `per_core_view`, `panels`) are ignored, so old files keep loading.
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
   #[serde_inline_default(1000)]
   pub interval: u32,
 
-  #[serde_inline_default(false)]
-  pub per_core_view: bool,
-
   #[serde_inline_default(RatioMode::Scaled)]
   pub ratio_mode: RatioMode,
 
-  #[serde(default)]
-  pub panels: Panels,
+  /// Process list below the metrics (`p`).
+  #[serde_inline_default(true)]
+  pub show_procs: bool,
 
   #[serde_inline_default(ProcSort::Cpu)]
   pub proc_sort: ProcSort,
@@ -180,11 +143,6 @@ impl Config {
     self.save();
   }
 
-  pub fn toggle_per_core_view(&mut self) {
-    self.per_core_view = !self.per_core_view;
-    self.save();
-  }
-
   pub fn toggle_ratio_mode(&mut self) {
     self.ratio_mode = match self.ratio_mode {
       RatioMode::Scaled => RatioMode::Active,
@@ -193,11 +151,9 @@ impl Config {
     self.save();
   }
 
-  /// Shows / hides the panel bound to key `1`–`5`; other keys are ignored.
-  pub fn toggle_panel(&mut self, key: char) {
-    if self.panels.toggle(key) {
-      self.save();
-    }
+  pub fn toggle_procs(&mut self) {
+    self.show_procs = !self.show_procs;
+    self.save();
   }
 
   pub fn set_proc_sort(&mut self, sort: ProcSort, desc: bool) {
@@ -209,7 +165,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-  use super::{Config, Panels, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS};
+  use super::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS};
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
@@ -217,9 +173,8 @@ mod tests {
 
   fn assert_defaults(cfg: &Config) {
     assert_eq!(cfg.interval, 1000);
-    assert!(!cfg.per_core_view);
     assert_eq!(cfg.ratio_mode, RatioMode::Scaled);
-    assert_eq!(cfg.panels, Panels::default());
+    assert!(cfg.show_procs);
     assert_eq!(cfg.proc_sort, ProcSort::Cpu);
     assert!(cfg.proc_sort_desc);
   }
@@ -228,9 +183,6 @@ mod tests {
   fn empty_json_loads_defaults() {
     assert_defaults(&parse("{}"));
     assert_defaults(&Config::default());
-
-    let panels = Panels::default();
-    assert!(panels.cpu && panels.gpu && panels.mem && panels.power && panels.proc);
   }
 
   #[test]
@@ -254,23 +206,25 @@ mod tests {
     );
 
     assert_eq!(cfg.interval, 500);
-    assert!(cfg.per_core_view);
     assert_eq!(cfg.ratio_mode, RatioMode::Active);
-    assert_eq!(cfg.panels, Panels::default());
+    assert!(cfg.show_procs);
     assert_eq!(cfg.proc_sort, ProcSort::Cpu);
     assert!(cfg.proc_sort_desc);
 
-    // themes and graph styles of earlier redesign builds, unknown values too
+    // themes, graph styles, panels and the cores row of earlier redesign builds, unknown values too
     for json in [
       r#"{"view_type": "Sparkline", "color": "Green"}"#,
       r#"{"view_type": "Braille", "theme": "nord"}"#,
       r#"{"view_type": "Block", "theme": "dracula"}"#,
       r#"{"view_type": "Unknown", "theme": 42, "color": null}"#,
+      r#"{"per_core_view": true, "panels": {"cpu": false, "proc": false}}"#,
+      r#"{"per_core_view": "yes", "panels": [1, 2]}"#,
     ] {
       assert_defaults(&parse(json));
     }
-    let cfg = parse(r#"{"view_type": "Block", "theme": "mono", "panels": {"gpu": false}}"#);
-    assert_eq!(cfg.panels, Panels { gpu: false, ..Panels::default() });
+    let cfg = parse(r#"{"panels": {"proc": false}, "show_procs": false, "interval": 2000}"#);
+    assert!(!cfg.show_procs);
+    assert_eq!(cfg.interval, 2000);
   }
 
   #[test]
@@ -280,27 +234,21 @@ mod tests {
   }
 
   #[test]
-  fn partial_panels_default_to_visible() {
-    let cfg = parse(r#"{"panels": {"proc": false, "gpu": false}}"#);
-    assert_eq!(cfg.panels, Panels { gpu: false, proc: false, ..Panels::default() });
-  }
-
-  #[test]
   fn new_fields_round_trip() {
     let cfg = Config {
-      panels: Panels { mem: false, ..Panels::default() },
+      show_procs: false,
       proc_sort: ProcSort::Power,
       proc_sort_desc: false,
       ..Config::default()
     };
 
     let json = serde_json::to_string(&cfg).unwrap();
-    for old in ["color", "theme", "view_type"] {
+    for old in ["color", "theme", "view_type", "per_core_view", "panels"] {
       assert!(!json.contains(old), "{old} in {json}");
     }
 
     let cfg = parse(&json);
-    assert_eq!(cfg.panels, Panels { mem: false, ..Panels::default() });
+    assert!(!cfg.show_procs);
     assert_eq!(cfg.proc_sort, ProcSort::Power);
     assert!(!cfg.proc_sort_desc);
   }
@@ -320,34 +268,12 @@ mod tests {
   }
 
   #[test]
-  fn toggle_panel_flips_one_panel() {
-    let all = Panels::default();
-    let cases = [
-      ('1', Panels { cpu: false, ..all }),
-      ('2', Panels { gpu: false, ..all }),
-      ('3', Panels { mem: false, ..all }),
-      ('4', Panels { power: false, ..all }),
-      ('5', Panels { proc: false, ..all }),
-    ];
-
-    for (key, hidden) in cases {
-      let mut cfg = Config::default();
-      cfg.toggle_panel(key);
-      assert_eq!(cfg.panels, hidden, "key {key}");
-      cfg.toggle_panel(key);
-      assert_eq!(cfg.panels, all, "key {key}");
-    }
-  }
-
-  #[test]
-  fn toggle_panel_ignores_other_keys() {
-    let mut panels = Panels::default();
-    for key in ['0', '6', '9', 'a', ' '] {
-      assert!(!panels.toggle(key));
-    }
-    assert_eq!(panels, Panels::default());
-    assert!(panels.toggle('5'));
-    assert!(!panels.proc);
+  fn toggle_procs_flips_process_list() {
+    let mut cfg = Config::default();
+    cfg.toggle_procs();
+    assert!(!cfg.show_procs);
+    cfg.toggle_procs();
+    assert!(cfg.show_procs);
   }
 
   #[test]

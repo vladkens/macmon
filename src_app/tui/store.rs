@@ -1,11 +1,13 @@
 //! Metric history stores used by the terminal UI.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use crate::config::RatioMode;
-use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, SocInfo};
+use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
-pub(super) const MAX_SPARKLINE: usize = 128;
+/// Samples kept for the history graphs, newest first: 2 per braille cell, enough to fill the
+/// strips of a terminal about 1100 columns wide.
+pub(super) const HISTORY_LEN: usize = 2048;
+/// Latest samples behind the power average and maximum.
+pub(super) const STATS_LEN: usize = 128;
 const MAX_TEMPS: usize = 8;
 
 #[derive(Debug, Default, Clone)]
@@ -29,16 +31,12 @@ impl FreqSample {
       active_ratio: active_ratio as f64,
     }
   }
-
-  fn from_core(core: &CpuCoreMetrics) -> Self {
-    Self::new(core.freq_mhz, core.scaled_ratio, core.active_ratio)
-  }
 }
 
 impl RatioSeries {
   fn push(&mut self, ratio: f64) {
     self.items.insert(0, (ratio * 100.0) as u64);
-    self.items.truncate(MAX_SPARKLINE);
+    self.items.truncate(HISTORY_LEN);
     self.ratio = ratio;
   }
 }
@@ -66,53 +64,6 @@ impl FreqStore {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct CoreId {
-  pub(super) die_id: usize,
-  pub(super) core_id: usize,
-}
-
-impl From<&CpuCoreMetrics> for CoreId {
-  fn from(core: &CpuCoreMetrics) -> Self {
-    Self { die_id: core.die_id, core_id: core.core_id }
-  }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct CpuFreqStore {
-  pub(super) aggregate: FreqStore,
-  pub(super) cores: BTreeMap<CoreId, FreqStore>,
-}
-
-impl CpuFreqStore {
-  pub(super) fn push(&mut self, aggregate: FreqSample, cores: &[CpuCoreMetrics]) {
-    self.aggregate.push(aggregate);
-
-    let mut seen = BTreeSet::new();
-    for core in cores {
-      let id = CoreId::from(core);
-      self.cores.entry(id).or_default().push(FreqSample::from_core(core));
-      seen.insert(id);
-    }
-
-    for (id, store) in &mut self.cores {
-      if !seen.contains(id) {
-        store.push(FreqSample::default());
-      }
-    }
-  }
-
-  /// Die of every core, in core order (grouped by die).
-  pub(super) fn dies(&self) -> Vec<usize> {
-    self.cores.keys().map(|id| id.die_id).collect()
-  }
-
-  /// Latest ratio of every core, in core order.
-  pub(super) fn core_ratios(&self, mode: RatioMode) -> Vec<f64> {
-    self.cores.values().map(|core| core.ratio(mode).ratio).collect()
-  }
-}
-
 /// One CPU cluster of a metrics sample.
 pub(super) struct ClusterSample<'a> {
   /// Tier label: `E` / `P` on M1–M4, `P` / `S` on M5+.
@@ -120,7 +71,6 @@ pub(super) struct ClusterSample<'a> {
   /// Core count from `SocInfo`, for the chip summary.
   pub(super) count: usize,
   pub(super) aggregate: FreqSample,
-  pub(super) cores: &'a [CpuCoreMetrics],
 }
 
 /// History of one CPU cluster.
@@ -128,7 +78,7 @@ pub(super) struct ClusterSample<'a> {
 pub(super) struct ClusterStore {
   pub(super) label: String,
   pub(super) count: usize,
-  pub(super) freq: CpuFreqStore,
+  pub(super) freq: FreqStore,
 }
 
 /// Histories of the CPU clusters, lowest tier first, as many as the samples have.
@@ -151,32 +101,24 @@ impl CpuClusters {
 
       let cluster = &mut self.items[i];
       cluster.count = sample.count;
-      cluster.freq.push(sample.aggregate, sample.cores);
+      cluster.freq.push(sample.aggregate);
     }
   }
 }
 
 /// CPU clusters of a metrics sample, lowest tier first. The library reports two tiers today; the
 /// TUI takes any number of them.
-pub(super) fn cluster_samples<'a>(soc: &'a SocInfo, data: &'a Metrics) -> [ClusterSample<'a>; 2] {
+pub(super) fn cluster_samples<'a>(soc: &'a SocInfo, data: &Metrics) -> [ClusterSample<'a>; 2] {
   let ecpu = FreqSample::new(data.ecpu_freq_mhz, data.ecpu_scaled_ratio, data.ecpu_active_ratio);
   let pcpu = FreqSample::new(data.pcpu_freq_mhz, data.pcpu_scaled_ratio, data.pcpu_active_ratio);
   [
-    ClusterSample {
-      label: &soc.ecpu_label,
-      count: soc.ecpu_cores.into(),
-      aggregate: ecpu,
-      cores: &data.ecpu_cores,
-    },
-    ClusterSample {
-      label: &soc.pcpu_label,
-      count: soc.pcpu_cores.into(),
-      aggregate: pcpu,
-      cores: &data.pcpu_cores,
-    },
+    ClusterSample { label: &soc.ecpu_label, count: soc.ecpu_cores.into(), aggregate: ecpu },
+    ClusterSample { label: &soc.pcpu_label, count: soc.pcpu_cores.into(), aggregate: pcpu },
   ]
 }
 
+/// Power history (mW, newest first) with the smoothed current value, and the average and maximum
+/// of the latest `STATS_LEN` samples.
 #[derive(Debug, Default)]
 pub(super) struct PowerStore {
   pub(super) items: Vec<u64>,
@@ -190,11 +132,12 @@ impl PowerStore {
     let was_top = if !self.items.is_empty() { self.items[0] as f64 / 1000.0 } else { 0.0 };
 
     self.items.insert(0, (value * 1000.0) as u64);
-    self.items.truncate(MAX_SPARKLINE);
+    self.items.truncate(HISTORY_LEN);
 
+    let stats = &self.items[..self.items.len().min(STATS_LEN)];
     self.top_value = avg2(was_top, value);
-    self.avg_value = self.items.iter().sum::<u64>() as f64 / self.items.len() as f64 / 1000.0;
-    self.max_value = self.items.iter().max().map_or(0, |v| *v) as f64 / 1000.0;
+    self.avg_value = stats.iter().sum::<u64>() as f64 / stats.len() as f64 / 1000.0;
+    self.max_value = stats.iter().max().map_or(0, |v| *v) as f64 / 1000.0;
   }
 }
 
@@ -285,16 +228,12 @@ fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
 
 #[cfg(test)]
 mod tests {
-  use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, SocInfo};
+  use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
-  use super::{ClusterSample, CoreId, CpuClusters, CpuFreqStore, FanStore, FreqSample};
-  use super::{MAX_SPARKLINE, MAX_TEMPS, MemoryStore, PowerStore, TempStore};
+  use super::{ClusterSample, CpuClusters, FanStore, FreqSample, FreqStore};
+  use super::{HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN, TempStore};
   use super::{avg2, cluster_samples};
   use crate::config::RatioMode;
-
-  fn core(die_id: usize, core_id: usize, freq_mhz: u32, ratio: f32) -> CpuCoreMetrics {
-    CpuCoreMetrics { die_id, core_id, freq_mhz, scaled_ratio: ratio, active_ratio: ratio }
-  }
 
   fn assert_close(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < 1e-9, "expected {expected}, got {actual}");
@@ -331,12 +270,56 @@ mod tests {
   #[test]
   fn power_store_caps_history() {
     let mut store = PowerStore::default();
-    for i in 0..(MAX_SPARKLINE + 10) {
+    for i in 0..(HISTORY_LEN + 10) {
       store.push(i as f64);
     }
 
-    assert_eq!(store.items.len(), MAX_SPARKLINE);
-    assert_eq!(store.items[0], ((MAX_SPARKLINE + 9) * 1000) as u64);
+    assert_eq!(store.items.len(), HISTORY_LEN);
+    assert_eq!(store.items[0], ((HISTORY_LEN + 9) * 1000) as u64);
+  }
+
+  #[test]
+  fn power_stats_cover_latest_samples_only() {
+    // a 50 W peak, then STATS_LEN samples of 1 and 3 W: the graph keeps the peak, the average and
+    // maximum don't
+    let mut store = PowerStore::default();
+    store.push(50.0);
+    for i in 0..STATS_LEN {
+      store.push(if i % 2 == 0 { 1.0 } else { 3.0 });
+    }
+
+    assert_eq!(store.items.len(), STATS_LEN + 1);
+    assert_eq!(store.items.last(), Some(&50_000));
+    assert_close(store.avg_value, 2.0);
+    assert_close(store.max_value, 3.0);
+
+    // one sample less: the peak is still in the window
+    let mut store = PowerStore::default();
+    store.push(50.0);
+    for _ in 1..STATS_LEN {
+      store.push(1.0);
+    }
+    assert_close(store.max_value, 50.0);
+    assert_close(store.avg_value, (50.0 + (STATS_LEN - 1) as f64) / STATS_LEN as f64);
+  }
+
+  #[test]
+  fn freq_store_keeps_long_history() {
+    let mut store = FreqStore::default();
+    for _ in 0..(HISTORY_LEN + 5) {
+      store.push(FreqSample::new(1000, 0.25, 0.5));
+    }
+    store.push(FreqSample::new(3000, 0.75, 1.0));
+
+    assert_eq!(store.freq_mhz, 3000);
+    for mode in [RatioMode::Scaled, RatioMode::Active] {
+      assert_eq!(store.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
+    }
+    // newest first
+    let scaled = store.ratio(RatioMode::Scaled);
+    assert_eq!(scaled.items[..2], [75, 25]);
+    assert_close(scaled.ratio, 0.75);
+    assert_eq!(store.ratio(RatioMode::Active).items[..2], [100, 50]);
   }
 
   #[test]
@@ -376,72 +359,29 @@ mod tests {
     assert_eq!(store.last(), (MAX_TEMPS + 5) as f32);
   }
 
-  #[test]
-  fn cpu_freq_store_pushes_idle_sample_for_missing_core() {
-    let mut store = CpuFreqStore::default();
-    let aggregate = FreqSample::new(2000, 0.5, 0.6);
-
-    store.push(aggregate, &[core(0, 0, 2000, 0.4), core(0, 1, 2400, 0.8)]);
-    store.push(aggregate, &[core(0, 0, 1800, 0.2)]);
-
-    assert_eq!(store.cores.len(), 2);
-    assert_eq!(store.aggregate.freq_mhz, 2000);
-    assert_eq!(store.aggregate.ratio(RatioMode::Scaled).items, vec![50, 50]);
-    assert_eq!(store.aggregate.ratio(RatioMode::Active).items, vec![60, 60]);
-
-    let core0 = &store.cores[&CoreId { die_id: 0, core_id: 0 }];
-    assert_eq!(core0.freq_mhz, 1800);
-    assert_eq!(core0.ratio(RatioMode::Scaled).items, vec![20, 40]);
-
-    let core1 = &store.cores[&CoreId { die_id: 0, core_id: 1 }];
-    assert_eq!(core1.freq_mhz, 0);
-    assert_eq!(core1.ratio(RatioMode::Scaled).items, vec![0, 80]);
-    assert_eq!(core1.ratio(RatioMode::Scaled).ratio, 0.0);
-    assert_eq!(core1.ratio(RatioMode::Active).items, vec![0, 80]);
-  }
-
-  #[test]
-  fn cpu_freq_store_core_dies_and_ratios() {
-    let mut store = CpuFreqStore::default();
-    assert!(store.dies().is_empty());
-    assert!(store.core_ratios(RatioMode::Scaled).is_empty());
-
-    let mut cores = [core(1, 0, 1000, 0.25), core(0, 1, 1000, 0.5), core(0, 0, 1000, 0.75)];
-    cores[0].active_ratio = 1.0;
-    store.push(FreqSample::default(), &cores);
-
-    // sorted by die, then core
-    assert_eq!(store.dies(), [0, 0, 1]);
-    assert_eq!(store.core_ratios(RatioMode::Scaled), [0.75, 0.5, 0.25]);
-    assert_eq!(store.core_ratios(RatioMode::Active), [0.75, 0.5, 1.0]);
-  }
-
-  fn sample<'a>(label: &'a str, ratio: f32, cores: &'a [CpuCoreMetrics]) -> ClusterSample<'a> {
-    let aggregate = FreqSample::new(1000, ratio, ratio);
-    ClusterSample { label, count: cores.len(), aggregate, cores }
+  fn sample(label: &str, ratio: f32, count: usize) -> ClusterSample<'_> {
+    ClusterSample { label, count, aggregate: FreqSample::new(1000, ratio, ratio) }
   }
 
   #[test]
   fn cpu_clusters_follow_samples() {
-    let cores = [core(0, 0, 1000, 0.5), core(0, 1, 1000, 0.5)];
     let mut clusters = CpuClusters::default();
 
     // three tiers, like M6 (6E + 4P + 2S)
-    let three = [sample("E", 0.1, &cores), sample("P", 0.2, &cores), sample("S", 0.3, &cores[..1])];
+    let three = [sample("E", 0.1, 6), sample("P", 0.2, 4), sample("S", 0.3, 2)];
     clusters.push(&three);
     clusters.push(&three);
     let labels: Vec<&str> = clusters.items.iter().map(|c| c.label.as_str()).collect();
     assert_eq!(labels, ["E", "P", "S"]);
-    assert_eq!(clusters.items[2].count, 1);
-    assert_eq!(clusters.items[2].freq.cores.len(), 1);
-    assert_eq!(clusters.items[1].freq.aggregate.ratio(RatioMode::Scaled).items, [20, 20]);
+    assert_eq!(clusters.items[2].count, 2);
+    assert_eq!(clusters.items[1].freq.ratio(RatioMode::Scaled).items, [20, 20]);
 
     // fewer clusters drop the rest, a changed label starts a new history
-    clusters.push(&[sample("E", 0.4, &cores), sample("X", 0.5, &cores)]);
+    clusters.push(&[sample("E", 0.4, 6), sample("X", 0.5, 4)]);
     assert_eq!(clusters.items.len(), 2);
-    assert_eq!(clusters.items[0].freq.aggregate.ratio(RatioMode::Scaled).items, [40, 10, 10]);
+    assert_eq!(clusters.items[0].freq.ratio(RatioMode::Scaled).items, [40, 10, 10]);
     assert_eq!(clusters.items[1].label, "X");
-    assert_eq!(clusters.items[1].freq.aggregate.ratio(RatioMode::Scaled).items, [50]);
+    assert_eq!(clusters.items[1].freq.ratio(RatioMode::Scaled).items, [50]);
   }
 
   #[test]
@@ -458,17 +398,16 @@ mod tests {
       ecpu_scaled_ratio: 0.5,
       pcpu_freq_mhz: 4000,
       pcpu_active_ratio: 0.25,
-      pcpu_cores: vec![core(0, 0, 4000, 0.25)],
       ..Default::default()
     };
 
     let [low, high] = cluster_samples(&soc, &data);
-    assert_eq!((low.label, low.count, low.cores.len()), ("P", 6, 0));
-    assert_eq!((high.label, high.count, high.cores.len()), ("S", 4, 1));
+    assert_eq!((low.label, low.count), ("P", 6));
+    assert_eq!((high.label, high.count), ("S", 4));
 
     let mut clusters = CpuClusters::default();
     clusters.push(&[low, high]);
-    let [p, s] = [&clusters.items[0].freq.aggregate, &clusters.items[1].freq.aggregate];
+    let [p, s] = [&clusters.items[0].freq, &clusters.items[1].freq];
     assert_eq!((p.freq_mhz, p.ratio(RatioMode::Scaled).ratio), (2000, 0.5));
     assert_eq!((s.freq_mhz, s.ratio(RatioMode::Active).ratio), (4000, 0.25));
   }

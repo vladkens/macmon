@@ -83,6 +83,7 @@
 - ➕ Since Task 14 every power row has avg / max: `CPU   4.50W avg  3.10 max  8.20  45°C ⣀⣠⣤⣴⣶⣾⣿⣷`, `SYS  16.00W avg 14.00 max 20.00  fan 1200rpm`, `all   9.50W avg  8.00 max 12.00`. The column is as wide as its full text plus an 8-cell graph (46 cells with one fan) while the strips keep 36 cells, then shrinks to 31 cells (numbers with avg / max); graphs go first, then temperatures, then avg / max. Fans move to a row of their own when they don't fit after SYS.
 - Panel keys: `1` CPU strips + cores, `2` GPU strip, `3` RAM/SWAP strips, `4` power column, `5` proc box. Hidden rows shrink the top box; with every metric hidden the proc box takes the full height; with proc hidden the top box takes the full height.
 - Key hints: global + proc hints on the bottom border of the bottom-most box (proc hints drop first, `q quit` always stays).
+- ➕ Since Task 16 (user review): the top box is as tall as its content and the proc box takes the rest (no `PROC_HEIGHT_PCT`, no growing strips); no cores row, no `d`, no panel keys — metrics are always visible and `p` shows / hides the proc box; header = chip info left, `macmon vX` right; hints right-aligned `q quit | r scaled | -/+ 1000ms | / filter | s sort`; power rows `CPU` / `GPU` / `ANE` / `Power` (all_power) / `Total` (sys_power) + fans. See the Task 16 mockup.
 
 ### Layout (A) — superseded by Layout V3
 ```
@@ -117,6 +118,7 @@
 ### Config migration
 - `color`, `theme`, `view_type` fields dropped (serde ignores unknown fields, old files keep loading).
 - New: `panels` (5 bools, default all on), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
+- ➕ Task 16: `panels` and `per_core_view` dropped (ignored on load); new `show_procs` (default `true`, key `p`).
 
 ### Process sampling (`src_app/procs.rs`)
 - `ProcInfo { pid, ppid, name, user, cpu_pct, mem_bytes, power_w: Option<f32>, gpu_pct }`.
@@ -135,7 +137,7 @@
 - Unavailable values render as `-` in dim color; values colored by theme gradient.
 
 ### Keys (final)
-- `q` / `Ctrl-C` quit · `d` per-core · `r` ratio mode · `-`/`+` interval · `1`–`5` panels · `/` filter · `s`/`S` sort · arrows / PgUp / PgDn / Home / End selection · `Esc` cancel.
+- `q` / `Ctrl-C` quit · ~~`d` per-core~~ · `r` ratio mode · `-`/`+` interval · ~~`1`–`5` panels~~ `p` process list (➕ Task 16) · `/` filter · `s`/`S` sort · arrows / PgUp / PgDn / Home / End selection · `Esc` cancel.
 
 ## What Goes Where
 - **Implementation Steps** (`[ ]` checkboxes): code, tests, docs in this repo.
@@ -391,15 +393,15 @@ Target (100 columns):
 - Modify: `readme.md`
 - Modify: `changelog.md`
 
-- [ ] top box height = max(strip rows, power rows) + borders; process box gets all remaining height; remove `PROC_HEIGHT_PCT` and spare-row growth; process list auto-hides only when the remaining height is below `PROC_MIN_ROWS`
-- [ ] graph history sized to fill the widest possible strip (newest on the right, full width once enough samples exist); `PowerStore` avg / max still over the last 128 samples
-- [ ] header: chip info left, `macmon vX` right; remove the clock and the interval
-- [ ] hints: right-aligned on the bottom border of the bottom-most box, ` q quit | r scaled | -/+ 1000ms ` (+ ` / filter | s sort ` when the process list is visible); drop items from the end when narrow, `q quit` always stays
-- [ ] power labels `Power` (all_power) and `Total` (sys_power); fans on the Total row or their own row when they don't fit
-- [ ] remove the cores row, `d`, the `per_core` config field and the core-bar code; remove keys `1`–`5` and the `panels` config field; add `p` to show / hide the process list, persisted in config (old configs with `panels` / `per_core` still load)
-- [ ] update `readme.md` Controls / features and the `changelog.md` Unreleased entry for the key changes
-- [ ] write tests: top box height equals its content rows at 200x50, 120x40, 80x24 and the process box gets the rest; graph fills the full strip width once history is full; header has no clock / interval; hint text and right alignment, narrow-width truncation; `d` and `1`–`5` do nothing; `p` toggles and persists; old configs with `panels` / `per_core` load
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] top box height = max(strip rows, power rows) + borders; process box gets all remaining height; remove `PROC_HEIGHT_PCT` and spare-row growth; process list auto-hides only when the remaining height is below `PROC_MIN_ROWS` (`compute_layout(area, procs, &Content)`; under the strips (< 70 columns) strips + power rows; one row per strip; a hidden or auto-hidden process list leaves the top box at its content height (blank screen below, no stretching); a screen shorter than the content cuts the rows that don't fit)
+- [x] graph history sized to fill the widest possible strip (newest on the right, full width once enough samples exist); `PowerStore` avg / max still over the last 128 samples (`store::HISTORY_LEN = 2048` samples = 1024 braille cells, strips of terminals up to ~1100 columns; `STATS_LEN = 128` for avg / max; the per-core stores went with the cores row, so `ClusterStore` keeps one `FreqStore`)
+- [x] header: chip info left, `macmon vX` right; remove the clock and the interval (the version is dropped when it doesn't fit next to the chip info)
+- [x] hints: right-aligned on the bottom border of the bottom-most box, ` q quit | r scaled | -/+ 1000ms ` (+ ` / filter | s sort ` when the process list is visible); drop items from the end when narrow, `q quit` always stays (ends with `─╯` like the right title; keys bold, ` | ` dim; `q quit` stays as long as it fits, plain border below 12 columns; the hints don't change while typing a filter; old `draw_hints` / `render_proc_hints` removed)
+- [x] power labels `Power` (all_power) and `Total` (sys_power); fans on the Total row or their own row when they don't fit (labels 5 cells, `CPU    4.50W avg …` as in the mockup; order CPU, GPU, ANE, Power, Total; widths: full column 47 cells, min 32, fans inline from 45; at 80 columns the column is 37 cells, so temperatures go there now)
+- [x] remove the cores row, `d`, the `per_core` config field and the core-bar code; remove keys `1`–`5` and the `panels` config field; add `p` to show / hide the process list, persisted in config (old configs with `panels` / `per_core` still load) (config field `show_procs`; removed `core_lines` / `CoreLine` / `ClusterCores`, `core_bar`, `CpuFreqStore` / `CoreId`, `Panels`, the "all panels hidden" hint; `ProcView::selected_pid` is test-only now)
+- [x] update `readme.md` Controls / features and the `changelog.md` Unreleased entry for the key changes (readme: `p`, no `d` / `1`–`5`, Power / Total explained; changelog: `d` removal under Breaking Changes, `p` instead of panel toggles, long history charts)
+- [x] write tests: top box height equals its content rows at 200x50, 120x40, 80x24 and the process box gets the rest; graph fills the full strip width once history is full; header has no clock / interval; hint text and right alignment, narrow-width truncation; `d` and `1`–`5` do nothing; `p` toggles and persists; old configs with `panels` / `per_core` load (plus `matches_target_layout_at_100_columns`: the mockup row by row; layout tests rewritten for content height; `power_stats_cover_latest_samples_only`, `freq_store_keeps_long_history`; real binary on a pty at 110x26 / 100x30 / 60x20 matches the mockup, `p` hides the list and saves `show_procs: false`)
+- [x] run `make test` and `make check` - must pass before next task
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
@@ -409,7 +411,7 @@ Target (100 columns):
 - `cargo run --release` in a real terminal: walk through every key (Task 13 drove them only on a pty with an emulated screen).
 - Over SSH: stepped gradient, no palette query, no stray characters.
 - Small window (e.g. 60x15) and huge window; resize while running.
-- M-series with many cores (Max/Ultra) for the per-core grid; Mac without fans (MacBook Air).
+- M-series with many cores (Max/Ultra); Mac without fans (MacBook Air).
 - Compare CPU% / MEM / GPU% for a few processes with Activity Monitor.
 - CPU overhead of macmon itself with proc panel on vs off.
 

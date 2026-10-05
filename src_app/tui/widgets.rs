@@ -1,4 +1,4 @@
-//! Custom widgets: history graphs, horizontal meters and per-core bars.
+//! Custom widgets: history graphs and horizontal meters.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -12,17 +12,9 @@ const LEFT_DOTS: [u32; 5] = [0x00, 0x40, 0x44, 0x46, 0x47];
 const RIGHT_DOTS: [u32; 5] = [0x00, 0x80, 0xa0, 0xb0, 0xb8];
 const BRAILLE_BLANK: u32 = 0x2800;
 const DOTS_PER_ROW: u64 = 4;
-/// Vertical bars of the per-core row, lowest first; an idle core still shows the lowest one.
-pub const CORE_BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
 fn clamp_ratio(ratio: f64) -> f64 {
   if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) }
-}
-
-/// One-cell vertical bar for a core load `ratio` (`▁` idle … `█` busy).
-pub fn core_bar(ratio: f64) -> &'static str {
-  let level = (clamp_ratio(ratio) * (CORE_BARS.len() - 1) as f64).round() as usize;
-  CORE_BARS[level.min(CORE_BARS.len() - 1)]
 }
 
 /// Braille history graph for newest-first samples, right-aligned (newest sample on the right): a
@@ -140,7 +132,7 @@ mod tests {
   use ratatui::style::Color;
   use ratatui::widgets::Widget;
 
-  use super::{Graph, Meter, core_bar, dot_level};
+  use super::{Graph, Meter, dot_level};
   use crate::tui::palette::Palette;
   use crate::tui::theme::Theme;
 
@@ -264,19 +256,6 @@ mod tests {
       let buf = draw(Graph::new(&[100; 8], &theme), w, h);
       assert!(buf.content.is_empty());
     }
-  }
-
-  #[test]
-  fn core_bars_by_load() {
-    assert_eq!(core_bar(0.0), "▁", "idle cores stay visible");
-    assert_eq!(core_bar(0.5), "▅");
-    assert_eq!(core_bar(1.0), "█");
-    assert_eq!(core_bar(0.07), "▁");
-    assert_eq!(core_bar(0.08), "▂");
-    // out of range values are clamped
-    assert_eq!(core_bar(-1.0), "▁");
-    assert_eq!(core_bar(f64::NAN), "▁");
-    assert_eq!(core_bar(2.0), "█");
   }
 
   #[test]

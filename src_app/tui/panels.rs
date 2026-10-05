@@ -1,6 +1,6 @@
-//! Metrics box (CPU cluster / GPU / RAM / SWAP strips, per-core bars, power column) and the box
-//! frame it shares with the process list: rounded borders, titles fitted on the top border and
-//! key hints on the bottom border.
+//! Metrics box (CPU cluster / GPU / RAM / SWAP strips, power column) and the box frame it shares
+//! with the process list: rounded borders, titles fitted on the top border and key hints on the
+//! bottom border.
 
 use std::borrow::Cow;
 
@@ -12,27 +12,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
 
 use super::App;
-use super::layout::{
-  CORE_RUN_GAP, ClusterCores, Content, CoreLine, LayoutPlan, PowerSize, Strip, compute_layout,
-  die_label,
-};
+use super::layout::{Content, LayoutPlan, PowerSize, Strip, compute_layout};
 use super::store::{FreqStore, PowerStore};
-use super::widgets::{Graph, Meter, core_bar};
+use super::widgets::{Graph, Meter};
 use crate::config::RatioMode;
 
 const GB: f64 = (1u64 << 30) as f64;
-/// Blank cells between key hints on the bottom border.
-const HINT_GAP: u16 = 2;
+/// Between key hints on the bottom border.
+const HINT_SEPARATOR: &str = " | ";
 /// Narrowest power history graph worth drawing; a narrower power column drops the graphs.
 const POWER_GRAPH_MIN: u16 = 8;
-/// Between the SYS power and the fans on one row.
+/// Between the Total power and the fans on one row.
 const FANS_GAP: &str = "  ";
 /// Narrowest detail column of the strips (`1.8GHz`, `20/36G`).
 const DETAIL_MIN_WIDTH: usize = 6;
-/// Label of the per-core bars, in the strip label column of the first cores line.
-const CORES_LABEL: &str = "cores";
 /// Strip labels besides the CPU clusters', for the label column width.
-const STRIP_LABELS: [&str; 4] = ["GPU", "RAM", "SWAP", CORES_LABEL];
+const STRIP_LABELS: [&str; 3] = ["GPU", "RAM", "SWAP"];
 
 pub(super) fn ratio(value: f64, total: f64) -> f64 {
   if total == 0.0 { 0.0 } else { value / total }
@@ -203,16 +198,16 @@ fn size_strip(label: &str, used: u64, total: u64) -> StripData<'static> {
   }
 }
 
-/// One row of the power column in parts: `CPU   4.50W` `avg  3.10 max  8.20` ` 45°C` `⣀⣠⣤⣴`.
+/// One row of the power column in parts: `CPU    4.50W` `avg  3.10 max  8.20` ` 45°C` `⣀⣠⣤⣴`.
 #[derive(Default)]
 struct PowerRow<'a> {
-  /// `CPU   4.50W`, or the fans on a row of their own: always shown.
+  /// `CPU    4.50W`, or the fans on a row of their own: always shown.
   head: Vec<Span<'static>>,
   /// ` avg  3.10 max  8.20`.
   stats: Vec<Span<'static>>,
   /// `  45°C`, blank for a unit without a sensor; empty for rows without a temperature.
   temp: Vec<Span<'static>>,
-  /// Fans after the SYS power, when they fit on its row.
+  /// Fans after the Total power, when they fit on its row.
   tail: Vec<Span<'static>>,
   history: Option<&'a [u64]>,
 }
@@ -304,77 +299,56 @@ impl App {
     inner
   }
 
-  /// Draws the global key hints over the bottom border of box `area`. Hints that don't fit are
-  /// dropped from the end, so `q quit` stays visible as long as possible. Returns where the hints
-  /// end, as for `draw_hints`.
-  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) -> Option<u16> {
-    let hints = [
+  /// Draws the key hints right-aligned over the bottom border of box `area`: `q quit | r scaled |
+  /// -/+ 1000ms`, then `/ filter | s sort` while the process list is on screen. Hints that don't
+  /// fit are dropped from the end, so `q quit` stays as long as it fits.
+  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect, procs: bool) {
+    let mut hints = vec![
       ("q", "quit".to_string()),
-      ("d", "cores".to_string()),
       ("r", self.cfg.ratio_mode.label().to_string()),
       ("-/+", format!("{}ms", self.cfg.interval)),
-      ("1-5", "panels".to_string()),
     ];
-
-    self.draw_hints(f, area, 2, &hints)
-  }
-
-  /// Draws `(key, label)` hints over the bottom border of box `area`, starting `start` cells from
-  /// its left edge. Hints that don't fit are dropped from the end. Returns the offset from the left
-  /// edge where the drawn hints end, `None` when none fit.
-  pub(super) fn draw_hints(
-    &self,
-    f: &mut Frame,
-    area: Rect,
-    start: u16,
-    hints: &[(&str, String)],
-  ) -> Option<u16> {
-    let items: Vec<[Span; 2]> = hints
-      .iter()
-      .map(|(key, label)| [self.heading(*key), self.text(format!(" {label}"))])
-      .collect();
-    let widths: Vec<u16> =
-      items.iter().map(|[key, label]| (key.width() + label.width()) as u16).collect();
-
-    // the line keeps a border cell and the corner on the right, hints get a padding space on
-    // both sides
-    let room = area.width.saturating_sub(start).saturating_sub(2);
-    let count = fit_count(room.saturating_sub(2), &widths, HINT_GAP);
-    if count == 0 {
-      return None;
+    if procs {
+      hints.extend([("/", "filter".to_string()), ("s", "sort".to_string())]);
     }
 
-    let gap = " ".repeat(HINT_GAP as usize);
+    let items: Vec<[Span; 2]> = hints
+      .into_iter()
+      .map(|(key, label)| [self.heading(key), self.text(format!(" {label}"))])
+      .collect();
+    let widths: Vec<u16> = items.iter().map(|item| spans_width(item)).collect();
+
+    // as the right title: a border cell before the corner, a blank cell on both sides of the text
+    let room = area.width.saturating_sub(4);
+    let separator = HINT_SEPARATOR.len() as u16;
+    let count = fit_count(room.saturating_sub(2), &widths, separator);
+    if count == 0 {
+      return;
+    }
+
     let mut spans = vec![Span::raw(" ")];
     for (i, item) in items.into_iter().take(count).enumerate() {
       if i > 0 {
-        spans.push(Span::raw(gap.clone()));
+        spans.push(self.dim(HINT_SEPARATOR));
       }
       spans.extend(item);
     }
     spans.push(Span::raw(" "));
 
-    let line = Line::from(spans).style(self.theme.text);
-    f.buffer_mut().set_line(area.x + start, area.bottom() - 1, &line, room);
-    Some(start + width_u16(&line))
+    let line = Line::from(spans);
+    let width = width_u16(&line);
+    f.buffer_mut().set_line(area.right() - 2 - width, area.bottom() - 1, &line, width);
   }
 
-  /// Screen layout for the visible panels and the current metrics.
+  /// Screen layout for the current metrics.
   pub(super) fn layout(&self, area: Rect) -> LayoutPlan {
-    let clusters: Vec<ClusterCores> = self
-      .clusters
-      .items
-      .iter()
-      .map(|c| ClusterCores { label: &c.label, dies: c.freq.dies() })
-      .collect();
     let content = Content {
-      clusters: &clusters,
+      clusters: self.clusters.items.len(),
       swap: self.mem.swap_total > 0,
       power: self.power_size(),
-      cores_indent: self.cores_indent() as u16,
     };
 
-    compute_layout(area, self.cfg.panels, self.cfg.per_core_view, &content)
+    compute_layout(area, self.cfg.show_procs, &content)
   }
 
   /// Width of the strip label column: the widest strip label.
@@ -383,17 +357,10 @@ impl App {
     STRIP_LABELS.iter().map(|label| label.len()).chain(clusters).max().unwrap_or(0)
   }
 
-  /// Cells before the bars on a cores line: the label column and the space before the percent,
-  /// so the bars start under the digits of `" 42%"`.
-  fn cores_indent(&self) -> usize {
-    self.label_width() + 2
-  }
-
-  /// Metrics box: chip summary, clock and version in the title, strips, cores lines and the power
-  /// column inside.
+  /// Metrics box: chip summary and version in the title, strips and the power column inside.
   pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
     let Some(area) = plan.top else { return };
-    self.draw_box(f, area, self.metrics_titles(area.width));
+    self.draw_box(f, area, self.metrics_titles());
     let buf = f.buffer_mut();
 
     let label_width = self.label_width();
@@ -403,10 +370,6 @@ impl App {
     let detail_width = details.max().unwrap_or(0).max(DETAIL_MIN_WIDTH);
     for (strip, area) in strips {
       self.render_strip(buf, strip, area, label_width, detail_width);
-    }
-
-    for (i, (line, area)) in plan.cores.iter().enumerate() {
-      self.render_core_line(buf, line, *area, i == 0);
     }
 
     if let Some(sep) = plan.separator {
@@ -420,21 +383,11 @@ impl App {
     }
   }
 
-  /// Chip summary left (`M3 Pro · 6E+6P · 18GPU · 36GB`), clock and version right. The version
-  /// gives way to the chip summary first, the clock stays as long as it fits.
-  fn metrics_titles(&self, width: u16) -> Titles<'static> {
-    let chip = self.chip_title();
-    let clock = chrono::Local::now().format("%H:%M:%S").to_string();
-    let full = format!(
-      "{clock} · {} v{} · {}ms",
-      env!("CARGO_PKG_NAME"),
-      env!("CARGO_PKG_VERSION"),
-      self.cfg.interval
-    );
-
-    let full_width = Line::from(full.as_str()).width() as u16;
-    let fits = place_titles(width, &[width_u16(&chip) + 2], Some(full_width + 2)).right.is_some();
-    Titles::new(chip).right(self.text(if fits { full } else { clock }))
+  /// Chip summary left (`M3 Pro · 6E+6P · 18GPU · 36GB`), `macmon vX` right; the version gives
+  /// way to the chip summary.
+  fn metrics_titles(&self) -> Titles<'static> {
+    let version = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    Titles::new(self.chip_title()).right(self.text(version))
   }
 
   /// `M3 Pro · 6E+6P · 18GPU · 36GB`; core counts come from the CPU clusters, so a third tier
@@ -478,7 +431,7 @@ impl App {
     Some(match strip {
       Strip::Cluster(i) => {
         let cluster = self.clusters.items.get(i)?;
-        freq_strip(cluster_name(&cluster.label), &cluster.freq.aggregate, mode)
+        freq_strip(cluster_name(&cluster.label), &cluster.freq, mode)
       }
       Strip::Gpu => freq_strip("GPU".to_string(), &self.igpu_freq, mode),
       Strip::Ram => size_strip("RAM", mem.ram_usage, mem.ram_total),
@@ -486,7 +439,7 @@ impl App {
     })
   }
 
-  /// One strip: text on its first row, the graph (over all its rows) or meter after the text.
+  /// One strip: its text, then the history graph or meter up to the end of the row.
   fn render_strip(
     &self,
     buf: &mut Buffer,
@@ -514,42 +467,13 @@ impl App {
     }
   }
 
-  /// One line of core bars: `cores  E ▃▅▂▁  P ▇▆█▅`, `D1` prefix on multi-die lines.
-  fn render_core_line(&self, buf: &mut Buffer, line: &CoreLine, area: Rect, first: bool) {
-    let indent = self.cores_indent();
-    let label = if first { CORES_LABEL } else { "" };
-    let mut spans = vec![self.heading(format!("{label:<indent$}"))];
-    if let Some(die) = line.die {
-      spans.push(self.dim(format!("{} ", die_label(die))));
-    }
-
-    let mode = self.cfg.ratio_mode;
-    for (i, run) in line.runs.iter().enumerate() {
-      let Some(cluster) = self.clusters.items.get(run.cluster) else { continue };
-      if i > 0 {
-        spans.push(Span::raw(" ".repeat(CORE_RUN_GAP)));
-      }
-
-      // a wrapped cluster keeps its label cells blank, so the bars line up
-      let blank = || " ".repeat(cluster.label.chars().count());
-      let label = if run.label { cluster.label.clone() } else { blank() };
-      spans.push(self.heading(format!("{label} ")));
-
-      let ratios = cluster.freq.core_ratios(mode);
-      for &ratio in ratios.get(run.cores.clone()).unwrap_or_default() {
-        spans.push(Span::styled(core_bar(ratio), self.theme.gradient(ratio)));
-      }
-    }
-
-    buf.set_line(area.x, area.y, &Line::from(spans), area.width);
-  }
-
-  /// `{label} {current}W avg {avg} max {max}` of one power sensor.
+  /// `{label} {current}W avg {avg} max {max}` of one power sensor; labels are 5 cells wide
+  /// (`Power`, `Total`).
   fn power_row(&self, label: &str, store: &PowerStore) -> PowerRow<'static> {
     PowerRow {
       head: vec![
-        self.heading(format!("{label:<4}")),
-        self.text(format!("{:>6.2}W", store.top_value)),
+        self.heading(format!("{label:<5}")),
+        self.text(format!(" {:>5.2}W", store.top_value)),
       ],
       stats: vec![
         self.dim(" avg "),
@@ -562,8 +486,9 @@ impl App {
   }
 
   /// Power rows `width` cells wide: CPU / GPU / ANE with average, maximum, temperature and history,
-  /// SYS power with average and maximum and the fans (when available; the fans get a row of their
-  /// own when they don't fit after SYS), and the total.
+  /// then `Power` (CPU + GPU + ANE) and `Total` (system) with average and maximum, and the fans.
+  /// Total and the fans show only when available; the fans get a row of their own when they don't
+  /// fit after Total.
   fn power_rows(&self, width: u16) -> Vec<PowerRow<'_>> {
     let units = [
       ("CPU", &self.cpu_power, self.cpu_temp.last()),
@@ -580,32 +505,32 @@ impl App {
         PowerRow { temp, history: Some(&store.items), ..self.power_row(label, store) }
       })
       .collect();
+    rows.push(self.power_row("Power", &self.all_power));
 
-    let sys = (self.sys_power.top_value > 0.0).then(|| self.power_row("SYS", &self.sys_power));
+    let total = (self.sys_power.top_value > 0.0).then(|| self.power_row("Total", &self.sys_power));
     let fans = self.fans.label();
     let fans = (!fans.is_empty()).then(|| self.text(fans));
-    match (sys, fans) {
-      (Some(sys), Some(fans)) => {
+    match (total, fans) {
+      (Some(total), Some(fans)) => {
         let tail = FANS_GAP.len() + fans.width();
-        if usize::from(sys.widths().text(true, false)) + tail <= usize::from(width) {
-          rows.push(PowerRow { tail: vec![Span::raw(FANS_GAP), fans], ..sys });
+        if usize::from(total.widths().text(true, false)) + tail <= usize::from(width) {
+          rows.push(PowerRow { tail: vec![Span::raw(FANS_GAP), fans], ..total });
         } else {
-          rows.extend([sys, PowerRow { head: vec![fans], ..Default::default() }]);
+          rows.extend([total, PowerRow { head: vec![fans], ..Default::default() }]);
         }
       }
-      (sys, fans) => {
-        rows.extend(sys);
+      (total, fans) => {
+        rows.extend(total);
         rows.extend(fans.map(|fans| PowerRow { head: vec![fans], ..Default::default() }));
       }
     }
 
-    rows.push(self.power_row("all", &self.all_power));
     rows
   }
 
   /// Size of the power rows for the layout.
   fn power_size(&self) -> PowerSize {
-    // fans on the SYS row, as wide rows have them
+    // fans on the Total row, as wide rows have them
     let rows: Vec<PowerWidths> = self.power_rows(u16::MAX).iter().map(PowerRow::widths).collect();
     let full = |row: &PowerWidths| {
       let graph = if row.graph { 1 + POWER_GRAPH_MIN } else { 0 };
@@ -655,10 +580,10 @@ mod tests {
 
   const GB: u64 = 1 << 30;
 
-  /// Widths of real power rows: CPU / GPU / ANE `CPU   4.50W` ` avg  4.50 max  4.50` `  45°C` and
-  /// a graph, then SYS and the total without temperature and graph.
+  /// Widths of real power rows: CPU / GPU / ANE `CPU    4.50W` ` avg  4.50 max  4.50` `  45°C`
+  /// and a graph, then Power and Total without temperature and graph.
   fn power_widths() -> Vec<PowerWidths> {
-    let unit = PowerWidths { head: 11, stats: 20, temp: 6, tail: 0, graph: true };
+    let unit = PowerWidths { head: 12, stats: 20, temp: 6, tail: 0, graph: true };
     let total = PowerWidths { temp: 0, graph: false, ..unit };
     vec![unit, unit, unit, total, total]
   }
@@ -672,14 +597,14 @@ mod tests {
     let rows = power_widths();
     let fit = |width| fit_power(&rows, width);
 
-    // 37 cells of text, a gap and at least 8 graph cells
-    assert_eq!(fit(200), parts(true, true, Some(38)));
-    assert_eq!(fit(46), parts(true, true, Some(38)));
-    assert_eq!(fit(45), parts(true, true, None));
-    assert_eq!(fit(37), parts(true, true, None));
-    assert_eq!(fit(36), parts(true, false, None));
-    assert_eq!(fit(31), parts(true, false, None));
-    assert_eq!(fit(30), parts(false, false, None));
+    // 38 cells of text, a gap and at least 8 graph cells
+    assert_eq!(fit(200), parts(true, true, Some(39)));
+    assert_eq!(fit(47), parts(true, true, Some(39)));
+    assert_eq!(fit(46), parts(true, true, None));
+    assert_eq!(fit(38), parts(true, true, None));
+    assert_eq!(fit(37), parts(true, false, None));
+    assert_eq!(fit(32), parts(true, false, None));
+    assert_eq!(fit(31), parts(false, false, None));
     assert_eq!(fit(0), parts(false, false, None));
 
     // a narrower column never shows more, and parts go in a fixed order
@@ -698,13 +623,13 @@ mod tests {
     // 100 W and more: the total is one cell wider, so every row drops average and maximum
     let mut rows = power_widths();
     rows[4].head += 1;
-    assert_eq!(fit_power(&rows, 32), parts(true, false, None));
-    assert_eq!(fit_power(&rows, 31), parts(false, false, None));
+    assert_eq!(fit_power(&rows, 33), parts(true, false, None));
+    assert_eq!(fit_power(&rows, 32), parts(false, false, None));
     // graphs start after the widest row with a graph
-    assert_eq!(fit_power(&rows, 46), parts(true, true, Some(38)));
-    rows[0].head += 1;
-    assert_eq!(fit_power(&rows, 46), parts(true, true, None));
     assert_eq!(fit_power(&rows, 47), parts(true, true, Some(39)));
+    rows[0].head += 1;
+    assert_eq!(fit_power(&rows, 47), parts(true, true, None));
+    assert_eq!(fit_power(&rows, 48), parts(true, true, Some(40)));
 
     // no rows with a graph, no rows at all
     assert_eq!(fit_power(&rows[3..], 100), parts(true, true, None));

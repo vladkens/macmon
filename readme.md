@@ -19,13 +19,13 @@
 
 - 🚫 Runs without sudo
 - ⚡ Real-time CPU / GPU / ANE power usage
-- 📊 CPU frequency-scaled and active ratios per cluster, per-core load
+- 📊 CPU frequency-scaled and active ratios per cluster
 - 💾 RAM / Swap usage
 - 📈 Braille history charts with average and max values
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
 - 🎨 Follows your terminal's color scheme
-- 🪟 Toggleable panels, can be displayed in a small window
+- 🪟 Compact layout that fits a small window
 - 🦀 Written in Rust
 
 ## 📥 Installation
@@ -79,15 +79,14 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI: CPU clusters, GPU, memory and power on top, the process list below.
+Run `macmon` without a subcommand to open the terminal UI: CPU clusters, GPU, memory and power on top, the process list below. `Power` is the CPU + GPU + ANE power, `Total` the power of the whole system (when the Mac reports it).
 
 ```text
 Controls:
   q     - quit (also Ctrl-C)
-  d     - toggle per-core load row
   r     - switch ratio mode: scaled / active
   - / + - change update interval
-  1-5   - show / hide panels: CPU, GPU, memory, power, processes
+  p     - show / hide the process list
 
 Process list:
   /     - filter by name or PID (Enter - keep, Esc - clear)
@@ -97,7 +96,7 @@ Process list:
   Esc   - clear selection, then filter
 ```
 
-Settings (interval, panels, per-core row, ratio mode, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
+Settings (interval, ratio mode, process list, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
 
 #### Process data without sudo
 
