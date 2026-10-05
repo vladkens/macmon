@@ -112,8 +112,9 @@
 - ➕ As built (Task 12): the query runs only with truecolor (otherwise the palette is unused); OSC 10/11 are not queried, since nothing uses fg/bg (borders / dim are ANSI 8, selection is reverse video, titles and text are the default fg). Replies are read from `/dev/tty` with `select(2)` (macOS `poll(2)` doesn't support devices). Colors count only within 150 ms; without the DA1 reply by then, input is read and dropped until it arrives, at most 500 ms more, so replies up to ~650 ms late can't become key presses (later ones still could). Discrete steps: green up to 1/3, yellow up to 2/3, red above.
 - ➕ As built (Task 13): no query in SSH sessions (`SSH_TTY` or `SSH_CONNECTION` non-empty), where replies are most likely to come after the drain window; those sessions get the discrete steps.
 
-### Graph style (user decision after Task 11)
-- Braille only: no `v` key and no block mode. Power-column mini graphs are braille too. Core bars (one `▁`…`█` cell per core) stay — they show current values, not history.
+### Graph style (user decision after Task 11, revised after Task 16)
+- ~~Braille only~~ — superseded: one-row braille has only 4 levels and low loads read as a dotted line. User picked variant B from the comparison page (https://claude.ai/code/artifact/4e4fc050-93d1-47bf-8873-6569cda3ce54): solid block bars `▁▂▃▄▅▆▇█`, 8 levels per row, one sample per cell, each bar colored by its own value on the load gradient. Still one canonical style: no `v` key, no toggle.
+- Power-column graphs: block bars in the low (green) color, no gradient.
 
 ### Config migration
 - `color`, `theme`, `view_type` fields dropped (serde ignores unknown fields, old files keep loading).
@@ -402,6 +403,34 @@ Target (100 columns):
 - [x] update `readme.md` Controls / features and the `changelog.md` Unreleased entry for the key changes (readme: `p`, no `d` / `1`–`5`, Power / Total explained; changelog: `d` removal under Breaking Changes, `p` instead of panel toggles, long history charts)
 - [x] write tests: top box height equals its content rows at 200x50, 120x40, 80x24 and the process box gets the rest; graph fills the full strip width once history is full; header has no clock / interval; hint text and right alignment, narrow-width truncation; `d` and `1`–`5` do nothing; `p` toggles and persists; old configs with `panels` / `per_core` load (plus `matches_target_layout_at_100_columns`: the mockup row by row; layout tests rewritten for content height; `power_stats_cover_latest_samples_only`, `freq_store_keeps_long_history`; real binary on a pty at 110x26 / 100x30 / 60x20 matches the mockup, `p` hides the list and saves `show_procs: false`)
 - [x] run `make test` and `make check` - must pass before next task
+
+### Task 17: ➕ Solid block graphs and original power format (variant B)
+
+User compared three drawn variants (comparison page linked in "Graph style") and picked B. Target at 100 columns (same data as the page):
+```
+╭─ M2 · 4E+4P · 10GPU · 24GB ────────────────────────────────────────────────────── macmon v0.8.2 ─╮
+│ E-CPU   26% 1.8GHz  ▃▂▃▃▂▃▅▃▂▂▃▃▂▃▃▆▃▂▃▂▃▃▂▃▅▃▂▂▃ │ CPU    2.94W (3.70, 6.95)  62°C ▃▅▂▃▃▇▃▂▃▃▂▃ │
+│ P-CPU   20% 3.5GHz  ▂▁▂▂▅▂▁▂▂▂▁▂▇▂▂▁▂▂▂▄▂▁▂▂▅▂▁▂▂ │ GPU    0.62W (0.51, 0.66)  60°C ▄▄▅▄▄▄▅▄▄▄▄▅ │
+│ GPU     20% 0.4GHz  ▂▂▂▂▂▂▂▂▃▂▂▂▂▂▂▂▂▂▃▂▂▂▂▂▂▂▂▂▃ │ ANE    0.00W (0.00, 0.00)                    │
+│ RAM     80% 19/24G  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱ │ Power  3.56W (4.20, 7.41)                    │
+│ SWAP    57% 1.7/3G  ▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ │ Total 11.82W (13.25, 16.42)  fan 1223rpm     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+The strip text prefix (`E-CPU  26% 1.8GHz `) keeps its current implemented format; only the graph cells change on the left.
+
+**Files:**
+- Modify: `src_app/tui/widgets.rs`
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/layout.rs` (power column width)
+- Modify: `src_app/tui/store.rs` (only if history sizing changes)
+- Modify: `readme.md` / `changelog.md` (only where they mention braille)
+
+- [ ] graphs: replace braille with solid block bars `▁`…`█` (one sample per cell, 8 levels, a non-zero value gets at least `▁`, zero is blank, newest on the right); each bar colored by its own value on the load gradient (ANSI steps / RGB as before); remove the braille drawing code
+- [ ] power rows in the original format `CPU    2.94W (3.70, 6.95)` (label padded to 6, watts right-aligned, parentheses and comma dim), temperature column aligned across CPU / GPU rows, then a block graph in the low color filling the rest of the column (≥ 12 cells at 100 columns); `Power` and `Total` rows numbers only, fans after Total
+- [ ] power column width sized from the new text; when space is short drop the graph first, then the temperature, then avg / max (current W always stays)
+- [ ] RAM / SWAP meters unchanged
+- [ ] write tests: block levels for 0, tiny, 50%, 100% values; per-bar gradient colors (no RGB without palette + truecolor); 100-column render matches the target above row by row (data from the test fixture, layout and widths exact); power format and drop order at 200, 100, 80, 72, 60 columns; nothing overflows
+- [ ] run `make test` and `make check` - must pass before next task
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
