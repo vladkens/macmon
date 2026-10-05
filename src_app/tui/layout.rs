@@ -16,11 +16,12 @@ pub const PROC_HEIGHT_PCT: u32 = 60;
 pub const PROC_MIN_ROWS: u16 = 3;
 /// Rows of the process box besides the process rows: borders and the table header.
 const PROC_CHROME: u16 = 3;
-/// Width of the power column next to the strips.
-pub const POWER_WIDTH: u16 = 30;
 /// Narrowest metrics box with the power column next to the strips; narrower boxes put the power
 /// rows under the strips.
 pub const POWER_SIDE_MIN_WIDTH: u16 = 70;
+/// Strips keep this width next to the power column: the power column gives way first, down to
+/// its own minimum width.
+pub const STRIPS_MIN_WIDTH: u16 = 36;
 /// Cells between the strips and the power column: ` │ `.
 const POWER_GAP: u16 = 3;
 /// Blank cells inside the left and right borders of the metrics box.
@@ -164,6 +165,27 @@ fn wrap_core_line(line: CoreLine, width: usize, clusters: &[ClusterCores]) -> Ve
   chunks.collect()
 }
 
+/// Size of the power rows, measured from their text.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PowerSize {
+  /// Rows with the fans on the SYS row.
+  pub rows: u16,
+  /// Width that shows everything: numbers, temperatures and history graphs.
+  pub width: u16,
+  /// Narrowest power column next to the strips: the numbers with average and maximum.
+  pub min_width: u16,
+  /// Narrowest width with the fans on the SYS row; narrower rows put them on a row of their own
+  /// (0: nothing to move).
+  pub fans_inline: u16,
+}
+
+impl PowerSize {
+  /// Rows taken by power rows `width` cells wide.
+  pub fn height(&self, width: u16) -> u16 {
+    self.rows.saturating_add(u16::from(width < self.fans_inline))
+  }
+}
+
 /// What the metrics box has to show, besides the panel flags.
 #[derive(Debug, Default)]
 pub struct Content<'a> {
@@ -171,8 +193,8 @@ pub struct Content<'a> {
   pub clusters: &'a [ClusterCores<'a>],
   /// SWAP strip under RAM (only when swap is configured).
   pub swap: bool,
-  /// Rows of the power column.
-  pub power_rows: u16,
+  /// Rows and widths of the power column.
+  pub power: PowerSize,
   /// Cells of a cores line before the bars (the strip label column).
   pub cores_indent: u16,
 }
@@ -227,6 +249,15 @@ fn strips(panels: Panels, content: &Content) -> Vec<Strip> {
   strips
 }
 
+/// Width of the power column next to the strips in a box `inner_width` cells wide: everything
+/// fits while the strips keep `STRIPS_MIN_WIDTH`, then the column shrinks down to its minimum
+/// width. The strips always keep at least one cell.
+fn side_power_width(inner_width: u16, power: &PowerSize) -> u16 {
+  let room = inner_width.saturating_sub(POWER_GAP + STRIPS_MIN_WIDTH);
+  let max = inner_width.saturating_sub(POWER_GAP + 1);
+  room.min(power.width).max(power.min_width).min(max)
+}
+
 /// Splits `area` into the metrics box on top and the process box below it.
 ///
 /// The process box takes `PROC_HEIGHT_PCT` of the height, the metrics box the rest but never less
@@ -245,11 +276,12 @@ pub fn compute_layout(area: Rect, panels: Panels, per_core: bool, content: &Cont
   }
 
   let strips = strips(panels, content);
-  let power_rows = if panels.power { content.power_rows } else { 0 };
   let inner_width = area.width.saturating_sub(2 + 2 * PADDING);
   let side = panels.power && !strips.is_empty() && area.width >= POWER_SIDE_MIN_WIDTH;
+  let power_width = if side { side_power_width(inner_width, &content.power) } else { inner_width };
+  let power_rows = if panels.power { content.power.height(power_width) } else { 0 };
   let left_width =
-    if side { inner_width.saturating_sub(POWER_WIDTH + POWER_GAP) } else { inner_width };
+    if side { inner_width.saturating_sub(power_width + POWER_GAP) } else { inner_width };
 
   let core_lines = if panels.cpu && per_core {
     core_lines(left_width.saturating_sub(content.cores_indent), content.clusters)
@@ -285,7 +317,7 @@ pub fn compute_layout(area: Rect, panels: Panels, per_core: bool, content: &Cont
   let left = if side {
     let left = Rect { width: left_width, ..inner };
     plan.separator = non_empty(Rect { x: left.right() + 1, width: 1, ..inner });
-    plan.power = non_empty(Rect { x: inner.right() - POWER_WIDTH, width: POWER_WIDTH, ..inner });
+    plan.power = non_empty(Rect { x: inner.right() - power_width, width: power_width, ..inner });
     left
   } else {
     // the strips keep their rows first, power rows go under them; spare rows go to the graphs,
@@ -335,8 +367,8 @@ mod tests {
   use ratatui::layout::{Margin, Rect};
 
   use super::{
-    ClusterCores, Content, CoreLine, CoreRun, LayoutPlan, POWER_SIDE_MIN_WIDTH, POWER_WIDTH,
-    PROC_MIN_ROWS, Strip, compute_layout, core_lines,
+    ClusterCores, Content, CoreLine, CoreRun, LayoutPlan, POWER_SIDE_MIN_WIDTH, PROC_MIN_ROWS,
+    PowerSize, STRIPS_MIN_WIDTH, Strip, compute_layout, core_lines,
   };
   use crate::config::Panels;
 
@@ -357,8 +389,12 @@ mod tests {
     vec![cluster("E", 6, 1), cluster("P", 6, 1)]
   }
 
+  /// Power rows of an M3 Pro with one fan: CPU / GPU / ANE `CPU   4.50W avg  4.50 max  4.50  45°C`
+  /// (37 cells) and an 8 cells graph, SYS with the fan (44 cells), the total.
+  const POWER: PowerSize = PowerSize { rows: 5, width: 46, min_width: 31, fans_inline: 44 };
+
   fn content<'a>(clusters: &'a [ClusterCores<'a>]) -> Content<'a> {
-    Content { clusters, swap: true, power_rows: 5, cores_indent: 7 }
+    Content { clusters, swap: true, power: POWER, cores_indent: 7 }
   }
 
   fn layout(area: Rect, panels: Panels, per_core: bool) -> LayoutPlan {
@@ -403,9 +439,9 @@ mod tests {
     // strips left with one padding cell, power column right, separator between them
     use Strip::*;
     assert_eq!(strip_kinds(&plan), [Cluster(0), Cluster(1), Gpu, Ram, Swap]);
-    assert_eq!(plan.strips[0].1, rect(2, 1, 163, 6));
-    assert_eq!(plan.separator, Some(rect(166, 1, 1, 18)));
-    assert_eq!(plan.power, Some(rect(168, 1, POWER_WIDTH, 18)));
+    assert_eq!(plan.strips[0].1, rect(2, 1, 147, 6));
+    assert_eq!(plan.separator, Some(rect(150, 1, 1, 18)));
+    assert_eq!(plan.power, Some(rect(152, 1, POWER.width, 18)));
 
     // 13 spare rows go to the three graph strips, meters stay one row high
     assert_eq!(heights(&plan), [6, 5, 5, 1, 1]);
@@ -426,11 +462,69 @@ mod tests {
       assert!(plan.separator.is_some(), "{ctx}: power column on the side");
     }
 
-    // 72x24: still room for the power column next to the strips
+    // 72x24: still room for the power column next to the strips, at its minimum width
     let plan = layout(rect(0, 0, 72, 24), ALL, true);
     assert_eq!(plan.proc, Some(rect(0, 10, 72, 14)));
-    assert_eq!(plan.power, Some(rect(40, 1, POWER_WIDTH, 8)));
-    assert_eq!(plan.strips[0].1.width, 35);
+    assert_eq!(plan.power, Some(rect(39, 1, POWER.min_width, 8)));
+    assert_eq!(plan.strips[0].1.width, 34);
+  }
+
+  #[test]
+  fn power_column_widens_on_wide_screens() {
+    // (screen width, power column width): everything while the strips keep their minimum, then
+    // narrower down to the minimum power width
+    let cases = [
+      (400, POWER.width),
+      (200, POWER.width),
+      (89, POWER.width),
+      (88, POWER.width - 1),
+      (80, 37),
+      (74, POWER.min_width),
+      (72, POWER.min_width),
+      (POWER_SIDE_MIN_WIDTH, POWER.min_width),
+    ];
+    for (width, power) in cases {
+      let plan = layout(rect(0, 0, width, 40), ALL, false);
+      let ctx = format!("width {width}");
+      let column = plan.power.expect("power column");
+      let strips = plan.strips[0].1;
+      assert_eq!(column.width, power, "{ctx}");
+      assert_eq!(column.right(), width - 2, "{ctx}: one padding cell before the border");
+      assert_eq!(strips.width + 3 + column.width, width - 4, "{ctx}: ` │ ` between them");
+      assert!(power == POWER.min_width || strips.width >= STRIPS_MIN_WIDTH, "{ctx}");
+    }
+
+    // under the strips the power rows take the full width
+    let plan = layout(rect(0, 0, POWER_SIDE_MIN_WIDTH - 1, 40), ALL, false);
+    assert_eq!(plan.power.map(|r| r.width), Some(POWER_SIDE_MIN_WIDTH - 5));
+  }
+
+  #[test]
+  fn fans_move_to_own_row_in_narrow_power_column() {
+    let height = |plan: &LayoutPlan| plan.power.map(|r| r.height);
+    let rows = |width| {
+      let panels = Panels { power: true, proc: true, ..NONE };
+      height(&layout(rect(0, 0, width, 40), panels, false))
+    };
+    // only the power rows: full width, the fans share the SYS row from 44 cells on
+    assert_eq!(rows(POWER.fans_inline + 4), Some(5));
+    assert_eq!(rows(POWER.fans_inline + 3), Some(6));
+
+    // next to the strips at 80 columns: 37 cells, so 5 strips next to 6 power rows need a
+    // metrics box of 8 rows
+    let plan = layout(rect(0, 0, 80, 8 + PROC_MIN_ROWS + 3), ALL, false);
+    assert_eq!(plan.power.map(|r| r.width), Some(37));
+    assert_eq!(plan.top.map(|r| r.height), Some(8));
+    assert_eq!(height(&plan), Some(6));
+
+    // under the strips: power rows right under the graphs, one more without room for the fans
+    let clusters = m3_pro();
+    let with = |power| {
+      compute_layout(rect(0, 0, 30, 40), ALL, false, &Content { power, ..content(&clusters) })
+    };
+    assert_eq!(height(&with(POWER)), Some(6));
+    // no fans or no SYS power: nothing to move
+    assert_eq!(height(&with(PowerSize { fans_inline: 0, ..POWER })), Some(5));
   }
 
   #[test]
@@ -549,7 +643,7 @@ mod tests {
     // GPU alone next to 5 power rows: the GPU graph gets all 5 rows
     let panels = Panels { gpu: true, power: true, ..NONE };
     let plan = layout(rect(0, 0, 100, 7), panels, false);
-    assert_eq!(plan.strips, [(Strip::Gpu, rect(2, 1, 63, 5))]);
+    assert_eq!(plan.strips, [(Strip::Gpu, rect(2, 1, 47, 5))]);
 
     // meters don't grow: power rows sit right under them on narrow screens
     let panels = Panels { mem: true, power: true, ..NONE };
@@ -585,7 +679,7 @@ mod tests {
     // narrow screen: one line per die and cluster grows the top box past 40%
     let plan = compute_layout(rect(0, 0, 30, 30), ALL, true, &content(&clusters));
     assert_eq!(plan.cores.len(), 4);
-    let needed = 5 + 4 + 5 + 2; // strips, core lines, power rows, borders
+    let needed = 5 + 4 + 6 + 2; // strips, core lines, power rows (fans on their own), borders
     assert_eq!(plan.top.map(|r| r.height), Some(needed));
   }
 
