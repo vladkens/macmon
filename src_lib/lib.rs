@@ -68,6 +68,8 @@
 //! }
 //! ```
 
+mod clpc;
+
 #[cfg(feature = "app")]
 #[doc(hidden)]
 pub mod diagnostics;

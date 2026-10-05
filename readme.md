@@ -199,6 +199,14 @@ The default `pulse` mode generates a predictable cyclic CPU load with a fixed 50
 
 ## 📊 Metrics
 
+### Power sources and macOS 27
+
+macOS 27 broke the CPU/ANE power source that macmon previously used without root. The IOReport `Energy Model` counters can remain visible but stop updating: refreshing them now requires the private `com.apple.private.pmgr.nrg.reporting` entitlement. Apple's signed `powermetrics` has this entitlement and can keep using the named channels. Running macmon with `sudo` does not grant the same access.
+
+The working rootless workaround we found is to read hidden energy reports from the AppleCLPC driver through IOReport. These reports use opaque IDs instead of discoverable CPU/GPU/ANE channel names, so macmon has to identify the counters and verify their units. This leaves macmon maintaining undocumented mappings for data that Apple's own tool can still read directly.
+
+Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+
 ### Output format
 
 The `pipe` command and the HTTP `/json` endpoint return the same metrics:
@@ -351,6 +359,8 @@ Creating `Sampler` inside the worker keeps its low-level macOS handles on that t
 ## 🤝 Contributing
 
 All contributions are welcome! Feel free to open an issue or submit a pull request.
+
+For offline CLPC CPU/GPU/ANE key extraction from macOS firmware, see [docs/clpc-discovery.md](docs/clpc-discovery.md). The extractor is [scripts/clpc.py](scripts/clpc.py).
 
 ## 📝 License
 
