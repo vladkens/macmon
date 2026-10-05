@@ -12,13 +12,27 @@ pub(crate) fn is_pmp_ane_channel(group: &str, subgroup: &str, channel: &str, uni
     && matches!(unit, "mJ" | "uJ" | "nJ")
 }
 
+pub(crate) fn is_clpc_energy_channel(
+  group: &str,
+  subgroup: &str,
+  channel: &str,
+  unit: &str,
+) -> bool {
+  group == "CLPC"
+    && subgroup == "Energy Counters"
+    && matches!(channel, "CPU Energy" | "GPU Energy" | "ANE")
+    && unit == "nJ"
+}
+
 pub(crate) fn ioreport_channels_filter(
   group: &str,
   subgroup: &str,
   channel: &str,
   unit: &str,
 ) -> bool {
-  if is_pmp_ane_channel(group, subgroup, channel, unit) {
+  if is_pmp_ane_channel(group, subgroup, channel, unit)
+    || is_clpc_energy_channel(group, subgroup, channel, unit)
+  {
     return true;
   }
 
@@ -40,6 +54,16 @@ pub(crate) fn ioreport_channels_filter(
 #[cfg(test)]
 mod tests {
   use super::ioreport_channels_filter;
+
+  #[test]
+  fn subscribes_only_to_known_clpc_energy_counters() {
+    for channel in ["CPU Energy", "GPU Energy", "ANE"] {
+      assert!(ioreport_channels_filter("CLPC", "Energy Counters", channel, "nJ"));
+      assert!(!ioreport_channels_filter("CLPC", "Energy Counters", channel, "events"));
+    }
+    assert!(!ioreport_channels_filter("CLPC", "Energy Counters", "DRAM", "nJ"));
+    assert!(!ioreport_channels_filter("CLPC", "Performance States", "ANE", "nJ"));
+  }
 
   #[test]
   fn subscribes_to_ane_energy_without_bandwidth_or_state_counters() {

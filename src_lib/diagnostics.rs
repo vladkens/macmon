@@ -3,7 +3,7 @@
 use core_foundation::base::{CFRelease, CFShow};
 use std::time::Duration;
 
-use crate::shared::{ioreport_channels_filter, is_pmp_ane_channel};
+use crate::shared::{ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel};
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
   cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
@@ -18,6 +18,7 @@ fn debug_channels(group: &str, subgroup: &str, channel: &str, unit: &str) -> boo
     || group == "CPU Stats"
     || group == "GPU Stats"
     || is_pmp_ane_channel(group, subgroup, channel, unit)
+    || is_clpc_energy_channel(group, subgroup, channel, unit)
 }
 
 fn print_divider(msg: &str) {

@@ -231,7 +231,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
   match &args.command {
     Some(Commands::Pipe { samples, soc_info }) => {
-      let mut sampler = Sampler::new()?;
+      // Debug override: require CLPC CPU/GPU/ANE counters without fallback.
+      let force_clpc = std::env::var("MACMON_FORCE_CLPC").is_ok_and(|x| x == "1");
+      let mut sampler = if force_clpc { Sampler::with_clpc()? } else { Sampler::new()? };
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
