@@ -464,6 +464,50 @@ User review: the footer ` q quit | r scaled | -/+ 1000ms | / filter | s sort ` m
 - [x] write tests: footer text / alignment / narrow dropping; header arrow on the active column; click on each header sorts and repeated click reverses; click on filter label enters input; row click selects; wheel scrolls; clicks on borders / metrics box do nothing; mouse events while the process list is hidden do nothing (mod: `key_hints_*`, `click_on_header_sorts_and_again_reverses` (all 7 headers, second click on the arrow cell, saved config), `click_on_filter_label_starts_typing`, `click_on_row_selects_its_process` (scrolled table too), `wheel_moves_selection_and_scrolls`, `clicks_outside_targets_do_nothing` (also right click / release / drag / move), `mouse_does_nothing_while_process_list_hidden` (`p` and auto-hide), `restoring_the_terminal_*` (every mode crossterm turns on goes off, once; every step despite write errors), `input_thread_forwards_clicks_and_wheel_only`; proc_view: arrow fits every column, `column_areas`, mouse on synthetic targets, wheel math, `clear` forgets targets, USER sort; panels: `titles_return_the_cells_of_their_text`; existing tests updated to the new title / header / widths. Real binary on a pty (pyte, SGR mouse reports): 31/31 — capture on after the palette query, footer, title, header clicks / reverse / saved config, moves and right clicks ignored, row click, wheel scroll keeps the selected row, wheel over metrics ignored, filter click + typing, `p` hides and clicks do nothing, `q` and Ctrl-C (while typing) exit 0 with every mouse mode off before the main screen returns)
 - [x] run `make test` and `make check` - must pass before next task
 
+### Task 19: ➕ Proportional boxes: original macmon metric boxes over the process list
+
+User review on a wide (~250 column) terminal: one-row strips stretch into long threads (RAM / SWAP meters 170 cells long) and look broken; width breakpoints were rejected as "guessing the zoom". The original macmon scales fine because its boxes grow in both directions. Decision: bring back the original metric boxes, compressed into the top part of the screen, process list full width below. One structure at every size, only the scale changes. Mockup (rendered at 200×50 and 110×32): https://claude.ai/code/artifact/29e38633-0f88-4825-b4cc-3abb4492d59f. The strips version is bookmarked as branch `tui-redesign-strips` (1ca90ed).
+
+```
+╭ Apple M2 (4E+4P+10GPU 24GB) ───────────────────────────────────────────────────── macmon v0.8.2 ╮
+│╭ E-CPU 20% @ 1640 MHz ──╮╭ P-CPU 26% @ 3500 MHz ──╮╭ GPU 3% @ 444 MHz ──────╮╭ RAM 20.11 / 24.0 GB (83.8%) ╮│
+││        ▁▂▂▃▂▂▃▂▂▃▅▃▂▂▃││         ▃▂▅▃▂▇▅▃▂▃▅▂▃││              ▁▁▁▁▁▁▁▂▁││ ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇││
+│╰────────────────────────╯╰────────────────────────╯╰───────────────────────╯╰────────────────────────────╯│
+│╭ CPU 3.44W (4.02, 6.77) ───────── 56.5°C ╮╭ GPU 0.08W (0.12, 0.25) ──── 54.1°C ╮╭ ANE 0.00W (0.00, 0.00) ──╮│
+││          ▂▃▅▃▂▇▅▃▂▂▃▅▃▂▃                  ││           ▁▁▂▁▁▅▂▁▁▁▁            ││                          ││
+│╰─────────────────────────────────────────╯╰─────────────────────────────────────╯╰──────────────────────────╯│
+╰ Power: 3.52W (avg 4.14W, max 6.89W) | Fan 1196 RPM | Total 10.07W (11.92, 15.21) ──────────────────────────╯
+╭ proc 656 ─ / filter ──────────────────────────────────────────────────────────────────────────────────────╮
+│ … process table as now …                                                                                  │
+╰──────────────────────────────────────────────────────────── q quit | p procs | r scaled | -/+ 1000ms ─────╯
+```
+(widths in this sketch are approximate; the artifact page is the reference)
+
+- Metrics area = top `METRICS_HEIGHT_PCT = 40` % of the height (process list keeps ~60 %, the user's earlier choice). Hidden (`p`) or auto-hidden process list → the metrics area takes the full height, exactly like the original app.
+- Outer box: `Apple M2 (4E+4P+10GPU 24GB)` left (original title format), `macmon vX` right; bottom border left: original power summary `Power: 3.52W (avg 4.14W, max 6.89W)` + `Fan 1196 RPM` + `Total 10.07W (11.92, 15.21)` (only parts whose sensors exist). When the metrics box is the bottom-most box, the key hints share that border right-aligned; titles never overlap (existing title-fitting rules: hints / summary parts drop from the end).
+- Row 1: one box per CPU cluster (generic N: 2 today, 3 on M6), then GPU, then RAM. Titles in the original format: `E-CPU 20% @ 1640 MHz`, `GPU 3% @ 444 MHz`, `RAM 20.11 / 24.0 GB (83.8%)` with `SWAP 2.35 / 3.0 GB` as a right title when swap exists and it fits.
+- Row 2: CPU, GPU, ANE power boxes: `CPU 3.44W (4.02, 6.77)` + right `56.5°C` (temperature only when available); ANE without temperature.
+- Boxes split the width evenly; the inner height splits between the two rows (row 1 gets the extra row). Each box: graph fills the whole inner area.
+- Graphs: multi-row solid bars `▁`…`█`, one sample per column, newest on the right, each column colored by its own value on the load gradient (CPU / GPU / RAM by ratio; power graphs in the low color, auto-scaled to the visible max like the original).
+- Titles that don't fit: right title drops first, then the left title is truncated.
+- Remove the one-row strips, the power column, `PowerSize` / `fit_power`, the strip prefix code and `Meter` if nothing uses it any more. Keep: palette / theme, process sampling, process view, mouse, footer, `p`, `r`, `-`/`+`.
+
+**Files:**
+- Modify: `src_app/tui/layout.rs`
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/widgets.rs`
+- Modify: `src_app/tui/store.rs` (only if history / stats need it)
+- Modify: `src_app/tui/mod.rs`
+- Modify: `readme.md` / `changelog.md`
+
+- [ ] layout: metrics area = 40 % of the height on top, process box below with the rest; full height for metrics when the process list is hidden or auto-hidden; two rows of boxes inside the metrics box, widths split evenly, heights split between rows
+- [ ] metric boxes in the original title format (clusters generic over N, GPU, RAM with SWAP right title; CPU / GPU / ANE power with temperatures); outer box titles and the power summary on its bottom border
+- [ ] multi-row solid bar graph widget (one sample per column, eighths per row, per-column gradient color or one color); remove the one-row strip / power-column code and anything left unused
+- [ ] key hints and power summary share the bottom border without overlap when the process list is hidden
+- [ ] readme / changelog: describe the layout (original boxes + process list), drop the strip wording
+- [ ] write tests: layout proportions at 200x50, 110x32, 80x24 (metrics ≈ 40 %, process box the rest, boxes inside the area, no overlap); `p` / auto-hide → metrics full height; box count follows clusters (2 and 3); original title strings; right title dropped / left truncated in narrow boxes; graph levels across rows and per-column colors; footer + power summary on one border at narrow widths; existing process / mouse tests still pass
+- [ ] run `make test` and `make check` - must pass before next task
+
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
