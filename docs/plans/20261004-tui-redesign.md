@@ -432,6 +432,36 @@ The strip text prefix (`E-CPU  26% 1.8GHz `) keeps its current implemented forma
 - [x] write tests: block levels for 0, tiny, 50%, 100% values; per-bar gradient colors (no RGB without palette + truecolor); 100-column render matches the target above row by row (data from the test fixture, layout and widths exact); power format and drop order at 200, 100, 80, 72, 60 columns; nothing overflows (widget: `graph_bar_levels`, right alignment, visible-sample scale, per-bar colors smooth / ANSI, one color, first row only; render: `matches_target_layout_at_100_columns` compares rows 0–6 as whole strings (49-cell strips with the current prefix, separator, 44-cell power column), `strip_bars_follow_their_own_load_power_bars_stay_low` (ANSI and smooth), `power_temperatures_and_graphs_line_up` (12 W CPU, no sensors), dim parentheses / comma, `narrow_power_column_drops_graph_then_temp_then_stats` at 200 … 30 columns, `graphs_are_block_bars` replaces `graphs_are_braille`; whole-frame ANSI-only test unchanged; layout / fit tests updated to the new widths. Real binary on a pty at 110x26 / 100x30 / 60x20 matches the target layout)
 - [x] run `make test` and `make check` - must pass before next task
 
+➕ Merged `main` after Task 17 (6656de7): CLPC power fixes — CPU power is real now on this machine; `procs.rs` `IOObjectRelease` aligned to `-> u32` to match `find_clpc.rs` (clashing extern declarations).
+
+### Task 18: ➕ Footer as in the original, process controls in the process box, mouse support
+
+User review: the footer ` q quit | r scaled | -/+ 1000ms | / filter | s sort ` mixed global and process keys and put the interval in the middle; sorting should work by clicking. Target:
+```
+╭─ proc 631 ─ / filter ────────────────────────────────────────────────────╮
+│    PID  NAME                         USER    CPU%  MEM ↓  POWER  GPU%    │
+│  21723  com.apple.Virtualization.VM  user    16.5   4.0G  0.32W   0.0    │
+│   1998  ghostty                      user     3.9   723M  0.15W   1.1    │
+╰─────────────────────────────── q quit | p procs | r scaled | -/+ 1000ms ─╯
+```
+- Footer (bottom border of the bottom-most box, right-aligned): ` q quit | p procs | r scaled | -/+ 1000ms ` — global keys only, original order, interval last. Same line whether or not the process list is visible.
+- Process controls live in the process box: `/ filter` label in its top border (typing shows the filter text there instead, as now); the sort arrow `↓` / `↑` sits next to the active column header instead of in the title.
+- Mouse (crossterm mouse capture, enabled with the alternate screen and disabled on exit / panic): click a column header → sort by it, click the active one again → reverse; click `/ filter` → start typing; click a process row → select it; wheel → scroll the list. Clicks outside these targets do nothing. Keys `s` / `S` / `/` and navigation keep working.
+
+**Files:**
+- Modify: `src_app/tui/mod.rs` (mouse capture on/off, `Event::Mouse`, dispatch)
+- Modify: `src_app/tui/proc_view.rs` (header hit-testing, sort arrow by the header, filter label, row click, wheel)
+- Modify: `src_app/tui/panels.rs` (footer text)
+- Modify: `readme.md` / `changelog.md` (controls, mouse, text selection note)
+
+- [ ] footer ` q quit | p procs | r scaled | -/+ 1000ms ` right-aligned on the bottom-most box, dropping items from the end when narrow (`q quit` stays); remove `/ filter` and `s sort` from it
+- [ ] process box top border: `proc N` then `/ filter` (or the filter text while typing / when set); sort arrow next to the active column header; remove `cpu ↓` from the title
+- [ ] mouse capture on start, off on normal exit and in the panic hook; input thread forwards mouse events; hit-testing uses the rects from the last render (no layout duplicated in the handler)
+- [ ] click header → sort by that column (same column → reverse, persisted like `s` / `S`); click `/ filter` → filter input; click row → select that pid; wheel up / down → move the selection / scroll by 3 rows
+- [ ] readme: mouse controls and that terminal text selection needs Option (iTerm2) / Shift (Ghostty, most others) while mouse capture is on; changelog entry
+- [ ] write tests: footer text / alignment / narrow dropping; header arrow on the active column; click on each header sorts and repeated click reverses; click on filter label enters input; row click selects; wheel scrolls; clicks on borders / metrics box do nothing; mouse events while the process list is hidden do nothing
+- [ ] run `make test` and `make check` - must pass before next task
+
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
