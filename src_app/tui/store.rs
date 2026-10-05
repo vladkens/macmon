@@ -3,8 +3,8 @@
 use crate::config::RatioMode;
 use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
-/// Samples kept for the history graphs, newest first: one per cell, enough to fill the strips of
-/// a terminal about 1100 columns wide.
+/// Samples kept for the history graphs, newest first: one per column, enough to fill the widest
+/// box (CPU power, a third of the width) of a terminal about 3000 columns wide.
 pub(super) const HISTORY_LEN: usize = 1024;
 /// Latest samples behind the power average and maximum.
 pub(super) const STATS_LEN: usize = 128;
@@ -141,8 +141,10 @@ impl PowerStore {
   }
 }
 
+/// Latest RAM / SWAP usage with the RAM usage history (bytes, newest first).
 #[derive(Debug, Default)]
 pub(super) struct MemoryStore {
+  pub(super) items: Vec<u64>,
   pub(super) ram_usage: u64,
   pub(super) ram_total: u64,
   pub(super) swap_usage: u64,
@@ -151,6 +153,9 @@ pub(super) struct MemoryStore {
 
 impl MemoryStore {
   pub(super) fn push(&mut self, value: MemMetrics) {
+    self.items.insert(0, value.ram_usage);
+    self.items.truncate(HISTORY_LEN);
+
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
@@ -211,10 +216,10 @@ impl FanStore {
   pub(super) fn label(&self) -> String {
     match self.items.as_slice() {
       [] => "".to_string(),
-      [fan] => format!("fan {}rpm", fan.rpm),
+      [fan] => format!("Fan {} RPM", fan.rpm),
       fans => {
         let values = fans.iter().map(|fan| fan.rpm.to_string()).collect::<Vec<_>>().join("/");
-        format!("fans {values}rpm")
+        format!("Fans {values} RPM")
       }
     }
   }
@@ -420,6 +425,14 @@ mod tests {
 
     assert_eq!((store.ram_usage, store.ram_total), (40, 100));
     assert_eq!((store.swap_usage, store.swap_total), (2, 10));
+    // RAM history for the graph, newest first
+    assert_eq!(store.items, [40, 60]);
+
+    for i in 0..HISTORY_LEN as u64 {
+      store.push(MemMetrics { ram_total: 100, ram_usage: i, swap_total: 0, swap_usage: 0 });
+    }
+    assert_eq!(store.items.len(), HISTORY_LEN);
+    assert_eq!(store.items[0], HISTORY_LEN as u64 - 1);
   }
 
   #[test]
@@ -428,10 +441,11 @@ mod tests {
     let mut store = FanStore::default();
     assert_eq!(store.label(), "");
 
+    // the original format
     store.push(vec![fan(1200)]);
-    assert_eq!(store.label(), "fan 1200rpm");
+    assert_eq!(store.label(), "Fan 1200 RPM");
 
     store.push(vec![fan(1200), fan(1350)]);
-    assert_eq!(store.label(), "fans 1200/1350rpm");
+    assert_eq!(store.label(), "Fans 1200/1350 RPM");
   }
 }

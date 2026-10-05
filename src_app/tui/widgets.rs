@@ -1,4 +1,4 @@
-//! Custom widgets: history graphs and horizontal meters.
+//! History graph widget.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -12,13 +12,10 @@ const BAR_LEVELS: u64 = 8;
 /// Code point before `▁`: the bar of level `n` is `BAR_BASE + n`.
 const BAR_BASE: u32 = 0x2580;
 
-fn clamp_ratio(ratio: f64) -> f64 {
-  if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) }
-}
-
-/// History graph for newest-first samples over the first row of its area, right-aligned (newest
-/// sample on the right): one solid bar `▁`…`█` per cell, each colored by its own value on the load
-/// gradient, or all in one color. Zero values leave the cell blank.
+/// History graph for newest-first samples over its whole area, right-aligned (newest sample on
+/// the right): one solid bar per column, growing from the bottom row up in eighths of a row
+/// (`▁`…`█`), each colored by its own value on the load gradient, or all in one color. Zero
+/// values leave the column blank.
 pub struct Graph<'a> {
   data: &'a [u64],
   max: Option<u64>,
@@ -31,15 +28,15 @@ impl<'a> Graph<'a> {
     Self { data, max: None, color: None, theme }
   }
 
-  /// Value drawn at full height. Defaults to the largest visible sample.
-  pub fn max(mut self, max: u64) -> Self {
-    self.max = Some(max);
+  /// Value drawn at full height; `None` (the default) scales to the largest visible sample.
+  pub fn max(mut self, max: Option<u64>) -> Self {
+    self.max = max;
     self
   }
 
-  /// Draws every bar in `color` instead of its load color.
-  pub fn color(mut self, color: Color) -> Self {
-    self.color = Some(color);
+  /// Draws every bar in `color` instead of its load color (`None`, the default).
+  pub fn color(mut self, color: Option<Color>) -> Self {
+    self.color = color;
     self
   }
 }
@@ -53,58 +50,34 @@ impl Widget for Graph<'_> {
 
     let visible = &self.data[..self.data.len().min(usize::from(area.width))];
     let max = self.max.unwrap_or_else(|| visible.iter().copied().max().unwrap_or(0)).max(1);
+    let levels = u64::from(area.height) * BAR_LEVELS;
     for (x, &value) in (area.left()..area.right()).rev().zip(visible) {
-      let level = bar_level(value, max);
-      if level == 0 {
-        continue;
-      }
-
-      let symbol = char::from_u32(BAR_BASE + level as u32).unwrap_or(' ');
+      let mut level = bar_level(value, max, levels);
       let color = self.color.unwrap_or_else(|| self.theme.gradient(value as f64 / max as f64));
-      buf[(x, area.y)].set_char(symbol).set_fg(color);
+      for y in (area.top()..area.bottom()).rev() {
+        if level == 0 {
+          break;
+        }
+
+        let eighths = level.min(BAR_LEVELS);
+        let symbol = char::from_u32(BAR_BASE + eighths as u32).unwrap_or(' ');
+        buf[(x, y)].set_char(symbol).set_fg(color);
+        level -= eighths;
+      }
     }
   }
 }
 
-/// Bar height of `value` in eighths of a row, rounded up: non-zero values get at least `▁`.
-fn bar_level(value: u64, max: u64) -> u64 {
+/// Bar height of `value` in eighths of a row out of `levels`, rounded up: non-zero values get at
+/// least `▁`.
+fn bar_level(value: u64, max: u64, levels: u64) -> u64 {
   if value == 0 {
     return 0;
   }
 
   // in u128, so large values don't overflow
-  let level = (u128::from(value) * u128::from(BAR_LEVELS)).div_ceil(u128::from(max.max(1)));
-  level.min(u128::from(BAR_LEVELS)) as u64
-}
-
-/// Horizontal meter bar `▰▰▰▱▱` over the first row of its area, the fill colored by the load
-/// gradient.
-pub struct Meter<'a> {
-  ratio: f64,
-  theme: &'a Theme,
-}
-
-impl<'a> Meter<'a> {
-  pub fn new(ratio: f64, theme: &'a Theme) -> Self {
-    Self { ratio, theme }
-  }
-}
-
-impl Widget for Meter<'_> {
-  fn render(self, area: Rect, buf: &mut Buffer) {
-    let area = area.intersection(buf.area);
-    if area.is_empty() {
-      return;
-    }
-
-    let ratio = clamp_ratio(self.ratio);
-    let filled = (ratio * f64::from(area.width)).round() as u16;
-    for i in 0..area.width {
-      let (symbol, color) =
-        if i < filled { ("▰", self.theme.gradient(ratio)) } else { ("▱", self.theme.dim) };
-      buf[(area.x + i, area.y)].set_symbol(symbol).set_fg(color);
-    }
-  }
+  let level = (u128::from(value) * u128::from(levels)).div_ceil(u128::from(max.max(1)));
+  level.min(u128::from(levels)) as u64
 }
 
 #[cfg(test)]
@@ -114,7 +87,7 @@ mod tests {
   use ratatui::style::Color;
   use ratatui::widgets::Widget;
 
-  use super::{Graph, Meter, bar_level};
+  use super::{Graph, bar_level};
   use crate::tui::palette::Palette;
   use crate::tui::theme::Theme;
 
@@ -134,26 +107,26 @@ mod tests {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
   }
 
-  /// One-row graph of `data` (newest first) scaled to `max`.
+  fn rows(buf: &Buffer) -> Vec<String> {
+    (0..buf.area.height).map(|y| row(buf, y)).collect()
+  }
+
+  /// Graph of `data` (newest first) scaled to `max`, `height` rows tall.
+  fn graph(data: &[u64], max: u64, width: u16, height: u16) -> Vec<String> {
+    let theme = Theme::default();
+    rows(&draw(Graph::new(data, &theme).max(Some(max)), width, height))
+  }
+
+  /// One-row graph of `data` scaled to `max`.
   fn bars(data: &[u64], max: u64, width: u16) -> String {
-    let theme = Theme::default();
-    row(&draw(Graph::new(data, &theme).max(max), width, 1), 0)
-  }
-
-  fn meter_rows(ratio: f64, width: u16, height: u16) -> Buffer {
-    let theme = Theme::default();
-    draw(Meter::new(ratio, &theme), width, height)
-  }
-
-  fn meter(ratio: f64, width: u16) -> Buffer {
-    meter_rows(ratio, width, 1)
+    graph(data, max, width, 1).remove(0)
   }
 
   #[test]
   fn graph_empty_data_renders_nothing() {
     assert_eq!(bars(&[], 100, 4), "    ");
     // zero samples are blank too
-    assert_eq!(bars(&[0; 8], 100, 4), "    ");
+    assert_eq!(graph(&[0; 8], 100, 4, 3), ["    "; 3]);
   }
 
   #[test]
@@ -162,21 +135,39 @@ mod tests {
     assert_eq!(bars(&[100, 50, 1, 0], 100, 4), " ▁▄█");
     assert_eq!(bars(&[800, 700, 600, 500, 400, 300, 200, 100], 800, 8), "▁▂▃▄▅▆▇█");
 
-    // rounded up to the next eighth, clamped to the row
-    assert_eq!(bar_level(0, 100), 0);
-    assert_eq!(bar_level(1, 100), 1);
-    assert_eq!(bar_level(12, 100), 1);
-    assert_eq!(bar_level(13, 100), 2);
-    assert_eq!(bar_level(50, 100), 4);
-    assert_eq!(bar_level(51, 100), 5);
-    assert_eq!(bar_level(100, 100), 8);
-    assert_eq!(bar_level(500, 100), 8);
-    assert_eq!(bar_level(5, 0), 8); // zero max doesn't divide by zero
-    assert_eq!(bar_level(u64::MAX, u64::MAX), 8);
+    // rounded up to the next eighth, clamped to the area
+    assert_eq!(bar_level(0, 100, 8), 0);
+    assert_eq!(bar_level(1, 100, 8), 1);
+    assert_eq!(bar_level(12, 100, 8), 1);
+    assert_eq!(bar_level(13, 100, 8), 2);
+    assert_eq!(bar_level(50, 100, 8), 4);
+    assert_eq!(bar_level(51, 100, 8), 5);
+    assert_eq!(bar_level(100, 100, 8), 8);
+    assert_eq!(bar_level(500, 100, 8), 8);
+    assert_eq!(bar_level(5, 0, 8), 8); // zero max doesn't divide by zero
+    assert_eq!(bar_level(u64::MAX, u64::MAX, u64::MAX), u64::MAX);
+
+    // three rows: 24 eighths
+    assert_eq!(bar_level(50, 100, 24), 12);
+    assert_eq!(bar_level(1, 100, 24), 1);
+    assert_eq!(bar_level(100, 100, 24), 24);
   }
 
   #[test]
-  fn graph_is_right_aligned_one_sample_per_cell() {
+  fn graph_bars_grow_across_rows() {
+    // three rows, newest on the right: 100 % full, 50 % one and a half rows, 30 % (7.2 eighths
+    // rounded up to 8) one row, a tiny value one eighth at the bottom, zero blank
+    let rows = graph(&[100, 50, 30, 1, 0], 100, 5, 3);
+    assert_eq!(rows, ["█", "▄█", "▁███"].map(|r| format!("{r:>5}")));
+
+    // every level of a two-row bar, bottom row full before the top row starts
+    let levels: Vec<u64> = (1..=16).rev().collect();
+    let rows = graph(&levels, 16, 16, 2);
+    assert_eq!(rows, ["        ▁▂▃▄▅▆▇█", "▁▂▃▄▅▆▇█████████"]);
+  }
+
+  #[test]
+  fn graph_is_right_aligned_one_sample_per_column() {
     assert_eq!(bars(&[100; 3], 100, 5), "  ███");
     // newest sample is rightmost
     assert_eq!(bars(&[100, 50], 100, 2), "▄█");
@@ -189,21 +180,31 @@ mod tests {
   fn graph_scales_to_visible_samples() {
     let theme = Theme::default();
     // the older 100 doesn't fit, so 20 is the full height
-    let buf = draw(Graph::new(&[10, 20, 100], &theme), 2, 1);
-    assert_eq!(row(&buf, 0), "█▄");
+    let buf = draw(Graph::new(&[10, 20, 100], &theme), 2, 2);
+    assert_eq!(rows(&buf), ["█ ", "██"]);
+    // `None` is the same as no maximum
+    let buf = draw(Graph::new(&[10, 20, 100], &theme).max(None), 2, 2);
+    assert_eq!(rows(&buf), ["█ ", "██"]);
   }
 
   #[test]
-  fn graph_colors_each_bar_by_its_value() {
+  fn graph_colors_each_column_by_its_value() {
     for theme in [smooth(), Theme::default()] {
-      let buf = draw(Graph::new(&[90, 50, 10], &theme).max(100), 3, 1);
-      let colors: Vec<Color> = (0..3).map(|x| buf[(x, 0)].fg).collect();
-      assert_eq!(colors, [0.1, 0.5, 0.9].map(|t| theme.gradient(t)));
+      let buf = draw(Graph::new(&[90, 50, 10], &theme).max(Some(100)), 3, 4);
+      // every cell of a bar in the bar's color
+      for (x, t) in [(0, 0.1), (1, 0.5), (2, 0.9)] {
+        for y in 0..4 {
+          if buf[(x, y)].symbol() != " " {
+            assert_eq!(buf[(x, y)].fg, theme.gradient(t), "{x}, {y}");
+          }
+        }
+      }
+      assert_eq!(rows(&buf), ["  ▅", "  █", " ██", "▄██"]);
     }
 
     // the terminal's green / yellow / red without a palette, no RGB
     let theme = Theme::default();
-    let buf = draw(Graph::new(&[90, 50, 10], &theme).max(100), 3, 1);
+    let buf = draw(Graph::new(&[90, 50, 10], &theme).max(Some(100)), 3, 1);
     let colors: Vec<Color> = (0..3).map(|x| buf[(x, 0)].fg).collect();
     assert_eq!(colors, [Color::Green, Color::Yellow, Color::Red]);
   }
@@ -212,18 +213,11 @@ mod tests {
   fn graph_in_one_color() {
     let theme = smooth();
     let low = theme.gradient(0.0);
-    let buf = draw(Graph::new(&[4000, 2000, 0, 300], &theme).color(low), 4, 1);
-    assert_eq!(row(&buf, 0), "▁ ▄█");
-    for x in [0, 2, 3] {
-      assert_eq!(buf[(x, 0)].fg, low, "x {x}");
+    let buf = draw(Graph::new(&[4000, 2000, 0, 200], &theme).color(Some(low)), 4, 2);
+    assert_eq!(rows(&buf), ["   █", "▁ ██"]);
+    for (x, y) in [(0, 1), (2, 1), (3, 1), (3, 0)] {
+      assert_eq!(buf[(x, y)].fg, low, "{x}, {y}");
     }
-  }
-
-  #[test]
-  fn graph_draws_first_row_only() {
-    let theme = Theme::default();
-    let buf = draw(Graph::new(&[100, 50], &theme).max(100), 2, 2);
-    assert_eq!((row(&buf, 0).as_str(), row(&buf, 1).as_str()), ("▄█", "  "));
   }
 
   #[test]
@@ -236,44 +230,10 @@ mod tests {
   }
 
   #[test]
-  fn meter_fill_at_0_50_100_percent() {
-    assert_eq!(row(&meter(0.0, 10), 0), "▱▱▱▱▱▱▱▱▱▱");
-    assert_eq!(row(&meter(0.5, 10), 0), "▰▰▰▰▰▱▱▱▱▱");
-    assert_eq!(row(&meter(1.0, 10), 0), "▰▰▰▰▰▰▰▰▰▰");
-    // rounded to the nearest cell
-    assert_eq!(row(&meter(0.42, 10), 0), "▰▰▰▰▱▱▱▱▱▱");
-  }
-
-  #[test]
-  fn meter_colors_fill_by_ratio() {
-    for theme in [smooth(), Theme::default()] {
-      let buf = draw(Meter::new(0.5, &theme), 10, 1);
-      assert_eq!(buf[(0, 0)].fg, theme.gradient(0.5));
-      assert_eq!(buf[(4, 0)].fg, theme.gradient(0.5));
-      assert_eq!(buf[(5, 0)].fg, theme.dim);
-    }
-
+  fn graph_stays_inside_its_area() {
     let theme = Theme::default();
-    let buf = draw(Meter::new(0.7, &theme), 10, 1);
-    assert_eq!((buf[(0, 0)].fg, buf[(9, 0)].fg), (Color::Red, Color::DarkGray));
-  }
-
-  #[test]
-  fn meter_narrow_widths() {
-    assert_eq!(row(&meter(0.42, 2), 0), "▰▱");
-    assert_eq!(row(&meter(0.2, 1), 0), "▱");
-    assert_eq!(row(&meter(0.6, 1), 0), "▰");
-    assert!(meter(0.42, 0).content.is_empty());
-
-    // only the first row is drawn
-    let buf = meter_rows(0.5, 4, 2);
-    assert_eq!((row(&buf, 0).as_str(), row(&buf, 1).as_str()), ("▰▰▱▱", "    "));
-  }
-
-  #[test]
-  fn meter_clamps_ratio() {
-    assert_eq!(row(&meter(1.5, 5), 0), "▰▰▰▰▰");
-    assert_eq!(row(&meter(-1.0, 5), 0), "▱▱▱▱▱");
-    assert_eq!(row(&meter(f64::NAN, 5), 0), "▱▱▱▱▱");
+    let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
+    Graph::new(&[100; 10], &theme).max(Some(100)).render(Rect::new(2, 1, 3, 2), &mut buf);
+    assert_eq!(rows(&buf), ["      ", "  ███ ", "  ███ ", "      "]);
   }
 }

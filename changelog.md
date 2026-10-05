@@ -7,7 +7,7 @@
 
 ### Features
 
-- Redesigned the TUI in a btop-inspired layout: a compact metrics box on top and a full-width process list below
+- Redesigned the TUI layout: the metric boxes (CPU clusters, GPU and RAM, then CPU / GPU / ANE power) take the top 40% of the window and a full-width process list the rest; with the list hidden, the boxes take the whole window
 - Added a process list with PID, name, user, CPU %, memory, power (W) and GPU % per process, without sudo (power only for the current user's processes)
 - Added process sorting (`s` / `S`, including by user), filtering by name or PID (`/`) and selection (arrows, PgUp / PgDn, Home / End)
 - Added mouse support in the process list: click a column header to sort by it (again to reverse), click `/ filter` to filter, click a process to select it, scroll with the wheel; hold Option (iTerm2) or Shift (Ghostty and most other terminals) to select text
@@ -16,7 +16,8 @@
 
 ### Improvements
 
-- History charts fill the full width of wide terminals; average and max still cover the last 128 samples
+- History charts fill their whole box at any window size; average and max still cover the last 128 samples
+- The power summary (`Power`, fans, `Total`) sits on the bottom border of the metrics box
 - Made the process list auto-hide in small windows; process sampling pauses while it is hidden
 - The footer lists the global keys (`q quit | p procs | r scaled | -/+ 1000ms`); process list controls sit in its own box: `/ filter` on its border and the sort arrow next to the sorted column
 - The terminal is restored (mouse capture off, main screen, normal mode) on errors and crashes too

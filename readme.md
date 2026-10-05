@@ -25,7 +25,7 @@
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
 - 🎨 Follows your terminal's color scheme
-- 🪟 Compact layout that fits a small window
+- 🪟 Layout that scales with the window
 - 🦀 Written in Rust
 
 ## 📥 Installation
@@ -79,7 +79,7 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI: CPU clusters, GPU, memory and power on top, the process list below. `Power` is the CPU + GPU + ANE power, `Total` the power of the whole system (when the Mac reports it).
+Run `macmon` without a subcommand to open the terminal UI: the metric boxes of the original layout (one per CPU cluster, GPU and RAM, then CPU / GPU / ANE power) in the top 40% of the window and the process list below it; with the process list hidden, the boxes take the whole window. Each box shows its history as a chart filling the box. The bottom border of the metrics box shows `Power` (CPU + GPU + ANE), the fans and `Total`, the power of the whole system (when the Mac reports it).
 
 ```text
 Controls:
