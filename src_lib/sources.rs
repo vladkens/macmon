@@ -27,20 +27,27 @@ use std::{
 
 use core_foundation::{
   array::{
-    CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef,
-    CFMutableArrayRef, kCFTypeArrayCallBacks,
+    CFArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex,
+    CFArrayRef, CFMutableArrayRef, kCFTypeArrayCallBacks,
   },
-  base::{CFAllocatorRef, CFRange, CFRelease, CFTypeRef, kCFAllocatorDefault, kCFAllocatorNull},
+  base::{
+    CFAllocatorRef, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
+    kCFAllocatorNull,
+  },
   data::{CFDataGetBytes, CFDataGetLength, CFDataRef},
   dictionary::{
-    CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
+    CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
     CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
-    CFMutableDictionaryRef, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+    CFMutableDictionary, CFMutableDictionaryRef, kCFTypeDictionaryKeyCallBacks,
+    kCFTypeDictionaryValueCallBacks,
   },
   number::{
-    CFNumberCreate, CFNumberGetValue, CFNumberRef, kCFNumberSInt32Type, kCFNumberSInt64Type,
+    CFNumber, CFNumberCreate, CFNumberGetValue, CFNumberRef, kCFNumberSInt32Type,
+    kCFNumberSInt64Type,
   },
-  string::{CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
+  string::{
+    CFString, CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8,
+  },
 };
 use serde::Serialize;
 
@@ -127,6 +134,7 @@ unsafe extern "C" {
   fn IOServiceGetMatchingServices(mainPort: u32, matching: CFDictionaryRef, existing: *mut u32) -> i32;
   fn IOIteratorNext(iterator: u32) -> u32;
   fn IORegistryEntryGetName(entry: u32, name: *mut i8) -> i32;
+  fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
   fn IORegistryEntryCreateCFProperties(entry: u32, properties: *mut CFMutableDictionaryRef, allocator: CFAllocatorRef, options: u32) -> i32;
   fn IOObjectRelease(obj: u32) -> u32;
 }
@@ -151,6 +159,8 @@ unsafe extern "C" {
   fn IOReportChannelGetGroup(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportChannelGetSubGroup(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportChannelGetChannelName(a: CFDictionaryRef) -> CFStringRef;
+  fn IOReportChannelGetChannelID(a: CFDictionaryRef) -> u64;
+  fn IOReportChannelGetDriverID(a: CFDictionaryRef) -> u64;
   fn IOReportSimpleGetIntegerValue(a: CFDictionaryRef, b: i32) -> i64;
   fn IOReportChannelGetUnitLabel(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportStateGetCount(a: CFDictionaryRef) -> i32;
@@ -306,6 +316,12 @@ pub struct IOReportIterator {
 }
 
 impl IOReportIterator {
+  fn from_sample(data: CFDictionaryRef) -> Self {
+    // Subscription can omit unsupported channels and samples can reorder them.
+    // Read metadata from the actual sample, never by position in the request.
+    Self::new(data, cfio_channel_metadata(data))
+  }
+
   /// Create an iterator from raw IOReport sample data and channel metadata.
   pub fn new(data: CFDictionaryRef, metadata: Vec<(String, String, String, String)>) -> Self {
     let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
@@ -805,12 +821,97 @@ pub fn get_soc_info() -> WithError<SocInfo> {
 
 struct IOReportChannels {
   chan: CFMutableDictionaryRef,
-  source: Option<CFDictionaryRef>,
-  selected: Option<CFMutableArrayRef>,
+  source: CFDictionaryRef,
+  selected: CFMutableArrayRef,
+}
+
+impl Drop for IOReportChannels {
+  fn drop(&mut self) {
+    unsafe {
+      CFRelease(self.chan as _);
+      CFRelease(self.selected as _);
+      CFRelease(self.source as _);
+    }
+  }
+}
+
+fn clpc_energy_channel(driver: u64, id: u64, name: &str) -> CFMutableDictionary<CFString, CFType> {
+  // IOReportTypes.h: simple integer, power category, one element; energy in nJ.
+  let channel_type = 1i64 | (2 << 16) | (1 << 32);
+  let unit = (3i64 << 56) | (118 << 32);
+  let legend = CFArray::from_CFTypes(&[
+    CFNumber::from(id as i64).into_CFType(),
+    CFNumber::from(channel_type).into_CFType(),
+    CFString::new(name).into_CFType(),
+  ]);
+  let info = CFDictionary::from_CFType_pairs(&[(
+    CFString::new("IOReportChannelUnit"),
+    CFNumber::from(unit),
+  )]);
+  let channel = CFDictionary::from_CFType_pairs(&[
+    (CFString::new("DriverID"), CFNumber::from(driver as i64).into_CFType()),
+    (CFString::new("DriverName"), CFString::new("AppleCLPC").into_CFType()),
+    (CFString::new("IOReportGroupName"), CFString::new("CLPC").into_CFType()),
+    (CFString::new("IOReportSubGroupName"), CFString::new("Energy Counters").into_CFType()),
+    (CFString::new("IOReportChannelInfo"), info.into_CFType()),
+    (CFString::new("LegendChannel"), legend.into_CFType()),
+  ]);
+  // IOReport's getters cache derived fields in the channel dictionary.
+  CFMutableDictionary::from(&channel)
+}
+
+fn cfio_add_clpc_channels(selected: CFMutableArrayRef, filter: Option<ChannelFilterRef<'_>>) {
+  let Some(os_version) = sysctl_str("kern.osproductversion") else { return };
+  let Ok(services) = IOServiceIterator::new("AppleCLPC") else { return };
+  for (entry, name) in services {
+    let mut driver = 0;
+    let result = unsafe { IORegistryEntryGetRegistryEntryID(entry, &mut driver) };
+    let props = if result == 0 { cfio_get_props(entry, name).ok() } else { None };
+    unsafe { IOObjectRelease(entry) };
+    let Some(props) = props else { continue };
+    let channels = cfdict_get_val(props, "CFBundleIdentifier").and_then(|value| {
+      let bundle = unsafe { CFType::wrap_under_get_rule(value) }.downcast::<CFString>()?;
+      crate::clpc::energy_channels(&bundle.to_string(), &os_version)
+    });
+    unsafe { CFRelease(props as _) };
+    let Some(channels) = channels else { continue };
+
+    cfio_append_clpc_channels(selected, driver, &channels, filter);
+  }
+}
+
+fn cfio_append_clpc_channels(
+  selected: CFMutableArrayRef,
+  driver: u64,
+  channels: &[(u64, &str)],
+  filter: Option<ChannelFilterRef<'_>>,
+) {
+  for &(id, name) in channels {
+    if filter.is_some_and(|f| !f("CLPC", "Energy Counters", name, "nJ")) {
+      continue;
+    }
+
+    let exists = (0..unsafe { CFArrayGetCount(selected) }).any(|i| {
+      let item = unsafe { CFArrayGetValueAtIndex(selected, i) } as CFDictionaryRef;
+      // Alternate table indices can resolve to the same underlying CLPC counter.
+      unsafe {
+        IOReportChannelGetDriverID(item) == driver
+          && IOReportChannelGetChannelID(item) as u32 == id as u32
+      }
+    });
+    if !exists {
+      let channel = clpc_energy_channel(driver, id, name);
+      unsafe { CFArrayAppendValue(selected, channel.as_CFTypeRef()) };
+    }
+  }
 }
 
 fn cfio_get_chan(filter: Option<ChannelFilterRef<'_>>) -> WithError<IOReportChannels> {
   let all_channels = unsafe { IOReportCopyAllChannels(0, 0) };
+  if all_channels.is_null() {
+    return Err("Failed to get channels".into());
+  }
+
   let Some(channel_array) = cfdict_get_val(all_channels, "IOReportChannels") else {
     unsafe { CFRelease(all_channels as _) };
     return Err("Failed to get channels".into());
@@ -820,32 +921,28 @@ fn cfio_get_chan(filter: Option<ChannelFilterRef<'_>>) -> WithError<IOReportChan
   let size = unsafe { CFDictionaryGetCount(all_channels) };
   let chan = unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, size, all_channels) };
 
-  let mut selected_channels = None;
-  if let Some(filter) = filter {
-    let count = unsafe { CFArrayGetCount(channel_array) };
-    let selected =
-      unsafe { CFArrayCreateMutable(kCFAllocatorDefault, count, &kCFTypeArrayCallBacks) };
+  let count = unsafe { CFArrayGetCount(channel_array) };
+  let selected = unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks) };
 
-    for i in 0..count {
-      let item = unsafe { CFArrayGetValueAtIndex(channel_array, i) } as CFDictionaryRef;
-      let group = cfio_get_group(item);
-      let subgroup = cfio_get_subgroup(item);
-      let channel = cfio_get_channel(item);
-      let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
-      if filter(&group, &subgroup, &channel, &unit) {
-        unsafe { CFArrayAppendValue(selected, item as _) };
-      }
+  for i in 0..count {
+    let item = unsafe { CFArrayGetValueAtIndex(channel_array, i) } as CFDictionaryRef;
+    let group = cfio_get_group(item);
+    let subgroup = cfio_get_subgroup(item);
+    let channel = cfio_get_channel(item);
+    let unit = from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string();
+    if filter.is_none_or(|f| f(&group, &subgroup, &channel, &unit)) {
+      unsafe { CFArrayAppendValue(selected, item as _) };
     }
+  }
+  cfio_add_clpc_channels(selected, filter);
 
-    let key = cfstr("IOReportChannels");
-    unsafe {
-      CFDictionarySetValue(chan, key as _, selected as _);
-      CFRelease(key as _);
-    }
-    selected_channels = Some(selected);
+  let key = cfstr("IOReportChannels");
+  unsafe {
+    CFDictionarySetValue(chan, key as _, selected as _);
+    CFRelease(key as _);
   }
 
-  Ok(IOReportChannels { chan, source: Some(all_channels), selected: selected_channels })
+  Ok(IOReportChannels { chan, source: all_channels, selected })
 }
 
 fn cfio_channel_metadata(channels: CFDictionaryRef) -> Vec<(String, String, String, String)> {
@@ -869,40 +966,56 @@ fn cfio_channel_metadata(channels: CFDictionaryRef) -> Vec<(String, String, Stri
   metadata
 }
 
-fn cfio_get_subs(chan: CFMutableDictionaryRef) -> WithError<IOReportSubscriptionRef> {
-  let mut s: MaybeUninit<CFMutableDictionaryRef> = MaybeUninit::uninit();
-  let rs = unsafe { IOReportCreateSubscription(null(), chan, s.as_mut_ptr(), 0, null()) };
-  if rs.is_null() {
+fn cfio_get_subs(
+  chan: CFMutableDictionaryRef,
+) -> WithError<(IOReportSubscriptionRef, CFMutableDictionaryRef)> {
+  let mut subscribed = null_mut();
+  let rs = unsafe { IOReportCreateSubscription(null(), chan, &mut subscribed, 0, null()) };
+  if rs.is_null() || subscribed.is_null() {
+    unsafe {
+      if !rs.is_null() {
+        CFRelease(rs as _);
+      }
+      if !subscribed.is_null() {
+        CFRelease(subscribed as _);
+      }
+    }
     return Err("Failed to create subscription".into());
   }
 
-  unsafe { s.assume_init() };
-  Ok(rs)
+  // Use the subscription's channel dictionary; unsupported reports may be omitted.
+  Ok((rs, subscribed))
 }
 
 /// IOReport subscription used to sample Apple Silicon power and residency counters.
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
-  source: Option<CFDictionaryRef>,
-  selected: Option<CFMutableArrayRef>,
-  metadata: Vec<(String, String, String, String)>,
   prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
+  /// Subscribe to discovered scalar CLPC reports alongside independent legacy energy channels.
+  /// Report names are hexadecimal IDs; their units are provisional until verified.
+  #[cfg(feature = "app")]
+  #[doc(hidden)]
+  pub fn with_clpc_reports(driver: u64, ids: &[u64]) -> WithError<Self> {
+    let filter = |group: &str, subgroup: &str, channel: &str, unit: &str| {
+      group == "Energy Model" || crate::shared::is_pmp_ane_channel(group, subgroup, channel, unit)
+    };
+    let channels = cfio_get_chan(Some(&filter))?;
+    for id in ids {
+      let channel = clpc_energy_channel(driver, *id, &format!("0x{id:016x}"));
+      unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
+    }
+    let (subs, chan) = cfio_get_subs(channels.chan)?;
+    Ok(Self { subs, chan, prev: None })
+  }
+
   fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Self> {
     let channels = cfio_get_chan(filter)?;
-    let metadata = cfio_channel_metadata(channels.chan);
-    let subs = cfio_get_subs(channels.chan)?;
-    Ok(Self {
-      subs,
-      chan: channels.chan,
-      source: channels.source,
-      selected: channels.selected,
-      metadata,
-      prev: None,
-    })
+    let (subs, chan) = cfio_get_subs(channels.chan)?;
+    Ok(Self { subs, chan, prev: None })
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -930,7 +1043,7 @@ impl IOReport {
       let sample3 = IOReportCreateSamplesDelta(sample1, sample2, null());
       CFRelease(sample1 as _);
       CFRelease(sample2 as _);
-      IOReportIterator::new(sample3, self.metadata.clone())
+      IOReportIterator::from_sample(sample3)
     }
   }
 
@@ -957,7 +1070,7 @@ impl IOReport {
     let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
     self.prev = Some(next);
 
-    (IOReportIterator::new(diff, self.metadata.clone()), elapsed)
+    (IOReportIterator::from_sample(diff), elapsed)
   }
 
   /// Collect multiple delta samples across one sampling window.
@@ -988,7 +1101,7 @@ impl IOReport {
       let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
       prev = next;
 
-      samples.push((IOReportIterator::new(diff, self.metadata.clone()), elapsed.max(1)));
+      samples.push((IOReportIterator::from_sample(diff), elapsed.max(1)));
     }
 
     self.prev = Some(prev);
@@ -1001,12 +1114,6 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      if let Some(selected) = self.selected {
-        CFRelease(selected as _);
-      }
-      if let Some(source) = self.source {
-        CFRelease(source as _);
-      }
       if let Some(prev) = self.prev {
         CFRelease(prev.0 as _);
       }
@@ -1383,6 +1490,77 @@ impl Drop for SMC {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn clpc_descriptors_preserve_driver_counter_ids_and_nanojoule_units() {
+    let driver = 0x1_0000_0428;
+    let channels =
+      crate::clpc::energy_channels("com.apple.driver.AppleT8112CLPC", "27.0.1").unwrap();
+    for (id, name) in channels {
+      let channel = clpc_energy_channel(driver, id, name);
+      let item = channel.as_concrete_TypeRef();
+      assert_eq!(unsafe { IOReportChannelGetDriverID(item) }, driver);
+      assert_eq!(unsafe { IOReportChannelGetChannelID(item) }, id);
+      assert_eq!(cfio_get_group(item), "CLPC");
+      assert_eq!(cfio_get_subgroup(item), "Energy Counters");
+      assert_eq!(cfio_get_channel(item), name);
+      assert_eq!(from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim(), "nJ");
+    }
+  }
+
+  #[test]
+  fn sample_metadata_follows_channels_after_omission_or_reordering() {
+    let channel_ids: Vec<_> = [
+      "com.apple.driver.AppleT8112CLPC",
+      "com.apple.driver.AppleT6002CLPC",
+      "com.apple.driver.AppleT8142CLPC",
+    ]
+    .into_iter()
+    .flat_map(|bundle| crate::clpc::energy_channels(bundle, "27.0.1").unwrap())
+    .collect();
+    let requested: Vec<_> =
+      channel_ids.iter().map(|&(id, name)| clpc_energy_channel(0x1_0000_0428, id, name)).collect();
+    for order in [vec![1], vec![2, 0, 1], vec![5, 3, 4], vec![8, 6, 7]] {
+      let channels: Vec<_> = order.iter().map(|&i| requested[i].clone()).collect();
+      let sample = CFDictionary::from_CFType_pairs(&[(
+        CFString::new("IOReportChannels"),
+        CFArray::from_CFTypes(&channels),
+      )]);
+      let data = sample.as_concrete_TypeRef();
+      // The iterator takes ownership of one retained reference to the sample.
+      unsafe { core_foundation::base::CFRetain(data as _) };
+      let actual: Vec<_> =
+        IOReportIterator::from_sample(data).map(|item| (item.channel, item.unit)).collect();
+      let expected: Vec<_> =
+        order.iter().map(|&i| (channel_ids[i].1.to_string(), "nJ".to_string())).collect();
+      assert_eq!(actual, expected);
+    }
+  }
+
+  #[test]
+  fn clpc_subscription_deduplicates_counter_aliases_per_driver_and_respects_filter() {
+    let driver = 0x1_0000_0428;
+    let channels =
+      crate::clpc::energy_channels("com.apple.driver.AppleT8142CLPC", "27.0.1").unwrap();
+    let selected = unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks) };
+    let alias = clpc_energy_channel(driver, 0x0000_0018_6a01_0933, "GPU Energy");
+    unsafe { CFArrayAppendValue(selected, alias.as_CFTypeRef()) };
+
+    cfio_append_clpc_channels(selected, driver, &channels, None);
+    cfio_append_clpc_channels(selected, driver, &channels, None);
+    assert_eq!(unsafe { CFArrayGetCount(selected) }, 3);
+
+    let gpu_only = |group: &str, subgroup: &str, name: &str, unit: &str| {
+      group == "CLPC" && subgroup == "Energy Counters" && name == "GPU Energy" && unit == "nJ"
+    };
+    cfio_append_clpc_channels(selected, driver + 1, &channels, Some(&gpu_only));
+    assert_eq!(unsafe { CFArrayGetCount(selected) }, 4);
+    let item = unsafe { CFArrayGetValueAtIndex(selected, 3) } as CFDictionaryRef;
+    assert_eq!(unsafe { IOReportChannelGetDriverID(item) }, driver + 1);
+    assert_eq!(unsafe { IOReportChannelGetChannelID(item) }, 0x0000_0019_6a01_0933);
+
+    unsafe { CFRelease(selected as _) };
+  }
 
   #[test]
   fn parse_acc_clusters_values() {

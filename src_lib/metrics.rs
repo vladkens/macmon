@@ -5,7 +5,9 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 use std::{collections::HashMap, time::Duration};
 
-use crate::shared::{ioreport_channels_filter, zero_div};
+use crate::shared::{
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, zero_div,
+};
 use crate::sources::{
   IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
   libc_swap,
@@ -18,6 +20,37 @@ type FreqMetrics = (u32, f32, f32);
 // const CPU_FREQ_DICE_SUBG: &str = "CPU Complex Performance States";
 const CPU_FREQ_CORE_SUBG: &str = "CPU Core Performance States";
 const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
+
+#[derive(Default)]
+struct PowerSources {
+  clpc: Option<f32>,
+  energy_model: Option<f32>,
+  pmp: f32,
+}
+
+impl PowerSources {
+  fn add_clpc(&mut self, watts: f32) {
+    // Negative deltas include IOReport's invalid-value sentinel and counter resets.
+    if watts.is_finite() && watts >= 0.0 {
+      *self.clpc.get_or_insert(0.0) += watts;
+    }
+  }
+
+  fn add_energy_model(&mut self, watts: f32) {
+    *self.energy_model.get_or_insert(0.0) += watts;
+  }
+
+  fn watts(self, force_clpc: bool) -> Option<f32> {
+    if force_clpc {
+      return self.clpc;
+    }
+
+    // On macOS 27 Energy Model CPU/ANE counters can freeze without Apple's
+    // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
+    // Drivers with unknown CLPC IDs need the legacy sources; ANE can use PMP.
+    Some(self.clpc.or(self.energy_model).unwrap_or(self.pmp))
+  }
+}
 
 // MARK: Structs
 
@@ -358,6 +391,7 @@ fn init_smc() -> WithError<SmcSensors> {
 /// loop. Run the sampler in a worker thread when sampling must not block the
 /// application thread.
 pub struct Sampler {
+  force_clpc: bool,
   soc: SocInfo,
   ior: IOReport,
   hid: IOHIDSensors,
@@ -376,6 +410,7 @@ impl Sampler {
     let smc_sensors = init_smc()?;
 
     Ok(Sampler {
+      force_clpc: false,
       soc,
       ior,
       hid,
@@ -384,6 +419,14 @@ impl Sampler {
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
     })
+  }
+
+  /// Require valid CLPC counters for CPU, GPU, and ANE power, without legacy fallback.
+  /// [`Self::get_metrics`] returns an error if any counter is unavailable or invalid.
+  pub fn with_clpc() -> WithError<Self> {
+    let mut sampler = Self::new()?;
+    sampler.force_clpc = true;
+    Ok(sampler)
   }
 
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
@@ -482,6 +525,9 @@ impl Sampler {
     let mut ecpu_map: HashMap<CpuCoreKey, FreqMetrics> = HashMap::new();
     let mut pcpu_map: HashMap<CpuCoreKey, FreqMetrics> = HashMap::new();
     let mut rs = Metrics::default();
+    let mut cpu_power = PowerSources::default();
+    let mut gpu_power = PowerSources::default();
+    let mut ane_power = PowerSources::default();
 
     // Keep this channel handling in sync with ioreport_channels_filter.
     for x in sample {
@@ -514,18 +560,45 @@ impl Sampler {
 
       if x.group == "Energy Model" {
         match x.channel.as_str() {
-          "GPU Energy" => rs.gpu_power += cfio_watts(x.item, &x.unit, dt)?,
+          "GPU Energy" => gpu_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?),
           // "CPU Energy" for Basic / Max, "DIE_{}_CPU Energy" for Ultra
-          c if c.ends_with("CPU Energy") => rs.cpu_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.ends_with("CPU Energy") => {
+            cpu_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
+          }
           // same pattern next keys: "ANE" for Basic, "ANE0" for Max, "ANE0_{}" for Ultra
-          c if c.starts_with("ANE") => rs.ane_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("ANE") => {
+            ane_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
+          }
           c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
           c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
           _ => {}
         }
       }
+
+      if is_pmp_ane_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        ane_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
+      }
+
+      if is_clpc_energy_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        let power = match x.channel.as_str() {
+          "CPU Energy" => &mut cpu_power,
+          "GPU Energy" => &mut gpu_power,
+          "ANE" => &mut ane_power,
+          _ => continue,
+        };
+        power.add_clpc(cfio_watts(x.item, &x.unit, dt)?);
+      }
     }
 
+    rs.cpu_power = cpu_power
+      .watts(self.force_clpc)
+      .ok_or("CPU power unavailable from CLPC; legacy fallback is disabled")?;
+    rs.gpu_power = gpu_power
+      .watts(self.force_clpc)
+      .ok_or("GPU power unavailable from CLPC; legacy fallback is disabled")?;
+    rs.ane_power = ane_power
+      .watts(self.force_clpc)
+      .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
     rs.ecpu_cores = collect_cpu_core_metrics(ecpu_map);
     rs.pcpu_cores = collect_cpu_core_metrics(pcpu_map);
 
@@ -579,9 +652,58 @@ mod tests {
   use crate::sources::SocInfo;
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, Metrics, aggregate_ioreport_metrics, calc_freq_from_residencies,
-    collect_cpu_core_metrics, parse_cpu_core_channel, smc_numeric_value,
+    CpuCoreKind, CpuCoreMetrics, Metrics, PowerSources, aggregate_ioreport_metrics,
+    calc_freq_from_residencies, collect_cpu_core_metrics, parse_cpu_core_channel,
+    smc_numeric_value,
   };
+
+  #[test]
+  fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
+    assert_eq!(PowerSources::default().watts(false), Some(0.0));
+    assert_eq!(PowerSources { pmp: 0.8, ..Default::default() }.watts(false), Some(0.8));
+
+    let mut power = PowerSources { pmp: 0.8, ..Default::default() };
+    power.add_energy_model(0.0);
+    assert_eq!(power.watts(false), Some(0.0));
+
+    let mut power = PowerSources { pmp: 0.8, ..Default::default() };
+    power.add_energy_model(0.5);
+    power.add_energy_model(0.25);
+    assert_eq!(power.watts(false), Some(0.75));
+  }
+
+  #[test]
+  fn clpc_power_takes_precedence_without_double_counting_or_replacing_idle_zero() {
+    for watts in [0.0, 0.8, 13.0] {
+      let mut power = PowerSources { energy_model: Some(2.0), pmp: 0.8, ..Default::default() };
+      power.add_clpc(watts);
+      assert_eq!(power.watts(false), Some(watts));
+    }
+    let mut power = PowerSources::default();
+    power.add_clpc(1.0);
+    power.add_clpc(2.0);
+    assert_eq!(power.watts(false), Some(3.0));
+  }
+
+  #[test]
+  fn invalid_clpc_power_keeps_the_legacy_fallback() {
+    for watts in [f32::NAN, f32::INFINITY, -1.0, i64::MIN as f32] {
+      let mut power = PowerSources { energy_model: Some(2.0), ..Default::default() };
+      power.add_clpc(watts);
+      assert_eq!(power.watts(false), Some(2.0));
+    }
+  }
+
+  #[test]
+  fn forced_clpc_rejects_legacy_fallback_but_accepts_idle_zero() {
+    for watts in [None, Some(f32::NAN), Some(f32::INFINITY), Some(-1.0), Some(0.0), Some(1.2)] {
+      let mut power = PowerSources { energy_model: Some(2.0), pmp: 0.8, ..Default::default() };
+      if let Some(watts) = watts {
+        power.add_clpc(watts);
+      }
+      assert_eq!(power.watts(true), watts.filter(|x| x.is_finite() && *x >= 0.0));
+    }
+  }
 
   fn core(
     die_id: usize,

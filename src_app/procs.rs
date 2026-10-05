@@ -103,7 +103,7 @@ unsafe extern "C" {
   fn IORegistryEntryCreateCFProperty(entry: u32, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
   fn IOIteratorNext(iterator: u32) -> u32;
   fn IOIteratorIsValid(iterator: u32) -> c_int;
-  fn IOObjectRelease(object: u32) -> c_int;
+  fn IOObjectRelease(object: u32) -> u32;
 }
 
 /// One row of the process list.
