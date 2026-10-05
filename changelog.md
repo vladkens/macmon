@@ -1,3 +1,26 @@
+## Unreleased
+
+### Breaking Changes
+
+- Removed the TUI color theme (`c`) and chart view (`v`) switches: colors now follow the terminal's own palette and charts are always braille; old `color`, `theme` and `view_type` config fields are ignored
+
+### Features
+
+- Redesigned the TUI in a btop-inspired layout: a compact metrics box on top and a full-width process list below
+- Added a process list with PID, name, user, CPU %, memory, power (W) and GPU % per process, without sudo (power only for the current user's processes)
+- Added process sorting (`s` / `S`), filtering by name or PID (`/`) and selection (arrows, PgUp / PgDn, Home / End)
+- Added panel toggles (`1`–`5`: CPU, GPU, memory, power, processes), saved in the config
+- Added a green → yellow → red load gradient in the terminal's colors, smooth on truecolor terminals
+
+### Improvements
+
+- Replaced the detailed per-core view (`d`) with a compact per-core load row grouped by cluster and die
+- Made the process list auto-hide in small windows; process sampling pauses while it is hidden
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.2...main
+
+---
+
 ## v0.8.2 – 2026-08-04
 
 ### Fixes

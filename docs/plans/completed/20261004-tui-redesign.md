@@ -350,9 +350,9 @@ The user asked at the start to keep every existing label. The old UI showed avg 
 - [x] run `make test` and `make check` - must pass before next task
 
 ### Task 15: [Final] Update documentation
-- [ ] update `readme.md`: features list, Controls section, note on process data without sudo
-- [ ] add entry to `changelog.md`
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `readme.md`: features list, Controls section, note on process data without sudo (features: per-core load, braille charts, process list, terminal colors, toggleable panels; `c` / `v` gone; Controls split into global keys and process list keys as in the key handlers; settings file and auto-hide noted; "Process data without sudo": CPU % / memory / GPU % for every process, power only for the current user's processes (`-` otherwise, all with `sudo`), CPU % as in Activity Monitor; screenshot left for Post-Completion)
+- [x] add entry to `changelog.md` (no "Unreleased" convention in the file: added an `## Unreleased` entry in the same style without a version or date, Full Changelog link `v0.8.2...main`; to be renamed at release)
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

@@ -19,12 +19,13 @@
 
 - 🚫 Runs without sudo
 - ⚡ Real-time CPU / GPU / ANE power usage
-- 📊 CPU frequency-scaled and active ratios per cluster
+- 📊 CPU frequency-scaled and active ratios per cluster, per-core load
 - 💾 RAM / Swap usage
-- 📈 Historical charts with average and max values
+- 📈 Braille history charts with average and max values
 - 🌡️ Average CPU / GPU temperature
-- 🎨 Switchable color themes (6 variants)
-- 🪟 Can be displayed in a small window
+- 📋 Process list with per-process CPU, memory, power and GPU usage
+- 🎨 Follows your terminal's color scheme
+- 🪟 Toggleable panels, can be displayed in a small window
 - 🦀 Written in Rust
 
 ## 📥 Installation
@@ -78,16 +79,29 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI.
+Run `macmon` without a subcommand to open the terminal UI: CPU clusters, GPU, memory and power on top, the process list below.
 
 ```text
 Controls:
-  c - change color
-  v - switch charts view: gauge / sparkline
-  d - toggle detailed CPU/RAM view
-  r - switch ratio mode: scaled / active
-  q - quit
+  q     - quit (also Ctrl-C)
+  d     - toggle per-core load row
+  r     - switch ratio mode: scaled / active
+  - / + - change update interval
+  1-5   - show / hide panels: CPU, GPU, memory, power, processes
+
+Process list:
+  /     - filter by name or PID (Enter - keep, Esc - clear)
+  s     - change sort column: CPU, MEM, POWER, GPU, PID, NAME
+  S     - reverse sort order
+  ↑ ↓   - select process (also PgUp / PgDn / Home / End)
+  Esc   - clear selection, then filter
 ```
+
+Settings (interval, panels, per-core row, ratio mode, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
+
+#### Process data without sudo
+
+CPU %, memory and GPU % are shown for every process. Power (W) is shown only for processes of the current user — macOS doesn't expose the energy counter of other users' processes without root, so those show `-` (run with `sudo` to see it for every process). CPU % follows Activity Monitor: 100% is one fully busy core.
 
 ### JSON output
 
