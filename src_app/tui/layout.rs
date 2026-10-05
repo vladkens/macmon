@@ -170,9 +170,10 @@ mod tests {
     Rect::new(x, y, width, height)
   }
 
-  /// Power rows of an M3 Pro with one fan: CPU / GPU / ANE `CPU    4.50W avg  4.50 max  4.50  45°C`
-  /// (38 cells) and an 8 cells graph, Power, Total with the fan (45 cells).
-  const POWER: PowerSize = PowerSize { rows: 5, width: 47, min_width: 32, fans_inline: 45 };
+  /// Power rows of an M3 Pro with one fan: CPU / GPU / ANE `CPU    4.50W (4.50, 4.50)  45°C` (31
+  /// cells) and a 12 cells graph, Power, Total `Total 12.00W (12.00, 12.00)` (27 cells) with the
+  /// fan (40 cells).
+  const POWER: PowerSize = PowerSize { rows: 5, width: 44, min_width: 27, fans_inline: 40 };
 
   /// M3 Pro: two clusters, swap configured.
   fn content() -> Content {
@@ -207,9 +208,9 @@ mod tests {
     use Strip::*;
     assert_eq!(strip_kinds(&plan), [Cluster(0), Cluster(1), Gpu, Ram, Swap]);
     let rows: Vec<Rect> = plan.strips.iter().map(|(_, r)| *r).collect();
-    assert_eq!(rows, (1..6).map(|y| rect(2, y, 146, 1)).collect::<Vec<_>>());
-    assert_eq!(plan.separator, Some(rect(149, 1, 1, 5)));
-    assert_eq!(plan.power, Some(rect(151, 1, POWER.width, 5)));
+    assert_eq!(rows, (1..6).map(|y| rect(2, y, 149, 1)).collect::<Vec<_>>());
+    assert_eq!(plan.separator, Some(rect(152, 1, 1, 5)));
+    assert_eq!(plan.power, Some(rect(154, 1, POWER.width, 5)));
   }
 
   #[test]
@@ -230,11 +231,15 @@ mod tests {
     let plan = compute_layout(rect(0, 0, 120, 40), true, &three);
     assert_eq!(plan.top.map(|r| r.height), Some(8));
 
-    // 72x24: still room for the power column next to the strips, at its minimum width
+    // 72x24: still room for the power column next to the strips, the fan on a row of its own
     let plan = layout(rect(0, 0, 72, 24), true);
     assert_eq!(plan.top, Some(rect(0, 0, 72, 8)));
-    assert_eq!(plan.power, Some(rect(38, 1, POWER.min_width, 6)));
-    assert_eq!(plan.strips[0].1.width, 33);
+    assert_eq!(plan.power, Some(rect(41, 1, 29, 6)));
+    assert_eq!(plan.strips[0].1.width, STRIPS_MIN_WIDTH);
+
+    // 70x24: the narrowest power column next to the strips
+    let plan = layout(rect(0, 0, POWER_SIDE_MIN_WIDTH, 24), true);
+    assert_eq!(plan.power, Some(rect(41, 1, POWER.min_width, 6)));
   }
 
   #[test]
@@ -244,11 +249,11 @@ mod tests {
     let cases = [
       (400, POWER.width),
       (200, POWER.width),
-      (90, POWER.width),
-      (89, POWER.width - 1),
+      (87, POWER.width),
+      (86, POWER.width - 1),
       (80, 37),
-      (75, POWER.min_width),
-      (72, POWER.min_width),
+      (75, 32),
+      (72, 29),
       (POWER_SIDE_MIN_WIDTH, POWER.min_width),
     ];
     for (width, power) in cases {
@@ -274,9 +279,9 @@ mod tests {
       compute_layout(rect(0, 0, width, 40), true, &content).top.map(|r| r.height)
     };
 
-    // next to the strips: the fan fits after Total from 45 cells on (88 columns)
-    assert_eq!(top(88, POWER), Some(7));
-    assert_eq!(top(87, POWER), Some(8));
+    // next to the strips: the fan fits after Total from 40 cells on (83 columns)
+    assert_eq!(top(83, POWER), Some(7));
+    assert_eq!(top(82, POWER), Some(8));
 
     // under the strips: 5 strips and 5 or 6 power rows
     assert_eq!(top(POWER_SIDE_MIN_WIDTH - 1, POWER), Some(12));

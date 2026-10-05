@@ -21,7 +21,7 @@
 - ⚡ Real-time CPU / GPU / ANE power usage
 - 📊 CPU frequency-scaled and active ratios per cluster
 - 💾 RAM / Swap usage
-- 📈 Braille history charts with average and max values
+- 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
 - 🎨 Follows your terminal's color scheme

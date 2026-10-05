@@ -20,8 +20,9 @@ use crate::config::RatioMode;
 const GB: f64 = (1u64 << 30) as f64;
 /// Between key hints on the bottom border.
 const HINT_SEPARATOR: &str = " | ";
-/// Narrowest power history graph worth drawing; a narrower power column drops the graphs.
-const POWER_GRAPH_MIN: u16 = 8;
+/// Narrowest power history graph: a power column with everything is the text plus this graph, a
+/// narrower one drops the graphs.
+const POWER_GRAPH_MIN: u16 = 12;
 /// Between the Total power and the fans on one row.
 const FANS_GAP: &str = "  ";
 /// Narrowest detail column of the strips (`1.8GHz`, `20/36G`).
@@ -198,14 +199,15 @@ fn size_strip(label: &str, used: u64, total: u64) -> StripData<'static> {
   }
 }
 
-/// One row of the power column in parts: `CPU    4.50W` `avg  3.10 max  8.20` ` 45°C` `⣀⣠⣤⣴`.
+/// One row of the power column in parts: `CPU    4.50W` ` (3.10, 8.20)` `  45°C` `▃▅▂▃`.
 #[derive(Default)]
 struct PowerRow<'a> {
   /// `CPU    4.50W`, or the fans on a row of their own: always shown.
   head: Vec<Span<'static>>,
-  /// ` avg  3.10 max  8.20`.
+  /// ` (3.10, 8.20)`: average and maximum.
   stats: Vec<Span<'static>>,
-  /// `  45°C`, blank for a unit without a sensor; empty for rows without a temperature.
+  /// `  45°C`, blank for a unit without a sensor; empty for rows without a temperature. The
+  /// leading gap lines the temperatures up across rows.
   temp: Vec<Span<'static>>,
   /// Fans after the Total power, when they fit on its row.
   tail: Vec<Span<'static>>,
@@ -467,8 +469,8 @@ impl App {
     }
   }
 
-  /// `{label} {current}W avg {avg} max {max}` of one power sensor; labels are 5 cells wide
-  /// (`Power`, `Total`).
+  /// `{label} {current}W ({avg}, {max})` of one power sensor, as in the original UI; labels are 5
+  /// cells wide (`Power`, `Total`), the parentheses and the comma dim.
   fn power_row(&self, label: &str, store: &PowerStore) -> PowerRow<'static> {
     PowerRow {
       head: vec![
@@ -476,10 +478,11 @@ impl App {
         self.text(format!(" {:>5.2}W", store.top_value)),
       ],
       stats: vec![
-        self.dim(" avg "),
-        self.text(format!("{:>5.2}", store.avg_value)),
-        self.dim(" max "),
-        self.text(format!("{:>5.2}", store.max_value)),
+        self.dim(" ("),
+        self.text(format!("{:.2}", store.avg_value)),
+        self.dim(", "),
+        self.text(format!("{:.2}", store.max_value)),
+        self.dim(")"),
       ],
       ..Default::default()
     }
@@ -497,14 +500,22 @@ impl App {
     ];
 
     let mut rows: Vec<PowerRow> = units
-      .into_iter()
-      .map(|(label, store, temp)| {
-        // a missing sensor leaves the cells blank, so the graphs line up
-        let temp = if temp > 0.0 { self.temp(temp) } else { Span::raw("     ") };
-        let temp = vec![Span::raw(" "), temp];
-        PowerRow { temp, history: Some(&store.items), ..self.power_row(label, store) }
+      .iter()
+      .map(|&(label, store, _)| PowerRow {
+        history: Some(&store.items),
+        ..self.power_row(label, store)
       })
       .collect();
+
+    // the temperatures start one cell after the widest numbers; a missing sensor leaves the cells
+    // blank, so the graphs line up
+    let numbers = |row: &PowerRow| spans_width(&row.head) + spans_width(&row.stats);
+    let temp_x = rows.iter().map(numbers).max().unwrap_or(0);
+    for (row, (_, _, temp)) in rows.iter_mut().zip(units) {
+      let gap = Span::raw(" ".repeat(usize::from(temp_x - numbers(row)) + 1));
+      let temp = if temp > 0.0 { self.temp(temp) } else { Span::raw("     ") };
+      row.temp = vec![gap, temp];
+    }
     rows.push(self.power_row("Power", &self.all_power));
 
     let total = (self.sys_power.top_value > 0.0).then(|| self.power_row("Total", &self.sys_power));
@@ -547,10 +558,11 @@ impl App {
     }
   }
 
-  /// Power rows top-down in `area`, history graphs right of the text.
+  /// Power rows top-down in `area`, history graphs in the low load color right of the text.
   fn render_power(&self, buf: &mut Buffer, area: Rect) {
     let rows = self.power_rows(area.width);
     let fit = fit_power(&rows.iter().map(PowerRow::widths).collect::<Vec<_>>(), area.width);
+    let color = self.theme.gradient(0.0);
 
     for (row, y) in rows.into_iter().zip(area.top()..area.bottom()) {
       let mut spans = row.head;
@@ -565,7 +577,7 @@ impl App {
 
       if let (Some(x), Some(items)) = (fit.graph, row.history) {
         let graph_area = Rect::new(area.x + x, y, area.width - x, 1);
-        Graph::new(items, &self.theme).render(graph_area, buf);
+        Graph::new(items, &self.theme).color(color).render(graph_area, buf);
       }
     }
   }
@@ -580,12 +592,13 @@ mod tests {
 
   const GB: u64 = 1 << 30;
 
-  /// Widths of real power rows: CPU / GPU / ANE `CPU    4.50W` ` avg  4.50 max  4.50` `  45°C`
-  /// and a graph, then Power and Total without temperature and graph.
+  /// Widths of real power rows: CPU / GPU / ANE `CPU    4.50W` ` (4.50, 4.50)` `  45°C` and a
+  /// graph, then Power ` (6.60, 6.60)` and Total ` (12.00, 12.00)` without temperature and graph.
   fn power_widths() -> Vec<PowerWidths> {
-    let unit = PowerWidths { head: 12, stats: 20, temp: 6, tail: 0, graph: true };
-    let total = PowerWidths { temp: 0, graph: false, ..unit };
-    vec![unit, unit, unit, total, total]
+    let unit = PowerWidths { head: 12, stats: 13, temp: 6, tail: 0, graph: true };
+    let power = PowerWidths { temp: 0, graph: false, ..unit };
+    let total = PowerWidths { stats: 15, ..power };
+    vec![unit, unit, unit, power, total]
   }
 
   fn parts(stats: bool, temp: bool, graph: Option<u16>) -> PowerFit {
@@ -597,14 +610,15 @@ mod tests {
     let rows = power_widths();
     let fit = |width| fit_power(&rows, width);
 
-    // 38 cells of text, a gap and at least 8 graph cells
-    assert_eq!(fit(200), parts(true, true, Some(39)));
-    assert_eq!(fit(47), parts(true, true, Some(39)));
-    assert_eq!(fit(46), parts(true, true, None));
-    assert_eq!(fit(38), parts(true, true, None));
-    assert_eq!(fit(37), parts(true, false, None));
-    assert_eq!(fit(32), parts(true, false, None));
-    assert_eq!(fit(31), parts(false, false, None));
+    // 31 cells of text, a gap and at least 12 graph cells
+    assert_eq!(fit(200), parts(true, true, Some(32)));
+    assert_eq!(fit(44), parts(true, true, Some(32)));
+    assert_eq!(fit(43), parts(true, true, None));
+    assert_eq!(fit(31), parts(true, true, None));
+    assert_eq!(fit(30), parts(true, false, None));
+    // the Total numbers are the widest
+    assert_eq!(fit(27), parts(true, false, None));
+    assert_eq!(fit(26), parts(false, false, None));
     assert_eq!(fit(0), parts(false, false, None));
 
     // a narrower column never shows more, and parts go in a fixed order
@@ -623,13 +637,13 @@ mod tests {
     // 100 W and more: the total is one cell wider, so every row drops average and maximum
     let mut rows = power_widths();
     rows[4].head += 1;
-    assert_eq!(fit_power(&rows, 33), parts(true, false, None));
-    assert_eq!(fit_power(&rows, 32), parts(false, false, None));
+    assert_eq!(fit_power(&rows, 28), parts(true, false, None));
+    assert_eq!(fit_power(&rows, 27), parts(false, false, None));
     // graphs start after the widest row with a graph
-    assert_eq!(fit_power(&rows, 47), parts(true, true, Some(39)));
+    assert_eq!(fit_power(&rows, 44), parts(true, true, Some(32)));
     rows[0].head += 1;
-    assert_eq!(fit_power(&rows, 47), parts(true, true, None));
-    assert_eq!(fit_power(&rows, 48), parts(true, true, Some(40)));
+    assert_eq!(fit_power(&rows, 44), parts(true, true, None));
+    assert_eq!(fit_power(&rows, 45), parts(true, true, Some(33)));
 
     // no rows with a graph, no rows at all
     assert_eq!(fit_power(&rows[3..], 100), parts(true, true, None));

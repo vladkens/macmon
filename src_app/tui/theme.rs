@@ -6,8 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use super::palette::{Palette, Rgb};
 
 /// Steps of the gradient without a smooth palette: green up to `GREEN_MAX`, yellow up to
-/// `YELLOW_MAX`, red above. A graph row is colored by its top, so in a 3-row graph each row gets
-/// one color.
+/// `YELLOW_MAX`, red above.
 const GREEN_MAX: f64 = 1.0 / 3.0;
 const YELLOW_MAX: f64 = 2.0 / 3.0;
 

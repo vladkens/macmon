@@ -408,8 +408,9 @@ mod tests {
     (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect()
   }
 
-  fn is_braille(c: char) -> bool {
-    ('\u{2801}'..='\u{28ff}').contains(&c)
+  /// Graph bar `▁`…`█`.
+  fn is_bar(c: char) -> bool {
+    ('▁'..='█').contains(&c)
   }
 
   #[test]
@@ -584,11 +585,11 @@ mod tests {
     "GPU    23% 1.4GHz ",
     "RAM    56% 20/36G ",
     "SWAP   50% 1/2G   ",
-    "CPU    4.50W avg  4.50 max  4.50",
-    "GPU    2.00W avg  2.00 max  2.00",
-    "ANE    0.10W avg  0.10 max  0.10",
-    "Power  6.60W avg  6.60 max  6.60",
-    "Total 12.00W avg 12.00 max 12.00",
+    "CPU    4.50W (4.50, 4.50)",
+    "GPU    2.00W (2.00, 2.00)",
+    "ANE    0.10W (0.10, 0.10)",
+    "Power  6.60W (6.60, 6.60)",
+    "Total 12.00W (12.00, 12.00)",
   ];
 
   #[test]
@@ -629,46 +630,37 @@ mod tests {
 
   #[test]
   fn matches_target_layout_at_100_columns() {
-    // M3 Pro without swap, enough history to fill the strips
-    let mut app = app_with_samples(60, |m| m.memory.swap_total = 0);
+    // M3 Pro, enough history to fill the graphs
+    let mut app = app_with_samples(60, |_| {});
     render_buffer(&mut app, 100, 30);
     app.update_procs(varied_procs());
     let buf = render_buffer(&mut app, 100, 30);
     let rows: Vec<String> = (0..30).map(|y| row(&buf, y)).collect();
-    let cells = |y: usize, skip: usize, take: usize| -> String {
-      rows[y].chars().skip(skip).take(take).collect()
+
+    let chip = "╭─ M3 Pro · 6E+6P · 18GPU · 36GB ";
+    let version = format!(" macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
+    let dashes = 100 - chip.chars().count() - version.chars().count();
+    assert_eq!(rows[0], format!("{chip}{}{version}", "─".repeat(dashes)));
+
+    // strips (49 cells: text, then 31 graph or meter cells) and the power column (44 cells: up to
+    // 31 cells of text, a gap and 12 graph cells) with ` │ ` between them; the samples are
+    // constant, so every bar of a graph is the same and the power graphs are at full height
+    let bars = |bar: &str| bar.repeat(31);
+    let meter = |filled: usize| format!("{}{}", "▰".repeat(filled), "▱".repeat(31 - filled));
+    let power = |text: &str, graph: bool| match graph {
+      true => format!("{text:<31} {}", "█".repeat(12)),
+      false => format!("{text:<44}"),
     };
-
-    let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
-    assert!(rows[0].starts_with("╭─ M3 Pro · 6E+6P · 18GPU · 36GB ──"), "{}", rows[0]);
-    assert!(rows[0].ends_with(&version), "{}", rows[0]);
-
-    // strips (46 cells) and the power column (47 cells) with ` │ ` between them
-    for y in 1..6 {
-      let frame: Vec<String> = [0, 1, 48, 49, 50, 98, 99].map(|x| cells(y, x, 1)).into();
-      assert_eq!(frame, ["│", " ", " ", "│", " ", " ", "│"], "{}", rows[y]);
-    }
-    let strips = [(1, "E-CPU  42% 1.8GHz "), (2, "P-CPU  77% 3.2GHz "), (3, "GPU    23% 1.4GHz ")];
-    for (y, label) in strips {
-      let strip = cells(y, 2, 46);
-      assert!(strip.starts_with(label), "{strip}");
-      assert!(strip.chars().skip(18).all(is_braille), "graph fills the strip: {strip}");
-    }
-    let ram = cells(4, 2, 46);
-    assert!(ram.starts_with("RAM    56% 20/36G ▰") && ram.ends_with('▱'), "{ram}");
-    assert_eq!(cells(5, 2, 46).trim(), "");
-
-    let power = [
-      "CPU    4.50W avg  4.50 max  4.50  45°C ",
-      "GPU    2.00W avg  2.00 max  2.00  40°C ",
-      "ANE    0.10W avg  0.10 max  0.10       ",
+    let expected = [
+      ("E-CPU  42% 1.8GHz ", bars("▄"), power("CPU    4.50W (4.50, 4.50)  45°C", true)),
+      ("P-CPU  77% 3.2GHz ", bars("▇"), power("GPU    2.00W (2.00, 2.00)  40°C", true)),
+      ("GPU    23% 1.4GHz ", bars("▂"), power("ANE    0.10W (0.10, 0.10)", true)),
+      ("RAM    56% 20/36G ", meter(17), power("Power  6.60W (6.60, 6.60)", false)),
+      ("SWAP   50% 1/2G   ", meter(16), power("Total 12.00W (12.00, 12.00)  fan 1200rpm", false)),
     ];
-    for (y, text) in (1..).zip(power) {
-      assert_eq!(cells(y, 51, 39), text);
-      assert!(cells(y, 90, 8).chars().all(is_braille), "{}", rows[y]);
+    for (y, (strip, graph, power)) in (1..).zip(expected) {
+      assert_eq!(rows[y], format!("│ {strip}{graph} │ {power} │"));
     }
-    assert_eq!(cells(4, 51, 47).trim_end(), "Power  6.60W avg  6.60 max  6.60");
-    assert_eq!(cells(5, 51, 47).trim_end(), "Total 12.00W avg 12.00 max 12.00  fan 1200rpm");
     assert_eq!(rows[6], format!("╰{}╯", "─".repeat(98)));
 
     // the process list in the rest of the screen, the hints on its bottom border
@@ -697,27 +689,27 @@ mod tests {
 
     // numbers, temperature and a history graph for CPU / GPU / ANE, the graphs line up
     let units = [
-      "CPU    4.50W avg  4.50 max  4.50  45°C ",
-      "GPU    2.00W avg  2.00 max  2.00  40°C ",
-      "ANE    0.10W avg  0.10 max  0.10       ",
+      "CPU    4.50W (4.50, 4.50)  45°C ",
+      "GPU    2.00W (2.00, 2.00)  40°C ",
+      "ANE    0.10W (0.10, 0.10)       ",
     ];
     for (row, text) in rows.iter().zip(units) {
-      // the newest sample is in the last cell
-      let graph: String = row.chars().skip(39).filter(|c| *c != ' ').collect();
+      // one bar per sample, the newest in the last cell
+      let graph: String = row.chars().skip(32).collect();
       assert!(row.starts_with(text), "{row}");
-      assert!(!graph.is_empty() && graph.chars().all(is_braille), "{row}");
-      assert_eq!(row.chars().count(), 51, "{row}");
+      assert_eq!(graph.trim_start(), "███", "{row}");
+      assert_eq!(row.chars().count(), 46, "{row}");
     }
     // Power, then Total with both fans: the column is as wide as that row
-    assert_eq!(rows[3], "Power  6.60W avg  6.60 max  6.60");
-    assert_eq!(rows[4], "Total 12.00W avg 12.00 max 12.00  fans 2000/2000rpm");
+    assert_eq!(rows[3], "Power  6.60W (6.60, 6.60)");
+    assert_eq!(rows[4], "Total 12.00W (12.00, 12.00)  fans 2000/2000rpm");
     assert_eq!(rows.len(), 5);
 
     // right of the strips, a separator line between them
     let power = app.layout(buf.area).power.unwrap();
-    assert_eq!((power.x, power.width), (47, 51));
+    assert_eq!((power.x, power.width), (52, 46));
     for y in 1..6 {
-      assert_eq!(buf[(45, y)].symbol(), "│", "row {y}");
+      assert_eq!(buf[(50, y)].symbol(), "│", "row {y}");
     }
   }
 
@@ -738,35 +730,71 @@ mod tests {
 
   /// Power rows of `varied_power_app` with every part shown, without the history graphs.
   const VARIED_POWER_ROWS: [&str; 5] = [
-    "CPU    5.00W avg  4.00 max  6.00  45°C",
-    "GPU    2.50W avg  2.00 max  3.00  40°C",
-    "ANE    0.25W avg  0.20 max  0.30",
-    "Power  9.50W avg  8.00 max 12.00",
-    "Total 16.00W avg 14.00 max 20.00  fan 1200rpm",
+    "CPU    5.00W (4.00, 6.00)  45°C",
+    "GPU    2.50W (2.00, 3.00)  40°C",
+    "ANE    0.25W (0.20, 0.30)",
+    "Power  9.50W (8.00, 12.00)",
+    "Total 16.00W (14.00, 20.00)  fan 1200rpm",
   ];
 
   /// Power row text without the history graph.
   fn without_graph(row: &str) -> &str {
-    row.trim_end_matches(|c: char| is_braille(c) || c == ' ')
+    row.trim_end_matches(|c: char| is_bar(c) || c == ' ')
   }
 
   #[test]
   fn power_rows_show_avg_and_max() {
-    for (width, height) in [(200, 50), (120, 40)] {
+    for (width, height) in [(200, 50), (120, 40), (100, 30)] {
       let mut app = varied_power_app();
       let buf = render_buffer(&mut app, width, height);
       let rows = power_rows(&app, &buf);
       let ctx = format!("{width}x{height}: {rows:#?}");
 
-      // CPU / GPU / ANE: current, average, maximum, temperature, then at least 8 graph cells
+      // CPU / GPU / ANE: current, average, maximum, temperature, then 12 graph cells
       for (row, text) in rows.iter().zip(&VARIED_POWER_ROWS[..3]) {
         assert_eq!(without_graph(row), *text, "{ctx}");
-        let graph: String = row.chars().skip(39).collect();
-        assert!(graph.chars().count() >= 8, "{ctx}");
-        assert!(graph.trim_start().chars().all(is_braille), "{ctx}");
+        let graph: String = row.chars().skip(32).collect();
+        assert_eq!(graph.chars().count(), 12, "{ctx}");
+        assert!(graph.trim_start().chars().all(is_bar), "{ctx}");
       }
       // Power, Total with the fan on its row
       assert_eq!(rows[3..5], VARIED_POWER_ROWS[3..], "{ctx}");
+    }
+
+    // parentheses and the comma dim, the numbers in the text color
+    let mut app = varied_power_app();
+    let buf = render_buffer(&mut app, 100, 30);
+    let power = app.layout(buf.area).power.unwrap();
+    let cpu = text(&buf, Rect { height: 1, ..power });
+    for (i, c) in cpu.chars().enumerate().take(25).skip(12) {
+      let color = if "(, )".contains(c) { app.theme.dim } else { app.theme.text };
+      assert_eq!(buf[(power.x + i as u16, power.y)].fg, color, "{c:?} in {cpu}");
+    }
+  }
+
+  #[test]
+  fn power_temperatures_and_graphs_line_up() {
+    // CPU numbers of 10 W and more are wider: the GPU temperature moves along
+    let mut app = app_with_samples(60, |m| m.cpu_power = 12.0);
+    let buf = render_buffer(&mut app, 120, 40);
+    let rows = power_rows(&app, &buf);
+    assert_eq!(without_graph(&rows[0]), "CPU   12.00W (12.00, 12.00)  45°C");
+    assert_eq!(without_graph(&rows[1]), "GPU    2.00W (2.00, 2.00)    40°C");
+    assert_eq!(without_graph(&rows[2]), "ANE    0.10W (0.10, 0.10)");
+    for row in &rows[..3] {
+      let text: String = row.chars().take(34).collect();
+      let graph: String = row.chars().skip(34).collect();
+      assert!(!text.chars().any(is_bar), "{rows:#?}");
+      assert_eq!(graph, "█".repeat(12), "{rows:#?}");
+    }
+
+    // no temperature sensors: blank cells, the graphs stay in line
+    let mut app = app_with_samples(60, |m| m.temp = Default::default());
+    let buf = render_buffer(&mut app, 120, 40);
+    let rows = power_rows(&app, &buf);
+    for row in &rows[..3] {
+      assert_eq!(row.chars().skip(32).collect::<String>(), "█".repeat(12), "{rows:#?}");
+      assert!(!row.contains("°C"), "{rows:#?}");
     }
   }
 
@@ -780,12 +808,12 @@ mod tests {
         format!("{head}{avg_max}{celsius}")
       };
       let mut rows = vec![
-        row("CPU    5.00W", " avg  4.00 max  6.00", "  45°C"),
-        row("GPU    2.50W", " avg  2.00 max  3.00", "  40°C"),
-        row("ANE    0.25W", " avg  0.20 max  0.30", ""),
-        row("Power  9.50W", " avg  8.00 max 12.00", ""),
+        row("CPU    5.00W", " (4.00, 6.00)", "  45°C"),
+        row("GPU    2.50W", " (2.00, 3.00)", "  40°C"),
+        row("ANE    0.25W", " (0.20, 0.30)", ""),
+        row("Power  9.50W", " (8.00, 12.00)", ""),
       ];
-      let total = row("Total 16.00W", " avg 14.00 max 20.00", "");
+      let total = row("Total 16.00W", " (14.00, 20.00)", "");
       match inline {
         true => rows.push(format!("{total}  fan 1200rpm")),
         false => rows.extend([total, "fan 1200rpm".to_string()]),
@@ -795,23 +823,29 @@ mod tests {
 
     // (screen size, power column width, average / maximum, temperatures, graphs, fans inline)
     let cases = [
-      // next to the strips: the narrowest column with everything, then graphs go first, the fan
-      // moves to a row of its own, temperatures go, the numbers stay
-      ((90, 24), 47, true, true, true, true),
-      ((89, 24), 46, true, true, false, true),
-      ((88, 24), 45, true, true, false, true),
-      ((87, 24), 44, true, true, false, false),
-      ((81, 24), 38, true, true, false, false),
-      ((80, 24), 37, true, false, false, false),
-      ((72, 24), 32, true, false, false, false),
+      // next to the strips: everything down to the narrowest column with the graphs, then the
+      // graphs go first, the fan moves to a row of its own, temperatures go, the numbers stay
+      ((200, 50), 44, true, true, true, true),
+      ((100, 30), 44, true, true, true, true),
+      ((87, 24), 44, true, true, true, true),
+      ((86, 24), 43, true, true, false, true),
+      ((83, 24), 40, true, true, false, true),
+      ((82, 24), 39, true, true, false, false),
+      ((80, 24), 37, true, true, false, false),
+      ((74, 24), 31, true, true, false, false),
+      ((73, 24), 30, true, false, false, false),
+      ((72, 24), 29, true, false, false, false),
+      ((70, 24), 27, true, false, false, false),
       // under the strips: everything fits at 60 columns, then the same order
       ((60, 15), 56, true, true, true, true),
-      ((50, 24), 46, true, true, false, true),
-      ((48, 24), 44, true, true, false, false),
-      ((42, 24), 38, true, true, false, false),
-      ((41, 24), 37, true, false, false, false),
-      ((36, 24), 32, true, false, false, false),
-      ((35, 24), 31, false, false, false, false),
+      ((48, 24), 44, true, true, true, true),
+      ((47, 24), 43, true, true, false, true),
+      ((44, 24), 40, true, true, false, true),
+      ((43, 24), 39, true, true, false, false),
+      ((35, 24), 31, true, true, false, false),
+      ((34, 24), 30, true, false, false, false),
+      ((31, 24), 27, true, false, false, false),
+      ((30, 24), 26, false, false, false, false),
     ];
     for ((width, height), column, stats, temp, graph, inline) in cases {
       let mut app = varied_power_app();
@@ -826,7 +860,9 @@ mod tests {
       let shown: Vec<&str> = shown.into_iter().filter(|row| !row.is_empty()).collect();
       assert_eq!(shown, expected(stats, temp, inline), "{ctx}");
       for row in &rows[..3] {
-        assert_eq!(row.chars().any(is_braille), graph, "{ctx}");
+        assert_eq!(row.chars().any(is_bar), graph, "{ctx}");
+        // a graph fills the rest of the column, the newest bar in its last cell
+        assert!(!graph || row.chars().count() == usize::from(column), "{ctx}");
       }
 
       // nothing drawn over the padding, the separator or the box borders
@@ -961,7 +997,7 @@ mod tests {
     let buf = render_buffer(&mut app, 80, 24);
     let rows = power_rows(&app, &buf);
     assert!(rows[3].starts_with("Power  6.60W"), "{rows:?}");
-    assert_eq!(rows[4..6], ["Total 12.00W avg 12.00 max 12.00", "fan 1200rpm"]);
+    assert_eq!(rows[4..6], ["Total 12.00W (12.00, 12.00)", "fan 1200rpm"]);
 
     // neither: Power is the last row
     let mut app = test_app_with(|m| {
@@ -990,10 +1026,10 @@ mod tests {
     // no separator: power rows span the full width right under the SWAP strip
     assert!(rows[1..11].iter().all(|row| row.matches('│').count() == 2), "{rows:#?}");
     assert!(rows[5].starts_with("│ SWAP   50% 1/2G   ▰"), "{}", rows[5]);
-    assert!(rows[6].starts_with("│ CPU    4.50W avg  4.50 max  4.50  45°C "), "{}", rows[6]);
-    assert!(rows[6].chars().any(is_braille), "{}: room for the graph", rows[6]);
-    assert!(rows[9].starts_with("│ Power  6.60W avg  6.60 max  6.60 "), "{}", rows[9]);
-    let total = "│ Total 12.00W avg 12.00 max 12.00  fan 1200rpm ";
+    assert!(rows[6].starts_with("│ CPU    4.50W (4.50, 4.50)  45°C "), "{}", rows[6]);
+    assert!(rows[6].chars().any(is_bar), "{}: room for the graph", rows[6]);
+    assert!(rows[9].starts_with("│ Power  6.60W (6.60, 6.60) "), "{}", rows[9]);
+    let total = "│ Total 12.00W (12.00, 12.00)  fan 1200rpm ";
     assert!(rows[10].starts_with(total), "{}", rows[10]);
 
     // the box ends right after them, the process list is auto-hidden
@@ -1093,7 +1129,7 @@ mod tests {
   }
 
   #[test]
-  fn graphs_are_braille() {
+  fn graphs_are_block_bars() {
     let mut app = test_app();
     for _ in 0..40 {
       app.update_metrics(test_metrics());
@@ -1104,37 +1140,81 @@ mod tests {
       let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
       let ctx = format!("{width}x{height}");
 
-      // strip and power graphs in braille, meters in ▰▱, no block characters
-      assert!(screen.chars().filter(|c| is_braille(*c)).count() > 40, "{ctx}");
+      // strip and power graphs in solid bars, meters in ▰▱, no braille
+      assert!(screen.chars().filter(|c| is_bar(*c)).count() > 40, "{ctx}");
       let ram = screen.split("RAM    56% 20/36G ").nth(1).expect("ram strip");
       assert!(ram.starts_with('▰') && screen.contains('▱'), "{ctx}");
-      let block = |c: char| ('▁'..='█').contains(&c) || c == '░';
-      assert!(!screen.chars().any(block), "{ctx}");
+      assert!(!screen.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)), "{ctx}");
       for row in &power_rows(&app, &buf)[..3] {
-        let graph: String = row.chars().skip(39).filter(|c| *c != ' ').collect();
-        assert!(!graph.is_empty() && graph.chars().all(is_braille), "{ctx}: {row}");
+        let graph: String = row.chars().skip(32).filter(|c| *c != ' ').collect();
+        assert!(!graph.is_empty() && graph.chars().all(is_bar), "{ctx}: {row}");
+      }
+    }
+  }
+
+  #[test]
+  fn strip_bars_follow_their_own_load_power_bars_stay_low() {
+    // E-CPU load cycles through 10%, 50%, 89% (0.9 as f32), the newest is 89%
+    let loads = [0.1, 0.5, 0.9];
+    let smooth = Theme::new(Some(PALETTE), true);
+    for theme in [Theme::default(), smooth] {
+      let mut app = App { soc: test_soc(), theme, ..Default::default() };
+      for i in 0..60 {
+        app.update_metrics(Metrics { ecpu_scaled_ratio: loads[i % 3], ..test_metrics() });
+      }
+
+      let buf = render_buffer(&mut app, 100, 30);
+      let plan = app.layout(buf.area);
+      let strip = plan.strips[0].1;
+      let graph = Rect { x: strip.x + 18, width: strip.width - 18, ..strip };
+      let bars = text(&buf, graph);
+      assert!(bars.ends_with("▁▄█▁▄█"), "{bars}");
+      for x in graph.left()..graph.right() {
+        let cell = &buf[(x, graph.y)];
+        let load = match cell.symbol() {
+          "▁" => 0.1,
+          "▄" => 0.5,
+          "█" => 0.89,
+          other => panic!("{other:?} in {bars}"),
+        };
+        assert_eq!(cell.fg, theme.gradient(load), "{bars}");
+      }
+      // the terminal's own green / yellow / red without a smooth palette
+      if theme == Theme::default() {
+        let colors = (graph.right() - 3..graph.right()).map(|x| buf[(x, graph.y)].fg);
+        assert_eq!(colors.collect::<Vec<_>>(), [Color::Green, Color::Yellow, Color::Red]);
+      }
+
+      // power graphs in the low load color, whatever their height
+      let power = plan.power.unwrap();
+      for y in power.top()..power.top() + 3 {
+        for x in power.x + 32..power.right() {
+          let cell = &buf[(x, y)];
+          assert!(cell.symbol().chars().all(is_bar), "{:?}", cell.symbol());
+          assert_eq!(cell.fg, theme.gradient(0.0));
+        }
       }
     }
   }
 
   #[test]
   fn graphs_fill_strips_once_history_is_long_enough() {
-    // cells of the graph strips (clusters and GPU) with braille in them, and the graph width
+    // cells of the graph strips (clusters and GPU) with a bar in them, and the graph width
     let graph_cells = |app: &mut App, width: u16| -> Vec<(usize, usize)> {
       let buf = render_buffer(app, width, 50);
       let plan = app.layout(buf.area);
       let graphs = plan.strips.iter().filter(|(s, _)| matches!(s, Strip::Cluster(_) | Strip::Gpu));
       let cells = |r: &Rect| {
         let text = text(&buf, *r);
-        (text.chars().filter(|c| is_braille(*c)).count(), r.width as usize - 18)
+        (text.chars().filter(|c| is_bar(*c)).count(), r.width as usize - 18)
       };
       graphs.map(|(_, r)| cells(r)).collect()
     };
 
-    // 3 samples: only the newest cells on the right
+    // 3 samples: one bar each, on the right
     let mut app = test_app();
-    for (braille, _) in graph_cells(&mut app, 200) {
-      assert_eq!(braille, 2);
+    for (bars, _) in graph_cells(&mut app, 200) {
+      assert_eq!(bars, 3);
     }
 
     // a long history fills the strips of a wide terminal, newest sample on the right
@@ -1142,8 +1222,8 @@ mod tests {
       app.update_metrics(test_metrics());
     }
     assert_eq!(app.igpu_freq.ratio(RatioMode::Scaled).items.len(), 703);
-    // (screen width, graph cells): 64 cells was all the old 128 sample history could fill
-    for (width, graph) in [(100, 28), (200, 128), (400, 328)] {
+    // (screen width, graph cells): 128 cells was all the old 128 sample history could fill
+    for (width, graph) in [(100, 31), (200, 131), (400, 331)] {
       let cells = graph_cells(&mut app, width);
       assert_eq!(cells, [(graph, graph); 3], "width {width}");
     }

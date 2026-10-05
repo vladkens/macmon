@@ -3,9 +3,9 @@
 use crate::config::RatioMode;
 use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
-/// Samples kept for the history graphs, newest first: 2 per braille cell, enough to fill the
-/// strips of a terminal about 1100 columns wide.
-pub(super) const HISTORY_LEN: usize = 2048;
+/// Samples kept for the history graphs, newest first: one per cell, enough to fill the strips of
+/// a terminal about 1100 columns wide.
+pub(super) const HISTORY_LEN: usize = 1024;
 /// Latest samples behind the power average and maximum.
 pub(super) const STATS_LEN: usize = 128;
 const MAX_TEMPS: usize = 8;

@@ -2,7 +2,7 @@
 
 ### Breaking Changes
 
-- Removed the TUI color theme (`c`) and chart view (`v`) switches: colors now follow the terminal's own palette and charts are always braille; old `color`, `theme` and `view_type` config fields are ignored
+- Removed the TUI color theme (`c`) and chart view (`v`) switches: colors now follow the terminal's own palette and charts are always solid bars colored by load; old `color`, `theme` and `view_type` config fields are ignored
 - Removed the TUI per-core view (`d`); the old `per_core_view` config field is ignored
 
 ### Features

@@ -2,7 +2,7 @@
 
 ## Overview
 - Redesign the interactive TUI in a btop-inspired style: a full-width CPU box on top, a left column with GPU / MEM / POWER boxes, and a process list on the right (Layout V3 since Task 11: one metrics box on top, full-width process list below).
-- Replace single-accent coloring with load gradients (green → yellow → red) in the terminal's own colors (built-in themes until Task 12), and use braille history graphs.
+- Replace single-accent coloring with load gradients (green → yellow → red) in the terminal's own colors (built-in themes until Task 12), and use braille history graphs (solid block bars since Task 17).
 - Add a process list (PID, NAME, USER, CPU%, MEM, POWER W, GPU%) with sorting, filtering and selection, so macmon covers the "what is eating my Mac" use case that currently requires btop/htop/Activity Monitor.
 - Differentiators vs btop: per-process power (W) and per-process GPU %, both sudoless.
 - All existing metrics stay: E-CPU / P-CPU (aggregate + per-core, scaled/active ratio), GPU, RAM / SWAP, CPU / GPU / ANE / total / system power with avg/max, CPU / GPU temperature, fans.
@@ -51,7 +51,7 @@
 - Split `src_app/tui.rs` into `src_app/tui/` modules so the redesign doesn't produce a 2k-line file.
 - Input thread forwards raw key events (`Event::Key`); the app interprets them by mode (normal / filter input), so typing a filter doesn't trigger `q`/`c`/etc.
 - ~~Theme = named palette (border, title, text, dim, selection, 3-stop load gradient). Colors are RGB; when the terminal doesn't advertise truecolor (`COLORTERM` ≠ `truecolor`/`24bit`) they are mapped to the nearest xterm-256 index.~~ Superseded in Task 12 by "Colors: terminal palette".
-- Custom widgets: `BrailleGraph` (filled area graph, 2 samples per cell, 4 dots per row, vertical gradient) and `Meter` (horizontal bar with gradient fill). ~~`v` switches graphs to the current block-style `Sparkline`.~~ Braille only since Task 12.
+- Custom widgets: `BrailleGraph` (filled area graph, 2 samples per cell, 4 dots per row, vertical gradient) and `Meter` (horizontal bar with gradient fill). ~~`v` switches graphs to the current block-style `Sparkline`.~~ Braille only since Task 12; solid block bars since Task 17 (see "Graph style").
 - A pure `compute_layout(area, panels, per_core) -> LayoutPlan` decides box rectangles; panels toggle with `1`–`5`; the process panel auto-hides below a minimum size so macmon still works in a small window.
 - Process data comes from a separate `procs` thread (own `ProcSampler`), paused while the process panel is hidden, so users who don't need it pay nothing.
 
@@ -425,12 +425,12 @@ The strip text prefix (`E-CPU  26% 1.8GHz `) keeps its current implemented forma
 - Modify: `src_app/tui/store.rs` (only if history sizing changes)
 - Modify: `readme.md` / `changelog.md` (only where they mention braille)
 
-- [ ] graphs: replace braille with solid block bars `▁`…`█` (one sample per cell, 8 levels, a non-zero value gets at least `▁`, zero is blank, newest on the right); each bar colored by its own value on the load gradient (ANSI steps / RGB as before); remove the braille drawing code
-- [ ] power rows in the original format `CPU    2.94W (3.70, 6.95)` (label padded to 6, watts right-aligned, parentheses and comma dim), temperature column aligned across CPU / GPU rows, then a block graph in the low color filling the rest of the column (≥ 12 cells at 100 columns); `Power` and `Total` rows numbers only, fans after Total
-- [ ] power column width sized from the new text; when space is short drop the graph first, then the temperature, then avg / max (current W always stays)
-- [ ] RAM / SWAP meters unchanged
-- [ ] write tests: block levels for 0, tiny, 50%, 100% values; per-bar gradient colors (no RGB without palette + truecolor); 100-column render matches the target above row by row (data from the test fixture, layout and widths exact); power format and drop order at 200, 100, 80, 72, 60 columns; nothing overflows
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] graphs: replace braille with solid block bars `▁`…`█` (one sample per cell, 8 levels, a non-zero value gets at least `▁`, zero is blank, newest on the right); each bar colored by its own value on the load gradient (ANSI steps / RGB as before); remove the braille drawing code (`widgets::Graph` draws one row; level = ⌈value · 8 / max⌉ as in the comparison page, in u128 so nothing overflows; color = `gradient(value / max)`, or one color via `Graph::color`; braille dot tables / `dot_level` removed; `HISTORY_LEN` 2048 → 1024 samples, still strips of terminals up to ~1100 columns)
+- [x] power rows in the original format `CPU    2.94W (3.70, 6.95)` (label padded to 6, watts right-aligned, parentheses and comma dim), temperature column aligned across CPU / GPU rows, then a block graph in the low color filling the rest of the column (≥ 12 cells at 100 columns); `Power` and `Total` rows numbers only, fans after Total (avg / max as `{:.2}` without padding, so the temperatures start one cell after the widest CPU / GPU / ANE numbers: the gap is part of the temperature part and goes with it; graphs in `gradient(0.0)`, scaled to the largest visible sample)
+- [x] power column width sized from the new text; when space is short drop the graph first, then the temperature, then avg / max (current W always stays) (no layout code change: `PowerSize` is measured from the rows, `POWER_GRAPH_MIN` 8 → 12; with the fixture: full column 44 cells (31 text + gap + 12 graph), min 27 (`Total 12.00W (12.00, 12.00)`), fans inline from 40. Widths: 200 / 100 / 87 → 44 with graphs, 86 → 43 without, 80 → 37 with temperatures, 74 → 31 still with them, 72 → 29, 70 → 27 numbers only; under the strips 60 → 56 with a 24-cell graph)
+- [x] RAM / SWAP meters unchanged
+- [x] write tests: block levels for 0, tiny, 50%, 100% values; per-bar gradient colors (no RGB without palette + truecolor); 100-column render matches the target above row by row (data from the test fixture, layout and widths exact); power format and drop order at 200, 100, 80, 72, 60 columns; nothing overflows (widget: `graph_bar_levels`, right alignment, visible-sample scale, per-bar colors smooth / ANSI, one color, first row only; render: `matches_target_layout_at_100_columns` compares rows 0–6 as whole strings (49-cell strips with the current prefix, separator, 44-cell power column), `strip_bars_follow_their_own_load_power_bars_stay_low` (ANSI and smooth), `power_temperatures_and_graphs_line_up` (12 W CPU, no sensors), dim parentheses / comma, `narrow_power_column_drops_graph_then_temp_then_stats` at 200 … 30 columns, `graphs_are_block_bars` replaces `graphs_are_braille`; whole-frame ANSI-only test unchanged; layout / fit tests updated to the new widths. Real binary on a pty at 110x26 / 100x30 / 60x20 matches the target layout)
+- [x] run `make test` and `make check` - must pass before next task
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
