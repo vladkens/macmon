@@ -995,6 +995,23 @@ pub struct IOReport {
 }
 
 impl IOReport {
+  /// Subscribe to discovered scalar CLPC reports alongside independent legacy energy channels.
+  /// Report names are hexadecimal IDs; their units are provisional until verified.
+  #[cfg(feature = "app")]
+  #[doc(hidden)]
+  pub fn with_clpc_reports(driver: u64, ids: &[u64]) -> WithError<Self> {
+    let filter = |group: &str, subgroup: &str, channel: &str, unit: &str| {
+      group == "Energy Model" || crate::shared::is_pmp_ane_channel(group, subgroup, channel, unit)
+    };
+    let channels = cfio_get_chan(Some(&filter))?;
+    for id in ids {
+      let channel = clpc_energy_channel(driver, *id, &format!("0x{id:016x}"));
+      unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
+    }
+    let (subs, chan) = cfio_get_subs(channels.chan)?;
+    Ok(Self { subs, chan, prev: None })
+  }
+
   fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Self> {
     let channels = cfio_get_chan(filter)?;
     let (subs, chan) = cfio_get_subs(channels.chan)?;

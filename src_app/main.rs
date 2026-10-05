@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod config;
+mod find_clpc;
 mod serve;
 mod stress;
 mod tui;
@@ -85,6 +86,13 @@ enum Commands {
 
   /// Print debug information
   Debug,
+
+  /// Find CLPC power counters with CPU/GPU/ANE loads
+  FindClpc {
+    /// Verify against Apple powermetrics (sudo for powermetrics only)
+    #[arg(long)]
+    powermetrics: bool,
+  },
 
   /// Generate load for testing metrics
   Stress {
@@ -283,6 +291,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => print_debug()?,
+    Some(Commands::FindClpc { powermetrics }) => find_clpc::run(*powermetrics)?,
     Some(Commands::Stress { mode, workers, duration, pulse }) => {
       run_stress(*mode, *workers, *duration, *pulse)?;
     }
