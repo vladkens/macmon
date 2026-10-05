@@ -69,6 +69,7 @@
 //! ```
 
 mod clpc;
+mod power;
 
 #[cfg(feature = "app")]
 #[doc(hidden)]
@@ -81,5 +82,7 @@ pub mod sources;
 // Re-export the commonly used types.
 #[doc(inline)]
 pub use metrics::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, TempMetrics};
+#[doc(inline)]
+pub use power::PowerMode;
 #[doc(inline)]
 pub use sources::SocInfo;

@@ -99,6 +99,23 @@ macmon pipe -s 10 -i 500 | jq
 
 This will collect 10 samples with an update interval of 500 milliseconds.
 
+For source comparisons, `pipe` accepts `MACMON_POWER_SOURCE`:
+
+| Value | CPU | GPU and ANE |
+| --- | --- | --- |
+| `auto` (default) | Automatic selection | Automatic selection |
+| `clpc` | Require CLPC | Require CLPC |
+| `energy-model` | Read Energy Model directly, including frozen zeroes | Require Energy Model |
+| `pmp` | Require the approximate PMP CPU histogram estimate | Automatic selection |
+
+```sh
+MACMON_POWER_SOURCE=pmp macmon pipe -i 500 -s 20
+MACMON_POWER_SOURCE=clpc macmon pipe -i 500 -s 20
+MACMON_POWER_SOURCE=energy-model macmon pipe -i 500 -s 20
+```
+
+A forced source returns an error when its required channels are missing or invalid; it does not silently fall back. A valid scalar zero remains allowed. `MACMON_FORCE_CLPC=1` still selects strict CLPC when `MACMON_POWER_SOURCE` is unset; an explicit selector takes precedence. These environment variables affect only `pipe`. Library callers can use `Sampler::with_power_mode(PowerMode::Pmp)` or the existing `Sampler::with_clpc()`.
+
 ### HTTP server
 
 You can use the `serve` subcommand to expose metrics over HTTP. This is useful for integrating with monitoring systems like [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/).
@@ -197,7 +214,11 @@ macOS 27 broke the CPU/ANE power source that macmon previously used without root
 
 The working rootless workaround we found is to read hidden energy reports from the AppleCLPC driver through IOReport. These reports use opaque IDs instead of discoverable CPU/GPU/ANE channel names, so macmon has to identify the counters and verify their units. This leaves macmon maintaining undocumented mappings for data that Apple's own tool can still read directly.
 
-Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+Both the CLI and the Rust library select sources through `Sampler`: CPU uses CLPC → working Energy Model → PMP CPU histograms; GPU uses CLPC → Energy Model; ANE uses CLPC → Energy Model → ordinary PMP Energy Counters. Sources are checked during normal sampling. A CPU Energy Model counter that stays at zero for at least three seconds with evidence of CPU activity becomes ineligible; a single zero does not trigger a switch. GPU/ANE require positive readings from an independent energy source for their own component before a zero Energy Model counter can be rejected. The selected source is retained while usable, and interrupted intervals or counter resets require a fresh baseline. GPU/ANE idle zeroes are not rejected because CPU energy stopped updating.
+
+PMP CPU histograms are discovered by channel metadata, including numbered PMP groups and EACC/PACC/MACC clusters, without chip-specific IDs. Their estimate uses watt-bin midpoints without SRAM and an observation rate inferred from the maximum seen in each driver/group. This compensates for missing cluster observations after power gating, but the full cadence may not yet have been observed at startup. The estimate is approximate: coarse bins, an open final bin and cadence inference can produce substantial differences from CLPC, especially at low power. Missing clusters invalidate the entire PMP CPU sum. Some Macs expose no CPU PMP histograms; that is a normal fallback case.
+
+`macmon debug` shows discovered/subscribed channels, simultaneous candidate readings, the chosen source for each component, rejection/waiting reasons, and PMP labels, deltas and normalization denominators. Numeric output remains compatible: when no source is usable, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for CLPC mapping details; new driver IDs do not imply that PMP is absent or that its accuracy has been verified.
 
 ### Output format
 

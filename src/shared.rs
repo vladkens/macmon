@@ -12,6 +12,15 @@ pub(crate) fn is_pmp_ane_channel(group: &str, subgroup: &str, channel: &str, uni
     && matches!(unit, "mJ" | "uJ" | "nJ")
 }
 
+pub(crate) fn is_pmp_cpu_channel(group: &str, subgroup: &str, channel: &str) -> bool {
+  let numbered = |name: &str, prefix: &str| {
+    name.strip_prefix(prefix).is_some_and(|rest| rest.bytes().all(|c| c.is_ascii_digit()))
+  };
+  numbered(group, "PMP")
+    && subgroup == "Energy"
+    && ["EACC", "PACC", "MACC"].iter().any(|prefix| numbered(channel, prefix))
+}
+
 pub(crate) fn is_clpc_energy_channel(
   group: &str,
   subgroup: &str,
@@ -32,6 +41,7 @@ pub(crate) fn ioreport_channels_filter(
 ) -> bool {
   if is_pmp_ane_channel(group, subgroup, channel, unit)
     || is_clpc_energy_channel(group, subgroup, channel, unit)
+    || is_pmp_cpu_channel(group, subgroup, channel)
   {
     return true;
   }
@@ -53,7 +63,31 @@ pub(crate) fn ioreport_channels_filter(
 
 #[cfg(test)]
 mod tests {
-  use super::ioreport_channels_filter;
+  use super::{ioreport_channels_filter, is_pmp_cpu_channel};
+
+  #[test]
+  fn recognizes_cpu_histograms_without_model_or_die_limits() {
+    for group in ["PMP", "PMP0", "PMP1", "PMP12"] {
+      for name in ["EACC", "EACC0", "PACC", "PACC12", "MACC", "MACC3"] {
+        assert!(is_pmp_cpu_channel(group, "Energy", name));
+        assert!(ioreport_channels_filter(group, "Energy", name, "events"));
+      }
+    }
+    for (group, subgroup, name) in [
+      ("PMPX", "Energy", "PACC0"),
+      ("PMP-1", "Energy", "PACC0"),
+      ("PMP", "Bandwidth", "PACC0"),
+      ("PMP", "Energy", "PACC SRAM"),
+      ("PMP", "Energy", "PACC0 SRAM"),
+      ("PMP", "Energy", "AGX"),
+      ("PMP", "Energy", "ANE"),
+      ("PMP", "Energy", "PACC0 stall"),
+      ("PMP", "Energy", "PACC١"),
+      ("PMP", "Energy Counters", "PACC0"),
+    ] {
+      assert!(!is_pmp_cpu_channel(group, subgroup, name));
+    }
+  }
 
   #[test]
   fn subscribes_only_to_known_clpc_energy_counters() {

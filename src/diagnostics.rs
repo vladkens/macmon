@@ -4,11 +4,14 @@ use std::time::Duration;
 
 use core_foundation::base::{CFRelease, CFShow};
 
-use crate::shared::{ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel};
+use crate::Sampler;
+use crate::shared::{
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_cpu_channel,
+};
 use crate::sources::{
-  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
-  cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
-  is_pmgr_node, libc_ram, libc_swap, sysctl_str,
+  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_format, cfio_get_props,
+  cfio_get_residencies, cfio_id, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler,
+  hw_native, is_pmgr_node, libc_ram, libc_swap, sysctl_str,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -20,6 +23,7 @@ fn debug_channels(group: &str, subgroup: &str, channel: &str, unit: &str) -> boo
     || group == "GPU Stats"
     || is_pmp_ane_channel(group, subgroup, channel, unit)
     || is_clpc_energy_channel(group, subgroup, channel, unit)
+    || is_pmp_cpu_channel(group, subgroup, channel)
 }
 
 fn print_divider(msg: &str) {
@@ -123,13 +127,23 @@ pub fn print_debug() -> WithError<()> {
       x.subgroup,
       x.channel,
       x.unit,
-      if subscribed { ", subscribed" } else { "" }
+      if subscribed { ", in sampler filter" } else { "" }
     );
+    if cfio_format(x.item) == 2 {
+      println!("{msg} driver/channel={:x?} {:?}", cfio_id(x.item), cfio_get_residencies(x.item));
+      continue;
+    }
+    if cfio_format(x.item) != 1 {
+      println!("{msg} unsupported format {}", cfio_format(x.item));
+      continue;
+    }
+
     match x.unit.as_str() {
       "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
-      "mJ" | "uJ" | "nJ" => {
-        println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, Duration::from_millis(dur))?)
-      }
+      "mJ" | "uJ" | "nJ" => match cfio_watts(x.item, &x.unit, Duration::from_millis(dur)) {
+        Ok(watts) => println!("{msg} {watts:.2}W"),
+        Err(error) => println!("{msg} {error}"),
+      },
       "events" | "B" | "KiB" | "MiB" | "ns" | "us" | "ms" | "s" | "" => {
         println!("{msg} {} {}", cfio_integer_value(x.item), x.unit)
       }
@@ -138,6 +152,13 @@ pub fn print_debug() -> WithError<()> {
         unsafe { CFShow(x.item as _) };
       }
     }
+  }
+
+  print_divider("Power source selection (normal sampler)");
+  let mut sampler = Sampler::new()?;
+  for _ in 0..8 {
+    sampler.get_metrics(500)?;
+    print!("{}", sampler.power_diagnostic());
   }
 
   let mut smc = SMC::new()?;

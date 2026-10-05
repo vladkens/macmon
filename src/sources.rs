@@ -156,6 +156,7 @@ unsafe extern "C" {
   fn IOReportChannelGetChannelName(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportChannelGetChannelID(a: CFDictionaryRef) -> u64;
   fn IOReportChannelGetDriverID(a: CFDictionaryRef) -> u64;
+  fn IOReportChannelGetFormat(a: CFDictionaryRef) -> i32;
   fn IOReportSimpleGetIntegerValue(a: CFDictionaryRef, b: i32) -> i64;
   fn IOReportChannelGetUnitLabel(a: CFDictionaryRef) -> CFStringRef;
   fn IOReportStateGetCount(a: CFDictionaryRef) -> i32;
@@ -208,6 +209,10 @@ pub fn cfio_get_props(entry: u32, name: String) -> WithError<CFDictionaryRef> {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 /// Read IOReport state residency counters from a channel item.
 pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
+  if cfio_format(item) != 2 {
+    return Vec::new();
+  }
+
   let count = unsafe { IOReportStateGetCount(item) };
   let mut res = vec![];
 
@@ -227,6 +232,10 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 /// Convert an IOReport energy counter into Watts for a sampling duration.
 pub fn cfio_watts(item: CFDictionaryRef, unit: &str, duration: Duration) -> WithError<f32> {
+  if cfio_format(item) != 1 {
+    return Err("Energy counter is not scalar".into());
+  }
+
   let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f64;
   watts_from_energy(val, unit, duration)
 }
@@ -245,6 +254,63 @@ fn watts_from_energy(val: f64, unit: &str, duration: Duration) -> WithError<f32>
 /// Read the integer value from an IOReport channel item.
 pub fn cfio_integer_value(item: CFDictionaryRef) -> i64 {
   unsafe { IOReportSimpleGetIntegerValue(item, 0) }
+}
+
+pub(crate) type ChannelId = (u64, u64);
+
+pub(crate) fn cfio_id(item: CFDictionaryRef) -> ChannelId {
+  unsafe { (IOReportChannelGetDriverID(item), IOReportChannelGetChannelID(item)) }
+}
+
+pub(crate) fn cfio_format(item: CFDictionaryRef) -> i32 {
+  unsafe { IOReportChannelGetFormat(item) }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChannelInfo {
+  pub id: ChannelId,
+  pub group: String,
+  pub subgroup: String,
+  pub channel: String,
+  pub unit: String,
+  pub format: i32,
+  pub subscribed: bool,
+}
+
+fn cfio_items(data: CFDictionaryRef) -> Vec<CFDictionaryRef> {
+  if data.is_null() {
+    return Vec::new();
+  }
+  let Some(items) = cfdict_get_val(data, "IOReportChannels") else { return Vec::new() };
+  let items = items as CFArrayRef;
+  (0..unsafe { CFArrayGetCount(items) })
+    .map(|i| unsafe { CFArrayGetValueAtIndex(items, i) } as CFDictionaryRef)
+    .collect()
+}
+
+fn cfio_inventory(requested: CFDictionaryRef, subscribed: CFDictionaryRef) -> Vec<ChannelInfo> {
+  let subscribed: std::collections::HashSet<_> =
+    cfio_items(subscribed).into_iter().map(cfio_id).collect();
+  let mut seen = std::collections::HashSet::new();
+  cfio_items(requested)
+    .into_iter()
+    .filter_map(|item| {
+      let id = cfio_id(item);
+      if !seen.insert(id) {
+        return None;
+      }
+
+      Some(ChannelInfo {
+        id,
+        group: cfio_get_group(item),
+        subgroup: cfio_get_subgroup(item),
+        channel: cfio_get_channel(item),
+        unit: from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim().to_string(),
+        format: cfio_format(item),
+        subscribed: subscribed.contains(&id),
+      })
+    })
+    .collect()
 }
 
 // MARK: IOServiceIterator
@@ -319,8 +385,12 @@ impl IOReportIterator {
 
   /// Create an iterator from raw IOReport sample data and channel metadata.
   pub fn new(data: CFDictionaryRef, metadata: Vec<(String, String, String, String)>) -> Self {
-    let items = cfdict_get_val(data, "IOReportChannels").unwrap() as CFArrayRef;
-    let items_size = unsafe { CFArrayGetCount(items) } as isize;
+    let items = if data.is_null() {
+      null()
+    } else {
+      cfdict_get_val(data, "IOReportChannels").unwrap_or(null()) as CFArrayRef
+    };
+    let items_size = if items.is_null() { 0 } else { unsafe { CFArrayGetCount(items) } };
     debug_assert_eq!(metadata.len(), items_size as usize);
     Self { sample: data, items, items_size, index: 0, metadata }
   }
@@ -328,7 +398,9 @@ impl IOReportIterator {
 
 impl Drop for IOReportIterator {
   fn drop(&mut self) {
-    unsafe { CFRelease(self.sample as _) };
+    if !self.sample.is_null() {
+      unsafe { CFRelease(self.sample as _) };
+    }
   }
 }
 
@@ -942,6 +1014,9 @@ fn cfio_get_chan(filter: Option<ChannelFilterRef<'_>>) -> WithError<IOReportChan
 }
 
 fn cfio_channel_metadata(channels: CFDictionaryRef) -> Vec<(String, String, String, String)> {
+  if channels.is_null() {
+    return Vec::new();
+  }
   let Some(channel_array) = cfdict_get_val(channels, "IOReportChannels") else {
     return Vec::new();
   };
@@ -983,11 +1058,137 @@ fn cfio_get_subs(
   Ok((rs, subscribed))
 }
 
+pub(crate) struct IOReportInterval {
+  pub sample: IOReportIterator,
+  pub elapsed: Duration,
+  pub rebased: bool,
+  pub issues: HashMap<ChannelId, &'static str>,
+}
+
+// Darwin CLOCK_MONOTONIC_RAW includes suspend; Instant is also kept for scheduling.
+fn continuous_time() -> Duration {
+  let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+  unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut time) };
+  Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+}
+
+fn interval_discontinuous(requested: Duration, elapsed: Duration, continuous: Duration) -> bool {
+  elapsed > (requested * 3).max(requested + Duration::from_secs(2))
+    || continuous > elapsed + Duration::from_secs(1)
+}
+
+fn state_interval_issue(old: &[(String, i64)], new: &[(String, i64)]) -> Option<&'static str> {
+  if old.len() != new.len() || old.iter().zip(new).any(|(a, b)| a.0 != b.0) {
+    Some("state layout changed; rebasing")
+  } else if old.iter().zip(new).any(|(a, b)| b.1 < a.1) {
+    Some("state counter reset; rebasing")
+  } else {
+    None
+  }
+}
+
+fn cfio_interval_issues(
+  prev: CFDictionaryRef,
+  next: CFDictionaryRef,
+) -> HashMap<ChannelId, &'static str> {
+  let previous: HashMap<_, _> =
+    cfio_items(prev).into_iter().map(|item| (cfio_id(item), item)).collect();
+  let kind = |item| {
+    crate::power::channel_source(
+      &cfio_get_group(item),
+      &cfio_get_subgroup(item),
+      &cfio_get_channel(item),
+      from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim(),
+    )
+  };
+  let new_kinds: std::collections::HashSet<_> = cfio_items(next)
+    .into_iter()
+    .filter(|item| !previous.contains_key(&cfio_id(*item)))
+    .filter_map(kind)
+    .collect();
+  let mut issues = HashMap::new();
+  for item in cfio_items(next) {
+    // If a new die/cluster appeared, the old channels alone are not a complete
+    // candidate, even though the new channel will be omitted from this delta.
+    if kind(item).is_some_and(|kind| new_kinds.contains(&kind)) {
+      issues.insert(cfio_id(item), "new or recovered channel set; rebasing");
+      continue;
+    }
+
+    let group = cfio_get_group(item);
+    let subgroup = cfio_get_subgroup(item);
+    let channel = cfio_get_channel(item);
+    if group != "CLPC"
+      && group != "Energy Model"
+      && !crate::shared::is_pmp_cpu_channel(&group, &subgroup, &channel)
+      && !(group == "PMP" && subgroup == "Energy Counters")
+    {
+      continue;
+    }
+
+    let id = cfio_id(item);
+    let reason = match previous.get(&id) {
+      None => Some("new or recovered channel; rebasing"),
+      Some(&before) if cfio_format(before) != cfio_format(item) => Some("format changed; rebasing"),
+      Some(&before) => match cfio_format(item) {
+        1 if cfio_integer_value(item) < cfio_integer_value(before) => {
+          Some("counter reset; rebasing")
+        }
+        2 => {
+          let old = cfio_get_residencies(before);
+          let new = cfio_get_residencies(item);
+          state_interval_issue(&old, &new)
+        }
+        _ => None,
+      },
+    };
+    if let Some(reason) = reason {
+      issues.insert(id, reason);
+    }
+  }
+  issues
+}
+
+fn cfio_checked_delta(
+  prev: CFDictionaryRef,
+  next: CFDictionaryRef,
+  issues: &HashMap<ChannelId, &'static str>,
+) -> CFDictionaryRef {
+  if issues.is_empty() {
+    return unsafe { IOReportCreateSamplesDelta(prev, next, null()) };
+  }
+
+  // IOReport must not subtract state arrays with different layouts. Copy the
+  // containers, retaining only comparable channels; keep complete raw baselines.
+  let comparable = |data| {
+    let items: Vec<_> = cfio_items(data)
+      .into_iter()
+      .filter(|&item| !issues.contains_key(&cfio_id(item)))
+      .map(|item| unsafe { CFType::wrap_under_get_rule(item as _) })
+      .collect();
+    let array = CFArray::from_CFTypes(&items);
+    let copy = unsafe { CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, data) };
+    let key = CFString::new("IOReportChannels");
+    unsafe { CFDictionarySetValue(copy, key.as_CFTypeRef(), array.as_CFTypeRef()) };
+    copy
+  };
+  let before = comparable(prev);
+  let after = comparable(next);
+  let delta = unsafe { IOReportCreateSamplesDelta(before, after, null()) };
+  unsafe {
+    CFRelease(before as _);
+    CFRelease(after as _)
+  };
+  delta
+}
+
 /// IOReport subscription used to sample Apple Silicon power and residency counters.
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
   prev: Option<(CFDictionaryRef, std::time::Instant)>,
+  pub(crate) channels: Vec<ChannelInfo>,
+  continuous: Option<Duration>,
 }
 
 impl IOReport {
@@ -1005,13 +1206,33 @@ impl IOReport {
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    Ok(Self { subs, chan, prev: None })
+    let channels = cfio_inventory(channels.chan, chan);
+    Ok(Self { subs, chan, prev: None, channels, continuous: None })
   }
 
   fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Self> {
     let channels = cfio_get_chan(filter)?;
-    let (subs, chan) = cfio_get_subs(channels.chan)?;
-    Ok(Self { subs, chan, prev: None })
+    let (subs, chan) = cfio_get_subs(channels.chan).or_else(|error| {
+      // Optional histograms must not break the existing subscription on older drivers.
+      let has_pmp = cfio_items(channels.chan).iter().any(|&item| {
+        crate::shared::is_pmp_cpu_channel(
+          &cfio_get_group(item),
+          &cfio_get_subgroup(item),
+          &cfio_get_channel(item),
+        )
+      });
+      if !has_pmp {
+        return Err(error);
+      }
+
+      let legacy_filter = |g: &str, s: &str, c: &str, u: &str| {
+        filter.is_none_or(|f| f(g, s, c, u)) && !crate::shared::is_pmp_cpu_channel(g, s, c)
+      };
+      let legacy = cfio_get_chan(Some(&legacy_filter))?;
+      cfio_get_subs(legacy.chan)
+    })?;
+    let channels = cfio_inventory(channels.chan, chan);
+    Ok(Self { subs, chan, prev: None, channels, continuous: None })
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -1047,11 +1268,15 @@ impl IOReport {
     (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
   }
 
-  pub(crate) fn get_sample_interval(&mut self, duration: Duration) -> (IOReportIterator, Duration) {
-    let prev = match self.prev {
+  pub(crate) fn get_sample_interval(&mut self, duration: Duration) -> WithError<IOReportInterval> {
+    let mut prev = match self.prev.take() {
       Some(x) => x,
       None => self.raw_sample(),
     };
+    let continuous = self.continuous.take().unwrap_or_else(continuous_time);
+    if prev.0.is_null() {
+      return Err("Failed to create IOReport baseline".into());
+    }
 
     let target_at = prev.1 + duration;
     let now = std::time::Instant::now();
@@ -1059,14 +1284,44 @@ impl IOReport {
       std::thread::sleep(target_at.duration_since(now));
     }
 
-    let next = self.raw_sample();
-    let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
+    let mut next = self.raw_sample();
+    let mut now_continuous = continuous_time();
+    let mut elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
+    let rebased =
+      interval_discontinuous(duration, elapsed, now_continuous.saturating_sub(continuous));
+    if rebased && !next.0.is_null() {
+      // Discard the whole gap. Both endpoints of the replacement interval are fresh.
+      unsafe { CFRelease(prev.0 as _) };
+      prev = next;
+      let continuous = now_continuous;
+      std::thread::sleep(duration);
+      next = self.raw_sample();
+      now_continuous = continuous_time();
+      elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
+      if interval_discontinuous(duration, elapsed, now_continuous.saturating_sub(continuous)) {
+        unsafe { CFRelease(prev.0 as _) };
+        if !next.0.is_null() {
+          self.prev = Some(next);
+          self.continuous = Some(now_continuous);
+        }
+        return Err("IOReport interval interrupted again; baseline renewed".into());
+      }
+    }
+    if next.0.is_null() {
+      unsafe { CFRelease(prev.0 as _) };
+      return Err("Failed to create IOReport sample; baseline discarded".into());
+    }
+
+    let issues = cfio_interval_issues(prev.0, next.0);
+    let diff = cfio_checked_delta(prev.0, next.0, &issues);
     unsafe { CFRelease(prev.0 as _) };
-
-    let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
     self.prev = Some(next);
+    self.continuous = Some(now_continuous);
+    if diff.is_null() {
+      return Err("Failed to create IOReport delta; baseline renewed".into());
+    }
 
-    (IOReportIterator::from_sample(diff), elapsed)
+    Ok(IOReportInterval { sample: IOReportIterator::from_sample(diff), elapsed, rebased, issues })
   }
 
   /// Collect multiple delta samples across one sampling window.
@@ -1486,6 +1741,74 @@ impl Drop for SMC {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn detects_gaps_without_treating_polling_duration_as_a_gap() {
+    for ms in [100, 500, 1000, 10_000] {
+      let requested = Duration::from_millis(ms);
+      let actual = requested + Duration::from_millis(170);
+      assert!(!interval_discontinuous(requested, actual, actual));
+      assert!(interval_discontinuous(requested, actual, actual + Duration::from_secs(10)));
+      let delayed = requested * 4 + Duration::from_secs(3);
+      assert!(interval_discontinuous(requested, delayed, delayed));
+    }
+  }
+
+  #[test]
+  fn rejects_state_reset_and_layout_changes_before_delta() {
+    let old = vec![("1W".into(), 10), ("2W".into(), 20)];
+    assert_eq!(state_interval_issue(&old, &old), None);
+    let next = vec![("1W".into(), 11), ("2W".into(), 25)];
+    assert_eq!(state_interval_issue(&old, &next), None);
+    for next in [vec![("1W".into(), 11)], vec![("1W".into(), 11), ("3W".into(), 25)]] {
+      assert_eq!(state_interval_issue(&old, &next), Some("state layout changed; rebasing"));
+    }
+    assert_eq!(
+      state_interval_issue(&old, &[("1W".into(), 9), ("2W".into(), 25)]),
+      Some("state counter reset; rebasing")
+    );
+  }
+
+  #[test]
+  fn recovered_channel_invalidates_only_its_component_and_source() {
+    let cpu = clpc_energy_channel(1, 100, "CPU Energy");
+    let recovered_die = clpc_energy_channel(2, 100, "CPU Energy");
+    let gpu = clpc_energy_channel(1, 101, "GPU Energy");
+    let before = CFDictionary::from_CFType_pairs(&[(
+      CFString::new("IOReportChannels"),
+      CFArray::from_CFTypes(&[cpu.clone(), gpu.clone()]),
+    )]);
+    let after = CFDictionary::from_CFType_pairs(&[(
+      CFString::new("IOReportChannels"),
+      CFArray::from_CFTypes(&[cpu, recovered_die, gpu]),
+    )]);
+    let issues = cfio_interval_issues(before.as_concrete_TypeRef(), after.as_concrete_TypeRef());
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues.get(&(1, 100)), Some(&"new or recovered channel set; rebasing"));
+    assert_eq!(issues.get(&(2, 100)), Some(&"new or recovered channel set; rebasing"));
+  }
+
+  #[test]
+  fn inventory_distinguishes_subscription_omissions_and_deduplicates_ids() {
+    let cpu = clpc_energy_channel(1, 100, "CPU Energy");
+    let gpu = clpc_energy_channel(1, 101, "GPU Energy");
+    let other_die = clpc_energy_channel(2, 100, "CPU Energy");
+    let requested = CFDictionary::from_CFType_pairs(&[(
+      CFString::new("IOReportChannels"),
+      CFArray::from_CFTypes(&[cpu.clone(), cpu.clone(), gpu.clone(), other_die]),
+    )]);
+    let subscribed = CFDictionary::from_CFType_pairs(&[(
+      CFString::new("IOReportChannels"),
+      CFArray::from_CFTypes(&[gpu, cpu]),
+    )]);
+    let inventory =
+      cfio_inventory(requested.as_concrete_TypeRef(), subscribed.as_concrete_TypeRef());
+    assert_eq!(inventory.len(), 3);
+    assert_eq!(
+      inventory.iter().map(|c| (c.id, c.subscribed, c.format)).collect::<Vec<_>>(),
+      [((1, 100), true, 1), ((1, 101), true, 1), ((2, 100), false, 1)]
+    );
+  }
 
   #[test]
   fn clpc_descriptors_preserve_driver_counter_ids_and_nanojoule_units() {

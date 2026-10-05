@@ -17,7 +17,7 @@ mod stress;
 mod tui;
 
 use macmon::diagnostics::print_debug;
-use macmon::{Metrics, Sampler};
+use macmon::{Metrics, PowerMode, Sampler};
 use tui::App;
 
 // JSON output keeps the v0.7 field names as deprecated aliases.
@@ -39,6 +39,15 @@ fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_j
     pcpu_usage: (metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio),
     gpu_usage: (metrics.gpu_freq_mhz, metrics.gpu_scaled_ratio),
   })
+}
+
+fn pipe_power_mode(source: Option<&str>, legacy_force: Option<&str>) -> Result<PowerMode, String> {
+  // The explicit selector takes precedence, including an explicit "auto".
+  match source {
+    Some(value) => value.parse().map_err(|error| format!("MACMON_POWER_SOURCE={value:?}: {error}")),
+    None if legacy_force == Some("1") => Ok(PowerMode::Clpc),
+    None => Ok(PowerMode::Auto),
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -243,9 +252,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
   match &args.command {
     Some(Commands::Pipe { samples, soc_info }) => {
-      // Debug override: require CLPC CPU/GPU/ANE counters without fallback.
-      let force_clpc = std::env::var("MACMON_FORCE_CLPC").is_ok_and(|x| x == "1");
-      let mut sampler = if force_clpc { Sampler::with_clpc()? } else { Sampler::new()? };
+      // Pipe-only diagnostic override; the library's default remains automatic.
+      let source = match std::env::var("MACMON_POWER_SOURCE") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error.into()),
+      };
+      let mode =
+        pipe_power_mode(source.as_deref(), std::env::var("MACMON_FORCE_CLPC").ok().as_deref())?;
+      let mut sampler = Sampler::with_power_mode(mode)?;
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
@@ -318,6 +333,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn pipe_power_source_selection_and_legacy_override() {
+    assert_eq!(pipe_power_mode(None, None).unwrap(), PowerMode::Auto);
+    assert_eq!(pipe_power_mode(None, Some("1")).unwrap(), PowerMode::Clpc);
+    assert_eq!(pipe_power_mode(None, Some("0")).unwrap(), PowerMode::Auto);
+    for (value, mode) in [
+      ("auto", PowerMode::Auto),
+      ("clpc", PowerMode::Clpc),
+      ("energy-model", PowerMode::EnergyModel),
+      ("pmp", PowerMode::Pmp),
+    ] {
+      assert_eq!(pipe_power_mode(Some(value), Some("1")).unwrap(), mode);
+    }
+    for value in ["", "unknown", "energy", "PMP"] {
+      assert!(pipe_power_mode(Some(value), None).unwrap_err().contains("MACMON_POWER_SOURCE"));
+    }
+  }
 
   #[test]
   fn zero_duration_ane_and_all_skip_warmup() {
