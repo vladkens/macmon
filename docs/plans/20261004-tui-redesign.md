@@ -551,6 +551,54 @@ User review of Task 19: the RAM title doesn't fit (total memory is already in th
 - [x] write tests: RAM title strings at several widths; drop order for each box kind at shrinking widths (no mid-text cut while a smaller variant fits); gauge fill width / color at 0, 50, 100 % and box sizes; `v` toggles and persists, old configs with `view_type: "Sparkline"` / `"Gauge"` load; RAM graph at 70 % of total fills ~70 % of the height; footer text (mod: `ram_title_steps_down_with_swap` / `_without_swap` (each step at its first and last width, then cut), `ram_title_styles`, `titles_step_down_before_they_are_cut` (every box width 6–60 for E-CPU, P-CPU, GPU, RAM with / without swap, CPU and ANE power against a test oracle), `power_and_cluster_titles_at_their_step_widths`, `v_switches_load_boxes_to_gauges` (fill / color per box at 200x50, fill at 110x32 / 80x24 / 60x15 / 400x120, power boxes unchanged, saved `"Gauge"` / `"Sparkline"`, back to the same frame), `load_graphs_scale_to_full_load_power_graphs_to_their_peak` (RAM 70 % after 60 %, E-CPU, GPU at graphs 1–22 rows tall: within one eighth above the load and never full; constant power full); footer / hint tests for five hints; existing title tests moved to the new strings; widgets: `gauge_fills_its_ratio_of_every_row`, `gauge_clamps_ratio_and_stays_inside_its_area`; panels: `titles_fit_only_uncut`, `fit_titles_picks_the_longest_variant_that_fits`, `share_border` cases for five hints; config: `view_type_uses_released_names`, `toggle_view_type_switches_graph_and_gauge`, old `"Gauge"` kept. Real binary on a pty at 110x32 / 80x24 / 60x15: title steps as listed above, `v` → gauges and back, `view_type: "Sparkline"` saved)
 - [x] run `make test` and `make check` - must pass before next task
 
+### Task 21: ➕ Usability pass (UX review findings, ←/→ sort, `?` help, selected process path)
+
+A usability review drove the real binary on a pty at 24x8 … 200x50 (report: scratchpad, summarized here). The user asked for keyboard sort selection (←/→ like btop), approved a `?` help overlay, and chose "show the selected process's full path on the process box border" over a PATH column.
+
+User decisions:
+- `←` / `→` move the sort to the previous / next visible column (the header arrow moves with it); `s` / `S` keep working. A hint `← sort →` sits in the process box top border after `/ filter` (clickable like `/ filter`: clicking `←`/`→` moves the sort).
+- `?` opens a help overlay (centered box over the screen, Esc / `?` / `q` closes it; `q` closes the overlay instead of quitting while it is open). Content: every key and mouse action grouped (global / process list / filter typing), plus short explanations: CPU% = 100% per core (Activity Monitor convention); `scaled` vs `active` ratio; POWER `-` = another user's process (per-process power is readable only for your own processes, run with sudo for all); MEM = physical footprint for your processes, RSS for others; text selection needs Option (iTerm2) / Shift (Ghostty, most terminals) while the mouse is captured. Footer gets `? help` (after `q quit`).
+- Selected process: its PID and full executable path are shown on the bottom border of the process box, left side (path cut from the left with `…` when long), together with `Esc` to clear. Nothing selected → nothing there.
+
+Fixes from the review (MAJOR first):
+- `p` while the process list is auto-hidden (window too small): do nothing and don't save; the footer drops `p procs` while auto-hidden. A hidden-by-`p` list stays a saved preference as now.
+- POWER `-` explained on screen: when not root, the process box bottom border (left, when nothing is selected) shows a dim note `POWER: own processes only`; when sorted by POWER the `-` rows stay last (as now). Help overlay explains it too.
+- Selection drift: the wheel scrolls the view without creating a selection; PgUp/PgDn/Home/End without a selection scroll too (selection is created only by ↑/↓ or a click); a click on the selected row clears the selection; when the selected PID disappears or is filtered out, the selection is dropped (no fallback to a neighbour row).
+- Filter with no matches: centered dim `no process matches "<text>"` in the table area.
+- While typing a filter the footer shows ` Enter keep | Esc clear | ↑↓ select ` instead of the global hints.
+- Long filter text: cut from the left (`/…irtualiza█`) so the cursor and the end of the text stay visible; never drop the filter title while typing.
+- Esc in normal mode clears both the selection and the filter.
+- Sort direction when a column is first chosen (by `s`, ←/→ or click): numeric columns (CPU%, MEM, POWER, GPU%) start descending, NAME / USER / PID ascending; choosing the active column again reverses as now.
+- The sorted column is never dropped on narrow widths (drop another column instead); `s` and ←/→ skip columns that are not visible.
+- RAM title: add final steps `RAM 77%` and `77%` before any cut; never cut inside a number. Use `SWAP` instead of `SW` if it fits, `SW` only as the last swap variant.
+- Power boxes: add a variant with the temperature kept (`CPU 4.70W` + right `49°C`) between the full title and `CPU 4.70W`, so temperatures stay visible at 80 columns.
+- Toggle hints show state consistently: `v graph` / `v gauge`, `r scaled` / `r active`, `-/+ 1000ms`.
+- Footer hints are clickable (same targets as the keys), like `/ filter` and the headers.
+- With the process list hidden, the bottom border drops the power summary's `(avg, max)` / `Fan` parts before dropping hints.
+- Other users' CPU% (from `ps`, 10 ms resolution): average over the last 3 samples and skip the warm-up value for those rows, so idle daemons don't jump in 1% / 4% steps.
+- Interval from `-i` is not saved to the config; only `-`/`+` changes are saved.
+- NAME: add `…` when cut; drop USER before NAME would go below 16 cells.
+- Mouse capture off while the process list is hidden (nothing to click), on again when it shows.
+- readme: kernel_task is not listed without sudo; MEM footprint vs RSS; POWER own processes only.
+
+**Files:**
+- Modify: `src_app/tui/mod.rs`, `src_app/tui/proc_view.rs`, `src_app/tui/boxes.rs`, `src_app/tui/layout.rs` (if needed), `src_app/procs.rs` (ps CPU averaging), `src_app/config.rs` / `src_app/main.rs` (interval not saved from `-i`)
+- Create: help overlay code (in `boxes.rs` or a new `src_app/tui/help.rs`)
+- Modify: `readme.md`, `changelog.md`
+
+- [ ] ←/→ sort keys + clickable `← sort →` hint; direction defaults per column; sorted column never dropped; hidden columns skipped
+- [ ] `?` help overlay with keys, mouse and explanations; `? help` in the footer
+- [ ] selected process PID + path on the bottom border (left), POWER note when nothing is selected and not root
+- [ ] selection fixes: wheel / paging without creating a selection, click on selected row clears it, selection dropped when its PID disappears or is filtered out; Esc clears selection and filter
+- [ ] filter fixes: no-match message, typing footer, long text cut from the left
+- [ ] `p` ignored and not saved while auto-hidden; footer drops `p procs` then; mouse capture off while the list is hidden
+- [ ] title fixes: RAM final steps without cutting numbers; power variant keeping the temperature; state-style toggle hints; clickable footer hints; summary parts drop before hints
+- [ ] `ps` CPU averaging over 3 samples, warm-up skipped for those rows; `-i` not saved
+- [ ] NAME `…` and USER dropped before NAME < 16
+- [ ] readme / changelog updates (help, ←/→, kernel_task, MEM, POWER note)
+- [ ] write tests for each item above (keys, mouse targets, overlay open/close and `q` while open, footer variants, selection rules, filter messages, column dropping, title variants, ps averaging, interval not saved)
+- [ ] run `make test` and `make check` - must pass before next task
+
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
