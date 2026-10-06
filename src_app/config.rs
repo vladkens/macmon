@@ -74,8 +74,9 @@ pub struct Config {
   #[serde_inline_default(ViewType::Graph)]
   pub view_type: ViewType,
 
+  /// Saved interval; `interval()` is the one in use.
   #[serde_inline_default(1000)]
-  pub interval: u32,
+  interval: u32,
 
   #[serde_inline_default(RatioMode::Scaled)]
   pub ratio_mode: RatioMode,
@@ -89,6 +90,11 @@ pub struct Config {
 
   #[serde_inline_default(true)]
   pub proc_sort_desc: bool,
+
+  /// Interval from `-i` for this run only: used instead of the saved one, never saved. `-` / `+`
+  /// replace both.
+  #[serde(skip)]
+  run_interval: Option<u32>,
 
   /// File the settings are saved to on every change; `None` keeps them in memory only.
   #[serde(skip)]
@@ -179,16 +185,31 @@ impl Config {
     }
   }
 
+  /// Update interval in use: the one from `-i`, else the saved one.
+  pub fn interval(&self) -> u32 {
+    self.run_interval.unwrap_or(self.interval)
+  }
+
+  /// Uses `msec` (clamped) for this run without saving it, as `-i` does.
+  pub fn set_run_interval(&mut self, msec: u32) {
+    self.run_interval = Some(msec.clamp(TUI_MIN_MS, TUI_MAX_MS));
+  }
+
+  /// Sets and saves the interval, which replaces one from `-i`.
+  fn set_interval(&mut self, msec: u32) {
+    self.interval = msec;
+    self.run_interval = None;
+    self.save();
+  }
+
   pub fn dec_interval(&mut self) {
     let step = 250;
-    self.interval = (self.interval.saturating_sub(step).div_ceil(step) * step).max(TUI_MIN_MS);
-    self.save();
+    self.set_interval((self.interval().saturating_sub(step).div_ceil(step) * step).max(TUI_MIN_MS));
   }
 
   pub fn inc_interval(&mut self) {
     let step = 250;
-    self.interval = (self.interval.saturating_add(step) / step * step).min(TUI_MAX_MS);
-    self.save();
+    self.set_interval((self.interval().saturating_add(step) / step * step).min(TUI_MAX_MS));
   }
 
   pub fn toggle_view_type(&mut self) {
@@ -355,7 +376,7 @@ mod tests {
     };
 
     let json = serde_json::to_string(&cfg).unwrap();
-    for old in ["color", "per_core_view", "path"] {
+    for old in ["color", "per_core_view", "path", "run_interval"] {
       assert!(!json.contains(old), "{old} in {json}");
     }
 
@@ -445,6 +466,35 @@ mod tests {
     cfg.toggle_view_type();
     assert_eq!(file.saved()["view_type"], "Sparkline");
     assert_eq!(Config::load_from(Some(file.path())).view_type, ViewType::Graph);
+  }
+
+  #[test]
+  fn interval_from_the_command_line_is_not_saved() {
+    let file = TempConfig::new("interval_from_the_command_line");
+    let mut cfg = Config::load_from(Some(file.path()));
+    cfg.inc_interval();
+    assert_eq!(file.saved()["interval"], 1250);
+
+    // `-i 500`: used for this run, clamped like a saved value
+    cfg.set_run_interval(500);
+    assert_eq!(cfg.interval(), 500);
+    cfg.set_run_interval(10);
+    assert_eq!(cfg.interval(), TUI_MIN_MS);
+    cfg.set_run_interval(500);
+
+    // other settings save the interval of the file, not the one from `-i`
+    cfg.toggle_ratio_mode();
+    assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (1250.into(), 500));
+    assert_eq!(Config::load_from(Some(file.path())).interval(), 1250);
+
+    // `-` / `+` step from the interval in use and save it
+    cfg.dec_interval();
+    assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (250.into(), 250));
+    cfg.toggle_procs();
+    assert_eq!(file.saved()["interval"], 250);
+    cfg.set_run_interval(2000);
+    cfg.inc_interval();
+    assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (2250.into(), 2250));
   }
 
   #[test]

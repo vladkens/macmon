@@ -4,7 +4,8 @@
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::crossterm::event::KeyCode;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
@@ -155,6 +156,46 @@ fn place_titles(width: u16, left: &[u16], right: Option<u16>) -> TitleSlots {
   slots
 }
 
+/// Parts of a summary on a bottom border, joined by ` | `.
+pub(super) type Parts = Vec<Vec<Span<'static>>>;
+
+/// A key hint on a bottom border: the keys bold, then what they do. A click on it presses its key;
+/// on a hint for two keys (`-/+ 1000ms`) the left half presses the first one.
+pub(super) struct Hint {
+  keys: &'static str,
+  label: String,
+  codes: Vec<KeyCode>,
+}
+
+impl Hint {
+  pub(super) fn new(keys: &'static str, label: impl Into<String>, codes: &[KeyCode]) -> Self {
+    Self { keys, label: label.into(), codes: codes.to_vec() }
+  }
+
+  fn spans(&self) -> Vec<Span<'static>> {
+    vec![heading(self.keys), text(format!(" {}", self.label))]
+  }
+}
+
+/// Cells of the last frame that press keys when clicked, split evenly between the keys from left
+/// to right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct KeyTarget {
+  pub area: Rect,
+  pub codes: Vec<KeyCode>,
+}
+
+impl KeyTarget {
+  /// The key a click at `at` presses, if it hits the target.
+  pub(super) fn key_at(&self, at: Position) -> Option<KeyCode> {
+    if !self.area.contains(at) {
+      return None;
+    }
+    let i = usize::from(at.x - self.area.x) * self.codes.len() / usize::from(self.area.width);
+    self.codes.get(i).copied()
+  }
+}
+
 /// Cells of `items` (by width) joined by ` | `, with a blank cell at both ends; 0 for none.
 fn joined_width(items: &[u16]) -> u16 {
   if items.is_empty() {
@@ -192,6 +233,32 @@ struct BorderFit {
   hints: usize,
 }
 
+/// Cells for the summary on a bottom border `width` cells wide with hints of the given widths: all
+/// but the corners and the first hint (`q quit`) with the border cell after it.
+fn summary_room(width: u16, hints: &[u16]) -> u16 {
+  let avail = width.saturating_sub(4);
+  let first_hint = &hints[..hints.len().min(1)];
+  let reserved = match fit_joined(avail, first_hint) {
+    0 => 0,
+    _ => joined_width(first_hint) + 1,
+  };
+  avail.saturating_sub(reserved)
+}
+
+/// Text cells for a one-part summary on a bottom border `width` cells wide with hints of the
+/// given widths: the room next to every hint, so they stay, but at least half of the room next to
+/// `q quit` alone (the other hints drop then); without the summary's blank cells.
+fn text_room(width: u16, hints: &[u16]) -> u16 {
+  let beside_all = width.saturating_sub(4).saturating_sub(joined_width(hints) + 1);
+  beside_all.max(summary_room(width, hints) / 2).saturating_sub(2)
+}
+
+/// `text_room` for `hints`.
+pub(super) fn summary_text_room(width: u16, hints: &[Hint]) -> usize {
+  let hints: Vec<u16> = hints.iter().map(|hint| spans_width(&hint.spans())).collect();
+  usize::from(text_room(width, &hints))
+}
+
 /// Shares a bottom border `width` cells wide between the power summary (left) and the key hints
 /// (right), both given as item widths. Like titles, they keep a border cell next to the corners
 /// and between each other. `q quit` (the first hint) is placed first, then the summary takes the
@@ -199,13 +266,7 @@ struct BorderFit {
 /// get the room left (dropped from the end).
 fn share_border(width: u16, summary: &[u16], hints: &[u16]) -> BorderFit {
   let avail = width.saturating_sub(4);
-  let first_hint = &hints[..hints.len().min(1)];
-  let reserved = match fit_joined(avail, first_hint) {
-    0 => 0,
-    _ => joined_width(first_hint) + 1,
-  };
-
-  let room = avail.saturating_sub(reserved);
+  let room = summary_room(width, hints);
   let (summary_count, summary_width) = match fit_joined(room, summary) {
     // cut, as long as a character of it shows after the blank cell
     0 if !summary.is_empty() && room >= 2 => (1, room),
@@ -219,6 +280,20 @@ fn share_border(width: u16, summary: &[u16], hints: &[u16]) -> BorderFit {
     summary_width,
     hints: fit_joined(avail.saturating_sub(used), hints),
   }
+}
+
+/// Picks one of the summary `variants` (item widths; longest first) for a bottom border `width`
+/// cells wide shared with `hints` as `share_border` does: the first that fits whole next to every
+/// hint, else the last one. Returns its index and the fit.
+fn fit_bottom(width: u16, variants: &[Vec<u16>], hints: &[u16]) -> (usize, BorderFit) {
+  for (i, summary) in variants.iter().enumerate() {
+    let fit = share_border(width, summary, hints);
+    let whole = fit.summary == summary.len() && fit.summary_width == joined_width(summary);
+    if (whole && fit.hints == hints.len()) || i + 1 == variants.len() {
+      return (i, fit);
+    }
+  }
+  (0, share_border(width, &[], hints))
 }
 
 /// How a metric box draws its history.
@@ -270,51 +345,75 @@ impl App {
     Span::styled(format!("{:.decimals$}%", load * 100.0), self.theme.gradient(load))
   }
 
-  /// Global key hints in the order of the original UI: `q quit`, `p procs`, `v chart`,
-  /// `r scaled`, `-/+ 1000ms`; keys bold, labels plain.
-  fn key_hints(&self) -> Vec<Vec<Span<'static>>> {
-    let hints = [
-      ("q", "quit".to_string()),
-      ("p", "procs".to_string()),
-      ("v", "chart".to_string()),
-      ("r", self.cfg.ratio_mode.label().to_string()),
-      ("-/+", format!("{}ms", self.cfg.interval)),
-    ];
-    hints.into_iter().map(|(key, label)| vec![heading(key), text(format!(" {label}"))]).collect()
+  /// Key hints for the bottom border of the lowest box, keys bold, labels plain: the global keys
+  /// in the order of the original UI with the state of the toggles (`q quit | ? help | p procs |
+  /// v graph | r scaled | -/+ 1000ms`; no `p procs` while the window is too small for the process
+  /// list), or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`).
+  pub(super) fn footer_hints(&self) -> Vec<Hint> {
+    use KeyCode::{Char, Down, Enter, Esc, Up};
+    if self.proc_view.typing() {
+      let select = Hint::new("↑↓", "select", &[Up, Down]);
+      return vec![Hint::new("Enter", "keep", &[Enter]), Hint::new("Esc", "clear", &[Esc]), select];
+    }
+
+    let mut hints =
+      vec![Hint::new("q", "quit", &[Char('q')]), Hint::new("?", "help", &[Char('?')])];
+    if !self.procs_auto_hidden() {
+      hints.push(Hint::new("p", "procs", &[Char('p')]));
+    }
+    let view = match self.cfg.view_type {
+      ViewType::Graph => "graph",
+      ViewType::Gauge => "gauge",
+    };
+    let interval = format!("{}ms", self.cfg.interval());
+    hints.extend([
+      Hint::new("v", view, &[Char('v')]),
+      Hint::new("r", self.cfg.ratio_mode.label(), &[Char('r')]),
+      Hint::new("-/+", interval, &[Char('-'), Char('+')]),
+    ]);
+    hints
   }
 
-  /// Draws the `summary` parts (left) and, with `hints`, the global key hints (right-aligned)
-  /// over the bottom border of box `area`, sharing it as `share_border` does.
-  fn render_bottom_border(
+  /// Draws a summary (left) and `hints` (right-aligned) over the bottom border of box `area`.
+  /// `summaries` are variants of the summary, longest first: the first that fits whole next to
+  /// every hint is drawn, else the last one, sharing the border as `share_border` does. Returns
+  /// the click targets of the hints drawn.
+  pub(super) fn render_bottom_border(
     &self,
     f: &mut Frame,
     area: Rect,
-    summary: Vec<Vec<Span<'static>>>,
-    hints: bool,
-  ) {
-    let hints = if hints { self.key_hints() } else { vec![] };
+    summaries: Vec<Parts>,
+    hints: Vec<Hint>,
+  ) -> Vec<KeyTarget> {
     let widths =
       |items: &[Vec<Span>]| items.iter().map(|item| spans_width(item)).collect::<Vec<_>>();
-    let fit = share_border(area.width, &widths(&summary), &widths(&hints));
+    let hint_spans: Vec<Vec<Span>> = hints.iter().map(Hint::spans).collect();
+    let hint_widths = widths(&hint_spans);
+    let variants: Vec<Vec<u16>> = summaries.iter().map(|summary| widths(summary)).collect();
+    let (variant, fit) = fit_bottom(area.width, &variants, &hint_widths);
     let y = area.bottom() - 1;
 
+    let summary = summaries.into_iter().nth(variant).unwrap_or_default();
     if fit.summary > 0 {
       let line = joined(summary.into_iter().take(fit.summary));
       f.buffer_mut().set_line(area.x + 2, y, &line, fit.summary_width);
     }
 
+    let mut targets = vec![];
     if fit.hints > 0 {
-      let line = joined(hints.into_iter().take(fit.hints));
+      let line = joined(hint_spans.into_iter().take(fit.hints));
       let width = width_u16(&line);
-      f.buffer_mut().set_line(area.right() - 2 - width, y, &line, width);
-    }
-  }
+      let mut x = area.right() - 2 - width;
+      f.buffer_mut().set_line(x, y, &line, width);
 
-  /// Draws the global key hints right-aligned over the bottom border of box `area`: `q quit |
-  /// p procs | v chart | r scaled | -/+ 1000ms`. Hints that don't fit are dropped from the end, so
-  /// `q quit` stays as long as it fits.
-  pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) {
-    self.render_bottom_border(f, area, vec![], true);
+      // each hint after its blank cell or separator
+      for (hint, width) in hints.into_iter().zip(hint_widths).take(fit.hints) {
+        x += if targets.is_empty() { 1 } else { SEPARATOR.len() as u16 };
+        targets.push(KeyTarget { area: Rect::new(x, y, width, 1), codes: hint.codes });
+        x += width;
+      }
+    }
+    targets
   }
 
   /// Screen layout for the current metrics.
@@ -323,9 +422,10 @@ impl App {
   }
 
   /// Metrics box: chip and version in the title, the metric boxes inside and the power summary on
-  /// the bottom border, with the key hints when it is the lowest box.
-  pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
-    let Some(area) = plan.top else { return };
+  /// the bottom border, with the key hints when it is the lowest box. Returns the click targets
+  /// of the hints.
+  pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) -> Vec<KeyTarget> {
+    let Some(area) = plan.top else { return vec![] };
     draw_box(f, area, self.metrics_titles());
 
     for &(metric, r) in &plan.boxes {
@@ -341,7 +441,9 @@ impl App {
       }
     }
 
-    self.render_bottom_border(f, area, self.power_summary(), plan.proc.is_none());
+    let hints = if plan.proc.is_none() { self.footer_hints() } else { vec![] };
+    let summaries = (0..3).map(|step| self.power_summary(step)).collect();
+    self.render_bottom_border(f, area, summaries, hints)
   }
 
   /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, `macmon vX` right; the
@@ -378,27 +480,30 @@ impl App {
     Line::from(spans)
   }
 
-  /// Power summary of the original UI for the bottom border of the metrics box: `Power: 6.60W
-  /// (avg 6.60W, max 6.60W)` (CPU + GPU + ANE), the fans (`Fan 1200 RPM`) and `Total 12.00W
-  /// (12.00, 12.00)` (the whole system); the fans and Total only when their sensors exist.
-  fn power_summary(&self) -> Vec<Vec<Span<'static>>> {
+  /// Power summary of the original UI for the bottom border of the metrics box at `step`: `Power:
+  /// 6.60W (avg 6.60W, max 6.60W)` (CPU + GPU + ANE), the fans (`Fan 1200 RPM`) and `Total 12.00W
+  /// (12.00, 12.00)` (the whole system); from step 1 without the averages and maxima, from step 2
+  /// without the fans. The fans and Total only when their sensors exist.
+  fn power_summary(&self, step: usize) -> Parts {
     let all = &self.all_power;
-    let mut parts = vec![vec![
-      text(format!("Power: {:.2}W", all.top_value)),
-      dim(format!(" (avg {:.2}W, max {:.2}W)", all.avg_value, all.max_value)),
-    ]];
+    let mut power = vec![text(format!("Power: {:.2}W", all.top_value))];
+    if step == 0 {
+      power.push(dim(format!(" (avg {:.2}W, max {:.2}W)", all.avg_value, all.max_value)));
+    }
+    let mut parts = vec![power];
 
     let fans = self.fans.label();
-    if !fans.is_empty() {
+    if !fans.is_empty() && step < 2 {
       parts.push(vec![text(fans)]);
     }
 
     let sys = &self.sys_power;
     if sys.top_value > 0.0 {
-      parts.push(vec![
-        text(format!("Total {:.2}W", sys.top_value)),
-        dim(format!(" ({:.2}, {:.2})", sys.avg_value, sys.max_value)),
-      ]);
+      let mut total = vec![text(format!("Total {:.2}W", sys.top_value))];
+      if step == 0 {
+        total.push(dim(format!(" ({:.2}, {:.2})", sys.avg_value, sys.max_value)));
+      }
+      parts.push(total);
     }
 
     parts
@@ -437,26 +542,26 @@ impl App {
   /// RAM and swap usage over the RAM usage history scaled to the total RAM, or a gauge. The total
   /// RAM is in the chip title, so the title shows what is used, in steps from the longest that
   /// fits, percentages last: `RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB`, `RAM 16.8G 70% · SWAP
-  /// 2.4G 79%`, `RAM 70% · SWAP 79%`, `RAM 70% SW 79%`; without swap only the RAM part.
+  /// 2.4G 79%`, `RAM 70% · SWAP 79%`, `RAM 70% SWAP 79%`, `RAM 70% SW 79%` (without swap only the
+  /// RAM part), then `RAM 70%`, `70%` and no title, so no number is ever cut.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gb = |bytes: u64| bytes as f64 / GB;
     let ram = (gb(mem.ram_usage), ratio(gb(mem.ram_usage), gb(mem.ram_total)));
-    let titles: Vec<Vec<Span>> = if mem.swap_total > 0 {
+    let mut titles: Vec<Vec<Span>> = if mem.swap_total > 0 {
       let swap = (gb(mem.swap_usage), gb(mem.swap_total));
       let load = ratio(swap.0, swap.1);
-      (0..4)
+      (0..5)
         .map(|step| [self.ram_part(step, ram), self.swap_part(step, swap, load)].concat())
         .collect()
     } else {
-      (0..3).map(|step| self.ram_part(step, ram)).collect()
+      (0..2).map(|step| self.ram_part(step, ram)).collect()
     };
+    titles.extend([self.ram_part(2, ram), vec![self.percent(ram.1, 0)]]);
+    let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
+    titles.push(Titles::default());
 
-    MetricBox {
-      titles: titles.into_iter().map(Titles::new).collect(),
-      data: &mem.items,
-      scale: Scale::Load { max: mem.ram_total, load: ram.1 },
-    }
+    MetricBox { titles, data: &mem.items, scale: Scale::Load { max: mem.ram_total, load: ram.1 } }
   }
 
   /// RAM part of the RAM box title at `step` for `(used GB, load)`: `RAM 16.81 GB (70.0%)`, `RAM
@@ -472,10 +577,12 @@ impl App {
   }
 
   /// Swap part of the RAM box title at `step` for `(used GB, total GB)` and `load`, after the
-  /// RAM part: ` · SWAP 2.37 / 3.0 GB`, ` · SWAP 2.4G 79%`, ` · SWAP 79%`, then ` SW 79%`.
+  /// RAM part: ` · SWAP 2.37 / 3.0 GB`, ` · SWAP 2.4G 79%`, ` · SWAP 79%`, ` SWAP 79%`, then
+  /// ` SW 79%`.
   fn swap_part(&self, step: usize, (used, total): (f64, f64), load: f64) -> Vec<Span<'static>> {
     let mut spans = match step {
       0..=2 => vec![dim(" · "), heading("SWAP")],
+      3 => vec![text(" "), heading("SWAP")],
       _ => vec![text(" "), heading("SW")],
     };
     match step {
@@ -488,19 +595,25 @@ impl App {
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format) and the temperature
   /// (`45°C`) on the right when the sensor exists, over the power history in the low load color,
-  /// scaled to its largest visible sample. Narrow boxes drop the temperature, then the average
-  /// and maximum. Always a graph, as in the original.
+  /// scaled to its largest visible sample. Narrow boxes drop the temperature first, then the
+  /// average and maximum (the temperature comes back while it fits), then the temperature. Always
+  /// a graph, as in the original.
   fn power_box<'a>(&self, label: &'static str, store: &'a PowerStore, temp: f32) -> MetricBox<'a> {
     let short = vec![heading(label), text(format!(" {:.2}W", store.top_value))];
     let mut full = short.clone();
     full.push(dim(format!(" ({:.2}, {:.2})", store.avg_value, store.max_value)));
 
-    let mut titles = vec![];
-    if temp > 0.0 {
-      let color = self.theme.gradient(temp_ratio(temp));
-      titles.push(Titles::new(full.clone()).right(Span::styled(format!("{temp:.0}°C"), color)));
-    }
-    titles.extend([Titles::new(full), Titles::new(short)]);
+    let titles = if temp > 0.0 {
+      let temp = Span::styled(format!("{temp:.0}°C"), self.theme.gradient(temp_ratio(temp)));
+      vec![
+        Titles::new(full.clone()).right(temp.clone()),
+        Titles::new(full),
+        Titles::new(short.clone()).right(temp),
+        Titles::new(short),
+      ]
+    } else {
+      vec![Titles::new(full), Titles::new(short)]
+    };
 
     MetricBox { titles, data: &store.items, scale: Scale::Power }
   }
@@ -509,12 +622,13 @@ impl App {
 #[cfg(test)]
 mod tests {
   use ratatui::buffer::Buffer;
-  use ratatui::layout::Rect;
+  use ratatui::crossterm::event::KeyCode;
+  use ratatui::layout::{Position, Rect};
   use ratatui::style::Style;
 
   use super::{
-    BorderFit, TitleSlots, Titles, fit_joined, fit_titles, joined_width, place_titles,
-    share_border, temp_ratio,
+    BorderFit, KeyTarget, TitleSlots, Titles, fit_bottom, fit_joined, fit_titles, joined_width,
+    place_titles, share_border, summary_room, temp_ratio, text_room,
   };
 
   #[test]
@@ -666,8 +780,8 @@ mod tests {
     assert_eq!(joined_width(&[u16::MAX, u16::MAX]), u16::MAX);
   }
 
-  /// Widths of the power summary parts (`Power: …`, `Fan 1200 RPM`, `Total …`) and the key hints
-  /// (`q quit`, `p procs`, `v chart`, `r scaled`, `-/+ 1000ms`) of the test metrics.
+  /// Widths of the power summary parts (`Power: …`, `Fan 1200 RPM`, `Total …`) of the test
+  /// metrics and of five key hints (`q quit`, `p procs`, `v graph`, `r scaled`, `-/+ 1000ms`).
   const SUMMARY: [u16; 3] = [35, 12, 27];
   const HINTS: [u16; 5] = [6, 7, 7, 8, 10];
 
@@ -733,6 +847,85 @@ mod tests {
         }
       }
     }
+  }
+
+  #[test]
+  fn summary_room_leaves_the_corners_and_q_quit() {
+    // ╰─ summary ─ q quit ─╯: `q quit` with its blank cells and the border cell after it
+    assert_eq!(summary_room(100, &HINTS), 100 - 4 - 9);
+    assert_eq!(summary_room(100, &[]), 96);
+    assert_eq!(summary_room(12, &HINTS), 0);
+    // no room for `q quit`: all of it
+    assert_eq!(summary_room(11, &HINTS), 7);
+    assert_eq!(summary_room(3, &HINTS), 0);
+  }
+
+  #[test]
+  fn text_room_keeps_the_hints_while_it_can() {
+    // 6 hints, 61 cells: the room next to them, without the blank cells around the text
+    let hints = [6, 6, 7, 7, 8, 10];
+    assert_eq!(text_room(200, &hints), 200 - 4 - 61 - 1 - 2);
+    assert_eq!(text_room(120, &hints), 52);
+    // at least half the room next to `q quit`
+    assert_eq!(text_room(119, &hints), 51);
+    assert_eq!(text_room(100, &hints), (100 - 13) / 2 - 2);
+    assert_eq!(text_room(40, &hints), 11);
+    assert_eq!(text_room(14, &hints), 0);
+    assert_eq!(text_room(0, &hints), 0);
+    // no hints: the whole border
+    assert_eq!(text_room(40, &[]), 40 - 4 - 1 - 2);
+  }
+
+  #[test]
+  fn bottom_border_drops_summary_details_before_hints() {
+    // the power summary, without the averages and maxima, without the fans; 6 hints, 61 cells
+    let variants = [vec![35, 12, 27], vec![12, 12, 12], vec![12, 12]];
+    let hints = [6, 6, 7, 7, 8, 10];
+    let fit = |width| {
+      let (variant, fit) = fit_bottom(width, &variants, &hints);
+      (variant, fit.summary, fit.hints)
+    };
+
+    // the longest variant that fits next to every hint: 82, 44 and 29 cells
+    assert_eq!(fit(400), (0, 3, 6));
+    assert_eq!(fit(148), (0, 3, 6));
+    assert_eq!(fit(147), (1, 3, 6));
+    assert_eq!(fit(110), (1, 3, 6));
+    assert_eq!(fit(109), (2, 2, 6));
+    assert_eq!(fit(95), (2, 2, 6));
+    // then the hints drop, as `share_border` shares the border
+    assert_eq!(fit(94), (2, 2, 5));
+    assert_eq!(fit(50), (2, 2, 1));
+    assert_eq!(fit(41), (2, 1, 2));
+    assert_eq!(fit(11), (2, 1, 0));
+
+    // a single variant or none
+    assert_eq!(fit_bottom(60, &[vec![50]], &hints), (0, share_border(60, &[50], &hints)));
+    assert_eq!(fit_bottom(60, &[], &hints), (0, share_border(60, &[], &hints)));
+    // an empty last variant gives the hints the whole border
+    let note = [vec![25], vec![]];
+    assert_eq!(fit_bottom(100, &note, &hints).0, 0);
+    let all_hints = BorderFit { summary: 0, summary_width: 0, hints: 6 };
+    assert_eq!(fit_bottom(90, &note, &hints), (1, all_hints));
+  }
+
+  #[test]
+  fn key_targets_split_between_their_keys() {
+    let one = KeyTarget { area: Rect::new(10, 5, 6, 1), codes: vec![KeyCode::Char('q')] };
+    assert_eq!(one.key_at(Position::new(10, 5)), Some(KeyCode::Char('q')));
+    assert_eq!(one.key_at(Position::new(15, 5)), Some(KeyCode::Char('q')));
+    for (x, y) in [(9, 5), (16, 5), (12, 4), (12, 6)] {
+      assert_eq!(one.key_at(Position::new(x, y)), None, "{x}, {y}");
+    }
+
+    // `-/+ 1000ms`: the left half `-`, the right half `+`
+    let codes = vec![KeyCode::Char('-'), KeyCode::Char('+')];
+    let two = KeyTarget { area: Rect::new(0, 0, 10, 1), codes };
+    let key = |x| match two.key_at(Position::new(x, 0)) {
+      Some(KeyCode::Char(c)) => c,
+      _ => '?',
+    };
+    assert_eq!((0..10).map(key).collect::<String>(), "-----+++++");
   }
 
   #[test]

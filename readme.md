@@ -84,35 +84,41 @@ Run `macmon` without a subcommand to open the terminal UI: the metric boxes of t
 ```text
 Controls:
   q     - quit (also Ctrl-C)
+  ?     - show / hide help
   p     - show / hide the process list
-  v     - switch chart view: history / gauge
+  v     - switch chart view: graph / gauge
   r     - switch ratio mode: scaled / active
   - / + - change update interval
 
 Process list:
+  ↑ ↓   - select process; PgUp / PgDn / Home / End move the selection, or scroll
+          without one
+  ← →   - sort by the column on the left / right
+  s     - sort by the next column: CPU, MEM, POWER, GPU, PID, NAME, USER
+  S     - reverse sort order
   /     - filter by name or PID (Enter - keep, Esc - clear); while typing, every key
           (q, p, v, r, -, + too) goes to the filter, only Ctrl-C quits
-  s     - change sort column: CPU, MEM, POWER, GPU, PID, NAME, USER
-  S     - reverse sort order
-  ↑ ↓   - select process (also PgUp / PgDn / Home / End)
-  Esc   - clear selection, then filter
+  Esc   - clear selection and filter
 
 Mouse (process list):
   click a column header - sort by it, click again to reverse
   click "/ filter"      - filter by name or PID
-  click a process       - select it
-  wheel                 - move the selection and scroll by 3 rows
+  click a process       - select it, click it again to clear the selection
+  click a key hint      - same as the key ("← sort →" and the bottom border)
+  wheel                 - scroll by 3 rows, with the selection when there is one
 ```
 
-Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`. The process list hides itself when the window is too small.
+A column chosen for sorting starts with the largest numbers (CPU, MEM, POWER, GPU) or from the start (PID, NAME, USER); the sorted column stays on screen in narrow windows. The bottom border of the process list shows the PID and full path of the selected process.
+
+Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`; an interval given with `-i` is used for that run only. The process list hides itself when the window is too small.
 
 Colors come from your terminal's palette: borders and text in its own colors, loads from its green through yellow to red. The gradient is smooth on truecolor terminals (`COLORTERM=truecolor` or `24bit`) that answer the palette query (OSC 4); otherwise, and over SSH, where the query is skipped, it steps through the three colors.
 
-While macmon runs, the terminal sends mouse input to it, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
+While the process list is shown, the terminal sends mouse input to macmon, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
 
 #### Process data without sudo
 
-CPU %, memory and GPU % are shown for every process. Power (W) is shown only for processes of the current user — macOS doesn't expose the energy counter of other users' processes without root, so those show `-` (run with `sudo` to see it for every process). Per-process power needs macOS 13 or later. CPU % follows Activity Monitor: 100% is one fully busy core.
+CPU %, memory and GPU % are shown for every process. Power (W) is shown only for processes of the current user — macOS doesn't expose the energy counter of other users' processes without root, so those show `-` and the bottom border of the list notes `POWER: own processes only` (run with `sudo` to see it for every process). Per-process power needs macOS 13 or later. CPU % follows Activity Monitor: 100% is one fully busy core; for other users' processes it comes from `ps` in 10 ms steps and is averaged over the last 3 intervals. `kernel_task` is listed only with `sudo`.
 
 Memory is the physical footprint (Activity Monitor's "Memory") for the current user's processes, and the resident size for other users' processes, which is all macOS gives without root. The two measure differently (resident size counts shared pages and leaves out compressed memory), so sorting by MEM compares them only roughly. With `sudo` every process shows its footprint.
 

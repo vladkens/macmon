@@ -13,18 +13,20 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::boxes::{Titles, draw_box, ratio};
+use super::boxes::{KeyTarget, Parts, Titles, draw_box, ratio, summary_text_room};
 use super::theme::{self, dim, heading, text};
 use crate::config::ProcSort;
 use crate::procs::ProcInfo;
 
 /// Narrowest NAME column; other columns are dropped to keep it.
 const NAME_MIN_WIDTH: u16 = 8;
+/// Narrowest NAME column next to USER, which is dropped first to keep it.
+const NAME_USER_WIDTH: u16 = 16;
 /// Process power at the hot end of the load gradient.
 const POWER_HOT_W: f64 = 10.0;
 /// Cursor shown after the filter text while typing it.
 const FILTER_CURSOR: &str = "█";
-/// Stands for the start of a filter too long for the border.
+/// Stands for the cut part of a text too long for its cells.
 const ELLIPSIS: &str = "…";
 /// Cells of the shortest filter title worth showing next to the count: `/…x█`.
 const FILTER_MIN_WIDTH: usize = 4;
@@ -38,9 +40,15 @@ type Column = ProcSort;
 const COLUMNS: [Column; 7] =
   [Column::Pid, Column::Name, Column::User, Column::Cpu, Column::Mem, Column::Power, Column::Gpu];
 
-/// Columns dropped (in this order) when the table is too narrow; PID and NAME always stay.
-const DROP_ORDER: [Column; 5] =
-  [Column::User, Column::Power, Column::Gpu, Column::Mem, Column::Cpu];
+/// Columns dropped (in this order) when the table is too narrow, each while NAME would get fewer
+/// cells than the given width; PID, NAME and the sorted column always stay.
+const DROP_ORDER: [(Column, u16); 5] = [
+  (Column::User, NAME_USER_WIDTH),
+  (Column::Power, NAME_MIN_WIDTH),
+  (Column::Gpu, NAME_MIN_WIDTH),
+  (Column::Mem, NAME_MIN_WIDTH),
+  (Column::Cpu, NAME_MIN_WIDTH),
+];
 
 /// The table column of each sort key.
 impl Column {
@@ -74,6 +82,12 @@ impl Column {
     !matches!(self, Self::Name | Self::User)
   }
 
+  /// Direction of a column when it is chosen for sorting: numbers largest first, PIDs and text
+  /// from the start.
+  fn sorts_desc(self) -> bool {
+    !matches!(self, Self::Pid | Self::Name | Self::User)
+  }
+
   /// Header text, with the sort arrow when the table is sorted by this column: `MEM ↓`.
   fn header_text(self, sort: ProcSort, desc: bool) -> String {
     match (self == sort, desc) {
@@ -84,25 +98,24 @@ impl Column {
   }
 }
 
-/// Columns of a table `width` cells wide with their widths, one blank cell between columns.
-/// Columns are dropped in `DROP_ORDER` until the rest fit next to a `NAME_MIN_WIDTH` NAME column;
-/// NAME takes all the space left and is dropped only when no cell is left for it.
-fn fit_columns(width: u16) -> Vec<(Column, u16)> {
-  let need = |columns: &[Column]| -> u32 {
-    columns.iter().map(|c| u32::from(c.width()) + 1).sum::<u32>().saturating_sub(1)
+/// Columns of a table `width` cells wide sorted by `sort`, with their widths, one blank cell
+/// between columns. Columns are dropped as `DROP_ORDER` says, never the sorted one; NAME takes all
+/// the space left and is dropped only when no cell is left for it.
+fn fit_columns(width: u16, sort: Column) -> Vec<(Column, u16)> {
+  // NAME's cells next to the other columns, each with its gap
+  let name_width = |columns: &[Column]| {
+    let fixed = columns.iter().filter(|c| **c != Column::Name).map(|c| u32::from(c.width()) + 1);
+    u32::from(width).saturating_sub(fixed.sum())
   };
 
   let mut columns = COLUMNS.to_vec();
-  for column in DROP_ORDER {
-    if need(&columns) <= u32::from(width) {
-      break;
+  for (column, min_name) in DROP_ORDER {
+    if column != sort && name_width(&columns) < u32::from(min_name) {
+      columns.retain(|c| *c != column);
     }
-    columns.retain(|c| *c != column);
   }
 
-  let fixed: u32 =
-    columns.iter().filter(|c| **c != Column::Name).map(|c| u32::from(c.width()) + 1).sum();
-  let name = u32::from(width).saturating_sub(fixed) as u16;
+  let name = name_width(&columns) as u16;
   columns
     .into_iter()
     .filter_map(|c| match c {
@@ -167,19 +180,47 @@ fn matches(proc: &ProcInfo, filter: &str) -> bool {
 }
 
 /// First visible row so that row `selected` is on screen, moving as little as possible from
-/// `offset`. Without a selection the table shows its top.
+/// `offset`.
 fn scroll_offset(offset: usize, selected: Option<usize>, height: usize, len: usize) -> usize {
-  let Some(selected) = selected else { return 0 };
-  let offset = if selected < offset {
-    selected
-  } else if selected >= offset + height {
-    (selected + 1).saturating_sub(height)
-  } else {
-    offset
+  let offset = match selected {
+    Some(selected) if selected < offset => selected,
+    Some(selected) if selected >= offset + height => (selected + 1).saturating_sub(height),
+    _ => offset,
   };
 
   // no blank rows below the last process when the list shrinks
   offset.min(len.saturating_sub(height))
+}
+
+/// `text` cut to `max` cells, ending with `…` when cut.
+fn cut_end(text: &str, max: usize) -> String {
+  match max {
+    _ if Span::raw(text).width() <= max => text.to_string(),
+    0 => String::new(),
+    _ => format!("{}{ELLIPSIS}", head(text, max - 1)),
+  }
+}
+
+/// `text` cut to its last `max` cells, starting with `…` when cut.
+fn cut_start(text: &str, max: usize) -> String {
+  match max {
+    _ if Span::raw(text).width() <= max => text.to_string(),
+    0 => String::new(),
+    _ => format!("{ELLIPSIS}{}", tail(text, max - 1)),
+  }
+}
+
+/// The longest start of `text` (whole characters) at most `max` cells wide.
+fn head(text: &str, max: usize) -> &str {
+  let mut end = 0;
+  for (i, c) in text.char_indices() {
+    let next = i + c.len_utf8();
+    if Span::raw(&text[..next]).width() > max {
+      break;
+    }
+    end = next;
+  }
+  &text[..end]
 }
 
 /// The longest end of `text` (whole characters) at most `max` cells wide.
@@ -194,7 +235,7 @@ fn tail(text: &str, max: usize) -> &str {
   &text[start..]
 }
 
-/// Selected process: its pid, and its row to fall back on when the process goes away.
+/// Selected process: its pid and its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Selection {
   pid: i32,
@@ -207,7 +248,8 @@ struct Selection {
 struct Targets {
   /// The whole box, borders included: the wheel works anywhere over it.
   area: Rect,
-  /// `/ filter` (or the filter text) on the top border.
+  /// `/ filter` (or the filter text) on the top border; the `← sort →` hint after it is a key
+  /// target of the app.
   filter: Option<Rect>,
   /// Header cells of each column on screen.
   headers: Vec<(Column, Rect)>,
@@ -284,6 +326,19 @@ impl ProcView {
     self.selected.map(|s| s.pid)
   }
 
+  /// The selected process.
+  pub fn selected(&self) -> Option<&ProcInfo> {
+    self.rows().nth(self.selected?.index)
+  }
+
+  /// Columns on screen at the last render; all of them before the first one.
+  fn visible_columns(&self) -> Vec<Column> {
+    match self.targets.headers.as_slice() {
+      [] => COLUMNS.to_vec(),
+      headers => headers.iter().map(|&(column, _)| column).collect(),
+    }
+  }
+
   /// Replaces the process list; the selection follows its pid.
   pub fn set_procs(&mut self, procs: Vec<ProcInfo>) {
     self.procs = Some(procs);
@@ -299,8 +354,8 @@ impl ProcView {
     self.refresh();
   }
 
-  /// Re-sorts and re-filters the list. The selection stays on its pid; when that process is gone,
-  /// the row at the same position (or the last one) is selected instead.
+  /// Re-sorts and re-filters the list. The selection stays on its pid, and is dropped when that
+  /// process is gone or filtered out.
   fn refresh(&mut self) {
     let procs = self.procs.as_deref_mut().unwrap_or_default();
     sort_procs(procs, self.sort, self.sort_desc);
@@ -311,15 +366,13 @@ impl ProcView {
     let procs = self.procs.as_deref().unwrap_or_default();
     let rows = &self.rows;
     self.selected = self.selected.and_then(|sel| {
-      let index = match rows.iter().position(|&i| procs[i].pid == sel.pid) {
-        Some(index) => index,
-        None => sel.index.min(rows.len().checked_sub(1)?),
-      };
-      Some(Selection { pid: procs[rows[index]].pid, index })
+      let index = rows.iter().position(|&i| procs[i].pid == sel.pid)?;
+      Some(Selection { index, ..sel })
     });
   }
 
-  /// Fits the scroll position to a table body `height` rows high, keeping the selection visible.
+  /// Fits the scroll position to a table body `height` rows high, keeping the selection visible
+  /// and no blank rows below the last process.
   pub fn fit(&mut self, height: usize) {
     self.page = height;
     self.offset =
@@ -338,18 +391,35 @@ impl ProcView {
     self.selected = self.rows.get(index).map(|&i| Selection { pid: procs[i].pid, index });
   }
 
-  /// Moves the selection for a navigation key (arrows, PgUp / PgDn, Home / End); without a
-  /// selection it starts above the first row. Returns `false` for other keys.
+  /// Scrolls the table to show row `offset` first, without blank rows below the last process.
+  fn scroll_to(&mut self, offset: usize) {
+    self.offset = offset.min(self.rows.len().saturating_sub(self.page));
+  }
+
+  /// Moves the selection for a navigation key (arrows, PgUp / PgDn, Home / End). Without a
+  /// selection ↑ / ↓ select the top row on screen and the others scroll the table. Returns
+  /// `false` for other keys.
   fn navigate(&mut self, code: KeyCode) -> bool {
     let page = self.page.max(1);
-    let index = match (code, self.selected.map(|s| s.index)) {
-      (KeyCode::Home, _) | (KeyCode::Up | KeyCode::PageUp | KeyCode::Down, None) => 0,
-      (KeyCode::End, _) => usize::MAX,
-      (KeyCode::PageDown, None) => page - 1,
-      (KeyCode::Up, Some(i)) => i.saturating_sub(1),
-      (KeyCode::Down, Some(i)) => i + 1,
-      (KeyCode::PageUp, Some(i)) => i.saturating_sub(page),
-      (KeyCode::PageDown, Some(i)) => i + page,
+    let Some(selected) = self.selected.map(|s| s.index) else {
+      match code {
+        KeyCode::Up | KeyCode::Down => self.select(self.offset),
+        KeyCode::PageUp => self.scroll_to(self.offset.saturating_sub(page)),
+        KeyCode::PageDown => self.scroll_to(self.offset.saturating_add(page)),
+        KeyCode::Home => self.scroll_to(0),
+        KeyCode::End => self.scroll_to(usize::MAX),
+        _ => return false,
+      }
+      return true;
+    };
+
+    let index = match code {
+      KeyCode::Home => 0,
+      KeyCode::End => usize::MAX,
+      KeyCode::Up => selected.saturating_sub(1),
+      KeyCode::Down => selected + 1,
+      KeyCode::PageUp => selected.saturating_sub(page),
+      KeyCode::PageDown => selected + page,
       _ => return false,
     };
 
@@ -366,22 +436,18 @@ impl ProcView {
       return true;
     }
 
-    if self.typing {
-      self.type_key(key);
-      return true;
-    }
-
     match key.code {
+      KeyCode::Left => self.move_sort(-1),
+      KeyCode::Right => self.move_sort(1),
+      _ if self.typing => self.type_key(key),
       KeyCode::Char('/') => self.typing = true,
       KeyCode::Char('S') => self.reverse_sort(),
       KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => self.reverse_sort(),
-      KeyCode::Char('s') => {
-        self.sort = self.sort.next();
-        self.refresh();
-      }
-      KeyCode::Esc if self.selected.is_some() => self.selected = None,
-      KeyCode::Esc if !self.filter.is_empty() => {
+      KeyCode::Char('s') => self.next_sort(),
+      KeyCode::Esc if self.selected.is_some() || !self.filter.is_empty() => {
+        self.selected = None;
         self.filter.clear();
+        self.offset = 0;
         self.refresh();
       }
       _ => return false,
@@ -395,19 +461,45 @@ impl ProcView {
     self.refresh();
   }
 
-  /// Sorts by `sort` in the current direction; the current sort key reverses instead.
+  /// Sorts by `sort` in its own direction (`Column::sorts_desc`); the current sort key reverses
+  /// instead.
   fn sort_by(&mut self, sort: ProcSort) {
     if self.sort == sort {
       self.sort_desc = !self.sort_desc;
     } else {
       self.sort = sort;
+      self.sort_desc = sort.sorts_desc();
     }
     self.refresh();
   }
 
+  /// `s`: the next column on screen in the `ProcSort::next` cycle.
+  fn next_sort(&mut self) {
+    let visible = self.visible_columns();
+    let mut next = self.sort.next();
+    while !visible.contains(&next) && next != self.sort {
+      next = next.next();
+    }
+    if next != self.sort {
+      self.sort_by(next);
+    }
+  }
+
+  /// ← / →: the column on screen `step` places right of the sorted one (left when negative),
+  /// wrapping around.
+  fn move_sort(&mut self, step: isize) {
+    let visible = self.visible_columns();
+    let at = visible.iter().position(|&c| c == self.sort).unwrap_or(0);
+    let next = visible[(at as isize + step).rem_euclid(visible.len() as isize) as usize];
+    if next != self.sort {
+      self.sort_by(next);
+    }
+  }
+
   /// Applies a mouse event to the cells of the last render: a click on a column header sorts by
-  /// it (again: reverses), on the filter label starts filter input, on a process selects it; the
-  /// wheel over the box moves the selection `WHEEL_ROWS` rows. Anything else is ignored.
+  /// it (again: reverses), on the filter label starts filter input, on a process selects it (on
+  /// the selected one clears the selection); the wheel over the box moves the selection
+  /// `WHEEL_ROWS` rows, or scrolls without one. Anything else is ignored.
   pub fn handle_mouse(&mut self, mouse: MouseEvent) {
     let at = Position::new(mouse.column, mouse.row);
     let over_box = self.targets.area.contains(at);
@@ -428,7 +520,9 @@ impl ProcView {
     } else if targets.body.contains(at) {
       // blank rows below the last process select nothing
       let index = self.offset + usize::from(at.y - targets.body.y);
-      if index < self.rows.len() {
+      if self.selected.is_some_and(|s| s.index == index) {
+        self.selected = None;
+      } else if index < self.rows.len() {
         self.select(index);
       }
     }
@@ -436,10 +530,13 @@ impl ProcView {
 
   /// Moves the selection `rows` rows (negative: up) and scrolls the table as much, so the
   /// selected row keeps its place on screen until the table hits its top or end. Without a
-  /// selection it starts from the top row on screen.
+  /// selection it only scrolls.
   fn wheel(&mut self, rows: isize) {
+    let Some(from) = self.selected.map(|s| s.index) else {
+      self.scroll_to(self.offset.saturating_add_signed(rows));
+      return;
+    };
     let Some(last) = self.rows.len().checked_sub(1) else { return };
-    let from = self.selected.map_or(self.offset, |s| s.index);
     let index = from.saturating_add_signed(rows).min(last);
     self.offset = (self.offset + index).saturating_sub(from);
     self.select(index);
@@ -470,15 +567,49 @@ impl ProcView {
 }
 
 impl App {
-  /// Process panel: count and filter in the title, a header row with the sort arrow and the
-  /// process rows. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
+  /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
+  /// the process rows, and the selected process and the key hints on the bottom border. Keeps the
+  /// cells that react to the mouse for `ProcView::handle_mouse`, and adds the click targets of
+  /// the hints to the app's.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let (titles, filter) = self.proc_titles(area.width);
     let (inner, titles) = draw_box(f, area, titles);
     let (headers, body) = self.render_proc_table(f, inner);
-    // the filter title, when it fits
-    let filter = titles.get(filter).copied();
-    self.proc_view.targets = Targets { area, filter, headers, body };
+    let power_shown = headers.iter().any(|&(column, _)| column == Column::Power);
+    // the filter title and the sort hint after it, when they fit
+    let sort = titles
+      .get(filter + 1)
+      .map(|&area| KeyTarget { area, codes: vec![KeyCode::Left, KeyCode::Right] });
+    self.proc_view.targets = Targets { area, filter: titles.get(filter).copied(), headers, body };
+
+    let hints = self.footer_hints();
+    let summaries = self.proc_summaries(summary_text_room(area.width, &hints), power_shown);
+    let targets = self.render_bottom_border(f, area, summaries, hints);
+    self.key_targets.extend(targets.into_iter().chain(sort));
+  }
+
+  /// Left side of the bottom border of the process box, as variants for `render_bottom_border`:
+  /// the selected process (`631 /System/…/WindowServer`, its path cut from the left to `room`
+  /// cells; the name when the path isn't readable) with `Esc clear`, which gives way to the key
+  /// hints. Without a selection, a dim note that POWER is known for own processes only, while
+  /// the POWER column shows processes without it next to some with it (all have it as root).
+  fn proc_summaries(&self, room: usize, power_shown: bool) -> Vec<Parts> {
+    if let Some(proc) = self.proc_view.selected() {
+      let pid = proc.pid.to_string();
+      let path = if proc.path.is_empty() { &proc.name } else { &proc.path };
+      let path = cut_start(path, room.saturating_sub(pid.len() + 1));
+      let selected = vec![heading(pid), text(" "), text(path)];
+      let clear = vec![heading("Esc"), text(" clear")];
+      return vec![vec![selected.clone(), clear], vec![selected]];
+    }
+
+    let procs = self.proc_view.procs().unwrap_or_default();
+    let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
+    if power_shown && power(true) && power(false) {
+      vec![vec![vec![dim("POWER: own processes only")]], vec![]]
+    } else {
+      vec![]
+    }
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the
@@ -498,7 +629,14 @@ impl App {
     self.proc_view.fit(body.height as usize);
     // one blank cell between the columns and each border, as in the metrics box
     let table = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
-    let columns = fit_columns(table.width);
+    let columns = fit_columns(table.width, self.proc_view.sort);
+
+    let filter = self.proc_view.filter();
+    if self.proc_view.row_count() == 0 && !filter.is_empty() {
+      let row = body.centered_vertically(Constraint::Length(1));
+      let message = format!("no process matches \"{filter}\"");
+      f.render_widget(Line::from(dim(message)).centered(), row);
+    }
     let buf = f.buffer_mut();
 
     let (sort, desc) = (self.proc_view.sort, self.proc_view.sort_desc);
@@ -524,9 +662,10 @@ impl App {
   }
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// `/ filter`, or the filter once there is one or it is being typed. A filter too long for the
-  /// border shows its end (`/…ari█`); with no room for that next to the count, the filter takes
-  /// the count's place. Returns the titles and the index of the filter title.
+  /// `/ filter`, or the filter once there is one or it is being typed, then `← sort →`. A filter
+  /// too long for the border shows its end (`/…ari█`) and leaves out the sort hint; with no room
+  /// for that next to the count, the filter takes the count's place. Returns the titles and the
+  /// index of the filter title; the sort hint comes right after it.
   fn proc_titles(&self, width: u16) -> (Titles<'static>, usize) {
     let view = &self.proc_view;
     let mut name = vec![heading("proc")];
@@ -539,18 +678,20 @@ impl App {
       name.push(text(count));
     }
 
+    // as key hints: the keys bold, the labels plain
+    let sort = vec![heading("←"), text(" sort "), heading("→")];
     if !view.typing() && view.filter().is_empty() {
-      // as a key hint: the key bold, the label plain
-      return (Titles::new(name).left(vec![heading("/"), text(" filter")]), 1);
+      return (Titles::new(name).left(vec![heading("/"), text(" filter")]).left(sort), 1);
     }
 
     // the filter's text after `╭─ ` + the count + ` ─ ` and before ` ─╮`, or alone between them
     let name_width: usize = name.iter().map(Span::width).sum();
     let beside = usize::from(width).saturating_sub(name_width + 9);
     if beside >= FILTER_MIN_WIDTH {
-      (Titles::new(name).left(self.filter_title(beside)), 1)
+      (Titles::new(name).left(self.filter_title(beside)).left(sort), 1)
     } else {
-      (Titles::new(self.filter_title(usize::from(width).saturating_sub(6))), 0)
+      let filter = self.filter_title(usize::from(width).saturating_sub(6));
+      (Titles::new(filter).left(sort), 0)
     }
   }
 
@@ -626,7 +767,8 @@ fn column_areas(area: Rect, columns: &[(Column, u16)]) -> Vec<(Column, Rect)> {
   areas
 }
 
-/// Draws one table row: `cells` in `columns`, numbers right-aligned, clipped to `area`.
+/// Draws one table row: `cells` in `columns`, numbers right-aligned, text cut with `…`, clipped
+/// to `area`.
 fn draw_row<'a>(
   buf: &mut Buffer,
   area: Rect,
@@ -639,7 +781,7 @@ fn draw_row<'a>(
     let text = if column.right_aligned() {
       format!("{:>width$}", cell.content)
     } else {
-      cell.content.into_owned()
+      cut_end(&cell.content, usize::from(cell_area.width))
     };
     buf.set_stringn(cell_area.x, cell_area.y, text, usize::from(cell_area.width), cell.style);
   }
@@ -653,7 +795,8 @@ mod tests {
   use ratatui::layout::Rect;
 
   use super::{
-    COLUMNS, Column, ProcView, Targets, column_areas, fit_columns, format_mem, scroll_offset, tail,
+    COLUMNS, Column, ProcView, Targets, column_areas, cut_end, cut_start, fit_columns, format_mem,
+    scroll_offset, tail,
   };
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
@@ -664,6 +807,7 @@ mod tests {
     ProcInfo {
       pid,
       name: name.to_string(),
+      path: format!("/usr/bin/{name}"),
       user: "user".to_string(),
       cpu_pct: cpu,
       mem_bytes: mem_mb * MB,
@@ -747,13 +891,23 @@ mod tests {
   fn s_cycles_sort_and_shift_s_reverses() {
     use ProcSort::*;
     let mut view = view();
-    let mut sorts = vec![view.sort];
+    let mut sorts = vec![(view.sort, view.sort_desc)];
     for _ in 0..7 {
       assert!(press(&mut view, KeyCode::Char('s')));
-      sorts.push(view.sort);
+      sorts.push((view.sort, view.sort_desc));
     }
-    assert_eq!(sorts, [Cpu, Mem, Power, Gpu, Pid, Name, User, Cpu]);
-    assert!(view.sort_desc, "s keeps the direction");
+    // each column in its own direction: numbers largest first, PIDs and text from the start
+    let expected = [
+      (Cpu, true),
+      (Mem, true),
+      (Power, true),
+      (Gpu, true),
+      (Pid, false),
+      (Name, false),
+      (User, false),
+      (Cpu, true),
+    ];
+    assert_eq!(sorts, expected);
 
     assert!(press(&mut view, KeyCode::Char('S')));
     assert!(!view.sort_desc);
@@ -871,11 +1025,18 @@ mod tests {
     assert!(press(&mut view, KeyCode::End));
     assert_eq!(view.selected_pid(), Some(77));
 
-    // esc clears the selection first, then the filter
+    // without a selection the paging keys scroll, ↑ / ↓ select the top row on screen
     assert!(press(&mut view, KeyCode::Esc));
     assert_eq!(view.selected_pid(), None);
+    for (code, offset) in
+      [(KeyCode::PageDown, 2), (KeyCode::PageUp, 0), (KeyCode::End, 3), (KeyCode::Home, 0)]
+    {
+      assert!(press(&mut view, code));
+      assert_eq!((view.selected_pid(), view.offset), (None, offset), "{code:?}");
+    }
     assert!(press(&mut view, KeyCode::PageDown));
-    assert_eq!(view.selected_pid(), Some(631), "page down from no selection");
+    assert!(press(&mut view, KeyCode::Up));
+    assert_eq!((view.selected_pid(), view.offset), (Some(2301), 2), "the top row on screen");
   }
 
   #[test]
@@ -892,15 +1053,28 @@ mod tests {
   }
 
   #[test]
-  fn esc_clears_filter_without_selection() {
+  fn esc_clears_selection_and_filter() {
     let mut view = view();
     assert!(press(&mut view, KeyCode::Char('/')));
     type_str(&mut view, "saf");
     assert!(press(&mut view, KeyCode::Enter));
     assert!(press(&mut view, KeyCode::Down));
 
+    // both at once, and the table back at its top
+    view.fit(1);
+    assert!(press(&mut view, KeyCode::End));
     assert!(press(&mut view, KeyCode::Esc));
-    assert_eq!((view.selected_pid(), view.filter()), (None, "saf"));
+    assert_eq!((view.selected_pid(), view.filter(), view.offset), (None, "", 0));
+    assert_eq!(pids(&view).len(), 5);
+    assert!(!press(&mut view, KeyCode::Esc), "nothing left to clear");
+
+    // either one alone
+    assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::Esc));
+    assert_eq!(view.selected_pid(), None);
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "x");
+    assert!(press(&mut view, KeyCode::Enter));
     assert!(press(&mut view, KeyCode::Esc));
     assert_eq!(view.filter(), "");
   }
@@ -935,26 +1109,21 @@ mod tests {
   }
 
   #[test]
-  fn selection_clamps_when_list_shrinks() {
+  fn selection_is_dropped_when_its_process_exits() {
     let mut view = view(); // [4410, 631, 2301, 1, 77]
-    assert!(press(&mut view, KeyCode::End));
-    assert_eq!(view.selected_pid(), Some(77));
+    assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::Down));
+    assert_eq!(view.selected_pid(), Some(631));
 
-    // the selected process exits: the last row takes over
+    // other processes come and go: the selection stays on its process, at its new row
     let all = sample();
-    view.set_procs(vec![all[1].clone(), all[2].clone(), all[3].clone()]);
-    assert_eq!(pids(&view), [4410, 631, 2301]);
-    assert_eq!(view.selected_pid(), Some(2301));
+    view.set_procs(vec![all[1].clone(), all[3].clone()]);
+    assert_eq!((pids(&view), view.selected_pid()), (vec![4410, 631], Some(631)));
+    assert_eq!(view.selected().map(|p| p.name.as_str()), Some("WindowServer"));
 
-    // the selected process exits again: the row at the same position
-    assert!(press(&mut view, KeyCode::Up)); // 631, index 1
-    view.set_procs(vec![all[2].clone(), all[0].clone(), all[3].clone()]);
-    assert_eq!(pids(&view), [4410, 2301, 1]);
-    assert_eq!(view.selected_pid(), Some(2301));
-
-    // nothing left to select
-    view.set_procs(vec![]);
-    assert_eq!(view.selected_pid(), None);
+    // the selected process exits: no neighbour takes over, and it isn't back with its pid
+    view.set_procs(vec![all[2].clone(), all[3].clone()]);
+    assert_eq!((view.selected_pid(), view.selected()), (None, None));
     view.set_procs(sample());
     assert_eq!(view.selected_pid(), None);
   }
@@ -1015,8 +1184,9 @@ mod tests {
     assert_eq!(scroll_offset(5, Some(2), 4, 20), 2);
     assert_eq!(scroll_offset(5, Some(7), 4, 20), 5);
     assert_eq!(scroll_offset(5, Some(12), 4, 20), 9);
-    // no selection: back to the top
-    assert_eq!(scroll_offset(5, None, 4, 20), 0);
+    // no selection: where it is, without blank rows at the bottom
+    assert_eq!(scroll_offset(5, None, 4, 20), 5);
+    assert_eq!(scroll_offset(18, None, 4, 20), 16);
     // shrunk list: no blank rows at the bottom
     assert_eq!(scroll_offset(10, Some(11), 4, 12), 8);
     assert_eq!(scroll_offset(3, Some(1), 10, 5), 0);
@@ -1027,13 +1197,15 @@ mod tests {
   #[test]
   fn columns_drop_by_priority_at_narrow_widths() {
     use ProcSort::*;
-    let names = |width| fit_columns(width).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
+    // sorted by PID, which always stays anyway
+    let names = |width| fit_columns(width, Pid).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
 
     let all = [(Pid, 5), (Name, 154), (User, 10), (Cpu, 6), (Mem, 6), (Power, 7), (Gpu, 6)];
-    assert_eq!(fit_columns(200), all);
-    // 5 + 8 + 10 + 6 + 6 + 7 + 6 + 6 gaps
-    assert_eq!(names(54), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(53), [Pid, Name, Cpu, Mem, Power, Gpu]);
+    assert_eq!(fit_columns(200, Pid), all);
+    // USER goes before NAME gets fewer than 16 cells: 5 + 16 + 10 + 6 + 6 + 7 + 6 + 6 gaps
+    assert_eq!(names(62), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
+    assert_eq!(names(61), [Pid, Name, Cpu, Mem, Power, Gpu]);
+    // the others before it gets fewer than 8
     assert_eq!(names(43), [Pid, Name, Cpu, Mem, Power, Gpu]);
     assert_eq!(names(42), [Pid, Name, Cpu, Mem, Gpu]);
     assert_eq!(names(35), [Pid, Name, Cpu, Mem, Gpu]);
@@ -1044,10 +1216,29 @@ mod tests {
     assert_eq!(names(20), [Pid, Name]);
 
     // NAME shrinks below its minimum once nothing else can go, then disappears
-    assert_eq!(fit_columns(14), [(Pid, 5), (Name, 8)]);
-    assert_eq!(fit_columns(10), [(Pid, 5), (Name, 4)]);
-    assert_eq!(fit_columns(6), [(Pid, 5)]);
-    assert_eq!(fit_columns(0), [(Pid, 5)]);
+    assert_eq!(fit_columns(14, Pid), [(Pid, 5), (Name, 8)]);
+    assert_eq!(fit_columns(10, Pid), [(Pid, 5), (Name, 4)]);
+    assert_eq!(fit_columns(6, Pid), [(Pid, 5)]);
+    assert_eq!(fit_columns(0, Pid), [(Pid, 5)]);
+  }
+
+  #[test]
+  fn sorted_column_is_never_dropped() {
+    use ProcSort::*;
+    // another column goes in its place
+    assert_eq!(fit_columns(40, User), [(Pid, 5), (Name, 9), (User, 10), (Cpu, 6), (Mem, 6)]);
+    assert_eq!(fit_columns(30, Power), [(Pid, 5), (Name, 9), (Cpu, 6), (Power, 7)]);
+    assert_eq!(fit_columns(30, Gpu), [(Pid, 5), (Name, 10), (Cpu, 6), (Gpu, 6)]);
+    // even when NAME is left with a cell or none
+    assert_eq!(fit_columns(20, Cpu), [(Pid, 5), (Name, 7), (Cpu, 6)]);
+    assert_eq!(fit_columns(14, Mem), [(Pid, 5), (Name, 1), (Mem, 6)]);
+    assert_eq!(fit_columns(13, Cpu), [(Pid, 5), (Cpu, 6)]);
+    // once NAME gets a cell next to PID
+    for sort in COLUMNS {
+      for width in 7..120 {
+        assert!(fit_columns(width, sort).iter().any(|(c, _)| *c == sort), "{sort:?} at {width}");
+      }
+    }
   }
 
   #[test]
@@ -1100,7 +1291,7 @@ mod tests {
     view.targets = Targets {
       area: Rect::new(0, 0, 40, 6),
       filter: Some(Rect::new(12, 0, 8, 1)),
-      headers: column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36)),
+      headers: column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36, ProcSort::Cpu)),
       body: Rect::new(1, 2, 38, 3),
     };
     view
@@ -1110,11 +1301,16 @@ mod tests {
   fn mouse_acts_on_the_rendered_targets() {
     let left = MouseEventKind::Down(MouseButton::Left);
 
-    // header: PID at 2..7; a new key keeps the direction, the same key reverses it
+    // header: PID at 2..7, then MEM at 25..31; a new key sorts in its own direction, the same
+    // key reverses it
     let mut view = rendered_view();
     view.handle_mouse(mouse(left, 6, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, true));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
     view.handle_mouse(mouse(left, 2, 1));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, true));
+    view.handle_mouse(mouse(left, 25, 1));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Mem, true));
+    view.handle_mouse(mouse(left, 6, 1));
     assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
     // the gap after PID
     view.handle_mouse(mouse(left, 7, 1));
@@ -1131,6 +1327,12 @@ mod tests {
     view.handle_mouse(mouse(left, 1, 3));
     assert_eq!(view.selected_pid(), Some(631));
     view.handle_mouse(mouse(left, 38, 4));
+    assert_eq!(view.selected_pid(), Some(2301));
+
+    // the selected row again: no selection
+    view.handle_mouse(mouse(left, 20, 4));
+    assert_eq!(view.selected_pid(), None);
+    view.handle_mouse(mouse(left, 20, 4));
     assert_eq!(view.selected_pid(), Some(2301));
 
     // a blank row below the last process selects nothing
@@ -1151,17 +1353,18 @@ mod tests {
 
     // a header click sorts the filtered rows, a row click selects one of them
     view.handle_mouse(mouse(left, 6, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, true));
-    assert_eq!(pids(&view), [4410, 2301, 77]);
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
+    assert_eq!(pids(&view), [77, 2301, 4410]);
     view.handle_mouse(mouse(left, 20, 3));
     assert_eq!(view.selected_pid(), Some(2301));
     view.handle_mouse(mouse(MouseEventKind::ScrollDown, 20, 3));
-    assert_eq!(view.selected_pid(), Some(77));
+    assert_eq!(view.selected_pid(), Some(4410));
 
-    // and the filter is still being typed
+    // and the filter is still being typed; cargo no longer matches, so nothing is selected
     assert!(view.typing());
     type_str(&mut view, "i");
-    assert_eq!((view.filter(), pids(&view)), ("ari", vec![2301, 77]));
+    assert_eq!((view.filter(), pids(&view)), ("ari", vec![77, 2301]));
+    assert_eq!(view.selected_pid(), None);
   }
 
   #[test]
@@ -1174,6 +1377,15 @@ mod tests {
     };
     use MouseEventKind::{ScrollDown, ScrollUp};
 
+    // without a selection it only scrolls, up to the end of the table
+    wheel(&mut view, ScrollDown);
+    assert_eq!(page(&view), [(false, 2301), (false, 1), (false, 77)]);
+    wheel(&mut view, ScrollUp);
+    assert_eq!(page(&view), [(false, 4410), (false, 631), (false, 2301)]);
+    assert_eq!(view.selected_pid(), None);
+
+    // with one, the selection moves along
+    assert!(press(&mut view, KeyCode::Down));
     wheel(&mut view, ScrollDown);
     assert_eq!(page(&view), [(false, 2301), (true, 1), (false, 77)], "the end of the table");
     wheel(&mut view, ScrollDown);
@@ -1214,11 +1426,66 @@ mod tests {
 
   #[test]
   fn columns_fill_the_width() {
-    for width in 14..300 {
-      let columns = fit_columns(width);
-      let used: u16 = columns.iter().map(|(_, w)| w + 1).sum::<u16>() - 1;
-      assert_eq!(used, width, "width {width}: {columns:?}");
+    // from PID, the widest sorted column (USER) and a cell for NAME
+    for sort in COLUMNS {
+      for width in 18..300 {
+        let columns = fit_columns(width, sort);
+        let used: u16 = columns.iter().map(|(_, w)| w + 1).sum::<u16>() - 1;
+        assert_eq!(used, width, "width {width}: {columns:?}");
+      }
     }
+  }
+
+  #[test]
+  fn cut_text_ends_with_an_ellipsis() {
+    assert_eq!(cut_end("WindowServer", 20), "WindowServer");
+    assert_eq!(cut_end("WindowServer", 12), "WindowServer");
+    assert_eq!(cut_end("WindowServer", 9), "WindowSe…");
+    assert_eq!(cut_end("WindowServer", 1), "…");
+    assert_eq!(cut_end("WindowServer", 0), "");
+    // wide characters take two cells and are never split
+    assert_eq!(cut_end("漢字テキスト", 6), "漢字…");
+    assert_eq!(cut_end("漢字テキスト", 5), "漢字…");
+
+    assert_eq!(cut_start("/usr/libexec/foo", 20), "/usr/libexec/foo");
+    assert_eq!(cut_start("/usr/libexec/foo", 8), "…xec/foo");
+    assert_eq!(cut_start("/usr/libexec/foo", 1), "…");
+    assert_eq!(cut_start("/usr/libexec/foo", 0), "");
+  }
+
+  #[test]
+  fn arrows_move_the_sort_over_the_columns_on_screen() {
+    use ProcSort::*;
+    // before the first render every column counts; ← / → work while typing too
+    let mut fresh = view();
+    assert!(press(&mut fresh, KeyCode::Char('/')));
+    assert!(press(&mut fresh, KeyCode::Left));
+    assert_eq!((fresh.sort, fresh.sort_desc), (User, false));
+    assert!(fresh.typing() && fresh.filter().is_empty());
+    assert_eq!(pids(&fresh), [1, 77, 631, 2301, 4410], "same user: by pid");
+
+    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER and POWER are left out
+    let mut view = rendered_view();
+    let mut sorts = vec![];
+    for _ in 0..5 {
+      assert!(press(&mut view, KeyCode::Right));
+      sorts.push((view.sort, view.sort_desc));
+    }
+    assert_eq!(sorts, [(Mem, true), (Gpu, true), (Pid, false), (Name, false), (Cpu, true)]);
+    assert!(press(&mut view, KeyCode::Left));
+    assert_eq!((view.sort, view.sort_desc), (Name, false));
+    assert!(press(&mut view, KeyCode::Left));
+    assert!(press(&mut view, KeyCode::Left));
+    assert_eq!((view.sort, view.sort_desc), (Gpu, true), "wraps around");
+
+    // `s` skips them too
+    let mut view = rendered_view();
+    let mut sorts = vec![];
+    for _ in 0..5 {
+      assert!(press(&mut view, KeyCode::Char('s')));
+      sorts.push(view.sort);
+    }
+    assert_eq!(sorts, [Mem, Gpu, Pid, Name, Cpu]);
   }
 
   #[test]
@@ -1286,24 +1553,21 @@ mod tests {
   }
 
   #[test]
-  fn filter_hiding_the_selected_process_moves_the_selection() {
+  fn filter_hiding_the_selected_process_drops_the_selection() {
     let mut view = view(); // [4410, 631, 2301, 1, 77]
     assert!(press(&mut view, KeyCode::Down));
     assert!(press(&mut view, KeyCode::Down));
     assert_eq!(view.selected_pid(), Some(631));
 
-    // `s` keeps WindowServer ([631, 2301, 77]), `sa` doesn't: the row at its position takes the
-    // selection
+    // `s` keeps WindowServer ([631, 2301, 77]), `sa` doesn't: no other row takes the selection
     assert!(press(&mut view, KeyCode::Char('/')));
     type_str(&mut view, "s");
     assert_eq!((pids(&view), view.selected_pid()), (vec![631, 2301, 77], Some(631)));
     type_str(&mut view, "af");
     assert_eq!(pids(&view), [2301, 77]);
-    assert_eq!(view.selected_pid(), Some(2301));
-
-    // nothing matches: no selection, and it doesn't come back with the rows
-    type_str(&mut view, "zz");
     assert_eq!(view.selected_pid(), None);
+
+    // and it doesn't come back with the rows
     assert!(press(&mut view, KeyCode::Esc));
     assert_eq!(pids(&view).len(), 5);
     assert_eq!(view.selected_pid(), None);

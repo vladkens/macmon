@@ -1,6 +1,7 @@
 //! Terminal user interface.
 
 mod boxes;
+mod help;
 mod layout;
 mod palette;
 mod proc_view;
@@ -24,10 +25,12 @@ use ratatui::crossterm::{
   },
   terminal,
 };
+use ratatui::layout::Position;
 use ratatui::prelude::*;
 
-use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS};
+use crate::config::{Config, TUI_MIN_MS};
 use crate::procs::{ProcInfo, ProcSampler};
+use boxes::KeyTarget;
 use macmon::{Metrics, Sampler, SocInfo};
 use palette::Palette;
 use proc_view::ProcView;
@@ -90,6 +93,17 @@ fn restore_term_once(
   let _ = out.execute(cursor::Show);
   let _ = disable_raw_mode();
   true
+}
+
+/// Turns mouse capture on or off to `want`, if it isn't already (`on`); returns the new state.
+/// Only the process list uses the mouse, so capture is off while it is hidden and the terminal
+/// selects text as usual.
+fn set_mouse_capture(out: &mut impl Write, on: bool, want: bool) -> io::Result<bool> {
+  match (on, want) {
+    (false, true) => out.execute(EnableMouseCapture).map(|_| true),
+    (true, false) => out.execute(DisableMouseCapture).map(|_| false),
+    _ => Ok(on),
+  }
 }
 
 /// Starts reading input once the terminal is in raw mode: `query` asks for the palette first,
@@ -267,6 +281,11 @@ pub struct App {
   proc_view: ProcView,
   /// Set while the process panel is on screen; the process thread samples only then.
   procs_active: Arc<AtomicBool>,
+
+  /// Key hints of the last frame, which press their keys when clicked.
+  key_targets: Vec<KeyTarget>,
+  /// The help overlay (`?`) with its first line on screen, while it is open.
+  help: Option<usize>,
 }
 
 impl App {
@@ -304,6 +323,11 @@ impl App {
     self.procs_active.load(Ordering::Relaxed)
   }
 
+  /// The process list is on in the settings, but the window is too small for it.
+  fn procs_auto_hidden(&self) -> bool {
+    self.cfg.show_procs && !self.procs_visible()
+  }
+
   /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
   /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
   /// filter input, so keys don't go to a filter that isn't on screen.
@@ -321,31 +345,43 @@ impl App {
     }
   }
 
-  /// Applies one event. Returns `Break` when the app should quit. Keys can change the interval,
-  /// which `msec` hands on to the sampling threads.
+  /// Applies one event. Returns `Break` when the app should quit. Keys and clicks on key hints
+  /// can change the interval, which `msec` hands on to the sampling threads.
   fn handle_event(&mut self, event: Event, msec: &RwLock<u32>) -> ControlFlow<()> {
-    match event {
-      Event::Update(data) => self.update_metrics(*data),
-      Event::Procs(procs) => self.update_procs(procs),
-      Event::Key(key) => {
-        if self.handle_key(key).is_break() {
-          return ControlFlow::Break(());
-        }
-        *msec.write().unwrap() = self.cfg.interval;
-      }
+    let flow = match event {
+      Event::Key(key) => self.handle_key(key),
       Event::Mouse(mouse) => self.handle_mouse(mouse),
-      Event::Tick => {}
-    }
+      Event::Update(data) => {
+        self.update_metrics(*data);
+        return ControlFlow::Continue(());
+      }
+      Event::Procs(procs) => {
+        self.update_procs(procs);
+        return ControlFlow::Continue(());
+      }
+      Event::Tick => return ControlFlow::Continue(()),
+    };
 
-    ControlFlow::Continue(())
+    *msec.write().unwrap() = self.cfg.interval();
+    flow
   }
 
-  /// Applies a key press to the app state. Returns `Break` when the app should quit.
-  /// Keys of the process panel (only while it is on screen) take precedence; while a filter is
-  /// typed every key except Ctrl-C goes to it.
+  /// Applies a key press to the app state. Returns `Break` when the app should quit. The help
+  /// overlay takes every key while it is open; then keys of the process panel (only while it is
+  /// on screen) take precedence, and while a filter is typed every key except Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
+    }
+
+    if let Some(scroll) = self.help {
+      self.help = match key.code {
+        KeyCode::Esc | KeyCode::Char('?' | 'q') => None,
+        KeyCode::Up => Some(scroll.saturating_sub(1)),
+        KeyCode::Down => Some(scroll + 1),
+        _ => Some(scroll),
+      };
+      return ControlFlow::Continue(());
     }
 
     if self.procs_visible() && self.update_proc_view(|view| view.handle_key(key)) {
@@ -354,11 +390,13 @@ impl App {
 
     match key.code {
       KeyCode::Char('q') => return ControlFlow::Break(()),
+      KeyCode::Char('?') => self.help = Some(0),
       KeyCode::Char('r') => self.cfg.toggle_ratio_mode(),
       KeyCode::Char('+') => self.cfg.inc_interval(),
       KeyCode::Char('=') => self.cfg.inc_interval(), // fallback to press without shift
       KeyCode::Char('-') => self.cfg.dec_interval(),
-      KeyCode::Char('p') => self.cfg.toggle_procs(),
+      // a window too small for the list keeps it hidden whatever the setting says
+      KeyCode::Char('p') if !self.procs_auto_hidden() => self.cfg.toggle_procs(),
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
       _ => {}
     }
@@ -366,11 +404,34 @@ impl App {
     ControlFlow::Continue(())
   }
 
-  /// Applies a mouse event to the process list (only while it is on screen), at the cells of the
-  /// last frame. Only the process list reacts to the mouse.
-  fn handle_mouse(&mut self, mouse: MouseEvent) {
-    if self.procs_visible() {
-      self.update_proc_view(|view| view.handle_mouse(mouse));
+  /// Applies a mouse event at the cells of the last frame, only while the process list is on
+  /// screen (mouse capture is off otherwise): a click on a key hint presses its key, other events
+  /// go to the process list. With the help open, a click closes it and the wheel scrolls it.
+  /// Returns `Break` when a click on `q quit` quits.
+  fn handle_mouse(&mut self, mouse: MouseEvent) -> ControlFlow<()> {
+    if !self.procs_visible() {
+      return ControlFlow::Continue(());
+    }
+
+    let at = Position::new(mouse.column, mouse.row);
+    let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
+    if let Some(scroll) = self.help {
+      self.help = match mouse.kind {
+        _ if click => None,
+        MouseEventKind::ScrollUp => Some(scroll.saturating_sub(3)),
+        MouseEventKind::ScrollDown => Some(scroll + 3),
+        _ => Some(scroll),
+      };
+      return ControlFlow::Continue(());
+    }
+
+    let key = self.key_targets.iter().find_map(|target| target.key_at(at));
+    match key {
+      Some(code) if click => self.handle_key(KeyEvent::new(code, KeyModifiers::NONE)),
+      _ => {
+        self.update_proc_view(|view| view.handle_mouse(mouse));
+        ControlFlow::Continue(())
+      }
     }
   }
 
@@ -389,17 +450,21 @@ impl App {
     self.set_procs_visible(plan.proc.is_some());
 
     // the key hints go on the lowest box: the process box, or the metrics box without it
-    self.render_metrics_box(f, &plan);
+    self.key_targets = self.render_metrics_box(f, &plan);
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
-      self.render_key_hints(f, r);
+    }
+    if let Some(scroll) = self.help {
+      self.help = Some(help::render(f, f.area(), scroll));
     }
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
-    // use from arg if provided, otherwise use config restored value
-    self.cfg.interval = interval.unwrap_or(self.cfg.interval).clamp(TUI_MIN_MS, TUI_MAX_MS);
-    let msec = Arc::new(RwLock::new(self.cfg.interval));
+    // an interval from `-i` is used for this run only, the saved one stays
+    if let Some(interval) = interval {
+      self.cfg.set_run_interval(interval);
+    }
+    let msec = Arc::new(RwLock::new(self.cfg.interval()));
 
     let (tx, rx) = mpsc::channel::<Event>();
     run_sampler_thread(tx.clone(), msec.clone());
@@ -415,8 +480,10 @@ impl App {
     let palette = start_input(&mut stdout(), query, || run_inputs_thread(tx.clone(), 250))?;
     self.theme = Theme::new(palette).with_three_level_bars(theme::detect_three_level_bars());
 
+    let mut mouse = true;
     loop {
       term.draw(|f| self.render(f))?;
+      mouse = set_mouse_capture(&mut stdout(), mouse, self.procs_visible())?;
       if self.handle_event(rx.recv()?, &msec).is_break() {
         break;
       }
@@ -443,8 +510,8 @@ mod tests {
   use ratatui::buffer::Buffer;
   use ratatui::crossterm::ExecutableCommand;
   use ratatui::crossterm::event::{
-    self as term_event, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
+    self as term_event, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
   };
   use ratatui::layout::{Margin, Rect};
   use ratatui::style::{Color, Modifier};
@@ -455,7 +522,7 @@ mod tests {
   use super::theme::{self, Theme};
   use super::{
     App, Event, PROCS_PAUSE_POLL, PROCS_WARMUP, input_event, restore_term_once, run_procs_thread,
-    start_input,
+    set_mouse_capture, start_input,
   };
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
@@ -468,8 +535,12 @@ mod tests {
     MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
   }
 
-  fn click(app: &mut App, x: u16, y: u16) {
-    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+  fn click(app: &mut App, x: u16, y: u16) -> ControlFlow<()> {
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y))
+  }
+
+  fn press(app: &mut App, code: KeyCode) -> ControlFlow<()> {
+    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
   }
 
   /// Screen column where `text` starts in the rendered `line`.
@@ -557,6 +628,24 @@ mod tests {
   }
 
   #[test]
+  fn mouse_capture_turns_on_and_off_once() {
+    let bytes = |command| {
+      let mut out = vec![];
+      match command {
+        true => out.execute(EnableMouseCapture).unwrap(),
+        false => out.execute(DisableMouseCapture).unwrap(),
+      };
+      out
+    };
+    for (on, want) in [(false, true), (true, false), (true, true), (false, false)] {
+      let mut out = vec![];
+      assert_eq!(set_mouse_capture(&mut out, on, want).unwrap(), want, "{on} -> {want}");
+      let expected = if on == want { vec![] } else { bytes(want) };
+      assert_eq!(out, expected, "{on} -> {want}");
+    }
+  }
+
+  #[test]
   fn input_starts_after_the_palette_query_and_mouse_capture() {
     // one log for the query, the terminal output and the input thread
     #[derive(Clone, Default)]
@@ -623,11 +712,17 @@ mod tests {
     assert_eq!(*msec.read().unwrap(), 1250);
     assert_eq!(file.saved()["interval"], 1250);
 
-    // the mouse: a click on the MEM header sorts by it
-    let header = proc_row(&render_buffer(&mut app, 200, 50), 1);
-    let at = mouse(MouseEventKind::Down(MouseButton::Left), x_of(&header, "MEM"), PROC_Y + 1);
+    // the mouse: a click on the MEM header sorts by it, one on `+` of the interval hint hands
+    // the new interval on
+    let buf = render_buffer(&mut app, 200, 50);
+    let left = MouseEventKind::Down(MouseButton::Left);
+    let at = mouse(left, x_of(&proc_row(&buf, 1), "MEM"), PROC_Y + 1);
     assert!(handle(&mut app, Event::Mouse(at)).is_continue());
     assert_eq!(app.proc_view.sort, ProcSort::Mem);
+    let at = mouse(left, x_of(&row(&buf, 49), "1250ms") + 4, 49);
+    assert!(handle(&mut app, Event::Mouse(at)).is_continue());
+    assert_eq!(*msec.read().unwrap(), 1500);
+    assert!(handle(&mut app, Event::Key(key('-'))).is_continue());
 
     assert!(handle(&mut app, Event::Key(key('q'))).is_break());
     assert_eq!(*msec.read().unwrap(), 1250);
@@ -752,16 +847,16 @@ mod tests {
   #[test]
   fn plus_equals_minus_change_interval() {
     let mut app = App::default();
-    assert_eq!(app.cfg.interval, 1000);
+    assert_eq!(app.cfg.interval(), 1000);
 
     assert_eq!(app.handle_key(key('+')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.interval, 1250);
+    assert_eq!(app.cfg.interval(), 1250);
 
     assert_eq!(app.handle_key(key('=')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.interval, 1500);
+    assert_eq!(app.cfg.interval(), 1500);
 
     assert_eq!(app.handle_key(key('-')), ControlFlow::Continue(()));
-    assert_eq!(app.cfg.interval, 1250);
+    assert_eq!(app.cfg.interval(), 1250);
   }
 
   #[test]
@@ -773,7 +868,7 @@ mod tests {
     }
 
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
-    assert_eq!(app.cfg.interval, 1000);
+    assert_eq!(app.cfg.interval(), 1000);
     assert!(app.cfg.show_procs);
 
     // keys without a binding (the old theme, cores and panel keys among them) change nothing
@@ -802,7 +897,7 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let plan = app.layout(buf.area);
     assert_eq!((plan.top, plan.proc), (Some(buf.area), None));
-    assert_eq!(row(&buf, 49), border(200, SUMMARY, &hints(5)));
+    assert_eq!(row(&buf, 49), border(200, SUMMARY, &hints(6)));
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert!(!screen.contains(" proc ") && !screen.contains("WindowServer"));
     assert!(!procs_active(&app), "no process sampling while hidden");
@@ -814,10 +909,39 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert!(screen.contains("collecting…"));
-    assert!(proc_row(&buf, 0).starts_with("╭─ proc ─ / filter ─"), "{}", proc_row(&buf, 0));
+    let title = proc_row(&buf, 0);
+    assert!(title.starts_with("╭─ proc ─ / filter ─ ← sort → ─"), "{title}");
     assert_eq!(row(&buf, PROC_Y - 1), border(200, SUMMARY, ""));
-    assert_eq!(row(&buf, 49), hints_border(200, 5));
+    assert_eq!(row(&buf, 49), hints_border(200, 6));
     assert!(procs_active(&app));
+  }
+
+  #[test]
+  fn p_is_ignored_while_the_window_is_too_small() {
+    let file = TempConfig::new("p_is_ignored_while_the_window_is_too_small");
+    let mut app = saving_app(&file);
+
+    // auto-hidden: `p` would change nothing on screen, so it changes no setting either
+    let buf = render_buffer(&mut app, 100, 12);
+    assert!(!procs_active(&app));
+    assert!(app.handle_key(key('p')).is_continue());
+    assert!(app.cfg.show_procs);
+    assert!(!file.path().exists(), "nothing saved");
+    // and the footer leaves it out
+    let hints = " q quit | ? help | v graph | r scaled | -/+ 1000ms ";
+    assert!(row(&buf, 11).ends_with(&format!("─{hints}─╯")), "{}", row(&buf, 11));
+
+    // room again: the list is back, and so is `p`
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(procs_active(&app));
+    assert_eq!(row(&buf, 49), hints_border(200, 6));
+    assert!(app.handle_key(key('p')).is_continue());
+    assert_eq!(file.saved()["show_procs"], false);
+
+    // hidden with `p`: a small window doesn't keep it from showing the list again
+    render_buffer(&mut app, 100, 12);
+    assert!(app.handle_key(key('p')).is_continue());
+    assert_eq!(file.saved()["show_procs"], true);
   }
 
   /// Solarized-like terminal palette, as a terminal would answer the palette query.
@@ -910,8 +1034,11 @@ mod tests {
   const SUMMARY: &str =
     " Power: 6.60W (avg 6.60W, max 6.60W) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ";
 
-  /// Global key hints, in the order of the original UI.
-  const HINTS: [&str; 5] = ["q quit", "p procs", "v chart", "r scaled", "-/+ 1000ms"];
+  /// Global key hints, in the order of the original UI, with `? help`.
+  const HINTS: [&str; 6] = ["q quit", "? help", "p procs", "v graph", "r scaled", "-/+ 1000ms"];
+
+  /// Note on the bottom border of the process box while some processes have no power reading.
+  const NOTE: &str = " POWER: own processes only ";
 
   /// The first `count` of `HINTS` joined, with a blank cell at both ends; empty for none.
   fn hints(count: usize) -> String {
@@ -938,16 +1065,18 @@ mod tests {
   }
 
   /// Top border of a box `width` cells wide (at least 5) with the first of `variants` (`(left,
-  /// right)` titles, longest first, `right` empty for none) that fits uncut, or else the last
-  /// one cut to the border.
+  /// right)` titles, longest first, `right` empty for none, both empty for no title) that fits
+  /// uncut, or else the last one cut to the border.
   fn fitted_top(width: usize, variants: &[(&str, &str)]) -> String {
     let len = |s: &str| s.chars().count();
     // the left title and its blanks start 2 cells in; one cell between titles, 2 at the end
-    let fits = |(left, right): (&str, &str)| match right {
-      "" => 2 + len(left) + 2 + 2 <= width,
+    let fits = |(left, right): (&str, &str)| match (left, right) {
+      ("", "") => true,
+      (_, "") => 2 + len(left) + 2 + 2 <= width,
       _ => 2 + len(left) + 2 + 1 + len(right) + 2 + 2 <= width,
     };
     match variants.iter().find(|v| fits(**v)) {
+      Some(("", "")) => format!("╭{}╮", "─".repeat(width - 2)),
       Some((left, right)) => top_border(width, left, right),
       None => {
         let (left, _) = variants.last().unwrap();
@@ -1121,14 +1250,15 @@ mod tests {
     // the power summary on the bottom border of the metrics box
     assert_eq!(rows[12], border(110, SUMMARY, ""));
 
-    // the process list in the rest of the screen: count and filter label on its top border, the
-    // sort arrow by the sorted column, the global hints on its bottom border
-    assert_eq!(rows[13], format!("╭─ proc 3 ─ / filter {}╮", "─".repeat(88)));
+    // the process list in the rest of the screen: count, filter label and sort hint on its top
+    // border, the sort arrow by the sorted column, the POWER note and the global hints on its
+    // bottom border
+    assert_eq!(rows[13], format!("╭─ proc 3 ─ / filter ─ ← sort → {}╮", "─".repeat(77)));
     let header = "│   PID NAME";
     let header_end = "USER       CPU% ↓    MEM   POWER   GPU% │";
     assert!(rows[14].starts_with(header) && rows[14].ends_with(header_end), "{}", rows[14]);
     assert!(rows[15].starts_with("│   631 WindowServer "), "{}", rows[15]);
-    assert_eq!(rows[31], hints_border(110, 5));
+    assert_eq!(rows[31], border(110, NOTE, &hints(6)));
   }
 
   /// App whose power samples differ, so the current value (the mean of the last two samples),
@@ -1228,16 +1358,20 @@ mod tests {
     top
   }
 
-  /// RAM box title steps with swap, longest first.
-  const RAM_SWAP_STEPS: [&str; 4] = [
+  /// RAM box title steps with swap, longest first; none at the end.
+  const RAM_SWAP_STEPS: [&str; 8] = [
     "RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB",
     "RAM 16.8G 70% · SWAP 2.4G 79%",
     "RAM 70% · SWAP 79%",
+    "RAM 70% SWAP 79%",
     "RAM 70% SW 79%",
+    "RAM 70%",
+    "70%",
+    "",
   ];
 
-  /// RAM box title steps without swap, longest first.
-  const RAM_STEPS: [&str; 3] = ["RAM 16.81 GB (70.0%)", "RAM 16.8G 70%", "RAM 70%"];
+  /// RAM box title steps without swap, longest first; none at the end.
+  const RAM_STEPS: [&str; 5] = ["RAM 16.81 GB (70.0%)", "RAM 16.8G 70%", "RAM 70%", "70%", ""];
 
   #[test]
   fn ram_title_steps_down_with_swap() {
@@ -1251,16 +1385,21 @@ mod tests {
       (34, RAM_SWAP_STEPS[2]),
       (24, RAM_SWAP_STEPS[2]),
       (23, RAM_SWAP_STEPS[3]),
-      (20, RAM_SWAP_STEPS[3]),
+      (22, RAM_SWAP_STEPS[3]),
+      (21, RAM_SWAP_STEPS[4]),
+      (20, RAM_SWAP_STEPS[4]),
+      (19, RAM_SWAP_STEPS[5]),
+      (13, RAM_SWAP_STEPS[5]),
+      (12, RAM_SWAP_STEPS[6]),
+      (9, RAM_SWAP_STEPS[6]),
     ];
     for (width, title) in cases {
       let top = top_row_box(&mut app, Metric::Ram, width);
       assert_eq!(top, top_border(width.into(), title, ""), "{width}");
     }
 
-    // the last step is cut only when it doesn't fit whole
-    assert_eq!(top_row_box(&mut app, Metric::Ram, 19), "╭─ RAM 70% SW 79%─╮");
-    assert_eq!(top_row_box(&mut app, Metric::Ram, 14), "╭─ RAM 70% S─╮");
+    // no number is ever cut: no title when even the percent doesn't fit
+    assert_eq!(top_row_box(&mut app, Metric::Ram, 8), "╭──────╮");
   }
 
   #[test]
@@ -1273,13 +1412,14 @@ mod tests {
       (19, RAM_STEPS[1]),
       (18, RAM_STEPS[2]),
       (13, RAM_STEPS[2]),
+      (12, RAM_STEPS[3]),
+      (9, RAM_STEPS[3]),
     ];
     for (width, title) in cases {
       let top = top_row_box(&mut app, Metric::Ram, width);
       assert_eq!(top, top_border(width.into(), title, ""), "{width}");
     }
-    assert_eq!(top_row_box(&mut app, Metric::Ram, 12), "╭─ RAM 70%─╮");
-    assert_eq!(top_row_box(&mut app, Metric::Ram, 10), "╭─ RAM 7─╮");
+    assert_eq!(top_row_box(&mut app, Metric::Ram, 8), "╭──────╮");
 
     let screen = render_to_string(&mut app, 240, 60);
     assert!(!screen.contains("SWAP") && !screen.contains("SW "));
@@ -1333,10 +1473,15 @@ mod tests {
       assert_eq!(top_row_box(&mut dry, Metric::Ram, width), fitted_top(width.into(), &steps));
     }
 
-    // power: the temperature goes first, then average and maximum; the current power stays
+    // power: the temperature goes first, then average and maximum with the temperature back,
+    // then the temperature again; the current power stays
     let mut app = test_app();
-    let cpu =
-      [("CPU 4.50W (4.50, 4.50)", "45°C"), ("CPU 4.50W (4.50, 4.50)", ""), ("CPU 4.50W", "")];
+    let cpu = [
+      ("CPU 4.50W (4.50, 4.50)", "45°C"),
+      ("CPU 4.50W (4.50, 4.50)", ""),
+      ("CPU 4.50W", "45°C"),
+      ("CPU 4.50W", ""),
+    ];
     let ane = [("ANE 0.10W (0.10, 0.10)", ""), ("ANE 0.10W", "")];
     for width in 6..=60 {
       let fitted = |steps: &[(&str, &str)]| fitted_top(width.into(), steps);
@@ -1353,7 +1498,10 @@ mod tests {
     assert_eq!(cpu(&mut app, 35), "╭─ CPU 4.50W (4.50, 4.50) ─ 45°C ─╮");
     assert_eq!(cpu(&mut app, 34), format!("╭─ CPU 4.50W (4.50, 4.50) {}╮", dashes(7)));
     assert_eq!(cpu(&mut app, 28), "╭─ CPU 4.50W (4.50, 4.50) ─╮");
-    assert_eq!(cpu(&mut app, 27), format!("╭─ CPU 4.50W {}╮", dashes(13)));
+    // the temperature stays at 80 columns (26-cell boxes)
+    assert_eq!(cpu(&mut app, 27), format!("╭─ CPU 4.50W {} 45°C ─╮", dashes(6)));
+    assert_eq!(cpu(&mut app, 22), "╭─ CPU 4.50W ─ 45°C ─╮");
+    assert_eq!(cpu(&mut app, 21), format!("╭─ CPU 4.50W {}╮", dashes(7)));
     assert_eq!(cpu(&mut app, 15), "╭─ CPU 4.50W ─╮");
     assert_eq!(cpu(&mut app, 14), "╭─ CPU 4.50W─╮");
 
@@ -1394,10 +1542,11 @@ mod tests {
 
   #[test]
   fn key_hints_right_aligned_on_bottom_border() {
-    let mut app = app_with_procs(varied_procs());
+    let mut app = app_with_procs(test_procs());
     let buf = render_buffer(&mut app, 200, 50);
-    assert_eq!(row(&buf, 49), hints_border(200, 5));
-    assert!(row(&buf, 49).ends_with("─ q quit | p procs | v chart | r scaled | -/+ 1000ms ─╯"));
+    assert_eq!(row(&buf, 49), hints_border(200, 6));
+    let hints = "─ q quit | ? help | p procs | v graph | r scaled | -/+ 1000ms ─╯";
+    assert!(row(&buf, 49).ends_with(hints));
     assert_eq!(row(&buf, PROC_Y - 1), border(200, SUMMARY, ""), "no hints on the metrics box");
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert_eq!(screen.matches("q quit").count(), 1);
@@ -1410,25 +1559,26 @@ mod tests {
     let x = |text: &str| bottom[..bottom.find(text).unwrap()].chars().count() as u16;
     let cell = |x: u16| &buf[(x, 49)];
     assert!(cell(x("q quit")).modifier.contains(Modifier::BOLD));
+    assert!(cell(x("? help")).modifier.contains(Modifier::BOLD));
     assert!(cell(x("p procs")).modifier.contains(Modifier::BOLD));
-    assert!(cell(x("v chart")).modifier.contains(Modifier::BOLD));
+    assert!(cell(x("v graph")).modifier.contains(Modifier::BOLD));
     assert!(!cell(x("quit")).modifier.contains(Modifier::BOLD));
     assert_eq!(cell(x("quit")).fg, theme::TEXT);
     assert_eq!(cell(x("| p")).fg, theme::DIM);
 
-    // the current ratio mode and interval; the label of `v` doesn't change with the view
+    // the state of the toggles: chart view, ratio mode and interval
     assert!(app.handle_key(key('r')).is_continue());
     assert!(app.handle_key(key('+')).is_continue());
     assert!(app.handle_key(key('v')).is_continue());
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    let hints = "─ q quit | p procs | v chart | r active | -/+ 1250ms ─╯";
+    let hints = "─ q quit | ? help | p procs | v gauge | r active | -/+ 1250ms ─╯";
     assert!(bottom.ends_with(hints), "{bottom}");
 
     // without the process list: the same hints on the metrics box, after the power summary
     app.cfg.show_procs = false;
     assert!(app.handle_key(key('-')).is_continue());
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    let hints = " q quit | p procs | v chart | r active | -/+ 1000ms ";
+    let hints = " q quit | ? help | p procs | v gauge | r active | -/+ 1000ms ";
     assert_eq!(bottom, border(200, SUMMARY, hints));
   }
 
@@ -1436,8 +1586,20 @@ mod tests {
   fn key_hints_drop_from_the_end_when_narrow() {
     // (width, hints shown): `q quit` 6 cells, then 3 cells between hints and 1 at both ends,
     // plus `╰─` and `─╯`
-    let cases =
-      [(200, 5), (56, 5), (55, 4), (43, 4), (42, 3), (32, 3), (31, 2), (22, 2), (21, 1), (12, 1)];
+    let cases = [
+      (200, 6),
+      (65, 6),
+      (64, 5),
+      (52, 5),
+      (51, 4),
+      (41, 4),
+      (40, 3),
+      (31, 3),
+      (30, 2),
+      (21, 2),
+      (20, 1),
+      (12, 1),
+    ];
     for (width, count) in cases.into_iter().chain([(11, 0), (5, 0)]) {
       let mut app = test_app();
       let buf = render_buffer(&mut app, width, 60);
@@ -1448,39 +1610,47 @@ mod tests {
 
   #[test]
   fn footer_and_power_summary_share_the_border() {
-    let parts =
-      ["Power: 6.60W (avg 6.60W, max 6.60W)", "Fan 1200 RPM", "Total 12.00W (12.00, 12.00)"];
-    let summary = |count: usize| format!(" {} ", parts[..count].join(" | "));
-    // (width, summary shown, hints shown): `q quit` first, then the summary, then the other hints
+    let full = SUMMARY;
+    let short = " Power: 6.60W | Fan 1200 RPM | Total 12.00W ";
+    let shortest = " Power: 6.60W | Total 12.00W ";
+    // (width, summary shown, hints shown): the averages and maxima, then the fans give way to
+    // the hints; then `q quit` first, the shortest summary, then the other hints
     let cases = [
-      (200, summary(3), 5),
-      (139, summary(3), 5),
-      (138, summary(3), 4),
-      (125, summary(3), 3),
-      (95, summary(3), 1),
-      (94, summary(2), 3),
-      (65, summary(2), 1),
-      (64, summary(1), 2),
-      (50, summary(1), 1),
+      (200, full, 6),
+      (148, full, 6),
+      (147, short, 6),
+      (110, short, 6),
+      (109, shortest, 6),
+      (95, shortest, 6),
+      (94, shortest, 5),
+      (71, shortest, 4),
+      (61, shortest, 3),
+      (51, shortest, 2),
+      (50, shortest, 1),
+      (42, shortest, 1),
+      (41, " Power: 6.60W ", 2),
+      (27, " Power: 6.60W ", 1),
       // the Power part is cut next to `q quit`
-      (49, " Power: 6.60W (avg 6.60W, max 6.60W)".to_string(), 1),
-      (30, " Power: 6.60W (av".to_string(), 1),
-      (12, String::new(), 1),
+      (26, " Power: 6.60W", 1),
+      (15, " P", 1),
+      (12, "", 1),
       // no room for `q quit`
-      (11, " Power:".to_string(), 0),
+      (11, " Power:", 0),
     ];
     for (width, left, count) in cases {
       let mut app = test_app();
       app.cfg.show_procs = false;
       let buf = render_buffer(&mut app, width, 30);
-      assert_eq!(row(&buf, 29), border(width.into(), &left, &hints(count)), "{width}");
+      assert_eq!(row(&buf, 29), border(width.into(), left, &hints(count)), "{width}");
     }
 
     // with the process list: the summary alone on the metrics box, the hints on the process box
     let mut app = test_app();
     let buf = render_buffer(&mut app, 80, 24);
-    assert_eq!(row(&buf, 9), border(80, &summary(2), ""));
-    assert_eq!(row(&buf, 23), hints_border(80, 5));
+    assert_eq!(row(&buf, 9), border(80, short, ""));
+    assert_eq!(row(&buf, 23), hints_border(80, 6));
+    let buf = render_buffer(&mut app, 86, 24);
+    assert_eq!(row(&buf, 9), border(86, full, ""));
   }
 
   /// App with synthetic CPU clusters of `(label, cores, load)`.
@@ -1882,10 +2052,12 @@ mod tests {
     assert!(!screen.contains("°C") && !screen.contains("Total") && !screen.contains("Fan"));
   }
 
+  /// Processes that all have a power reading, without readable paths.
   fn test_procs() -> Vec<ProcInfo> {
     let proc = |pid: i32, name: &str| ProcInfo {
       pid,
       name: name.to_string(),
+      path: String::new(),
       user: "root".to_string(),
       cpu_pct: 12.5,
       mem_bytes: 64 << 20,
@@ -1985,10 +2157,21 @@ mod tests {
     row(buf, PROC_Y + y)
   }
 
+  /// Path of the varied processes.
+  const WINDOW_SERVER: &str =
+    "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer";
+
+  /// Processes with different values, one of them (root's launchd) without a power reading.
   fn varied_procs() -> Vec<ProcInfo> {
+    let path = |name: &str| match name {
+      "launchd" => "/sbin/launchd".to_string(),
+      "WindowServer" => WINDOW_SERVER.to_string(),
+      _ => format!("/Applications/{name}.app/Contents/MacOS/{name}"),
+    };
     let proc = |pid: i32, name: &str, cpu, mem_mb: u64, power_w, gpu_pct| ProcInfo {
       pid,
       name: name.to_string(),
+      path: path(name),
       user: if pid < 100 { "root" } else { "vlad" }.to_string(),
       cpu_pct: cpu,
       mem_bytes: mem_mb << 20,
@@ -2092,13 +2275,26 @@ mod tests {
     ] {
       assert_eq!(header.contains(label), shown, "{label} in {header}");
     }
-    // NAME gets the 9 cells left: truncated
-    assert!(row(&buf, 10).starts_with("│   631 WindowSer   25.0"), "{}", row(&buf, 10));
+    // NAME gets the 9 cells left: cut, with `…`
+    assert!(row(&buf, 10).starts_with("│   631 WindowSe…   25.0"), "{}", row(&buf, 10));
 
-    // very narrow: PID and NAME only, nothing drawn over the border
+    // very narrow: PID, NAME and the sorted column, nothing drawn over the border
     let buf = render_buffer(&mut app, 18, 20);
-    assert_eq!(row(&buf, 9), "│   PID NAME     │");
-    assert_eq!(row(&buf, 10), "│   631 WindowSe │");
+    assert_eq!(row(&buf, 9), "│   PID … CPU% ↓ │");
+    assert_eq!(row(&buf, 10), "│   631 …   25.0 │");
+    // `s` goes to the next column on screen: PID, from the lowest
+    assert!(app.handle_key(key('s')).is_continue());
+    let buf = render_buffer(&mut app, 18, 20);
+    assert_eq!(row(&buf, 9), "│ PID ↑ NAME     │");
+    assert_eq!(row(&buf, 10), "│     1 launchd  │");
+
+    // USER goes before NAME gets fewer than 16 cells
+    let buf = render_buffer(&mut app, 66, 24);
+    let header = row(&buf, 11);
+    assert!(header.contains(&format!(" NAME{} USER ", " ".repeat(12))), "{header}");
+    let buf = render_buffer(&mut app, 65, 24);
+    let header = row(&buf, 11);
+    assert!(header.contains(&format!(" NAME{}  CPU% ", " ".repeat(23))), "{header}");
   }
 
   #[test]
@@ -2169,7 +2365,7 @@ mod tests {
     }
     assert_eq!(app.proc_view.filter(), "qcvdrp5+-s");
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
-    assert_eq!(app.cfg.interval, 1000);
+    assert_eq!(app.cfg.interval(), 1000);
     assert!(app.cfg.show_procs);
     assert_eq!(app.cfg.proc_sort, ProcSort::Cpu);
 
@@ -2233,40 +2429,42 @@ mod tests {
     let file = TempConfig::new("click_on_header_sorts_and_again_reverses");
     let mut app = with_procs(saving_app(&file), varied_procs());
 
-    // (header, sort key, pids descending, pids ascending); a new column keeps the direction
+    // (header, sort key, its first direction, pids then, pids reversed); numbers sort largest
+    // first, PIDs and text from the start
     let cases = [
-      ("PID", Pid, [2301, 631, 1], [1, 631, 2301]),
-      ("NAME", Name, [631, 2301, 1], [1, 2301, 631]),
+      ("PID", Pid, false, [1, 631, 2301], [2301, 631, 1]),
+      ("NAME", Name, false, [1, 2301, 631], [631, 2301, 1]),
       // ties by pid
-      ("USER", User, [631, 2301, 1], [1, 631, 2301]),
-      ("MEM", Mem, [2301, 631, 1], [1, 631, 2301]),
+      ("USER", User, false, [1, 631, 2301], [631, 2301, 1]),
+      ("MEM", Mem, true, [2301, 631, 1], [1, 631, 2301]),
       // launchd has no power reading: last both ways
-      ("POWER", Power, [631, 2301, 1], [2301, 631, 1]),
-      ("GPU%", Gpu, [631, 2301, 1], [1, 2301, 631]),
-      ("CPU%", Cpu, [631, 2301, 1], [1, 2301, 631]),
+      ("POWER", Power, true, [631, 2301, 1], [2301, 631, 1]),
+      ("GPU%", Gpu, true, [631, 2301, 1], [1, 2301, 631]),
+      ("CPU%", Cpu, true, [631, 2301, 1], [1, 2301, 631]),
     ];
-    for (header, sort, desc, asc) in cases {
+    let arrow = |desc: bool| if desc { "↓" } else { "↑" };
+    for (header, sort, desc, first, reversed) in cases {
       let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
-      click(&mut app, x_of(&line, header), PROC_Y + 1);
-      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, true), "{header}");
-      assert_eq!(shown_pids(&app), desc, "{header}");
+      assert!(click(&mut app, x_of(&line, header), PROC_Y + 1).is_continue());
+      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, desc), "{header}");
+      assert_eq!(shown_pids(&app), first, "{header}");
       let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
       assert_eq!(line.matches('↓').count() + line.matches('↑').count(), 1, "{line}");
 
       // again, on the arrow this time: the whole header cell counts
-      let arrow = x_of(&line, &format!("{header} ↓")) + header.len() as u16 + 1;
-      click(&mut app, arrow, PROC_Y + 1);
-      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, false), "{header}");
+      let at = x_of(&line, &format!("{header} {}", arrow(desc))) + header.len() as u16 + 1;
+      assert!(click(&mut app, at, PROC_Y + 1).is_continue());
+      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, !desc), "{header}");
       // saved like `s` / `S`
       assert_eq!(file.saved()["proc_sort"], format!("{sort:?}"), "{header}");
-      assert_eq!(file.saved()["proc_sort_desc"], false, "{header}");
-      assert_eq!(shown_pids(&app), asc, "{header}");
+      assert_eq!(file.saved()["proc_sort_desc"], !desc, "{header}");
+      assert_eq!(shown_pids(&app), reversed, "{header}");
       let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
-      assert!(line.contains(&format!("{header} ↑")), "{line}");
+      assert!(line.contains(&format!("{header} {}", arrow(!desc))), "{line}");
 
       // and back
-      click(&mut app, x_of(&line, header), PROC_Y + 1);
-      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, true), "{header}");
+      assert!(click(&mut app, x_of(&line, header), PROC_Y + 1).is_continue());
+      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, desc), "{header}");
     }
 
     assert_eq!(file.saved()["proc_sort"], "Cpu");
@@ -2281,10 +2479,10 @@ mod tests {
 
     // the blank cells around the label and the count title don't count
     for x in [x - 1, x + 8, x_of(&title, "proc 3")] {
-      click(&mut app, x, PROC_Y);
+      assert!(click(&mut app, x, PROC_Y).is_continue());
       assert!(!app.proc_view.typing(), "x {x}: {title}");
     }
-    click(&mut app, x + 7, PROC_Y);
+    assert!(click(&mut app, x + 7, PROC_Y).is_continue());
     assert!(app.proc_view.typing());
 
     // keys go to the filter, which replaces the label
@@ -2298,7 +2496,7 @@ mod tests {
     assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
     let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
     assert!(title.starts_with("╭─ proc 1/3 ─ /saf ─"), "{title}");
-    click(&mut app, x_of(&title, "/saf") + 2, PROC_Y);
+    assert!(click(&mut app, x_of(&title, "/saf") + 2, PROC_Y).is_continue());
     assert!(app.proc_view.typing());
     assert_eq!(app.proc_view.filter(), "saf");
   }
@@ -2319,7 +2517,7 @@ mod tests {
     assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
     let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
     assert_eq!(title, format!("╭─ proc 0/3 ─ /…{} ─╮", &filter[69..]));
-    click(&mut app, 190, PROC_Y);
+    assert!(click(&mut app, 190, PROC_Y).is_continue());
     assert!(app.proc_view.typing());
 
     // no room next to the count: the filter takes its place
@@ -2329,7 +2527,7 @@ mod tests {
     assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
     let buf = render_buffer(&mut app, 20, 50);
     assert_eq!(proc_row(&buf, 0), format!("╭─ /…{} ─╮", &filter[238..]));
-    click(&mut app, 5, PROC_Y);
+    assert!(click(&mut app, 5, PROC_Y).is_continue());
     assert!(app.proc_view.typing());
   }
 
@@ -2343,7 +2541,7 @@ mod tests {
     let buf = render_buffer(&mut app, 22, 50);
     assert_eq!(proc_row(&buf, 0), format!("╭─ proc 3 {}╮", "─".repeat(11)));
     for x in 0..22 {
-      click(&mut app, x, PROC_Y);
+      assert!(click(&mut app, x, PROC_Y).is_continue());
       assert!(!app.proc_view.typing(), "x {x}");
     }
 
@@ -2371,22 +2569,30 @@ mod tests {
 
     // anywhere across the row, the blank cells at the borders too
     for (x, row, pid) in [(100, 1, 2301), (1, 2, 1), (198, 0, 631)] {
-      click(&mut app, x, PROC_Y + 2 + row);
+      assert!(click(&mut app, x, PROC_Y + 2 + row).is_continue());
       assert_eq!(app.proc_view.selected_pid(), Some(pid), "x {x}, row {row}");
     }
     let buf = render_buffer(&mut app, 200, 50);
     assert!(buf[(100, PROC_Y + 2)].modifier.contains(Modifier::REVERSED));
 
     // blank rows below the last process keep the selection
-    click(&mut app, 100, PROC_Y + 10);
+    assert!(click(&mut app, 100, PROC_Y + 10).is_continue());
     assert_eq!(app.proc_view.selected_pid(), Some(631));
 
-    // a scrolled table: the row on screen, not the row from the top
+    // the selected row again: no selection
+    assert!(click(&mut app, 30, PROC_Y + 2).is_continue());
+    assert_eq!(app.proc_view.selected_pid(), None);
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(!buf[(100, PROC_Y + 2)].modifier.contains(Modifier::REVERSED));
+
+    // a scrolled table (End scrolls without a selection): the row on screen, not the row from
+    // the top
     let mut app = hundred_procs_app();
-    assert!(app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)).is_continue());
+    assert!(press(&mut app, KeyCode::End).is_continue());
+    assert_eq!(app.proc_view.selected_pid(), None);
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc73 "));
-    click(&mut app, 50, PROC_Y + 2);
+    assert!(click(&mut app, 50, PROC_Y + 2).is_continue());
     assert_eq!(app.proc_view.selected_pid(), Some(1073));
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc73 "), "the table doesn't move");
@@ -2395,7 +2601,9 @@ mod tests {
   #[test]
   fn wheel_moves_selection_and_scrolls() {
     let mut app = hundred_procs_app();
-    let wheel = |app: &mut App, kind| app.handle_mouse(mouse(kind, 100, PROC_Y + 10));
+    let wheel = |app: &mut App, kind| {
+      assert!(app.handle_mouse(mouse(kind, 100, PROC_Y + 10)).is_continue());
+    };
     // (screen row of the selection, its process)
     let selected = |app: &mut App| {
       let buf = render_buffer(app, 200, 50);
@@ -2405,13 +2613,16 @@ mod tests {
       (rows[0], app.proc_view.selected_pid().unwrap() - 1000)
     };
     use MouseEventKind::{ScrollDown, ScrollUp};
+    let top = |app: &mut App| proc_row(&render_buffer(app, 200, 50), 2);
 
-    // without a selection: from the top row, which scrolls away with the selection on it
+    // without a selection: it only scrolls, and ↓ then selects the top row on screen
     wheel(&mut app, ScrollDown);
-    assert_eq!(selected(&mut app), (0, 3));
     wheel(&mut app, ScrollDown);
-    assert_eq!(selected(&mut app), (0, 6));
+    assert!(top(&mut app).contains(" proc6 "), "{}", top(&mut app));
     wheel(&mut app, ScrollUp);
+    assert!(top(&mut app).contains(" proc3 "), "{}", top(&mut app));
+    assert_eq!(app.proc_view.selected_pid(), None);
+    assert!(press(&mut app, KeyCode::Down).is_continue());
     assert_eq!(selected(&mut app), (0, 3));
     // the top of the table: the selection moves up on screen instead
     wheel(&mut app, ScrollUp);
@@ -2420,7 +2631,7 @@ mod tests {
 
     // the selected row keeps its place on screen
     for _ in 0..5 {
-      assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_continue());
+      assert!(press(&mut app, KeyCode::Down).is_continue());
     }
     assert_eq!(selected(&mut app), (5, 5));
     wheel(&mut app, ScrollDown);
@@ -2438,8 +2649,9 @@ mod tests {
     assert_eq!(selected(&mut app), (26, 99));
 
     // the wheel over the metrics box doesn't move the list
-    app.handle_mouse(mouse(ScrollUp, 100, 3));
-    assert_eq!(selected(&mut app), (26, 99));
+    wheel(&mut app, ScrollUp);
+    assert!(app.handle_mouse(mouse(ScrollUp, 100, 3)).is_continue());
+    assert_eq!(selected(&mut app), (26, 96));
   }
 
   #[test]
@@ -2454,6 +2666,7 @@ mod tests {
     };
     let before = state(&app);
 
+    let footer = row(&buf, 49);
     let cells = [
       // borders and the padding cells of the header row, the gaps between header cells
       (0, PROC_Y + 1),
@@ -2462,28 +2675,40 @@ mod tests {
       (199, PROC_Y + 3),
       (x_of(&header, "CPU% ↓") - 1, PROC_Y + 1),
       (x_of(&header, "USER") + 10, PROC_Y + 1),
-      // top border, the count title, the bottom border with the key hints
+      // top border, the count title, the blank cells around the sort hint
       (100, PROC_Y),
       (4, PROC_Y),
+      (x_of(&proc_row(&buf, 0), "← sort") - 1, PROC_Y),
+      (x_of(&proc_row(&buf, 0), "← sort") + 8, PROC_Y),
+      // the bottom border: the note, the separators and blank cells around the key hints
+      (5, 49),
       (100, 49),
-      (x_of(&row(&buf, 49), "q quit"), 49),
+      (x_of(&footer, "q quit") - 1, 49),
+      (x_of(&footer, "| ? help"), 49),
+      (198, 49),
       // metrics box
       (0, 0),
       (10, 2),
       (100, 3),
     ];
     for (x, y) in cells {
-      click(&mut app, x, y);
+      assert!(click(&mut app, x, y).is_continue());
       assert_eq!(state(&app), before, "click at {x}, {y}");
     }
 
     // other buttons, releases, drags and moves over the targets
     use MouseEventKind::*;
     let kinds = [Down(MouseButton::Right), Up(MouseButton::Left), Drag(MouseButton::Left), Moved];
-    let targets = [(x_of(&header, "MEM"), PROC_Y + 1), (x_of(&proc_row(&buf, 0), "/"), PROC_Y)];
+    let targets = [
+      (x_of(&header, "MEM"), PROC_Y + 1),
+      (x_of(&proc_row(&buf, 0), "/"), PROC_Y),
+      (x_of(&proc_row(&buf, 0), "← sort"), PROC_Y),
+      (x_of(&footer, "q quit"), 49),
+      (x_of(&footer, "v graph"), 49),
+    ];
     for kind in kinds {
       for (x, y) in targets.into_iter().chain([(100, PROC_Y + 2)]) {
-        app.handle_mouse(mouse(kind, x, y));
+        assert!(app.handle_mouse(mouse(kind, x, y)).is_continue());
         assert_eq!(state(&app), before, "{kind:?} at {x}, {y}");
       }
     }
@@ -2502,8 +2727,8 @@ mod tests {
     let row = (100, PROC_Y + 2);
     let try_all = |app: &mut App| {
       for (x, y) in [mem, filter, row] {
-        click(app, x, y);
-        app.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
+        assert!(click(app, x, y).is_continue());
+        assert!(app.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y)).is_continue());
       }
       assert_eq!((app.cfg.proc_sort, app.proc_view.typing()), (ProcSort::Cpu, false));
       assert_eq!(app.proc_view.selected_pid(), None);
@@ -2525,7 +2750,7 @@ mod tests {
     render_buffer(&mut app, 200, 50);
     app.update_procs(varied_procs());
     render_buffer(&mut app, 200, 50);
-    click(&mut app, mem.0, mem.1);
+    assert!(click(&mut app, mem.0, mem.1).is_continue());
     assert_eq!(app.cfg.proc_sort, ProcSort::Mem);
   }
 
@@ -2576,6 +2801,274 @@ mod tests {
     assert!(app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_continue());
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc0 "));
+  }
+
+  #[test]
+  fn selected_process_and_its_path_on_the_bottom_border() {
+    let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+
+    // nothing selected: a note on POWER, as launchd has no reading next to processes with one
+    let buf = render_buffer(&mut app, 200, 50);
+    assert_eq!(row(&buf, 49), border(200, NOTE, &hints(6)));
+    assert_eq!(buf[(3, 49)].fg, theme::DIM);
+
+    // the PID and the full path, with `Esc clear`
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let selected = format!(" 631 {WINDOW_SERVER} | Esc clear ");
+    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
+    assert_eq!(bottom, border(200, &selected, &hints(6)));
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(buf[(3, 49)].modifier.contains(Modifier::BOLD), "the PID");
+    assert_eq!(buf[(7, 49)].fg, theme::TEXT);
+
+    // narrower: `Esc clear` gives way to the hints, then the path is cut from the left to the
+    // room the hints leave; once that is less than half the border, the hints drop instead
+    let left = format!(" 631 {WINDOW_SERVER} ");
+    let cut = |from: usize| format!(" 631 …{} ", &WINDOW_SERVER[from..]);
+    let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
+    assert_eq!(bottom(&mut app, 170), border(170, &selected, &hints(6)));
+    assert_eq!(bottom(&mut app, 169), border(169, &left, &hints(6)));
+    assert_eq!(bottom(&mut app, 120), border(120, &cut(39), &hints(6)));
+    assert_eq!(bottom(&mut app, 100), border(100, &cut(50), &hints(5)));
+    assert_eq!(bottom(&mut app, 40), border(40, &cut(80), &hints(2)));
+
+    // another process; no path: the name
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(bottom.starts_with("╰─ 2301 /Applications/Safari.app/Contents/MacOS/Safari | Esc"));
+    let mut app = app_with_procs(test_procs());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
+    assert_eq!(bottom, border(200, " 1 launchd | Esc clear ", &hints(6)));
+
+    // cleared: every process has power here, so no note either
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert_eq!(row(&render_buffer(&mut app, 200, 50), 49), hints_border(200, 6));
+  }
+
+  #[test]
+  fn power_note_gives_way_and_follows_the_power_column() {
+    let mut app = app_with_procs(varied_procs());
+    // the note drops before the hints do: 4 corner cells, the note, a gap and 61 cells of hints
+    assert_eq!(row(&render_buffer(&mut app, 93, 50), 49), border(93, NOTE, &hints(6)));
+    assert_eq!(row(&render_buffer(&mut app, 92, 50), 49), hints_border(92, 6));
+
+    // no POWER column on screen, no note
+    let buf = render_buffer(&mut app, 46, 50);
+    assert!(!proc_row(&buf, 1).contains("POWER"));
+    assert_eq!(row(&buf, 49), hints_border(46, 4));
+
+    // every process with a reading (root), or none: no note
+    for power in [Some(0.5), None] {
+      let procs = varied_procs().into_iter().map(|p| ProcInfo { power_w: power, ..p }).collect();
+      app.update_procs(procs);
+      assert_eq!(row(&render_buffer(&mut app, 200, 50), 49), hints_border(200, 6));
+    }
+  }
+
+  #[test]
+  fn arrows_and_the_sort_hint_move_the_sort() {
+    use ProcSort::*;
+    let file = TempConfig::new("arrows_and_the_sort_hint_move_the_sort");
+    let mut app = with_procs(saving_app(&file), varied_procs());
+    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
+    assert!(title.starts_with("╭─ proc 3 ─ / filter ─ ← sort → ─"), "{title}");
+
+    // → / ←: the next column on screen, in its own direction, saved
+    assert!(press(&mut app, KeyCode::Right).is_continue());
+    assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (Mem, true));
+    assert!(press(&mut app, KeyCode::Left).is_continue());
+    assert!(press(&mut app, KeyCode::Left).is_continue());
+    assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (User, false));
+    assert_eq!(
+      (file.saved()["proc_sort"].clone(), file.saved()["proc_sort_desc"].clone()),
+      ("User".into(), false.into())
+    );
+    let header = proc_row(&render_buffer(&mut app, 200, 50), 1);
+    assert!(header.contains(" USER ↑ "), "{header}");
+
+    // a click on the hint: its left half `← so` moves left, its right half `rt →` right
+    let x = x_of(&title, "← sort →");
+    for (dx, sort) in [(0, Name), (3, Pid), (4, Name), (7, User)] {
+      render_buffer(&mut app, 200, 50);
+      assert!(click(&mut app, x + dx, PROC_Y).is_continue());
+      assert_eq!(app.cfg.proc_sort, sort, "+{dx}");
+    }
+
+    // narrow: columns not on screen are skipped. Sorted by USER, 50 columns leave out POWER
+    let header = proc_row(&render_buffer(&mut app, 50, 50), 1);
+    assert!(!header.contains("POWER") && header.contains("USER ↑"), "{header}");
+    assert!(press(&mut app, KeyCode::Right).is_continue());
+    assert_eq!(app.cfg.proc_sort, Cpu);
+    // sorted by CPU, they leave out USER
+    let header = proc_row(&render_buffer(&mut app, 50, 50), 1);
+    assert!(!header.contains("USER") && header.contains("POWER"), "{header}");
+    for sort in [Mem, Power, Gpu, Pid, Name, Cpu] {
+      assert!(press(&mut app, KeyCode::Right).is_continue());
+      assert_eq!(app.cfg.proc_sort, sort);
+      render_buffer(&mut app, 50, 50);
+    }
+  }
+
+  #[test]
+  fn footer_hints_press_their_keys() {
+    let file = TempConfig::new("footer_hints_press_their_keys");
+    let mut app = with_procs(saving_app(&file), varied_procs());
+    let msec = RwLock::new(1000);
+    // clicks `text` (plus `dx` cells) on the footer of a fresh frame
+    let click_hint = |app: &mut App, text: &str, dx: u16| {
+      let footer = row(&render_buffer(app, 200, 50), 49);
+      let at = mouse(MouseEventKind::Down(MouseButton::Left), x_of(&footer, text) + dx, 49);
+      app.handle_event(Event::Mouse(at), &msec)
+    };
+
+    assert!(click_hint(&mut app, "v graph", 6).is_continue());
+    assert_eq!(file.saved()["view_type"], "Gauge");
+    assert!(click_hint(&mut app, "r scaled", 0).is_continue());
+    assert_eq!(file.saved()["ratio_mode"], "Active");
+    // the left half of `-/+ 1000ms` is `-`, the right half `+`
+    assert!(click_hint(&mut app, "-/+ 1000ms", 4).is_continue());
+    assert_eq!((file.saved()["interval"].clone(), *msec.read().unwrap()), (750.into(), 750));
+    assert!(click_hint(&mut app, "-/+ 750ms", 5).is_continue());
+    assert_eq!((file.saved()["interval"].clone(), *msec.read().unwrap()), (1000.into(), 1000));
+    assert!(click_hint(&mut app, "? help", 0).is_continue());
+    assert!(app.help.is_some());
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(click_hint(&mut app, "p procs", 6).is_continue());
+    assert_eq!(file.saved()["show_procs"], false);
+
+    // the metrics box has no hints to click while the list is on screen
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(!row(&buf, PROC_Y - 1).contains("q quit"));
+    assert!(click(&mut app, x_of(&row(&buf, 49), "q quit"), 49).is_break(), "q quit quits");
+  }
+
+  #[test]
+  fn typing_a_filter_changes_the_footer_and_says_when_nothing_matches() {
+    let mut app = app_with_procs(varied_procs());
+    assert!(app.handle_key(key('/')).is_continue());
+    let typing = " Enter keep | Esc clear | ↑↓ select ";
+    let buf = render_buffer(&mut app, 200, 50);
+    assert_eq!(row(&buf, 49), border(200, NOTE, typing));
+
+    // its hints are clickable too: Enter keeps the filter
+    for c in "zz".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    let buf = render_buffer(&mut app, 200, 50);
+    let message = "no process matches \"zz\"";
+    let middle = (PROC_Y + 2..49).find(|&y| row(&buf, y).contains(message)).expect(message);
+    assert_eq!(middle, PROC_Y + 2 + 13, "centered in the 27 table rows");
+    assert_eq!(buf[(x_of(&row(&buf, middle), "no"), middle)].fg, theme::DIM);
+    assert!(click(&mut app, x_of(&row(&buf, 49), "Enter"), 49).is_continue());
+    assert!(!app.proc_view.typing());
+    assert_eq!(app.proc_view.filter(), "zz");
+
+    // kept: the global hints are back, the message stays while nothing matches
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 49).ends_with(&format!("{}─╯", hints(6))));
+    assert!(row(&buf, middle).contains(message));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(!render_to_string(&mut app, 200, 50).contains("no process matches"));
+  }
+
+  #[test]
+  fn help_opens_over_the_screen_and_closes() {
+    let file = TempConfig::new("help_opens_over_the_screen_and_closes");
+    let mut app = with_procs(saving_app(&file), varied_procs());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let screen = render_to_string(&mut app, 200, 50);
+
+    assert!(app.handle_key(key('?')).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    let rows: Vec<String> = (0..50).map(|y| row(&buf, y)).collect();
+    let top = rows.iter().position(|r| r.contains("╭─ help ─")).expect("help box");
+    assert!(rows[top].contains("─ Esc close ─╮"), "{}", rows[top]);
+    assert!(!rows[top].contains("scroll"), "everything fits");
+    let text = rows.join("\n");
+    for line in [
+      "q, Ctrl-C",
+      "Process list",
+      "← →",
+      "Typing a filter",
+      "Mouse",
+      "100% is one fully busy core",
+      "POWER -",
+      "(run with sudo for all)",
+      "MEM",
+      "footprint",
+      "Option (iTerm2)",
+      "while dragging",
+    ] {
+      assert!(text.contains(line), "missing {line:?}");
+    }
+
+    // other keys do nothing while it is open; `q`, Esc and `?` close it
+    for c in ['p', 'v', 'r', '+', 's', '/'] {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(!file.path().exists(), "nothing saved");
+    assert!(app.help.is_some() && !app.proc_view.typing());
+    assert_eq!(app.handle_key(key('q')), ControlFlow::Continue(()), "q closes the help");
+    assert_eq!(render_to_string(&mut app, 200, 50), screen);
+    for close in [KeyCode::Esc, KeyCode::Char('?')] {
+      assert!(app.handle_key(key('?')).is_continue());
+      assert!(press(&mut app, close).is_continue());
+      assert!(app.help.is_none(), "{close:?}");
+    }
+    assert_eq!(app.proc_view.selected_pid(), Some(631), "Esc closed only the help");
+
+    // a click closes it; Ctrl-C still quits
+    assert!(app.handle_key(key('?')).is_continue());
+    render_buffer(&mut app, 200, 50);
+    assert!(click(&mut app, 100, 25).is_continue());
+    assert!(app.help.is_none() && app.proc_view.selected_pid() == Some(631));
+    assert!(app.handle_key(key('?')).is_continue());
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(app.handle_key(ctrl_c).is_break());
+
+    // while typing a filter `?` is text
+    let mut app = app_with_procs(varied_procs());
+    assert!(app.handle_key(key('/')).is_continue());
+    assert!(app.handle_key(key('?')).is_continue());
+    assert_eq!((app.help, app.proc_view.filter()), (None, "?"));
+  }
+
+  #[test]
+  fn help_scrolls_when_the_window_is_short() {
+    let mut app = app_with_procs(varied_procs());
+    assert!(app.handle_key(key('?')).is_continue());
+    let lines = |app: &mut App, width, height| {
+      let buf = render_buffer(app, width, height);
+      (0..height).map(|y| row(&buf, y)).collect::<Vec<_>>().join("\n")
+    };
+
+    // 80x24: 22 of its lines; ↑↓ scroll, the wheel too, never past its end
+    let text = lines(&mut app, 80, 24);
+    assert!(text.contains("╭─ help ─ ↑↓ scroll ─") && text.contains(" Keys "));
+    assert!(!text.contains("while dragging"));
+    for _ in 0..40 {
+      assert!(press(&mut app, KeyCode::Down).is_continue());
+    }
+    let text = lines(&mut app, 80, 24);
+    assert!(text.contains("while dragging") && !text.contains(" Keys "));
+    assert!(press(&mut app, KeyCode::Up).is_continue());
+    assert!(!lines(&mut app, 80, 24).contains("while dragging"), "one line back up");
+    for _ in 0..20 {
+      assert!(app.handle_mouse(mouse(MouseEventKind::ScrollUp, 40, 12)).is_continue());
+    }
+    assert!(lines(&mut app, 80, 24).contains(" Keys "));
+
+    // any size: inside the screen, corners in place
+    for (width, height) in [(400, 120), (200, 50), (80, 24), (40, 12), (10, 4), (2, 2), (1, 1)] {
+      let buf = render_buffer(&mut app, width, height);
+      if width >= 2 && height >= 2 {
+        let text = lines(&mut app, width, height);
+        assert!(text.contains("╭─ ") || width < 5, "{width}x{height}");
+      }
+      assert_eq!(buf.area, Rect::new(0, 0, width, height));
+    }
   }
 
   #[test]

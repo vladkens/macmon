@@ -4,7 +4,7 @@ Rootless Apple Silicon monitor and Rust library. Shared sampling and metric type
 
 ## Structure
 
-- `src_app/tui/`: the terminal UI. `mod.rs` runs it (threads, events, keys, terminal setup and restore), `layout.rs` splits the screen into the metrics box and the process list, `boxes.rs` draws the metric boxes and the box frame (titles, power summary, key hints), `proc_view.rs` is the process list (sort, filter, selection, mouse), `widgets.rs` the graph and gauge, `store.rs` the metric histories, `theme.rs` the colors, `palette.rs` the terminal palette query.
+- `src_app/tui/`: the terminal UI. `mod.rs` runs it (threads, events, keys, terminal setup and restore), `layout.rs` splits the screen into the metrics box and the process list, `boxes.rs` draws the metric boxes and the box frame (titles, power summary, key hints and their click targets), `proc_view.rs` is the process list (sort, filter, selection, mouse), `help.rs` the help overlay (`?`), `widgets.rs` the graph and gauge, `store.rs` the metric histories, `theme.rs` the colors, `palette.rs` the terminal palette query.
 - `src_app/procs.rs`: per-process usage without root: libproc for the current user's processes (CPU, footprint, energy), the setuid `/bin/ps` for other users' processes (CPU, resident size), GPU time of every process from the GPU's user clients in the IORegistry (`IOAccelerator` children).
 - `src_app/config.rs`: the TUI settings in `~/.config/macmon.json`.
 

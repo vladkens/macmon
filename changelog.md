@@ -12,6 +12,9 @@
 - Added process sorting (`s` / `S`, including by user), filtering by name or PID (`/`) and selection (arrows, PgUp / PgDn, Home / End)
 - Added mouse support in the process list: click a column header to sort by it (again to reverse), click `/ filter` to filter, click a process to select it, scroll with the wheel; hold Option (iTerm2) or Shift (Ghostty and most other terminals) to select text
 - Added `p` to show / hide the process list, saved in the config
+- Added a help overlay (`?`) with every key and mouse action and what CPU %, scaled / active, POWER `-` and MEM mean
+- Added `←` / `→` to sort by the previous / next column, also by clicking the `← sort →` hint on the process list border
+- The bottom border of the process list shows the PID and full path of the selected process, or notes that POWER covers your own processes only
 - Added a green → yellow → red load gradient in the terminal's colors, smooth on truecolor terminals (`COLORTERM=truecolor` / `24bit`) that answer the palette query (OSC 4), stepped otherwise and over SSH
 
 ### Improvements
@@ -22,13 +25,21 @@
 - Box titles get shorter step by step instead of being cut: frequency, GB values and power avg / max go first, percentages and current power stay; temperatures are shown in whole degrees
 - The power summary (`Power`, fans, `Total`) sits on the bottom border of the metrics box
 - Made the process list auto-hide in small windows; process sampling pauses while it is hidden
-- The footer lists the global keys (`q quit | p procs | v chart | r scaled | -/+ 1000ms`); process list controls sit in its own box: `/ filter` on its border and the sort arrow next to the sorted column
+- The footer lists the global keys (`q quit | ? help | p procs | v graph | r scaled | -/+ 1000ms`); process list controls sit in its own box: `/ filter` and `← sort →` on its border and the sort arrow next to the sorted column
 - The terminal is restored (mouse capture off, main screen, cursor shown, normal mode) on errors and crashes too
 - A bad value in `~/.config/macmon.json` resets only that setting instead of all of them
+- A column chosen for sorting starts in its own direction (numbers largest first, PID / name / user from the start); the sorted column is never dropped in narrow windows, USER goes before NAME gets narrow, and cut names end with `…`
+- The wheel and PgUp / PgDn / Home / End scroll without selecting a process; clicking the selected process clears the selection; the selection goes away with its process or when the filter hides it; Esc clears both the selection and the filter
+- A filter that matches nothing says so; while typing a filter, the footer shows its keys (`Enter keep | Esc clear | ↑↓ select`)
+- The footer shows the state of the toggles (`v graph` / `v gauge`), adds `? help` and leaves out `p procs` while the window is too small for the process list (`p` does nothing then); its hints are clickable
+- The power summary drops the averages and maxima, then the fans, before the key hints; the RAM title steps down to `RAM 70%` and `70%` instead of cutting numbers, and `SWAP` stays before `SW`; power boxes keep the temperature at 80 columns
+- Mouse capture is on only while the process list is shown, so the terminal selects text as usual otherwise
+- CPU % of other users' processes (from `ps`, in 10 ms steps) is averaged over the last 3 intervals, so idle processes no longer jump between 0 % and a few percent
 
 ### Fixes
 
 - Running with `sudo` no longer creates a root-owned `~/.config/macmon.json`, which kept later runs from saving settings; under `sudo` only an existing file is updated
+- An interval given with `-i` is no longer saved to the config by other settings; only `-` / `+` change the saved interval
 
 **Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.2...main
 
