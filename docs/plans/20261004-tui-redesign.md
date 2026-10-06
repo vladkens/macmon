@@ -508,7 +508,35 @@ User review on a wide (~250 column) terminal: one-row strips stretch into long t
 - [x] write tests: layout proportions at 200x50, 110x32, 80x24 (metrics ≈ 40 %, process box the rest, boxes inside the area, no overlap); `p` / auto-hide → metrics full height; box count follows clusters (2 and 3); original title strings; right title dropped / left truncated in narrow boxes; graph levels across rows and per-column colors; footer + power summary on one border at narrow widths; existing process / mouse tests still pass (layout: proportions, exact box rects, 3 clusters, hidden / auto-hidden, inside / no overlap / rows tile the width over a size grid; widget: levels across 2–3 rows, per-column colors, one color, area clipping; panels: `share_border` drop order and no overlap at every width 0–200; render: `matches_mockup_layout_at_110_columns` row by row, `renders_original_titles`, `power_boxes_show_current_avg_max_and_temperature` (styles too), `narrow_boxes_drop_right_title_then_cut_left`, `power_summary_follows_sensors`, `footer_and_power_summary_share_the_border`, `graph_columns_follow_their_own_load_power_graphs_stay_low`, `graphs_fill_boxes_once_history_is_long_enough`; process / mouse tests moved to the new geometry (process box at row 20 of 200x50, 27 rows; auto-hide at 60x12). Real binary on a pty at 110x32 (and `p`), 80x24, 200x50, 60x15 matches the mockup's structure)
 - [x] run `make test` and `make check` - must pass before next task
 
-⚠️ Found in the real run (left for the user to decide): with the original title strings and evenly split boxes, typical widths cut titles. At 110 columns the RAM box (27 cells) shows `RAM 20.03 / 24.0 GB (8` (the percent is cut) and the power boxes (36 cells) are one cell short of the temperature, so `°C` shows from ~113 columns; `SWAP …` needs a 54-cell RAM box (~218 columns); at 80 columns the cluster titles read `E-CPU   7% @ 1`. The mockup avoided this with shorter titles (`RAM 20.1/24.0 GB 84%`, `57°C`, unpadded `E-CPU 20% @ 1640 MHz`).
+⚠️ Found in the real run (left for the user to decide): with the original title strings and evenly split boxes, typical widths cut titles. At 110 columns the RAM box (27 cells) shows `RAM 20.03 / 24.0 GB (8` (the percent is cut) and the power boxes (36 cells) are one cell short of the temperature, so `°C` shows from ~113 columns; `SWAP …` needs a 54-cell RAM box (~218 columns); at 80 columns the cluster titles read `E-CPU   7% @ 1`. The mockup avoided this with shorter titles (`RAM 20.1/24.0 GB 84%`, `57°C`, unpadded `E-CPU 20% @ 1640 MHz`). → resolved in Task 20.
+
+### Task 20: ➕ Titles that fit, gauge view on `v`, RAM graph scale
+
+User review of Task 19: the RAM title doesn't fit (total memory is already in the outer title `… 24GB`, so drop it), and the old interface had a gauge view on `v` — bring it back since the top block is the original one again. A screenshot also showed the RAM box completely filled at 70 % usage.
+
+- RAM title: `RAM 16.81 GB (70.0%)` — no total (it's in the outer title); right title `SWAP 2.35 / 3.0 GB` when swap exists and it fits.
+- Titles degrade by whole parts instead of cutting mid-text:
+  - cluster / GPU boxes: `E-CPU 42% @ 1800 MHz` → `E-CPU 42%` (frequency drops first; label + percent always stay; no alignment padding inside the title);
+  - RAM: `RAM 16.81 GB (70.0%)` → `RAM 70.0%`; the SWAP right title drops before anything on the left;
+  - power boxes: `CPU 3.44W (4.02, 6.77)` + `57°C` → temperature drops first, then `(avg, max)`; current W always stays. Temperatures as whole degrees (`57°C`).
+  - only if even the minimal part doesn't fit, cut it (as now).
+- `v` toggles the cluster / GPU / RAM boxes between graph and gauge, like the original: gauge = a horizontal bar across the whole inner area filled to the ratio, colored by the load gradient of that ratio, empty part blank. Power boxes always stay graphs (as in the original). Persisted in config as `view_type`; the old values `"Sparkline"` (→ graph) and `"Gauge"` are accepted again, so an old config restores the user's old choice. Footer: ` q quit | p procs | v chart | r scaled | -/+ 1000ms ` (original order with `v chart`; `p procs` after `q quit`).
+- RAM graph must scale to `ram_total` (as the original `.max(val.ram_total)`), not to the visible maximum; SWAP is not graphed. Verify the other load graphs scale to 100 % and only power graphs auto-scale.
+
+**Files:**
+- Modify: `src_app/tui/panels.rs`
+- Modify: `src_app/tui/widgets.rs`
+- Modify: `src_app/tui/mod.rs`
+- Modify: `src_app/config.rs`
+- Modify: `readme.md` / `changelog.md`
+
+- [ ] RAM title without total; SWAP right title; temperatures as whole degrees
+- [ ] title parts with priorities: drop whole parts (frequency; GB value; temperature; avg / max; right titles first) before cutting text
+- [ ] `v` graph / gauge for cluster, GPU and RAM boxes; power boxes always graphs; `view_type` in config with old values accepted; footer with `v chart`
+- [ ] RAM graph scaled to `ram_total`; load graphs to 100 %; power graphs auto-scale
+- [ ] readme / changelog: `v` is back, RAM title change
+- [ ] write tests: RAM title strings at several widths; drop order for each box kind at shrinking widths (no mid-text cut while a smaller variant fits); gauge fill width / color at 0, 50, 100 % and box sizes; `v` toggles and persists, old configs with `view_type: "Sparkline"` / `"Gauge"` load; RAM graph at 70 % of total fills ~70 % of the height; footer text
+- [ ] run `make test` and `make check` - must pass before next task
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
