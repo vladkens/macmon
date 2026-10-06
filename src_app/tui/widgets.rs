@@ -1,4 +1,4 @@
-//! History graph widget.
+//! History graph and gauge widgets.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,6 +11,37 @@ use super::theme::Theme;
 const BAR_LEVELS: u64 = 8;
 /// Code point before `▁`: the bar of level `n` is `BAR_BASE + n`.
 const BAR_BASE: u32 = 0x2580;
+/// Filled cell of a gauge.
+const FULL: char = '█';
+
+/// Gauge view of the original macmon: a bar across its whole area, filled from the left to `ratio`
+/// (rounded to whole cells) in the load color of `ratio`; the rest stays blank.
+pub struct Gauge<'a> {
+  ratio: f64,
+  theme: &'a Theme,
+}
+
+impl<'a> Gauge<'a> {
+  /// Gauge for `ratio` in `0.0..=1.0`, clamped outside the range.
+  pub fn new(ratio: f64, theme: &'a Theme) -> Self {
+    let ratio = if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) };
+    Self { ratio, theme }
+  }
+}
+
+impl Widget for Gauge<'_> {
+  fn render(self, area: Rect, buf: &mut Buffer) {
+    let area = area.intersection(buf.area);
+    // at most `area.width`, as the ratio is at most 1
+    let filled = (f64::from(area.width) * self.ratio).round() as u16;
+    let color = self.theme.gradient(self.ratio);
+    for y in area.top()..area.bottom() {
+      for x in area.left()..area.left() + filled {
+        buf[(x, y)].set_char(FULL).set_fg(color);
+      }
+    }
+  }
+}
 
 /// History graph for newest-first samples over its whole area, right-aligned (newest sample on
 /// the right): one solid bar per column, growing from the bottom row up in eighths of a row
@@ -87,7 +118,7 @@ mod tests {
   use ratatui::style::Color;
   use ratatui::widgets::Widget;
 
-  use super::{Graph, bar_level};
+  use super::{Gauge, Graph, bar_level};
   use crate::tui::palette::Palette;
   use crate::tui::theme::Theme;
 
@@ -235,5 +266,61 @@ mod tests {
     let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
     Graph::new(&[100; 10], &theme).max(Some(100)).render(Rect::new(2, 1, 3, 2), &mut buf);
     assert_eq!(rows(&buf), ["      ", "  ███ ", "  ███ ", "      "]);
+  }
+
+  #[test]
+  fn gauge_fills_its_ratio_of_every_row() {
+    for theme in [smooth(), Theme::default()] {
+      // (ratio, width, height, filled cells per row)
+      let cases = [
+        (0.0, 10, 3, 0),
+        (0.5, 10, 3, 5),
+        (1.0, 10, 3, 10),
+        (0.0, 48, 7, 0),
+        (0.5, 48, 7, 24),
+        (1.0, 48, 7, 48),
+        (0.5, 1, 1, 1), // half a cell rounds up
+        (0.556, 48, 1, 27),
+        (0.44, 25, 2, 11),
+        (0.04, 10, 1, 0), // less than half a cell stays blank
+      ];
+      for (ratio, width, height, filled) in cases {
+        let buf = draw(Gauge::new(ratio, &theme), width, height);
+        let ctx = format!("{ratio} in {width}x{height}");
+        let row = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(width) - filled));
+        assert_eq!(rows(&buf), vec![row; usize::from(height)], "{ctx}");
+
+        // filled cells in the load color of the ratio
+        for (x, y) in (0..filled as u16).flat_map(|x| (0..height).map(move |y| (x, y))) {
+          assert_eq!(buf[(x, y)].fg, theme.gradient(ratio), "{ctx}: {x}, {y}");
+        }
+      }
+    }
+
+    // the terminal's green / yellow / red without a palette
+    let theme = Theme::default();
+    let colors = [0.0, 0.5, 1.0].map(|ratio| draw(Gauge::new(ratio, &theme), 4, 1)[(0, 0)].fg);
+    assert_eq!(colors, [Color::Reset, Color::Yellow, Color::Red], "nothing to color at 0");
+    assert_eq!(draw(Gauge::new(0.2, &theme), 4, 1)[(0, 0)].fg, Color::Green);
+  }
+
+  #[test]
+  fn gauge_clamps_ratio_and_stays_inside_its_area() {
+    let theme = Theme::default();
+    assert_eq!(rows(&draw(Gauge::new(1.5, &theme), 4, 1)), ["████"]);
+    assert_eq!(rows(&draw(Gauge::new(-1.0, &theme), 4, 1)), ["    "]);
+    assert_eq!(rows(&draw(Gauge::new(f64::NAN, &theme), 4, 1)), ["    "]);
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
+    Gauge::new(1.0, &theme).render(Rect::new(2, 1, 3, 2), &mut buf);
+    assert_eq!(rows(&buf), ["      ", "  ███ ", "  ███ ", "      "]);
+    // an area reaching past the buffer is clipped to it
+    let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
+    Gauge::new(1.0, &theme).render(Rect::new(2, 1, 10, 5), &mut buf);
+    assert_eq!(rows(&buf), ["    ", "  ██"]);
+
+    for (w, h) in [(0, 0), (0, 3), (3, 0)] {
+      assert!(draw(Gauge::new(0.5, &theme), w, h).content.is_empty());
+    }
   }
 }

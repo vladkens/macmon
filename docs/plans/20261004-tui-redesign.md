@@ -115,11 +115,13 @@
 ### Graph style (user decision after Task 11, revised after Task 16)
 - ~~Braille only~~ — superseded: one-row braille has only 4 levels and low loads read as a dotted line. User picked variant B from the comparison page (https://claude.ai/code/artifact/4e4fc050-93d1-47bf-8873-6569cda3ce54): solid block bars `▁▂▃▄▅▆▇█`, 8 levels per row, one sample per cell, each bar colored by its own value on the load gradient. Still one canonical style: no `v` key, no toggle.
 - Power-column graphs: block bars in the low (green) color, no gradient.
+- ➕ Task 20: `v` is back (as in the original): the CPU cluster, GPU and RAM boxes switch between the history graph and a gauge (bar filled to the current load in its load color); power boxes always show graphs.
 
 ### Config migration
 - `color`, `theme`, `view_type` fields dropped (serde ignores unknown fields, old files keep loading).
 - New: `panels` (5 bools, default all on), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
 - ➕ Task 16: `panels` and `per_core_view` dropped (ignored on load); new `show_procs` (default `true`, key `p`).
+- ➕ Task 20: `view_type` back with the released values (`"Sparkline"` = graph, `"Gauge"`); unknown values fall back to the graph.
 
 ### Process sampling (`src_app/procs.rs`)
 - `ProcInfo { pid, ppid, name, user, cpu_pct, mem_bytes, power_w: Option<f32>, gpu_pct }`.
@@ -141,6 +143,7 @@
 ### Keys (final)
 - `q` / `Ctrl-C` quit · ~~`d` per-core~~ · `r` ratio mode · `-`/`+` interval · ~~`1`–`5` panels~~ `p` process list (➕ Task 16) · `/` filter · `s`/`S` sort · arrows / PgUp / PgDn / Home / End selection · `Esc` cancel.
 - ➕ Task 18: footer ` q quit | p procs | r scaled | -/+ 1000ms ` (global keys only); mouse in the process list (see Process panel).
+- ➕ Task 20: `v` graph / gauge; footer ` q quit | p procs | v chart | r scaled | -/+ 1000ms `.
 
 ## What Goes Where
 - **Implementation Steps** (`[ ]` checkboxes): code, tests, docs in this repo.
@@ -514,10 +517,10 @@ User review on a wide (~250 column) terminal: one-row strips stretch into long t
 
 User review of Task 19: the RAM title doesn't fit (total memory is already in the outer title `… 24GB`, so drop it), and the old interface had a gauge view on `v` — bring it back since the top block is the original one again. A screenshot also showed the RAM box completely filled at 70 % usage.
 
-- RAM title: `RAM 16.81 GB (70.0%)` — no total (it's in the outer title); right title `SWAP 2.35 / 3.0 GB` when swap exists and it fits.
+- RAM title: no total (it's in the outer title). ~~Right title `SWAP 2.35 / 3.0 GB` when swap exists and it fits.~~ ➕ User change during Task 20: SWAP must stay visible as long as possible, so RAM and SWAP share ONE left title that degrades in steps, percentages last: `RAM 16.81 GB (70.0%) · SWAP 2.35 / 3.0 GB` → `RAM 16.8G 70% · SWAP 2.4G 79%` → `RAM 70% · SWAP 79%` → `RAM 70% SW 79%` → cut. Without swap: `RAM 16.81 GB (70.0%)` → `RAM 16.8G 70%` → `RAM 70%` → cut. Separator ` · ` dim, percentages on the load gradient; the longest step that fits the top border wins.
 - Titles degrade by whole parts instead of cutting mid-text:
   - cluster / GPU boxes: `E-CPU 42% @ 1800 MHz` → `E-CPU 42%` (frequency drops first; label + percent always stay; no alignment padding inside the title);
-  - RAM: `RAM 16.81 GB (70.0%)` → `RAM 70.0%`; the SWAP right title drops before anything on the left;
+  - RAM: ~~`RAM 16.81 GB (70.0%)` → `RAM 70.0%`; the SWAP right title drops before anything on the left~~ the steps above;
   - power boxes: `CPU 3.44W (4.02, 6.77)` + `57°C` → temperature drops first, then `(avg, max)`; current W always stays. Temperatures as whole degrees (`57°C`).
   - only if even the minimal part doesn't fit, cut it (as now).
 - `v` toggles the cluster / GPU / RAM boxes between graph and gauge, like the original: gauge = a horizontal bar across the whole inner area filled to the ratio, colored by the load gradient of that ratio, empty part blank. Power boxes always stay graphs (as in the original). Persisted in config as `view_type`; the old values `"Sparkline"` (→ graph) and `"Gauge"` are accepted again, so an old config restores the user's old choice. Footer: ` q quit | p procs | v chart | r scaled | -/+ 1000ms ` (original order with `v chart`; `p procs` after `q quit`).
@@ -530,13 +533,13 @@ User review of Task 19: the RAM title doesn't fit (total memory is already in th
 - Modify: `src_app/config.rs`
 - Modify: `readme.md` / `changelog.md`
 
-- [ ] RAM title without total; SWAP right title; temperatures as whole degrees
-- [ ] title parts with priorities: drop whole parts (frequency; GB value; temperature; avg / max; right titles first) before cutting text
-- [ ] `v` graph / gauge for cluster, GPU and RAM boxes; power boxes always graphs; `view_type` in config with old values accepted; footer with `v chart`
-- [ ] RAM graph scaled to `ram_total`; load graphs to 100 %; power graphs auto-scale
-- [ ] readme / changelog: `v` is back, RAM title change
-- [ ] write tests: RAM title strings at several widths; drop order for each box kind at shrinking widths (no mid-text cut while a smaller variant fits); gauge fill width / color at 0, 50, 100 % and box sizes; `v` toggles and persists, old configs with `view_type: "Sparkline"` / `"Gauge"` load; RAM graph at 70 % of total fills ~70 % of the height; footer text
-- [ ] run `make test` and `make check` - must pass before next task
+- [x] RAM title without total; ~~SWAP right title~~ SWAP in the same left title (➕ user change); temperatures as whole degrees (`ram_part` / `swap_part` build each step; `RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB` with the test metrics; names bold, ` · ` dim, percents on the gradient; `45°C`)
+- [x] title parts with priorities: drop whole parts (frequency; GB value; temperature; avg / max; right titles first) before cutting text (`MetricBox::titles` is a list of `Titles` variants, longest first; `fit_titles` picks the first that `Titles::fits` uncut (`place_titles` places every title at full width), else the last one, which `Titles::render` cuts as before. Cluster / GPU: `E-CPU 42% @ 1800 MHz` → `E-CPU 42%` (no padding, `{:.0}%`, `{} MHz`); power: + `45°C` → without temperature → `CPU 4.50W`; RAM: the 4 / 3 steps. A step fits from its text + 6 cells (+ the right title + 3): E-CPU 26, power 35 / 28 / 15, RAM with swap 47 / 35 / 24 / 20, without 26 / 19 / 13. At 110 columns: `E-CPU 42% @ 1800 MHz`, `RAM 77% · SWAP 64%` (27-cell boxes), power with temperatures (36 cells); at 80: `E-CPU 16%`, `RAM 77% SW 64%`, `CPU 1.93W`)
+- [x] `v` graph / gauge for cluster, GPU and RAM boxes; power boxes always graphs; `view_type` in config with old values accepted; footer with `v chart` (`config::ViewType { Graph, Gauge }`, `Graph` saved as `"Sparkline"` so released versions and their configs agree both ways; an unknown `view_type` (`Braille` / `Block` of earlier redesign builds, garbage) falls back to the graph without resetting the other settings; `widgets::Gauge`: every row of the box filled from the left to `round(width · ratio)` cells of `█` in `gradient(ratio)`, the rest blank, as the original's non-unicode `Gauge`; `MetricBox::gauge` = the current load, `None` for power boxes; footer ` q quit | p procs | v chart | r scaled | -/+ 1000ms `, all five from 56 columns)
+- [x] RAM graph scaled to `ram_total`; load graphs to 100 %; power graphs auto-scale (⚠️ cause of the "full RAM box" not found in the code: the RAM graph has been scaled to `ram_total` since Task 19 (`max: Some(mem.ram_total)`), cluster / GPU to 100, power to the visible maximum; a real run at 69.8 % RAM drew 23 of 32 eighths in a 4-row graph. What can make it look full: RAM barely changes, so a full history is a solid block, and bars round up to the next eighth, which shows most in short boxes (70 % → `▆` in a 1-row graph, `▄` over `█` in 2 rows). Kept as is; locked by `load_graphs_scale_to_full_load_power_graphs_to_their_peak`)
+- [x] readme / changelog: `v` is back, RAM title change (readme: `v` in Controls (keys in footer order), chart view in the saved settings, gauges / RAM title / shortened titles in the interactive mode paragraph; changelog: `v` / `view_type` no longer under Breaking Changes, entries for `v`, the RAM title, title steps and whole degrees, footer with `v chart`)
+- [x] write tests: RAM title strings at several widths; drop order for each box kind at shrinking widths (no mid-text cut while a smaller variant fits); gauge fill width / color at 0, 50, 100 % and box sizes; `v` toggles and persists, old configs with `view_type: "Sparkline"` / `"Gauge"` load; RAM graph at 70 % of total fills ~70 % of the height; footer text (mod: `ram_title_steps_down_with_swap` / `_without_swap` (each step at its first and last width, then cut), `ram_title_styles`, `titles_step_down_before_they_are_cut` (every box width 6–60 for E-CPU, P-CPU, GPU, RAM with / without swap, CPU and ANE power against a test oracle), `power_and_cluster_titles_at_their_step_widths`, `v_switches_load_boxes_to_gauges` (fill / color per box at 200x50, fill at 110x32 / 80x24 / 60x15 / 400x120, power boxes unchanged, saved `"Gauge"` / `"Sparkline"`, back to the same frame), `load_graphs_scale_to_full_load_power_graphs_to_their_peak` (RAM 70 % after 60 %, E-CPU, GPU at graphs 1–22 rows tall: within one eighth above the load and never full; constant power full); footer / hint tests for five hints; existing title tests moved to the new strings; widgets: `gauge_fills_its_ratio_of_every_row`, `gauge_clamps_ratio_and_stays_inside_its_area`; panels: `titles_fit_only_uncut`, `fit_titles_picks_the_longest_variant_that_fits`, `share_border` cases for five hints; config: `view_type_uses_released_names`, `toggle_view_type_switches_graph_and_gauge`, old `"Gauge"` kept. Real binary on a pty at 110x32 / 80x24 / 60x15: title steps as listed above, `v` → gauges and back, `view_type: "Sparkline"` saved)
+- [x] run `make test` and `make check` - must pass before next task
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

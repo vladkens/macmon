@@ -1,10 +1,28 @@
 //! Persistent terminal UI settings.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_inline_default::serde_inline_default;
 
 pub(crate) const TUI_MIN_MS: u32 = 250;
 pub(crate) const TUI_MAX_MS: u32 = 10_000;
+
+/// Look of the CPU cluster, GPU and RAM boxes (`v`). Saved under the names of released versions,
+/// so their configs keep the user's choice and they read ours.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+pub enum ViewType {
+  /// History graph (`Sparkline` in released versions).
+  #[serde(rename = "Sparkline")]
+  Graph,
+  /// Bar filled to the current load.
+  Gauge,
+}
+
+/// Reads `view_type`; values of earlier redesign builds (`Braille`, `Block`) or anything else
+/// unknown fall back to the graph instead of resetting every setting.
+fn view_type_or_graph<'de, D: Deserializer<'de>>(de: D) -> Result<ViewType, D::Error> {
+  let value = serde_json::Value::deserialize(de)?;
+  Ok(ViewType::deserialize(value).unwrap_or(ViewType::Graph))
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub enum RatioMode {
@@ -49,10 +67,15 @@ impl ProcSort {
 }
 
 /// Settings saved in `~/.config/macmon.json`. Fields of older versions (`color`, `theme`,
-/// `view_type`, `per_core_view`, `panels`) are ignored, so old files keep loading.
+/// `per_core_view`, `panels`) are ignored, so old files keep loading.
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+  /// Graph or gauge in the CPU cluster, GPU and RAM boxes (`v`).
+  #[serde_inline_default(ViewType::Graph)]
+  #[serde(deserialize_with = "view_type_or_graph")]
+  pub view_type: ViewType,
+
   #[serde_inline_default(1000)]
   pub interval: u32,
 
@@ -134,6 +157,14 @@ impl Config {
     self.save();
   }
 
+  pub fn toggle_view_type(&mut self) {
+    self.view_type = match self.view_type {
+      ViewType::Graph => ViewType::Gauge,
+      ViewType::Gauge => ViewType::Graph,
+    };
+    self.save();
+  }
+
   pub fn toggle_ratio_mode(&mut self) {
     self.ratio_mode = match self.ratio_mode {
       RatioMode::Scaled => RatioMode::Active,
@@ -156,13 +187,14 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-  use super::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS};
+  use super::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
   }
 
   fn assert_defaults(cfg: &Config) {
+    assert_eq!(cfg.view_type, ViewType::Graph);
     assert_eq!(cfg.interval, 1000);
     assert_eq!(cfg.ratio_mode, RatioMode::Scaled);
     assert!(cfg.show_procs);
@@ -196,6 +228,8 @@ mod tests {
       }"#,
     );
 
+    // the chart view of released versions is kept
+    assert_eq!(cfg.view_type, ViewType::Gauge);
     assert_eq!(cfg.interval, 500);
     assert_eq!(cfg.ratio_mode, RatioMode::Active);
     assert!(cfg.show_procs);
@@ -234,7 +268,7 @@ mod tests {
     };
 
     let json = serde_json::to_string(&cfg).unwrap();
-    for old in ["color", "theme", "view_type", "per_core_view", "panels"] {
+    for old in ["color", "theme", "per_core_view", "panels"] {
       assert!(!json.contains(old), "{old} in {json}");
     }
 
@@ -242,6 +276,37 @@ mod tests {
     assert!(!cfg.show_procs);
     assert_eq!(cfg.proc_sort, ProcSort::Power);
     assert!(!cfg.proc_sort_desc);
+  }
+
+  #[test]
+  fn view_type_uses_released_names() {
+    // configs of released versions
+    assert_eq!(parse(r#"{"view_type": "Sparkline"}"#).view_type, ViewType::Graph);
+    assert_eq!(parse(r#"{"view_type": "Gauge"}"#).view_type, ViewType::Gauge);
+
+    // saved under the same names, so released versions read it back
+    for (view_type, name) in [(ViewType::Graph, "Sparkline"), (ViewType::Gauge, "Gauge")] {
+      let json = serde_json::to_string(&Config { view_type, ..Config::default() }).unwrap();
+      assert!(json.contains(&format!(r#""view_type":"{name}""#)), "{json}");
+      assert_eq!(parse(&json).view_type, view_type);
+    }
+
+    // an unknown value falls back to the graph and keeps the other settings
+    for value in [r#""Braille""#, r#""Block""#, r#""gauge""#, "42", "null", "{}"] {
+      let cfg =
+        parse(&format!(r#"{{"view_type": {value}, "interval": 500, "show_procs": false}}"#));
+      assert_eq!(cfg.view_type, ViewType::Graph, "{value}");
+      assert_eq!((cfg.interval, cfg.show_procs), (500, false), "{value}");
+    }
+  }
+
+  #[test]
+  fn toggle_view_type_switches_graph_and_gauge() {
+    let mut cfg = Config::default();
+    cfg.toggle_view_type();
+    assert_eq!(cfg.view_type, ViewType::Gauge);
+    cfg.toggle_view_type();
+    assert_eq!(cfg.view_type, ViewType::Graph);
   }
 
   #[test]

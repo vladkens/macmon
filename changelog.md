@@ -2,7 +2,7 @@
 
 ### Breaking Changes
 
-- Removed the TUI color theme (`c`) and chart view (`v`) switches: colors now follow the terminal's own palette and charts are always solid bars colored by load; old `color`, `theme` and `view_type` config fields are ignored
+- Removed the TUI color theme switch (`c`): colors now follow the terminal's own palette; old `color` and `theme` config fields are ignored
 - Removed the TUI per-core view (`d`); the old `per_core_view` config field is ignored
 
 ### Features
@@ -16,10 +16,13 @@
 
 ### Improvements
 
-- History charts fill their whole box at any window size; average and max still cover the last 128 samples
+- History charts fill their whole box at any window size, as solid bars colored by load; average and max still cover the last 128 samples
+- `v` still switches the CPU, GPU and RAM boxes between history charts and gauges (power boxes always show charts); gauges are colored by load and the choice is saved as before (`view_type`)
+- The RAM box title shows used RAM and swap (`RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB`) without the total RAM, which is in the chip title
+- Box titles get shorter step by step instead of being cut: frequency, GB values and power avg / max go first, percentages and current power stay; temperatures are shown in whole degrees
 - The power summary (`Power`, fans, `Total`) sits on the bottom border of the metrics box
 - Made the process list auto-hide in small windows; process sampling pauses while it is hidden
-- The footer lists the global keys (`q quit | p procs | r scaled | -/+ 1000ms`); process list controls sit in its own box: `/ filter` on its border and the sort arrow next to the sorted column
+- The footer lists the global keys (`q quit | p procs | v chart | r scaled | -/+ 1000ms`); process list controls sit in its own box: `/ filter` on its border and the sort arrow next to the sorted column
 - The terminal is restored (mouse capture off, main screen, normal mode) on errors and crashes too
 
 **Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.2...main

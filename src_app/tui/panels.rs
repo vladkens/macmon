@@ -14,7 +14,8 @@ use ratatui::widgets::{Block, BorderType};
 use super::App;
 use super::layout::{LayoutPlan, Metric, compute_layout};
 use super::store::{FreqStore, PowerStore};
-use super::widgets::Graph;
+use super::widgets::{Gauge, Graph};
+use crate::config::ViewType;
 
 const GB: f64 = (1u64 << 30) as f64;
 /// Between the parts of the power summary and between the key hints on a bottom border.
@@ -62,6 +63,16 @@ impl<'a> Titles<'a> {
     self
   }
 
+  /// Whether every title fits uncut on the top border of a box `width` cells wide.
+  fn fits(&self, width: u16) -> bool {
+    let padded = |line: &Line| width_u16(line).saturating_add(2);
+    let left: Vec<u16> = self.left.iter().map(padded).collect();
+    let right = self.right.as_ref().map(padded);
+    let slots = place_titles(width, &left, right);
+    slots.left.iter().map(|&(_, w)| w).eq(left.iter().copied())
+      && slots.right.is_some() == right.is_some()
+  }
+
   /// Draws the titles over the top border of `area`; unstyled text gets `style`. Returns the
   /// cells of the text of the left titles that fit, in order, without the blank cell on both
   /// sides.
@@ -93,6 +104,18 @@ impl<'a> Titles<'a> {
 
     texts
   }
+}
+
+/// The first of `variants` (longest first) whose titles fit uncut on the top border of a box
+/// `width` cells wide; when none does, the last one, which `Titles::render` cuts to fit.
+fn fit_titles(width: u16, variants: Vec<Titles>) -> Titles {
+  let mut variants = variants.into_iter().peekable();
+  while let Some(titles) = variants.next() {
+    if variants.peek().is_none() || titles.fits(width) {
+      return titles;
+    }
+  }
+  Titles::default()
 }
 
 /// Positions of titles on a border `width` cells wide, as offsets from the box's left edge.
@@ -205,13 +228,16 @@ fn share_border(width: u16, summary: &[u16], hints: &[u16]) -> BorderFit {
 
 /// Titles and graph of one metric box.
 struct MetricBox<'a> {
-  titles: Titles<'static>,
+  /// Title variants, longest first; the box shows the first that fits (see `fit_titles`).
+  titles: Vec<Titles<'static>>,
   /// History, newest first.
   data: &'a [u64],
   /// Value at full height; `None` scales the graph to its largest visible sample.
   max: Option<u64>,
   /// One color for every bar instead of its load color.
   color: Option<Color>,
+  /// Current load (`0.0..=1.0`) for the gauge view (`v`); `None` keeps the graph in both views.
+  gauge: Option<f64>,
 }
 
 impl App {
@@ -228,6 +254,11 @@ impl App {
     Span::styled(text, self.theme.dim)
   }
 
+  /// `load` (`0.0..=1.0`) as a percent with `decimals`, in its load color.
+  fn percent(&self, load: f64, decimals: usize) -> Span<'static> {
+    Span::styled(format!("{:.decimals$}%", load * 100.0), self.theme.gradient(load))
+  }
+
   /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders and
   /// the cells of the left titles' text that fit (see `Titles::render`).
   pub(super) fn draw_box(&self, f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<Rect>) {
@@ -238,12 +269,13 @@ impl App {
     (inner, texts)
   }
 
-  /// Global key hints in the order of the original UI: `q quit`, `p procs`, `r scaled`,
-  /// `-/+ 1000ms`; keys bold, labels plain.
+  /// Global key hints in the order of the original UI: `q quit`, `p procs`, `v chart`,
+  /// `r scaled`, `-/+ 1000ms`; keys bold, labels plain.
   fn key_hints(&self) -> Vec<Vec<Span<'static>>> {
     let hints = [
       ("q", "quit".to_string()),
       ("p", "procs".to_string()),
+      ("v", "chart".to_string()),
       ("r", self.cfg.ratio_mode.label().to_string()),
       ("-/+", format!("{}ms", self.cfg.interval)),
     ];
@@ -294,8 +326,8 @@ impl App {
   }
 
   /// Draws the global key hints right-aligned over the bottom border of box `area`: `q quit |
-  /// p procs | r scaled | -/+ 1000ms`. Hints that don't fit are dropped from the end, so `q quit`
-  /// stays as long as it fits.
+  /// p procs | v chart | r scaled | -/+ 1000ms`. Hints that don't fit are dropped from the end, so
+  /// `q quit` stays as long as it fits.
   pub(super) fn render_key_hints(&self, f: &mut Frame, area: Rect) {
     self.render_bottom_border(f, area, vec![], true);
   }
@@ -313,9 +345,14 @@ impl App {
 
     for &(metric, r) in &plan.boxes {
       let Some(metric) = self.metric_box(metric) else { continue };
-      let (inner, _) = self.draw_box(f, r, metric.titles);
-      let graph = Graph::new(metric.data, &self.theme).max(metric.max).color(metric.color);
-      f.render_widget(graph, inner);
+      let (inner, _) = self.draw_box(f, r, fit_titles(r.width, metric.titles));
+      match metric.gauge.filter(|_| self.cfg.view_type == ViewType::Gauge) {
+        Some(load) => f.render_widget(Gauge::new(load, &self.theme), inner),
+        None => {
+          let graph = Graph::new(metric.data, &self.theme).max(metric.max).color(metric.color);
+          f.render_widget(graph, inner);
+        }
+      }
     }
 
     self.render_bottom_border(f, area, self.power_summary(), plan.proc.is_none());
@@ -394,56 +431,97 @@ impl App {
     })
   }
 
-  /// `E-CPU  42% @ 1800 MHz` (original format, the percent colored by load) over the usage
-  /// history.
+  /// `E-CPU 42% @ 1800 MHz` (the percent colored by load), or `E-CPU 42%` when the frequency
+  /// doesn't fit, over the usage history scaled to 100 %, or a gauge.
   fn freq_box<'a>(&self, label: String, freq: &'a FreqStore) -> MetricBox<'a> {
     let series = freq.ratio(self.cfg.ratio_mode);
-    let title = vec![
-      self.heading(label),
-      Span::styled(format!(" {:3.0}%", series.ratio * 100.0), self.theme.gradient(series.ratio)),
-      self.text(format!(" @ {:4} MHz", freq.freq_mhz)),
-    ];
-    MetricBox { titles: Titles::new(title), data: &series.items, max: Some(100), color: None }
+    let short = vec![self.heading(label), self.text(" "), self.percent(series.ratio, 0)];
+    let mut full = short.clone();
+    full.push(self.text(format!(" @ {} MHz", freq.freq_mhz)));
+
+    MetricBox {
+      titles: vec![Titles::new(full), Titles::new(short)],
+      data: &series.items,
+      max: Some(100),
+      color: None,
+      gauge: Some(series.ratio),
+    }
   }
 
-  /// `RAM 20.00 / 36.0 GB (55.6%)` and, when swap is configured, `SWAP 1.00 / 2.0 GB` on the right
-  /// (original format, the percent colored by load) over the RAM usage history.
+  /// RAM and swap usage over the RAM usage history scaled to the total RAM, or a gauge. The total
+  /// RAM is in the chip title, so the title shows what is used, in steps from the longest that
+  /// fits, percentages last: `RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB`, `RAM 16.8G 70% · SWAP
+  /// 2.4G 79%`, `RAM 70% · SWAP 79%`, `RAM 70% SW 79%`; without swap only the RAM part.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
-    let (used, total) = (mem.ram_usage as f64 / GB, mem.ram_total as f64 / GB);
-    let load = ratio(used, total);
-    let title = vec![
-      self.heading("RAM"),
-      self.text(format!(" {used:4.2} / {total:4.1} GB (")),
-      Span::styled(format!("{:.1}%", load * 100.0), self.theme.gradient(load)),
-      self.text(")"),
-    ];
+    let gb = |bytes: u64| bytes as f64 / GB;
+    let ram = (gb(mem.ram_usage), ratio(gb(mem.ram_usage), gb(mem.ram_total)));
+    let titles: Vec<Vec<Span>> = if mem.swap_total > 0 {
+      let swap = (gb(mem.swap_usage), gb(mem.swap_total));
+      let load = ratio(swap.0, swap.1);
+      (0..4)
+        .map(|step| [self.ram_part(step, ram), self.swap_part(step, swap, load)].concat())
+        .collect()
+    } else {
+      (0..3).map(|step| self.ram_part(step, ram)).collect()
+    };
 
-    let mut titles = Titles::new(title);
-    if mem.swap_total > 0 {
-      let (used, total) = (mem.swap_usage as f64 / GB, mem.swap_total as f64 / GB);
-      titles = titles.right(self.text(format!("SWAP {used:.2} / {total:.1} GB")));
+    MetricBox {
+      titles: titles.into_iter().map(Titles::new).collect(),
+      data: &mem.items,
+      max: Some(mem.ram_total),
+      color: None,
+      gauge: Some(ram.1),
     }
-    MetricBox { titles, data: &mem.items, max: Some(mem.ram_total), color: None }
   }
 
-  /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format) and the temperature on
-  /// the right when the sensor exists, over the power history in the low load color, scaled to its
-  /// largest visible sample.
-  fn power_box<'a>(&self, label: &'static str, store: &'a PowerStore, temp: f32) -> MetricBox<'a> {
-    let title = vec![
-      self.heading(label),
-      self.text(format!(" {:.2}W", store.top_value)),
-      self.dim(format!(" ({:.2}, {:.2})", store.avg_value, store.max_value)),
-    ];
+  /// RAM part of the RAM box title at `step` for `(used GB, load)`: `RAM 16.81 GB (70.0%)`, `RAM
+  /// 16.8G 70%`, then `RAM 70%`.
+  fn ram_part(&self, step: usize, (used, load): (f64, f64)) -> Vec<Span<'static>> {
+    let mut spans = vec![self.heading("RAM")];
+    match step {
+      0 => {
+        spans.extend([self.text(format!(" {used:.2} GB (")), self.percent(load, 1), self.text(")")])
+      }
+      1 => spans.extend([self.text(format!(" {used:.1}G ")), self.percent(load, 0)]),
+      _ => spans.extend([self.text(" "), self.percent(load, 0)]),
+    }
+    spans
+  }
 
-    let mut titles = Titles::new(title);
+  /// Swap part of the RAM box title at `step` for `(used GB, total GB)` and `load`, after the
+  /// RAM part: ` · SWAP 2.37 / 3.0 GB`, ` · SWAP 2.4G 79%`, ` · SWAP 79%`, then ` SW 79%`.
+  fn swap_part(&self, step: usize, (used, total): (f64, f64), load: f64) -> Vec<Span<'static>> {
+    let mut spans = match step {
+      0..=2 => vec![self.dim(" · "), self.heading("SWAP")],
+      _ => vec![self.text(" "), self.heading("SW")],
+    };
+    match step {
+      0 => spans.push(self.text(format!(" {used:.2} / {total:.1} GB"))),
+      1 => spans.extend([self.text(format!(" {used:.1}G ")), self.percent(load, 0)]),
+      _ => spans.extend([self.text(" "), self.percent(load, 0)]),
+    }
+    spans
+  }
+
+  /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format) and the temperature
+  /// (`45°C`) on the right when the sensor exists, over the power history in the low load color,
+  /// scaled to its largest visible sample. Narrow boxes drop the temperature, then the average
+  /// and maximum. Always a graph, as in the original.
+  fn power_box<'a>(&self, label: &'static str, store: &'a PowerStore, temp: f32) -> MetricBox<'a> {
+    let short = vec![self.heading(label), self.text(format!(" {:.2}W", store.top_value))];
+    let mut full = short.clone();
+    full.push(self.dim(format!(" ({:.2}, {:.2})", store.avg_value, store.max_value)));
+
+    let mut titles = vec![];
     if temp > 0.0 {
       let color = self.theme.gradient(temp_ratio(temp));
-      titles = titles.right(Span::styled(format!("{temp:.1}°C"), color));
+      titles.push(Titles::new(full.clone()).right(Span::styled(format!("{temp:.0}°C"), color)));
     }
+    titles.extend([Titles::new(full), Titles::new(short)]);
+
     let color = Some(self.theme.gradient(0.0));
-    MetricBox { titles, data: &store.items, max: None, color }
+    MetricBox { titles, data: &store.items, max: None, color, gauge: None }
   }
 }
 
@@ -454,7 +532,8 @@ mod tests {
   use ratatui::style::Style;
 
   use super::{
-    BorderFit, TitleSlots, Titles, fit_count, joined_width, place_titles, share_border, temp_ratio,
+    BorderFit, TitleSlots, Titles, fit_count, fit_titles, joined_width, place_titles, share_border,
+    temp_ratio,
   };
 
   #[test]
@@ -505,6 +584,46 @@ mod tests {
     // the second title doesn't fit, the first one is cut
     assert_eq!(render(8), [(Rect::new(8, 2, 3, 1), "pro".to_string())]);
     assert!(render(4).is_empty());
+  }
+
+  /// Top border of a box `width` cells wide with `titles` drawn on it.
+  fn border_with(titles: Titles, width: u16) -> String {
+    let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+    buf.set_string(0, 0, "─".repeat(width.into()), Style::new());
+    titles.render(buf.area, &mut buf, Style::new());
+    (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+  }
+
+  #[test]
+  fn titles_fit_only_uncut() {
+    // `╭─ cpu ─ 45°C ─╮`: 2 cells before the left title, 1 between, 2 after the right one
+    let titles = || Titles::new("cpu").right("45°C");
+    assert!(titles().fits(16));
+    assert!(!titles().fits(15));
+    assert!(Titles::new("cpu").fits(9) && !Titles::new("cpu").fits(8));
+    // a second left title must fit whole too
+    assert!(Titles::new("proc").left("ab").fits(15) && !Titles::new("proc").left("ab").fits(14));
+    assert!(Titles::default().fits(0));
+  }
+
+  #[test]
+  fn fit_titles_picks_the_longest_variant_that_fits() {
+    let (full, short) = ("CPU 4.50W (4.50, 4.50)", "CPU 4.50W");
+    let variants = || vec![Titles::new(full).right("45°C"), Titles::new(full), Titles::new(short)];
+    let fitted = |width: u16| border_with(fit_titles(width, variants()), width);
+    let dashes = |n: usize| "─".repeat(n);
+
+    assert_eq!(fitted(40), format!("── {full} {} 45°C ──", dashes(6)));
+    assert_eq!(fitted(35), format!("── {full} ─ 45°C ──"));
+    // the right title goes first, then the left one gets shorter
+    assert_eq!(fitted(34), format!("── {full} {}", dashes(8)));
+    assert_eq!(fitted(28), format!("── {full} ──"));
+    assert_eq!(fitted(27), format!("── {short} {}", dashes(14)));
+    assert_eq!(fitted(15), format!("── {short} ──"));
+    // none fits: the last one is cut
+    assert_eq!(fitted(14), "── CPU 4.50W──");
+    assert_eq!(fitted(10), "── CPU 4──");
+    assert_eq!(border_with(fit_titles(10, vec![]), 10), dashes(10));
   }
 
   #[test]
@@ -559,9 +678,9 @@ mod tests {
   }
 
   /// Widths of the power summary parts (`Power: …`, `Fan 1200 RPM`, `Total …`) and the key hints
-  /// (`q quit`, `p procs`, `r scaled`, `-/+ 1000ms`) of the test metrics.
+  /// (`q quit`, `p procs`, `v chart`, `r scaled`, `-/+ 1000ms`) of the test metrics.
   const SUMMARY: [u16; 3] = [35, 12, 27];
-  const HINTS: [u16; 4] = [6, 7, 8, 10];
+  const HINTS: [u16; 5] = [6, 7, 7, 8, 10];
 
   fn fit(summary: usize, summary_width: u16, hints: usize) -> BorderFit {
     BorderFit { summary, summary_width, hints }
@@ -569,12 +688,13 @@ mod tests {
 
   #[test]
   fn bottom_border_shares_summary_and_hints() {
-    // everything: ` Power… | Fan… | Total… ` is 82 cells, the hints 42, plus the corners and a
+    // everything: ` Power… | Fan… | Total… ` is 82 cells, the hints 52, plus the corners and a
     // border cell between them
-    assert_eq!(share_border(129, &SUMMARY, &HINTS), fit(3, 82, 4));
-    assert_eq!(share_border(400, &SUMMARY, &HINTS), fit(3, 82, 4));
+    assert_eq!(share_border(139, &SUMMARY, &HINTS), fit(3, 82, 5));
+    assert_eq!(share_border(400, &SUMMARY, &HINTS), fit(3, 82, 5));
     // hints drop from the end first, `q quit` stays
-    assert_eq!(share_border(128, &SUMMARY, &HINTS), fit(3, 82, 3));
+    assert_eq!(share_border(138, &SUMMARY, &HINTS), fit(3, 82, 4));
+    assert_eq!(share_border(125, &SUMMARY, &HINTS), fit(3, 82, 3));
     assert_eq!(share_border(95, &SUMMARY, &HINTS), fit(3, 82, 1));
     // then the summary parts, the room goes back to the hints
     assert_eq!(share_border(94, &SUMMARY, &HINTS), fit(2, 52, 3));
@@ -600,9 +720,9 @@ mod tests {
     assert_eq!(share_border(20, &SUMMARY, &[]), fit(1, 16, 0));
 
     // no summary (the process box): hints only, as many as fit
-    assert_eq!(share_border(200, &[], &HINTS), fit(0, 0, 4));
-    assert_eq!(share_border(46, &[], &HINTS), fit(0, 0, 4));
-    assert_eq!(share_border(45, &[], &HINTS), fit(0, 0, 3));
+    assert_eq!(share_border(200, &[], &HINTS), fit(0, 0, 5));
+    assert_eq!(share_border(56, &[], &HINTS), fit(0, 0, 5));
+    assert_eq!(share_border(55, &[], &HINTS), fit(0, 0, 4));
     assert_eq!(share_border(12, &[], &HINTS), fit(0, 0, 1));
     assert_eq!(share_border(11, &[], &HINTS), fit(0, 0, 0));
   }

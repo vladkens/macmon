@@ -79,14 +79,15 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI: the metric boxes of the original layout (one per CPU cluster, GPU and RAM, then CPU / GPU / ANE power) in the top 40% of the window and the process list below it; with the process list hidden, the boxes take the whole window. Each box shows its history as a chart filling the box. The bottom border of the metrics box shows `Power` (CPU + GPU + ANE), the fans and `Total`, the power of the whole system (when the Mac reports it).
+Run `macmon` without a subcommand to open the terminal UI: the metric boxes of the original layout (one per CPU cluster, GPU and RAM, then CPU / GPU / ANE power) in the top 40% of the window and the process list below it; with the process list hidden, the boxes take the whole window. Each box shows its history as a chart filling the box; `v` switches the CPU, GPU and RAM boxes to gauges of the current load. The RAM box shows used RAM and swap (the total RAM is in the chip title). Box titles get shorter step by step to fit narrow boxes. The bottom border of the metrics box shows `Power` (CPU + GPU + ANE), the fans and `Total`, the power of the whole system (when the Mac reports it).
 
 ```text
 Controls:
   q     - quit (also Ctrl-C)
+  p     - show / hide the process list
+  v     - switch chart view: history / gauge
   r     - switch ratio mode: scaled / active
   - / + - change update interval
-  p     - show / hide the process list
 
 Process list:
   /     - filter by name or PID (Enter - keep, Esc - clear)
@@ -102,7 +103,7 @@ Mouse (process list):
   wheel                 - move the selection and scroll by 3 rows
 ```
 
-Settings (interval, ratio mode, process list, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
+Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
 
 While macmon runs, the terminal sends mouse input to it, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
 

@@ -285,6 +285,7 @@ impl App {
       KeyCode::Char('=') => self.cfg.inc_interval(), // fallback to press without shift
       KeyCode::Char('-') => self.cfg.dec_interval(),
       KeyCode::Char('p') => self.cfg.toggle_procs(),
+      KeyCode::Char('v') => self.cfg.toggle_view_type(),
       _ => {}
     }
 
@@ -388,7 +389,7 @@ mod tests {
   use super::store::{ClusterSample, CpuClusters, FreqSample};
   use super::theme::Theme;
   use super::{App, Event, is_mouse_action, restore_term_once, run_procs_thread};
-  use crate::config::{ProcSort, RatioMode, TUI_MIN_MS};
+  use crate::config::{ProcSort, RatioMode, TUI_MIN_MS, ViewType};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -573,12 +574,12 @@ mod tests {
 
   #[test]
   fn removed_keys_do_nothing() {
-    // no theme or graph style switches, no cores row, no panel keys
+    // no theme switch, no cores row, no panel keys
     let mut app = app_with_procs(varied_procs());
     let cfg = serde_json::to_string(&app.cfg).unwrap();
     let theme = app.theme;
     let screen = render_to_string(&mut app, 200, 50);
-    for c in ['c', 'v', 'd', 'C', 'V', 'D', '0', '1', '2', '3', '4', '5', '6', '9'] {
+    for c in ['c', 'd', 'C', 'V', 'D', '0', '1', '2', '3', '4', '5', '6', '9'] {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?}");
     }
 
@@ -639,7 +640,7 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let plan = app.layout(buf.area);
     assert_eq!((plan.top, plan.proc), (Some(buf.area), None));
-    assert_eq!(row(&buf, 49), border(200, SUMMARY, &hints(4)));
+    assert_eq!(row(&buf, 49), border(200, SUMMARY, &hints(5)));
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert!(!screen.contains(" proc ") && !screen.contains("WindowServer"));
     assert!(!procs_active(&app), "no process sampling while hidden");
@@ -652,7 +653,7 @@ mod tests {
     assert!(screen.contains("collecting…"));
     assert!(proc_row(&buf, 0).starts_with("╭─ proc ─ / filter ─"), "{}", proc_row(&buf, 0));
     assert_eq!(row(&buf, PROC_Y - 1), border(200, SUMMARY, ""));
-    assert_eq!(row(&buf, 49), hints_border(200, 4));
+    assert_eq!(row(&buf, 49), hints_border(200, 5));
     assert!(procs_active(&app));
   }
 
@@ -728,12 +729,13 @@ mod tests {
     assert_eq!(buf[(0, 0)].fg, Color::DarkGray, "borders stay terminal colors");
   }
 
-  /// Box titles of `test_metrics` in the original format.
+  /// Full box titles of `test_metrics`: the original format without the RAM total and without
+  /// alignment padding.
   const TITLES: [&str; 7] = [
-    "E-CPU  42% @ 1800 MHz",
-    "P-CPU  77% @ 3200 MHz",
-    "GPU  23% @ 1400 MHz",
-    "RAM 20.00 / 36.0 GB (55.6%)",
+    "E-CPU 42% @ 1800 MHz",
+    "P-CPU 77% @ 3200 MHz",
+    "GPU 23% @ 1400 MHz",
+    "RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB",
     "CPU 4.50W (4.50, 4.50)",
     "GPU 2.00W (2.00, 2.00)",
     "ANE 0.10W (0.10, 0.10)",
@@ -745,7 +747,7 @@ mod tests {
     " Power: 6.60W (avg 6.60W, max 6.60W) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ";
 
   /// Global key hints, in the order of the original UI.
-  const HINTS: [&str; 4] = ["q quit", "p procs", "r scaled", "-/+ 1000ms"];
+  const HINTS: [&str; 5] = ["q quit", "p procs", "v chart", "r scaled", "-/+ 1000ms"];
 
   /// The first `count` of `HINTS` joined, with a blank cell at both ends; empty for none.
   fn hints(count: usize) -> String {
@@ -761,6 +763,34 @@ mod tests {
   /// Bottom border of a box `width` cells wide with the first `count` of `HINTS` right-aligned.
   fn hints_border(width: usize, count: usize) -> String {
     border(width, "", &hints(count))
+  }
+
+  /// Top border of a box `width` cells wide: `left` after `╭─`, `right` (if any) before `─╮`.
+  fn top_border(width: usize, left: &str, right: &str) -> String {
+    let left = format!("─ {left} ");
+    let right = if right.is_empty() { "─".to_string() } else { format!(" {right} ─") };
+    let dashes = width - 2 - left.chars().count() - right.chars().count();
+    format!("╭{left}{}{right}╮", "─".repeat(dashes))
+  }
+
+  /// Top border of a box `width` cells wide (at least 5) with the first of `variants` (`(left,
+  /// right)` titles, longest first, `right` empty for none) that fits uncut, or else the last
+  /// one cut to the border.
+  fn fitted_top(width: usize, variants: &[(&str, &str)]) -> String {
+    let len = |s: &str| s.chars().count();
+    // the left title and its blanks start 2 cells in; one cell between titles, 2 at the end
+    let fits = |(left, right): (&str, &str)| match right {
+      "" => 2 + len(left) + 2 + 2 <= width,
+      _ => 2 + len(left) + 2 + 1 + len(right) + 2 + 2 <= width,
+    };
+    match variants.iter().find(|v| fits(**v)) {
+      Some((left, right)) => top_border(width, left, right),
+      None => {
+        let (left, _) = variants.last().unwrap();
+        let cut: String = format!(" {left}").chars().take(width - 4).collect();
+        format!("╭─{cut}─╮")
+      }
+    }
   }
 
   /// Top border of the metric box `metric` in a rendered frame.
@@ -785,10 +815,12 @@ mod tests {
     for title in TITLES {
       assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
     }
-    // temperatures right on the CPU / GPU power boxes, none for ANE
-    assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45.0°C ─╮"));
-    assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40.0°C ─╮"));
+    // whole-degree temperatures right on the CPU / GPU power boxes, none for ANE
+    assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45°C ─╮"));
+    assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40°C ─╮"));
     assert!(box_top(&app, &buf, Metric::AnePower).ends_with("───╮"));
+    // the total RAM is in the chip title only
+    assert!(!screen.contains("36.0 GB"));
     // the power summary on the bottom border of the metrics box, the process box below it
     assert_eq!(row(&buf, PROC_Y - 1), border(200, SUMMARY, ""));
   }
@@ -856,14 +888,11 @@ mod tests {
     assert_eq!(rows[0], format!("{chip}{}{version}", "─".repeat(dashes)));
 
     // the metrics box is 13 rows (40 %), 11 inside its borders: 6 for the top row of boxes, 5
-    // for the bottom one. Top row: four boxes of 27 cells, the RAM title doesn't fit and is cut
-    let tops = [
-      "╭─ E-CPU  42% @ 1800 MHz ─╮",
-      "╭─ P-CPU  77% @ 3200 MHz ─╮",
-      "╭─ GPU  23% @ 1400 MHz ───╮",
-      "╭─ RAM 20.00 / 36.0 GB (5─╮",
-    ];
-    assert_eq!(rows[1], format!("│{}│", tops.concat()));
+    // for the bottom one. Top row: four boxes of 27 cells, the RAM title in its percent step
+    let tops =
+      ["E-CPU 42% @ 1800 MHz", "P-CPU 77% @ 3200 MHz", "GPU 23% @ 1400 MHz", "RAM 56% · SWAP 50%"];
+    let tops: String = tops.iter().map(|title| top_border(27, title, "")).collect();
+    assert_eq!(rows[1], format!("│{tops}│"));
 
     // 4 graph rows, top to bottom; the samples are constant, so every column of a graph is the
     // same: E-CPU 41% is 14 eighths of 32, P-CPU 76% 25, GPU 23% 8, RAM 20 of 36 GB 18
@@ -876,10 +905,14 @@ mod tests {
     }
     assert_eq!(rows[6], format!("│{}│", format!("╰{}╯", "─".repeat(25)).repeat(4)));
 
-    // bottom row: three power boxes of 36 cells, one cell short of the temperatures; the graphs
+    // bottom row: three power boxes of 36 cells with the whole-degree temperatures; the graphs
     // scaled to their largest sample, so constant power is full height
-    let titles = ["CPU 4.50W (4.50, 4.50)", "GPU 2.00W (2.00, 2.00)", "ANE 0.10W (0.10, 0.10)"];
-    let tops: String = titles.iter().map(|t| format!("╭─ {t} {}╮", "─".repeat(9))).collect();
+    let titles = [
+      ("CPU 4.50W (4.50, 4.50)", "45°C"),
+      ("GPU 2.00W (2.00, 2.00)", "40°C"),
+      ("ANE 0.10W (0.10, 0.10)", ""),
+    ];
+    let tops: String = titles.iter().map(|(left, right)| top_border(36, left, right)).collect();
     assert_eq!(rows[7], format!("│{tops}│"));
     for row in &rows[8..11] {
       assert_eq!(*row, format!("│{}│", format!("│{}│", "█".repeat(34)).repeat(3)));
@@ -896,7 +929,7 @@ mod tests {
     let header_end = "USER       CPU% ↓    MEM   POWER   GPU% │";
     assert!(rows[14].starts_with(header) && rows[14].ends_with(header_end), "{}", rows[14]);
     assert!(rows[15].starts_with("│   631 WindowServer "), "{}", rows[15]);
-    assert_eq!(rows[31], hints_border(110, 4));
+    assert_eq!(rows[31], hints_border(110, 5));
   }
 
   /// App whose power samples differ, so the current value (the mean of the last two samples),
@@ -921,8 +954,8 @@ mod tests {
 
     // 66 cells: current, average and maximum left, the temperature right
     let cases = [
-      (Metric::CpuPower, "CPU 5.00W (4.00, 6.00)", " 45.0°C "),
-      (Metric::GpuPower, "GPU 2.50W (2.00, 3.00)", " 40.0°C "),
+      (Metric::CpuPower, "CPU 5.00W (4.00, 6.00)", " 45°C "),
+      (Metric::GpuPower, "GPU 2.50W (2.00, 3.00)", " 40°C "),
       (Metric::AnePower, "ANE 0.25W (0.20, 0.30)", "─"),
     ];
     for (metric, title, end) in cases {
@@ -942,7 +975,7 @@ mod tests {
     assert_eq!((cell(13).symbol(), cell(13).fg), ("(", app.theme.dim));
     assert_eq!((cell(14).symbol(), cell(14).fg), ("4", app.theme.dim));
     let top = box_top(&app, &buf, Metric::CpuPower);
-    assert_eq!(cell(x_of(&top, "45.0°C")).fg, app.theme.gradient((45.0 - 30.0) / 70.0));
+    assert_eq!(cell(x_of(&top, "45°C")).fg, app.theme.gradient((45.0 - 30.0) / 70.0));
 
     // the summary: Power (avg / max), the fan, Total (avg / max)
     let summary =
@@ -958,42 +991,170 @@ mod tests {
     assert_eq!(fg("(14.00"), app.theme.dim);
   }
 
+  const GIB: f64 = (1u64 << 30) as f64;
+
+  /// App with 16.81 of 24 GB RAM in use (70.0 %) and 2.37 of 3 GB swap (79.0 %), or no swap.
+  fn ram_app(swap: bool) -> App {
+    test_app_with(|m| {
+      m.memory = MemMetrics {
+        ram_total: 24 << 30,
+        ram_usage: (16.81 * GIB) as u64,
+        swap_total: if swap { 3 << 30 } else { 0 },
+        swap_usage: if swap { (2.37 * GIB) as u64 } else { 0 },
+      }
+    })
+  }
+
+  /// Top border of the box of `metric` when the top row of boxes is `width` cells per box: the
+  /// screen is 4 boxes + 2 borders wide.
+  fn top_row_box(app: &mut App, metric: Metric, width: u16) -> String {
+    let buf = render_buffer(app, width * 4 + 2, 50);
+    let top = box_top(app, &buf, metric);
+    assert_eq!(top.chars().count(), usize::from(width), "{metric:?} at {width}: {top}");
+    top
+  }
+
+  /// Top border of the box of `metric` when the power boxes are `width` cells wide: the screen is
+  /// 3 boxes + 2 borders wide.
+  fn power_box_top(app: &mut App, metric: Metric, width: u16) -> String {
+    let buf = render_buffer(app, width * 3 + 2, 50);
+    let top = box_top(app, &buf, metric);
+    assert_eq!(top.chars().count(), usize::from(width), "{metric:?} at {width}: {top}");
+    top
+  }
+
+  /// RAM box title steps with swap, longest first.
+  const RAM_SWAP_STEPS: [&str; 4] = [
+    "RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB",
+    "RAM 16.8G 70% · SWAP 2.4G 79%",
+    "RAM 70% · SWAP 79%",
+    "RAM 70% SW 79%",
+  ];
+
+  /// RAM box title steps without swap, longest first.
+  const RAM_STEPS: [&str; 3] = ["RAM 16.81 GB (70.0%)", "RAM 16.8G 70%", "RAM 70%"];
+
   #[test]
-  fn narrow_boxes_drop_right_title_then_cut_left() {
-    let mut app = test_app();
+  fn ram_title_steps_down_with_swap() {
+    let mut app = ram_app(true);
+    // (box width, title): each step from the width where it fits whole (its text + 6 cells)
+    let cases = [
+      (60, RAM_SWAP_STEPS[0]),
+      (47, RAM_SWAP_STEPS[0]),
+      (46, RAM_SWAP_STEPS[1]),
+      (35, RAM_SWAP_STEPS[1]),
+      (34, RAM_SWAP_STEPS[2]),
+      (24, RAM_SWAP_STEPS[2]),
+      (23, RAM_SWAP_STEPS[3]),
+      (20, RAM_SWAP_STEPS[3]),
+    ];
+    for (width, title) in cases {
+      let top = top_row_box(&mut app, Metric::Ram, width);
+      assert_eq!(top, top_border(width.into(), title, ""), "{width}");
+    }
 
-    // 113 columns: power boxes of 37 cells, the temperature still fits next to the title
-    let buf = render_buffer(&mut app, 113, 32);
-    let cpu = box_top(&app, &buf, Metric::CpuPower);
-    assert_eq!(cpu, "╭─ CPU 4.50W (4.50, 4.50) ─ 45.0°C ─╮");
-
-    // 110 columns: one cell less, the temperature goes and the title stays whole
-    let buf = render_buffer(&mut app, 110, 32);
-    let cpu = box_top(&app, &buf, Metric::CpuPower);
-    assert_eq!(cpu, format!("╭─ CPU 4.50W (4.50, 4.50) {}╮", "─".repeat(9)));
-    // the RAM title doesn't fit its 27 cells: SWAP dropped, the title cut
-    assert_eq!(box_top(&app, &buf, Metric::Ram), "╭─ RAM 20.00 / 36.0 GB (5─╮");
-
-    // 60 columns: titles cut to their boxes
-    let buf = render_buffer(&mut app, 60, 15);
-    assert_eq!(box_top(&app, &buf, Metric::Cluster(0)), "╭─ E-CPU  42─╮");
-    assert_eq!(box_top(&app, &buf, Metric::CpuPower), "╭─ CPU 4.50W (4.5─╮");
-
-    // 240 columns: a RAM box of 60 cells fits the whole title and SWAP on the right
-    let buf = render_buffer(&mut app, 240, 60);
-    let ram = box_top(&app, &buf, Metric::Ram);
-    assert!(ram.starts_with("╭─ RAM 20.00 / 36.0 GB (55.6%) ─"), "{ram}");
-    assert!(ram.ends_with("─ SWAP 1.00 / 2.0 GB ─╮"), "{ram}");
+    // the last step is cut only when it doesn't fit whole
+    assert_eq!(top_row_box(&mut app, Metric::Ram, 19), "╭─ RAM 70% SW 79%─╮");
+    assert_eq!(top_row_box(&mut app, Metric::Ram, 14), "╭─ RAM 70% S─╮");
   }
 
   #[test]
-  fn swap_title_only_with_swap() {
-    let mut app = test_app_with(|m| m.memory.swap_total = 0);
-    let buf = render_buffer(&mut app, 240, 60);
-    let ram = box_top(&app, &buf, Metric::Ram);
-    assert!(ram.starts_with("╭─ RAM 20.00 / 36.0 GB (55.6%) ─") && ram.ends_with("───╮"), "{ram}");
-    let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
-    assert!(!screen.contains("SWAP"));
+  fn ram_title_steps_down_without_swap() {
+    let mut app = ram_app(false);
+    let cases = [
+      (60, RAM_STEPS[0]),
+      (26, RAM_STEPS[0]),
+      (25, RAM_STEPS[1]),
+      (19, RAM_STEPS[1]),
+      (18, RAM_STEPS[2]),
+      (13, RAM_STEPS[2]),
+    ];
+    for (width, title) in cases {
+      let top = top_row_box(&mut app, Metric::Ram, width);
+      assert_eq!(top, top_border(width.into(), title, ""), "{width}");
+    }
+    assert_eq!(top_row_box(&mut app, Metric::Ram, 12), "╭─ RAM 70%─╮");
+    assert_eq!(top_row_box(&mut app, Metric::Ram, 10), "╭─ RAM 7─╮");
+
+    let screen = render_to_string(&mut app, 240, 60);
+    assert!(!screen.contains("SWAP") && !screen.contains("SW "));
+  }
+
+  #[test]
+  fn ram_title_styles() {
+    let mut app = ram_app(true);
+    let buf = render_buffer(&mut app, 60 * 4 + 2, 50);
+    let ram = app.layout(buf.area).boxes[3].1;
+    let top = box_top(&app, &buf, Metric::Ram);
+    let cell = |text: &str| &buf[(ram.x + x_of(&top, text), ram.y)];
+
+    // names bold, the separator dim, the RAM percent on the gradient
+    assert!(cell("RAM").modifier.contains(Modifier::BOLD));
+    assert!(cell("SWAP").modifier.contains(Modifier::BOLD));
+    assert_eq!(cell("·").fg, app.theme.dim);
+    assert_eq!(cell("70.0%").fg, app.theme.gradient(16.81 / 24.0));
+    assert_eq!(cell("16.81").fg, app.theme.text);
+
+    // shorter steps: both percents on the gradient
+    let buf = render_buffer(&mut app, 30 * 4 + 2, 50);
+    let ram = app.layout(buf.area).boxes[3].1;
+    let top = box_top(&app, &buf, Metric::Ram);
+    assert_eq!(top, top_border(30, RAM_SWAP_STEPS[2], ""));
+    let fg = |text: &str| buf[(ram.x + x_of(&top, text), ram.y)].fg;
+    assert_eq!(fg("70%"), app.theme.gradient(16.81 / 24.0));
+    assert_eq!(fg("79%"), app.theme.gradient(2.37 / 3.0));
+  }
+
+  #[test]
+  fn titles_step_down_before_they_are_cut() {
+    // every box width: the longest step that fits whole, the last one cut only when none does
+    let clusters = [
+      (Metric::Cluster(0), ["E-CPU 42% @ 1800 MHz", "E-CPU 42%"]),
+      (Metric::Cluster(1), ["P-CPU 77% @ 3200 MHz", "P-CPU 77%"]),
+      (Metric::Gpu, ["GPU 23% @ 1400 MHz", "GPU 23%"]),
+    ];
+    let mut app = ram_app(true);
+    let mut dry = ram_app(false);
+    for width in 6..=60 {
+      for (metric, steps) in &clusters {
+        let steps = steps.map(|title| (title, ""));
+        assert_eq!(top_row_box(&mut app, *metric, width), fitted_top(width.into(), &steps));
+      }
+      let steps = RAM_SWAP_STEPS.map(|title| (title, ""));
+      assert_eq!(top_row_box(&mut app, Metric::Ram, width), fitted_top(width.into(), &steps));
+      let steps = RAM_STEPS.map(|title| (title, ""));
+      assert_eq!(top_row_box(&mut dry, Metric::Ram, width), fitted_top(width.into(), &steps));
+    }
+
+    // power: the temperature goes first, then average and maximum; the current power stays
+    let mut app = test_app();
+    let cpu =
+      [("CPU 4.50W (4.50, 4.50)", "45°C"), ("CPU 4.50W (4.50, 4.50)", ""), ("CPU 4.50W", "")];
+    let ane = [("ANE 0.10W (0.10, 0.10)", ""), ("ANE 0.10W", "")];
+    for width in 6..=60 {
+      let fitted = |steps: &[(&str, &str)]| fitted_top(width.into(), steps);
+      assert_eq!(power_box_top(&mut app, Metric::CpuPower, width), fitted(&cpu));
+      assert_eq!(power_box_top(&mut app, Metric::AnePower, width), fitted(&ane));
+    }
+  }
+
+  #[test]
+  fn power_and_cluster_titles_at_their_step_widths() {
+    let mut app = test_app();
+    let dashes = |n: usize| "─".repeat(n);
+    let cpu = |app: &mut App, width| power_box_top(app, Metric::CpuPower, width);
+    assert_eq!(cpu(&mut app, 35), "╭─ CPU 4.50W (4.50, 4.50) ─ 45°C ─╮");
+    assert_eq!(cpu(&mut app, 34), format!("╭─ CPU 4.50W (4.50, 4.50) {}╮", dashes(7)));
+    assert_eq!(cpu(&mut app, 28), "╭─ CPU 4.50W (4.50, 4.50) ─╮");
+    assert_eq!(cpu(&mut app, 27), format!("╭─ CPU 4.50W {}╮", dashes(13)));
+    assert_eq!(cpu(&mut app, 15), "╭─ CPU 4.50W ─╮");
+    assert_eq!(cpu(&mut app, 14), "╭─ CPU 4.50W─╮");
+
+    let ecpu = |app: &mut App, width| top_row_box(app, Metric::Cluster(0), width);
+    assert_eq!(ecpu(&mut app, 26), "╭─ E-CPU 42% @ 1800 MHz ─╮");
+    assert_eq!(ecpu(&mut app, 25), format!("╭─ E-CPU 42% {}╮", dashes(11)));
+    assert_eq!(ecpu(&mut app, 15), "╭─ E-CPU 42% ─╮");
+    assert_eq!(ecpu(&mut app, 13), "╭─ E-CPU 42─╮");
   }
 
   #[test]
@@ -1028,7 +1189,8 @@ mod tests {
   fn key_hints_right_aligned_on_bottom_border() {
     let mut app = app_with_procs(varied_procs());
     let buf = render_buffer(&mut app, 200, 50);
-    assert_eq!(row(&buf, 49), hints_border(200, 4));
+    assert_eq!(row(&buf, 49), hints_border(200, 5));
+    assert!(row(&buf, 49).ends_with("─ q quit | p procs | v chart | r scaled | -/+ 1000ms ─╯"));
     assert_eq!(row(&buf, PROC_Y - 1), border(200, SUMMARY, ""), "no hints on the metrics box");
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert_eq!(screen.matches("q quit").count(), 1);
@@ -1042,21 +1204,24 @@ mod tests {
     let cell = |x: u16| &buf[(x, 49)];
     assert!(cell(x("q quit")).modifier.contains(Modifier::BOLD));
     assert!(cell(x("p procs")).modifier.contains(Modifier::BOLD));
+    assert!(cell(x("v chart")).modifier.contains(Modifier::BOLD));
     assert!(!cell(x("quit")).modifier.contains(Modifier::BOLD));
     assert_eq!(cell(x("quit")).fg, app.theme.text);
     assert_eq!(cell(x("| p")).fg, app.theme.dim);
 
-    // the current ratio mode and interval
+    // the current ratio mode and interval; the label of `v` doesn't change with the view
     assert!(app.handle_key(key('r')).is_continue());
     assert!(app.handle_key(key('+')).is_continue());
+    assert!(app.handle_key(key('v')).is_continue());
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    assert!(bottom.ends_with("─ q quit | p procs | r active | -/+ 1250ms ─╯"), "{bottom}");
+    let hints = "─ q quit | p procs | v chart | r active | -/+ 1250ms ─╯";
+    assert!(bottom.ends_with(hints), "{bottom}");
 
     // without the process list: the same hints on the metrics box, after the power summary
     app.cfg.show_procs = false;
     assert!(app.handle_key(key('-')).is_continue());
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    let hints = " q quit | p procs | r active | -/+ 1000ms ";
+    let hints = " q quit | p procs | v chart | r active | -/+ 1000ms ";
     assert_eq!(bottom, border(200, SUMMARY, hints));
   }
 
@@ -1064,7 +1229,8 @@ mod tests {
   fn key_hints_drop_from_the_end_when_narrow() {
     // (width, hints shown): `q quit` 6 cells, then 3 cells between hints and 1 at both ends,
     // plus `╰─` and `─╯`
-    let cases = [(200, 4), (46, 4), (45, 3), (33, 3), (32, 2), (22, 2), (21, 1), (12, 1)];
+    let cases =
+      [(200, 5), (56, 5), (55, 4), (43, 4), (42, 3), (32, 3), (31, 2), (22, 2), (21, 1), (12, 1)];
     for (width, count) in cases.into_iter().chain([(11, 0), (5, 0)]) {
       let mut app = test_app();
       let buf = render_buffer(&mut app, width, 60);
@@ -1080,9 +1246,10 @@ mod tests {
     let summary = |count: usize| format!(" {} ", parts[..count].join(" | "));
     // (width, summary shown, hints shown): `q quit` first, then the summary, then the other hints
     let cases = [
-      (200, summary(3), 4),
-      (129, summary(3), 4),
-      (128, summary(3), 3),
+      (200, summary(3), 5),
+      (139, summary(3), 5),
+      (138, summary(3), 4),
+      (125, summary(3), 3),
       (95, summary(3), 1),
       (94, summary(2), 3),
       (65, summary(2), 1),
@@ -1106,7 +1273,7 @@ mod tests {
     let mut app = test_app();
     let buf = render_buffer(&mut app, 80, 24);
     assert_eq!(row(&buf, 9), border(80, &summary(2), ""));
-    assert_eq!(row(&buf, 23), hints_border(80, 4));
+    assert_eq!(row(&buf, 23), hints_border(80, 5));
   }
 
   /// App with synthetic CPU clusters of `(label, cores, load)`.
@@ -1133,7 +1300,7 @@ mod tests {
     let mut app = clusters_app(&[("E", 6, 0.2), ("P", 4, 0.4), ("S", 2, 0.6)]);
     let buf = render_buffer(&mut app, 200, 50);
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
-    for title in ["E-CPU  20% @ 2000 MHz", "P-CPU  40% @ 2000 MHz", "S-CPU  60% @ 2000 MHz"] {
+    for title in ["E-CPU 20% @ 2000 MHz", "P-CPU 40% @ 2000 MHz", "S-CPU 60% @ 2000 MHz"] {
       assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
     }
     assert!(row(&buf, 0).starts_with("╭─ Apple M3 Pro (6E+4P+2S+18GPU 36GB) ─"));
@@ -1150,13 +1317,13 @@ mod tests {
   fn keys_update_rendered_metrics() {
     let mut app = test_app();
     let screen = render_to_string(&mut app, 120, 40);
-    assert!(screen.contains("E-CPU  42%") && screen.contains("GPU  23%"));
+    assert!(screen.contains("E-CPU 42%") && screen.contains("GPU 23%"));
 
     // r: active ratios
     assert!(app.handle_key(key('r')).is_continue());
     let screen = render_to_string(&mut app, 200, 50);
-    assert!(screen.contains("E-CPU  50%") && screen.contains("P-CPU  80%"));
-    assert!(screen.contains("GPU  30%") && screen.contains("r active"));
+    assert!(screen.contains("E-CPU 50%") && screen.contains("P-CPU 80%"));
+    assert!(screen.contains("GPU 30%") && screen.contains("r active"));
 
     // +/-: interval in the hints only
     assert!(app.handle_key(key('+')).is_continue());
@@ -1361,11 +1528,133 @@ mod tests {
     assert!(bottoms(&mut app, 400).iter().any(|(_, graph)| *graph > 128));
   }
 
+  /// Eighths of a row filled by the bar in column `x` of the graph `area`.
+  fn column_eighths(buf: &Buffer, area: Rect, x: u16) -> u64 {
+    (area.top()..area.bottom())
+      .filter_map(|y| buf[(x, y)].symbol().chars().next())
+      .filter(|c| is_bar(*c))
+      .map(|c| u64::from(c) - 0x2580)
+      .sum()
+  }
+
+  #[test]
+  fn load_graphs_scale_to_full_load_power_graphs_to_their_peak() {
+    // RAM at 60 % of 24 GB, then at 70 %: the newest columns are the largest visible samples, and
+    // still fill only 70 % of the height
+    let ram = |usage: f64| MemMetrics {
+      ram_total: 24 << 30,
+      ram_usage: (usage * GIB) as u64,
+      ..test_metrics().memory
+    };
+    let mut app = app_with_samples(55, |m| m.memory = ram(14.4));
+    for _ in 0..5 {
+      app.update_metrics(Metrics { memory: ram(16.8), ..test_metrics() });
+    }
+
+    // (width, height, process list): graphs 7, 22, 4, 2 and 1 rows tall
+    let sizes =
+      [(200, 50, true), (200, 50, false), (110, 32, true), (80, 24, true), (60, 15, true)];
+    for (width, height, procs) in sizes {
+      app.cfg.show_procs = procs;
+      let buf = render_buffer(&mut app, width, height);
+      let ctx = format!("{width}x{height} procs {procs}");
+
+      // (metric, load, age of the column): RAM at 70 % and an older 60 % column, E-CPU 41 %
+      // (stored in whole percent), GPU 23 %, all scaled to a full load
+      let cases = [
+        (Metric::Ram, 0.7, 0),
+        (Metric::Ram, 0.6, 7),
+        (Metric::Cluster(0), 0.41, 0),
+        (Metric::Gpu, 0.23, 0),
+      ];
+      for (metric, load, age) in cases {
+        let area = graph_area(&app, buf.area, metric);
+        let levels = u64::from(area.height) * 8;
+        let eighths = column_eighths(&buf, area, area.right() - 1 - age);
+        // rounded up to the next eighth
+        let off = eighths as f64 - load * levels as f64;
+        let msg = format!("{ctx}: {metric:?} at {load}: {eighths} of {levels} eighths");
+        assert!((-1e-9..=1.0).contains(&off) && eighths < levels, "{msg}");
+      }
+
+      // constant power fills its graph: power graphs scale to their largest visible sample
+      for metric in [Metric::CpuPower, Metric::GpuPower, Metric::AnePower] {
+        let area = graph_area(&app, buf.area, metric);
+        let eighths = column_eighths(&buf, area, area.right() - 1);
+        assert_eq!(eighths, u64::from(area.height) * 8, "{ctx}: {metric:?}");
+      }
+    }
+  }
+
+  #[test]
+  fn v_switches_load_boxes_to_gauges() {
+    let mut app = app_with_samples(60, |_| {});
+    let graphs = render_buffer(&mut app, 200, 50);
+
+    assert!(app.handle_key(key('v')).is_continue());
+    assert_eq!(app.cfg.view_type, ViewType::Gauge);
+    let json = serde_json::to_string(&app.cfg).unwrap();
+    assert!(json.contains(r#""view_type":"Gauge""#), "{json}");
+
+    // every row filled to the load in its load color: E-CPU 42 % of 47 cells, P-CPU 77 % of 48,
+    // GPU 23 % of 47, RAM 20 of 36 GB of 48
+    let buf = render_buffer(&mut app, 200, 50);
+    let m = test_metrics();
+    let cases = [
+      (Metric::Cluster(0), f64::from(m.ecpu_scaled_ratio), 20),
+      (Metric::Cluster(1), f64::from(m.pcpu_scaled_ratio), 37),
+      (Metric::Gpu, f64::from(m.gpu_scaled_ratio), 11),
+      (Metric::Ram, 20.0 / 36.0, 27),
+    ];
+    for (metric, load, filled) in cases {
+      let area = graph_area(&app, buf.area, metric);
+      let gauge = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(area.width) - filled));
+      for y in area.top()..area.bottom() {
+        assert_eq!(text(&buf, Rect { y, height: 1, ..area }), gauge, "{metric:?} row {y}");
+        assert_eq!(buf[(area.x, y)].fg, app.theme.gradient(load), "{metric:?} row {y}");
+      }
+    }
+    // titles stay; the power boxes keep their graphs
+    assert_eq!(row(&buf, 1), row(&graphs, 1));
+    for (metric, r) in app.layout(buf.area).boxes {
+      if matches!(metric, Metric::CpuPower | Metric::GpuPower | Metric::AnePower) {
+        for y in r.top()..r.bottom() {
+          let line = Rect { y, height: 1, ..r };
+          assert_eq!(text(&buf, line), text(&graphs, line), "{metric:?} row {y}");
+        }
+      }
+    }
+
+    // other sizes: the filled share of the width follows the load
+    for (width, height) in [(110, 32), (80, 24), (60, 15), (400, 120)] {
+      let buf = render_buffer(&mut app, width, height);
+      for (metric, load, _) in cases {
+        let area = graph_area(&app, buf.area, metric);
+        let filled = (f64::from(area.width) * load).round() as usize;
+        let gauge =
+          format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(area.width) - filled));
+        for y in area.top()..area.bottom() {
+          assert_eq!(
+            text(&buf, Rect { y, height: 1, ..area }),
+            gauge,
+            "{width}x{height} {metric:?}"
+          );
+        }
+      }
+    }
+
+    // `v` again: back to the graphs
+    assert!(app.handle_key(key('v')).is_continue());
+    assert_eq!(app.cfg.view_type, ViewType::Graph);
+    assert!(serde_json::to_string(&app.cfg).unwrap().contains(r#""view_type":"Sparkline""#));
+    assert_eq!(render_buffer(&mut app, 200, 50), graphs);
+  }
+
   #[test]
   fn renders_without_metrics() {
     let mut app = App::default();
     let screen = render_to_string(&mut app, 120, 40);
-    assert!(screen.contains("Power: 0.00W") && screen.contains("RAM 0.00 /  0.0 GB (0.0%)"));
+    assert!(screen.contains("Power: 0.00W") && screen.contains("RAM 0.00 GB (0.0%)"));
     assert!(screen.contains("╭─ macmon ─"), "title without chip info");
     assert!(!screen.contains("°C") && !screen.contains("Total") && !screen.contains("Fan"));
   }
