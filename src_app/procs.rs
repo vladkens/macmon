@@ -18,10 +18,9 @@ use core_foundation::string::{CFString, CFStringRef};
 
 const RUSAGE_INFO_V4: c_int = 4;
 const RUSAGE_INFO_V6: c_int = 6;
-const KERN_FAILURE: c_int = 5;
 
 /// `ps` output columns; `comm` goes last as it may contain spaces.
-const PS_COLUMNS: &str = "pid=,ppid=,uid=,rss=,time=,comm=";
+const PS_COLUMNS: &str = "pid=,uid=,rss=,time=,comm=";
 
 /// `struct rusage_info_v6` from the macOS SDK `sys/resource.h`. `rusage_info_v4` is a prefix of
 /// it, so the same buffer serves both flavors.
@@ -110,13 +109,20 @@ unsafe extern "C" {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcInfo {
   pub pid: i32,
-  pub ppid: i32,
   pub name: String,
   pub user: String,
-  pub cpu_pct: f32,         // 100% = one fully busy core, as in Activity Monitor.
-  pub mem_bytes: u64,       // Physical footprint, as Activity Monitor's "Memory".
-  pub power_w: Option<f32>, // None when the energy counter isn't readable.
-  pub gpu_pct: f32,         // Share of the interval the GPU spent on the process, 0..=100.
+  /// 100% = one fully busy core, as in Activity Monitor.
+  pub cpu_pct: f32,
+  /// Physical footprint (Activity Monitor's "Memory") of the processes libproc reads: the current
+  /// user's, every process as root. Other users' processes come from `ps`, which has only the
+  /// resident size: it counts shared pages and leaves out compressed memory, so the two compare
+  /// only roughly.
+  pub mem_bytes: u64,
+  /// `None` when the energy counter isn't readable: other users' processes without root, and
+  /// every process before macOS 13 (no `rusage_info_v6`).
+  pub power_w: Option<f32>,
+  /// Share of the interval the GPU spent on the process, 0..=100.
+  pub gpu_pct: f32,
 }
 
 /// Cumulative counters of one process; rates come from two snapshots.
@@ -132,7 +138,6 @@ struct Counters {
 #[derive(Debug, Clone, PartialEq)]
 struct Raw {
   pid: i32,
-  ppid: i32,
   uid: u32,
   mem_bytes: u64,
   counters: Counters,
@@ -249,7 +254,6 @@ fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<R
 
   Some(Raw {
     pid,
-    ppid: info.pbi_ppid as i32,
     uid: info.pbi_uid,
     mem_bytes: ru.ri_phys_footprint,
     counters: Counters {
@@ -271,21 +275,9 @@ fn digits(s: &str) -> Option<u64> {
   s.parse().ok()
 }
 
-/// CPU time from `ps -o time` in nanoseconds: `[[dd-]hh:]mm:ss[.ss]`. macOS prints `mm:ss.ss`
-/// with minutes growing past 59, procps the `[dd-]hh:mm:ss` form.
+/// CPU time from macOS `ps -o time` in nanoseconds: `mm:ss.ss`, the minutes growing past 59.
 fn parse_ps_time(s: &str) -> Option<u64> {
-  let (days, hms) = match s.split_once('-') {
-    Some((days, hms)) => (Some(digits(days)?), hms),
-    None => (None, s),
-  };
-
-  let fields: Vec<&str> = hms.split(':').collect();
-  let (hours, mins, secs) = match fields[..] {
-    [mins, secs] if days.is_none() => (None, digits(mins)?, secs),
-    [hours, mins, secs] => (Some(digits(hours)?), digits(mins)?, secs),
-    _ => return None,
-  };
-
+  let (mins, secs) = s.split_once(':')?;
   let (secs, frac_ns) = match secs.split_once('.') {
     Some((secs, frac)) if frac.len() <= 9 => {
       (secs, digits(frac)? * 10u64.pow(9 - frac.len() as u32))
@@ -293,20 +285,17 @@ fn parse_ps_time(s: &str) -> Option<u64> {
     Some(_) => return None,
     None => (secs, 0),
   };
-  let secs = digits(secs)?;
 
-  // Only the leading field may exceed its usual range.
-  let hours_overflow = days.is_some() && hours.is_some_and(|hours| hours >= 24);
-  if secs >= 60 || (hours.is_some() && mins >= 60) || hours_overflow {
+  let (mins, secs) = (digits(mins)?, digits(secs)?);
+  if secs >= 60 {
     return None;
   }
 
-  let total = days.unwrap_or(0).checked_mul(24)?.checked_add(hours.unwrap_or(0))?;
-  let total = total.checked_mul(60)?.checked_add(mins)?.checked_mul(60)?.checked_add(secs)?;
+  let total = mins.checked_mul(60)?.checked_add(secs)?;
   total.checked_mul(1_000_000_000)?.checked_add(frac_ns)
 }
 
-/// One line of `ps -o pid=,ppid=,uid=,rss=,time=,comm=`; the command is the rest of the line.
+/// One line of `ps -o pid=,uid=,rss=,time=,comm=`; the command is the rest of the line.
 fn parse_ps_line(line: &str) -> Option<Raw> {
   let mut rest = line.trim();
   let mut field = || {
@@ -316,7 +305,6 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
   };
 
   let pid = field()?.parse().ok()?;
-  let ppid = field()?.parse().ok()?;
   let uid = field()?.parse().ok()?;
   let rss_kib = digits(field()?)?;
   let cpu_ns = parse_ps_time(field()?)?;
@@ -324,7 +312,6 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
 
   Some(Raw {
     pid,
-    ppid,
     uid,
     mem_bytes: rss_kib.saturating_mul(1024),
     // ps has no start time, a reused pid is told apart by its command.
@@ -340,12 +327,12 @@ fn parse_ps(out: &str) -> Vec<Raw> {
 
 /// Processes of all users from `/bin/ps` (setuid root), without the `ps` process itself.
 fn run_ps() -> Vec<Raw> {
-  let child = Command::new("/bin/ps")
-    .args(["-A", "-o", PS_COLUMNS])
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null())
-    .spawn();
+  ps_rows(Command::new("/bin/ps").args(["-A", "-o", PS_COLUMNS]))
+}
+
+/// Rows `cmd` prints in the `ps` format, without its own process; none when it can't run.
+fn ps_rows(cmd: &mut Command) -> Vec<Raw> {
+  let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
   let Ok(child) = child else { return Vec::new() };
 
   let ps_pid = child.id() as i32;
@@ -364,7 +351,12 @@ fn merge(mut rows: Vec<Raw>, ps: Vec<Raw>) -> Vec<Raw> {
 
 /// User name of a uid, or the uid itself when it has no passwd entry.
 fn user_name(uid: u32) -> String {
-  let mut buf: Vec<c_char> = vec![0; 1024];
+  user_name_with(uid, 1024)
+}
+
+/// `user_name` starting with a `buf_len` byte buffer, grown as `getpwuid_r` asks for it.
+fn user_name_with(uid: u32, buf_len: usize) -> String {
+  let mut buf: Vec<c_char> = vec![0; buf_len.max(1)];
   loop {
     let mut pwd: libc::passwd = unsafe { mem::zeroed() };
     let mut found: *mut libc::passwd = std::ptr::null_mut();
@@ -426,27 +418,23 @@ impl Iterator for IoIter {
 }
 
 /// Services of an IOKit class, its subclasses included.
-fn matching_services(class: &CStr) -> Result<IoIter, c_int> {
+fn matching_services(class: &CStr) -> Option<IoIter> {
   let matching = unsafe { IOServiceMatching(class.as_ptr()) };
   if matching.is_null() {
-    return Err(KERN_FAILURE);
+    return None;
   }
 
   let mut iter = 0;
   // Takes ownership of `matching`.
-  match unsafe { IOServiceGetMatchingServices(0, matching, &mut iter) } {
-    0 => Ok(IoIter(IoObject(iter))),
-    err => Err(err),
-  }
+  let ret = unsafe { IOServiceGetMatchingServices(0, matching, &mut iter) };
+  (ret == 0).then_some(IoIter(IoObject(iter)))
 }
 
 /// Children of a registry entry in the service plane.
-fn children(entry: &IoObject) -> Result<IoIter, c_int> {
+fn children(entry: &IoObject) -> Option<IoIter> {
   let mut iter = 0;
-  match unsafe { IORegistryEntryGetChildIterator(entry.0, c"IOService".as_ptr(), &mut iter) } {
-    0 => Ok(IoIter(IoObject(iter))),
-    err => Err(err),
-  }
+  let ret = unsafe { IORegistryEntryGetChildIterator(entry.0, c"IOService".as_ptr(), &mut iter) };
+  (ret == 0).then_some(IoIter(IoObject(iter)))
 }
 
 /// Pid from a user client's `IOUserClientCreator`: `"pid 631, WindowServer"`.
@@ -474,15 +462,14 @@ fn app_usage_ns(usage: &CFType) -> u64 {
 
 /// `(pid, GPU time in ns)` of every GPU user client. The clients are unregistered children of
 /// the `IOAccelerator` services, so they're only found by walking the service plane.
-fn read_gpu_clients() -> Result<Vec<(i32, u64)>, c_int> {
+fn read_gpu_clients() -> Option<Vec<(i32, u64)>> {
   let creator_key = CFString::from_static_string("IOUserClientCreator");
   let usage_key = CFString::from_static_string("AppUsage");
   let mut clients = Vec::new();
 
   for gpu in matching_services(c"IOAccelerator")? {
     // Clients come and go; a registry change mid-walk invalidates the iterator, so walk again.
-    for attempt in 0..3 {
-      let start = clients.len();
+    walk_until_consistent(&mut clients, 3, |clients| {
       let mut iter = children(&gpu)?;
       for client in iter.by_ref() {
         let creator = client.property(&creator_key).and_then(|v| v.downcast_into::<CFString>());
@@ -492,15 +479,29 @@ fn read_gpu_clients() -> Result<Vec<(i32, u64)>, c_int> {
         let gpu_ns = client.property(&usage_key).map_or(0, |usage| app_usage_ns(&usage));
         clients.push((pid, gpu_ns));
       }
-
-      if iter.is_valid() || attempt == 2 {
-        break;
-      }
-      clients.truncate(start);
-    }
+      Some(iter.is_valid())
+    })?;
   }
 
-  Ok(clients)
+  Some(clients)
+}
+
+/// Runs `walk` (it adds items to `items` and returns whether the walk was consistent) up to
+/// `attempts` times, until a walk is consistent; the items of an inconsistent walk are dropped,
+/// except the last one's. `None` from `walk` stops it.
+fn walk_until_consistent<T>(
+  items: &mut Vec<T>,
+  attempts: usize,
+  mut walk: impl FnMut(&mut Vec<T>) -> Option<bool>,
+) -> Option<()> {
+  for attempt in 1..=attempts {
+    let start = items.len();
+    if walk(items)? || attempt == attempts {
+      break;
+    }
+    items.truncate(start);
+  }
+  Some(())
 }
 
 /// GPU time per pid; a process may own several clients.
@@ -606,7 +607,6 @@ impl ProcSampler {
 
       procs.push(ProcInfo {
         pid: raw.pid,
-        ppid: raw.ppid,
         name: name.clone(),
         user,
         cpu_pct: usage.cpu_pct,
@@ -729,7 +729,6 @@ mod tests {
     let first = sampler.sample();
     let me = first.iter().find(|p| p.pid == pid).expect("own process is sampled");
     assert!(!me.name.is_empty());
-    assert_eq!(me.ppid, unsafe { libc::getppid() });
     assert_eq!(me.user, user_name(unsafe { libc::geteuid() }));
     assert!(me.mem_bytes > 0);
     assert_eq!(me.cpu_pct, 0.0); // no baseline yet
@@ -762,14 +761,11 @@ mod tests {
     let ms = |ms: u64| Some(ms * 1_000_000);
     assert_eq!(parse_ps_time("0:00.07"), ms(70));
     assert_eq!(parse_ps_time("38:23.50"), ms((38 * 60 + 23) * 1000 + 500));
-    assert_eq!(parse_ps_time("1234:56.78"), ms((1234 * 60 + 56) * 1000 + 780)); // macOS minutes
+    // minutes grow past 59: macOS never prints hours or days
+    assert_eq!(parse_ps_time("1234:56.78"), ms((1234 * 60 + 56) * 1000 + 780));
     assert_eq!(parse_ps_time("0:05"), ms(5000));
     assert_eq!(parse_ps_time("0:00.5"), ms(500));
     assert_eq!(parse_ps_time("0:00.123456789"), Some(123_456_789));
-    assert_eq!(parse_ps_time("1:02:03"), ms(3723 * 1000));
-    assert_eq!(parse_ps_time("25:00:00"), ms(25 * 3600 * 1000));
-    assert_eq!(parse_ps_time("2-03:04:05"), ms((2 * 86400 + 3 * 3600 + 4 * 60 + 5) * 1000));
-    assert_eq!(parse_ps_time("2-03:04:05.25"), ms((2 * 86400 + 11045) * 1000 + 250));
   }
 
   #[test]
@@ -782,10 +778,9 @@ mod tests {
       "1:",
       "1:2:3:4",
       "1:60.00",                 // seconds out of range
-      "1:60:00",                 // minutes out of range after hours
-      "1-24:00:00",              // hours out of range after days
-      "1-02:03",                 // days need hours
-      "-01:02:03",               // empty days
+      "1:02:03",                 // hours: procps, not macOS
+      "2-03:04:05",              // days: procps, not macOS
+      "-01:02",                  // sign
       "1:02.",                   // empty fraction
       "1:02.x",                  // bad fraction
       "1:02.1234567890",         // fraction past nanoseconds
@@ -802,10 +797,9 @@ mod tests {
   #[test]
   fn ps_lines() {
     let chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (GPU)";
-    let line = format!(" 2301  2002   501 182976   1:02.50 {chrome}");
+    let line = format!(" 2301   501 182976   1:02.50 {chrome}");
     let raw = parse_ps_line(&line).expect("valid line");
     assert_eq!(raw.pid, 2301);
-    assert_eq!(raw.ppid, 2002);
     assert_eq!(raw.uid, 501);
     assert_eq!(raw.mem_bytes, 182976 * 1024);
     assert_eq!(
@@ -815,11 +809,11 @@ mod tests {
     assert_eq!(raw.comm, chrome);
     assert_eq!(raw.fallback, "Google Chrome Helper (GPU)");
 
-    let raw = parse_ps_line("574\t1 0 2624 0:00.03 endpointsecurityd\n").expect("valid line");
-    assert_eq!((raw.pid, raw.ppid, raw.uid), (574, 1, 0));
+    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurityd\n").expect("valid line");
+    assert_eq!((raw.pid, raw.uid), (574, 0));
     assert_eq!(raw.fallback, "endpointsecurityd");
 
-    let raw = parse_ps_line("1 0 0 100 0:00.01 my  daemon ").expect("valid line");
+    let raw = parse_ps_line("1 0 100 0:00.01 my  daemon ").expect("valid line");
     assert_eq!(raw.comm, "my  daemon");
   }
 
@@ -829,19 +823,19 @@ mod tests {
       "",
       "   ",
       "garbage",
-      "1 0 0 100 0:00.01",          // no command
-      "x 0 0 100 0:00.01 cmd",      // pid
-      "1 0 -1 100 0:00.01 cmd",     // uid
-      "1 0 0 -100 0:00.01 cmd",     // rss
-      "1 0 0 100 0:61.00 cmd",      // time
-      "1 0 0 100 cmd",              // missing column
-      "PID PPID UID RSS TIME COMM", // header
+      "1 0 100 0:00.01",       // no command
+      "x 0 100 0:00.01 cmd",   // pid
+      "1 -1 100 0:00.01 cmd",  // uid
+      "1 0 -100 0:00.01 cmd",  // rss
+      "1 0 100 0:61.00 cmd",   // time
+      "1 0 100 cmd",           // missing column
+      "PID UID RSS TIME COMM", // header
     ];
     for line in bad {
       assert_eq!(parse_ps_line(line), None, "{line:?}");
     }
 
-    let out = "  1 0 0 10 0:01.00 /sbin/launchd\nbad line\n\n 88 1 88 20 0:02.00 /usr/sbin/a b\n";
+    let out = "  1 0 10 0:01.00 /sbin/launchd\nbad line\n\n 88 88 20 0:02.00 /usr/sbin/a b\n";
     let pids: Vec<i32> = parse_ps(out).iter().map(|raw| raw.pid).collect();
     assert_eq!(pids, [1, 88]);
     assert!(parse_ps("").is_empty());
@@ -850,7 +844,6 @@ mod tests {
   fn row(pid: i32, cpu_ns: u64, energy_nj: Option<u64>, comm: &str) -> Raw {
     Raw {
       pid,
-      ppid: 1,
       uid: 0,
       mem_bytes: 1024,
       counters: Counters { start: 0, cpu_ns, energy_nj, gpu_ns: None },
@@ -904,6 +897,50 @@ mod tests {
   fn user_names() {
     assert_eq!(user_name(0), "root");
     assert_eq!(user_name(1_999_999_999), "1999999999");
+    // a buffer too small for the passwd entry grows
+    assert_eq!(user_name_with(0, 1), "root");
+    assert_eq!(user_name_with(0, 0), "root");
+  }
+
+  #[test]
+  fn ps_rows_skip_their_own_process() {
+    // a stand-in for ps that prints its own pid (`$$`) next to another process
+    let script = "echo \"$$ 0 100 0:00.01 sh\"; echo '42 0 200 0:00.02 other'";
+    let rows = ps_rows(Command::new("/bin/sh").args(["-c", script]));
+    let pids: Vec<i32> = rows.iter().map(|raw| raw.pid).collect();
+    assert_eq!(pids, [42]);
+
+    // a ps that can't run: no rows
+    assert!(ps_rows(&mut Command::new("/nonexistent/ps")).is_empty());
+    // a ps that fails: whatever it printed
+    assert!(ps_rows(Command::new("/bin/sh").args(["-c", "exit 1"])).is_empty());
+  }
+
+  #[test]
+  fn walk_retries_until_consistent() {
+    // (items, consistent) of each walk
+    let run = |walks: Vec<(Vec<u32>, bool)>| {
+      let mut walks = walks.into_iter();
+      let mut count = 0;
+      let mut items = vec![7];
+      let result = walk_until_consistent(&mut items, 3, |items| {
+        count += 1;
+        let (found, consistent) = walks.next()?;
+        items.extend(found);
+        Some(consistent)
+      });
+      (result, items, count)
+    };
+
+    // consistent at once
+    assert_eq!(run(vec![(vec![1, 2], true)]), (Some(()), vec![7, 1, 2], 1));
+    // the items of an inconsistent walk are dropped, the earlier items stay
+    assert_eq!(run(vec![(vec![1], false), (vec![2, 3], true)]), (Some(()), vec![7, 2, 3], 2));
+    // never consistent: the last walk's items after the third try
+    let walks = vec![(vec![1], false), (vec![2], false), (vec![3], false), (vec![4], true)];
+    assert_eq!(run(walks), (Some(()), vec![7, 3], 3));
+    // a failed walk fails the whole read
+    assert_eq!(run(vec![(vec![1], false)]).0, None);
   }
 
   #[test]
@@ -1032,7 +1069,7 @@ mod tests {
     let pids: HashSet<i32> = clients.iter().map(|&(pid, _)| pid).collect();
     assert_eq!(sum_gpu_times(clients).len(), pids.len());
     for _ in 0..3 {
-      assert!(read_gpu_clients().is_ok());
+      assert!(read_gpu_clients().is_some());
     }
   }
 }

@@ -1,11 +1,13 @@
-# TUI Redesign: btop-style Layout and Process List (Phase 1)
+# TUI Redesign: Original Metric Boxes over a Process List (Phase 1)
+
+Current design: Tasks 19–20 (summary in "Current design" under Technical Details). Earlier layouts, themes and graph styles below are kept as history and marked as superseded.
 
 ## Overview
-- Redesign the interactive TUI in a btop-inspired style: a full-width CPU box on top, a left column with GPU / MEM / POWER boxes, and a process list on the right (Layout V3 since Task 11: one metrics box on top, full-width process list below; since Task 19 the metrics box holds the original macmon boxes in the top 40 % of the screen).
+- Redesign the interactive TUI ~~in a btop-inspired style: a full-width CPU box on top, a left column with GPU / MEM / POWER boxes, and a process list on the right~~ (Layout V3 since Task 11: one metrics box on top, full-width process list below; since Task 19 the metrics box holds the original macmon boxes in the top 40 % of the screen).
 - Replace single-accent coloring with load gradients (green → yellow → red) in the terminal's own colors (built-in themes until Task 12), and use braille history graphs (solid block bars since Task 17, filling their whole box since Task 19).
 - Add a process list (PID, NAME, USER, CPU%, MEM, POWER W, GPU%) with sorting, filtering and selection, so macmon covers the "what is eating my Mac" use case that currently requires btop/htop/Activity Monitor.
 - Differentiators vs btop: per-process power (W) and per-process GPU %, both sudoless.
-- All existing metrics stay: E-CPU / P-CPU (aggregate + per-core, scaled/active ratio), GPU, RAM / SWAP, CPU / GPU / ANE / total / system power with avg/max, CPU / GPU temperature, fans.
+- All existing metrics stay: E-CPU / P-CPU (aggregate ~~+ per-core~~ (per-core view removed in Task 16), scaled/active ratio), GPU, RAM / SWAP, CPU / GPU / ANE / total / system power with avg/max, CPU / GPU temperature, fans.
 - `pipe`, `serve`, `debug`, `stress` and the public library API are untouched.
 
 ## Context (from discovery)
@@ -49,15 +51,21 @@
 
 ## Solution Overview
 - Split `src_app/tui.rs` into `src_app/tui/` modules so the redesign doesn't produce a 2k-line file.
-- Input thread forwards raw key events (`Event::Key`); the app interprets them by mode (normal / filter input), so typing a filter doesn't trigger `q`/`c`/etc.
+- Input thread forwards raw key events (`Event::Key`); the app interprets them by mode (normal / filter input), so typing a filter doesn't trigger `q` / `p` / `v` / etc.
 - ~~Theme = named palette (border, title, text, dim, selection, 3-stop load gradient). Colors are RGB; when the terminal doesn't advertise truecolor (`COLORTERM` ≠ `truecolor`/`24bit`) they are mapped to the nearest xterm-256 index.~~ Superseded in Task 12 by "Colors: terminal palette".
-- Custom widgets: `BrailleGraph` (filled area graph, 2 samples per cell, 4 dots per row, vertical gradient) and `Meter` (horizontal bar with gradient fill). ~~`v` switches graphs to the current block-style `Sparkline`.~~ Braille only since Task 12; solid block bars since Task 17 (see "Graph style").
-- A pure `compute_layout(area, panels, per_core) -> LayoutPlan` decides box rectangles; panels toggle with `1`–`5`; the process panel auto-hides below a minimum size so macmon still works in a small window.
+- ~~Custom widgets: `BrailleGraph` (filled area graph, 2 samples per cell, 4 dots per row, vertical gradient) and `Meter` (horizontal bar with gradient fill). `v` switches graphs to the current block-style `Sparkline`.~~ Superseded: braille only in Task 12, solid block bars in Task 17, `Meter` removed and a multi-row `Graph` in Task 19, `Gauge` on `v` in Task 20 (see "Graph style").
+- A pure ~~`compute_layout(area, panels, per_core) -> LayoutPlan`~~ `compute_layout(area, procs, clusters) -> LayoutPlan` (Task 19) decides box rectangles; ~~panels toggle with `1`–`5`~~ `p` shows / hides the process list (Task 16); the process panel auto-hides below a minimum height so macmon still works in a small window.
 - Process data comes from a separate `procs` thread (own `ProcSampler`), paused while the process panel is hidden, so users who don't need it pay nothing.
 
 ## Technical Details
 
-### Layout V3 (user decision after Task 10 — replaces Layout A below)
+### Current design (Tasks 19–20)
+- Metrics box in the top 40 % of the screen (at least 8 rows), the process list in the rest; the metrics take the whole screen when the list is hidden (`p`) or auto-hidden (fewer than 3 process rows).
+- Inside the metrics box the original macmon boxes: one per CPU cluster, GPU and RAM on top, CPU / GPU / ANE power below, widths split evenly. Titles step down to fit (Task 20); the chip on the outer title, the power summary on its bottom border.
+- Multi-row solid bar graphs (eighths per row, three levels in Apple Terminal), per-column load color, power graphs in the low color scaled to their visible peak; `v` switches the cluster / GPU / RAM boxes to gauges.
+- Colors from the terminal palette (see "Colors: terminal palette"); process list, keys and mouse as in "Process panel" and "Keys (final)".
+
+### Layout V3 (user decision after Task 10 — replaces Layout A below; superseded by Task 16, then by the metric boxes of Task 19)
 ```
 ╭─ M3 Pro · 6E+6P · 18GPU · 36GB ───────────────────── 14:32 · macmon ─╮
 │ E-CPU  42% 1.8GHz ⣀⣠⣤⣴⣶⣾⣿⣷⣶⣤⣀⣀⣠⣤⣶⣿⣿⣷⣶⣤⣀⣠ │ CPU  4.2W 58°C ▁▂▃▅▇▅▃    │
@@ -113,20 +121,22 @@
 - ➕ As built (Task 13): no query in SSH sessions (`SSH_TTY` or `SSH_CONNECTION` non-empty), where replies are most likely to come after the drain window; those sessions get the discrete steps.
 
 ### Graph style (user decision after Task 11, revised after Task 16)
-- ~~Braille only~~ — superseded: one-row braille has only 4 levels and low loads read as a dotted line. User picked variant B from the comparison page (https://claude.ai/code/artifact/4e4fc050-93d1-47bf-8873-6569cda3ce54): solid block bars `▁▂▃▄▅▆▇█`, 8 levels per row, one sample per cell, each bar colored by its own value on the load gradient. Still one canonical style: no `v` key, no toggle.
-- Power-column graphs: block bars in the low (green) color, no gradient.
+- ~~Braille only~~ — superseded: one-row braille has only 4 levels and low loads read as a dotted line. User picked variant B from a comparison page shown during the review (not public): solid block bars `▁▂▃▄▅▆▇█`, 8 levels per row, one sample per cell, each bar colored by its own value on the load gradient. ~~Still one canonical style: no `v` key, no toggle.~~ (`v` is back in Task 20, see below.)
+- Power graphs (the power column until Task 19, the power boxes since): block bars in the low (green) color, no gradient.
 - ➕ Task 20: `v` is back (as in the original): the CPU cluster, GPU and RAM boxes switch between the history graph and a gauge (bar filled to the current load in its load color); power boxes always show graphs.
+- ➕ Review 1: Apple Terminal draws gaps between eighth blocks; as in v0.7.2 (`bar_set()` with `THREE_LEVELS` for `TERM_PROGRAM=Apple_Terminal`, lost in Task 12) the bars there use three levels: 1/8 blank, 2/8–6/8 `▄`, 7/8–8/8 `█`. ratatui's `Sparkline` / `Gauge` don't replace the own widgets: `Sparkline` rounds bars down (small non-zero samples blank) and scales to the peak of all its data, not the visible columns; `Gauge` with an empty label still paints a reversed blank cell in its middle.
 
 ### Config migration
-- `color`, `theme`, `view_type` fields dropped (serde ignores unknown fields, old files keep loading).
-- New: `panels` (5 bools, default all on), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
+- `color`, `theme`, ~~`view_type`~~ fields dropped (serde ignores unknown fields, old files keep loading); `view_type` is back since Task 20.
+- New: ~~`panels` (5 bools, default all on)~~ (dropped in Task 16), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
 - ➕ Task 16: `panels` and `per_core_view` dropped (ignored on load); new `show_procs` (default `true`, key `p`).
 - ➕ Task 20: `view_type` back with the released values (`"Sparkline"` = graph, `"Gauge"`); unknown values fall back to the graph.
+- ➕ Review 1: every field falls back on its own: a bad value (wrong type, unknown name) gets that field's default, the others keep theirs (released versions reset the whole file). Under `sudo` (which keeps `HOME`) only an existing file is rewritten, so no root-owned file or directory is created. The file path is a field of `Config`, so tests save to a temp file.
 
 ### Process sampling (`src_app/procs.rs`)
-- `ProcInfo { pid, ppid, name, user, cpu_pct, mem_bytes, power_w: Option<f32>, gpu_pct }`.
+- `ProcInfo { pid, ~~ppid,~~ name, user, cpu_pct, mem_bytes, power_w: Option<f32>, gpu_pct }` (➕ Review 1: `ppid` dropped until the process tree of Phase 2 needs it).
 - Own processes: `proc_listallpids` → `proc_pidinfo(PROC_PIDTBSDINFO)` (uid, ppid, name) → `proc_pid_rusage(RUSAGE_INFO_V6)` (user+system time, `ri_phys_footprint`, `ri_energy_nj`). `ri_*_time` are mach absolute units → convert with `mach_timebase_info`. Name = basename of `proc_pidpath`, fallback `pbi_name`.
-- Foreign processes (libproc failed): one `ps -A -o pid=,ppid=,uid=,rss=,time=,comm=` per tick; parse `[[dd-]hh:]mm:ss.ss`; memory = RSS; power = `None`. Skipped when running as root.
+- Foreign processes (libproc failed): one `ps -A -o pid=,uid=,rss=,time=,comm=` per tick; parse ~~`[[dd-]hh:]mm:ss.ss`~~ `mm:ss.ss` (➕ Review 1: macOS `ps` prints only minutes, growing past 59); memory = RSS; power = `None`. Skipped when running as root.
 - GPU: walk `IOAccelerator` children, read `IOUserClientCreator` + sum `AppUsage[].accumulatedGPUTime` per pid.
 - CPU % follows Activity Monitor convention (100% = one core). Deltas keyed by pid; negative delta, changed start time or changed command → treat as new process (no spike).
 - User names via `getpwuid_r`, cached per uid.
@@ -134,8 +144,8 @@
 
 ### Process panel
 - Columns by priority (dropped right-to-left on narrow widths): PID, NAME (flex), CPU%, MEM, GPU%, POWER, USER.
-- Sort: `s` cycles CPU → MEM → POWER → GPU → PID → NAME; `S` reverses. Shown in title.
-- Filter: `/` enters input mode, case-insensitive substring on name or pid; `Enter` keeps, `Esc` clears; shown in title.
+- Sort: `s` cycles CPU → MEM → POWER → GPU → PID → NAME → USER (USER since Task 18); `S` reverses. ~~Shown in title.~~ The arrow sits next to the sorted column's header (Task 18).
+- Filter: `/` enters input mode, case-insensitive substring on name or pid; `Enter` keeps, `Esc` clears; shown in title (➕ Review 1: a filter too long for the border shows its end, `/…ari█`; with no room next to the count it takes the count's place, so the text, cursor and click target never vanish).
 - Selection: `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`; follows the selected pid across refreshes; `Esc` (normal mode) clears.
 - Unavailable values render as `-` in dim color; values colored by theme gradient.
 - ➕ Task 18: title `proc N ─ / filter` (filter text instead once set / typing), no sort in the title; the sort arrow sits next to the sorted column header; USER sorts too (`s` cycle ends with USER); mouse: header click sorts / reverses, `/ filter` click starts input, row click selects, wheel moves selection + scroll by 3.
@@ -469,7 +479,7 @@ User review: the footer ` q quit | r scaled | -/+ 1000ms | / filter | s sort ` m
 
 ### Task 19: ➕ Proportional boxes: original macmon metric boxes over the process list
 
-User review on a wide (~250 column) terminal: one-row strips stretch into long threads (RAM / SWAP meters 170 cells long) and look broken; width breakpoints were rejected as "guessing the zoom". The original macmon scales fine because its boxes grow in both directions. Decision: bring back the original metric boxes, compressed into the top part of the screen, process list full width below. One structure at every size, only the scale changes. Mockup (rendered at 200×50 and 110×32): https://claude.ai/code/artifact/29e38633-0f88-4825-b4cc-3abb4492d59f. The strips version is bookmarked as branch `tui-redesign-strips` (1ca90ed).
+User review on a wide (~250 column) terminal: one-row strips stretch into long threads (RAM / SWAP meters 170 cells long) and look broken; width breakpoints were rejected as "guessing the zoom". The original macmon scales fine because its boxes grow in both directions. Decision: bring back the original metric boxes, compressed into the top part of the screen, process list full width below. One structure at every size, only the scale changes. Mockup rendered at 200×50 and 110×32 on a page shown during the review (not public). The strips version is commit 1ca90ed in this branch's history.
 
 ```
 ╭ Apple M2 (4E+4P+10GPU 24GB) ───────────────────────────────────────────────────── macmon v0.8.2 ╮
@@ -484,7 +494,7 @@ User review on a wide (~250 column) terminal: one-row strips stretch into long t
 │ … process table as now …                                                                                  │
 ╰──────────────────────────────────────────────────────────── q quit | p procs | r scaled | -/+ 1000ms ─────╯
 ```
-(widths in this sketch are approximate; the artifact page is the reference)
+(widths in this sketch are approximate; the mockup page was the reference)
 
 - Metrics area = top `METRICS_HEIGHT_PCT = 40` % of the height (process list keeps ~60 %, the user's earlier choice). Hidden (`p`) or auto-hidden process list → the metrics area takes the full height, exactly like the original app.
 - Outer box: `Apple M2 (4E+4P+10GPU 24GB)` left (original title format), `macmon vX` right; bottom border left: original power summary `Power: 3.52W (avg 4.14W, max 6.89W)` + `Fan 1196 RPM` + `Total 10.07W (11.92, 15.21)` (only parts whose sensors exist). When the metrics box is the bottom-most box, the key hints share that border right-aligned; titles never overlap (existing title-fitting rules: hints / summary parts drop from the end).
@@ -546,6 +556,7 @@ User review of Task 19: the RAM title doesn't fit (total memory is already in th
 
 **Manual verification**:
 - Ghostty / iTerm2 / Apple Terminal / inside tmux: palette query answered vs not (smooth vs stepped gradient), no stray characters from late replies, light and dark terminal themes.
+- Apple Terminal: graph bars in three levels (blank / `▄` / `█`) without gaps between rows.
 - `cargo run --release` in a real terminal: walk through every key (Task 13 drove them only on a pty with an emulated screen).
 - Over SSH: stepped gradient, no palette query, no stray characters.
 - Small window (e.g. 60x15) and huge window; resize while running.
@@ -558,5 +569,5 @@ User review of Task 19: the RAM title doesn't fit (total memory is already in th
 - Phase 2 (separate plan): kill / signals, process tree, details on Enter.
 
 **Library follow-up** (separate plan):
-- M6 has three CPU tiers (6E + 4P + 2S). The library exposes only two clusters (`ecpu_*` / `pcpu_*`): `cpu_tier_counts` reads perflevel0 and the last perflevel only, and `MCPU` channels are classified as the E slot, so on M6 the P and E tiers most likely merge into one cluster with a wrong label. Needs a verified fix on real M6 hardware and a public API for N clusters; the TUI strips are already generic over clusters.
+- M6 has three CPU tiers (6E + 4P + 2S). The library exposes only two clusters (`ecpu_*` / `pcpu_*`): `cpu_tier_counts` reads perflevel0 and the last perflevel only, and `MCPU` channels are classified as the E slot, so on M6 the P and E tiers most likely merge into one cluster with a wrong label. Needs a verified fix on real M6 hardware and a public API for N clusters; the TUI metric boxes are already generic over clusters.
 - Per-process watts looked low in a spot check (ghostty ~20% CPU → ~0.06 W): compare `ri_energy_nj` against Activity Monitor / `powermetrics --show-process-energy`.

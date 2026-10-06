@@ -35,7 +35,8 @@ impl FreqSample {
 
 impl RatioSeries {
   fn push(&mut self, ratio: f64) {
-    self.items.insert(0, (ratio * 100.0) as u64);
+    // rounded like the percent in the box title, so the graph agrees with it
+    self.items.insert(0, (ratio * 100.0).round() as u64);
     self.items.truncate(HISTORY_LEN);
     self.ratio = ratio;
   }
@@ -64,56 +65,55 @@ impl FreqStore {
   }
 }
 
-/// One CPU cluster of a metrics sample.
-pub(super) struct ClusterSample<'a> {
-  /// Tier label: `E` / `P` on M1–M4, `P` / `S` on M5+.
-  pub(super) label: &'a str,
-  /// Core count from `SocInfo`, for the chip summary.
-  pub(super) count: usize,
-  pub(super) aggregate: FreqSample,
-}
-
 /// History of one CPU cluster.
 #[derive(Debug, Default)]
 pub(super) struct ClusterStore {
+  /// Tier label: `E` / `P` on M1–M4, `P` / `S` on M5+.
   pub(super) label: String,
+  /// Core count, for the chip summary.
   pub(super) count: usize,
   pub(super) freq: FreqStore,
 }
 
-/// Histories of the CPU clusters, lowest tier first, as many as the samples have.
+/// Histories of the CPU clusters, lowest tier first. The library reports two tiers today; the TUI
+/// takes any number of them.
 #[derive(Debug, Default)]
 pub(super) struct CpuClusters {
   pub(super) items: Vec<ClusterStore>,
 }
 
 impl CpuClusters {
-  /// Adds a sample of every cluster. A cluster whose label changed starts a new history.
-  pub(super) fn push(&mut self, samples: &[ClusterSample]) {
-    self.items.truncate(samples.len());
-    for (i, sample) in samples.iter().enumerate() {
-      if self.items.get(i).is_some_and(|c| c.label != sample.label) {
-        self.items.truncate(i);
-      }
-      if i == self.items.len() {
-        self.items.push(ClusterStore { label: sample.label.to_string(), ..Default::default() });
-      }
+  /// Clusters of `(tier label, core count)`, lowest tier first, without samples yet.
+  pub(super) fn new<'a>(tiers: impl IntoIterator<Item = (&'a str, usize)>) -> Self {
+    let cluster = |(label, count): (&str, usize)| ClusterStore {
+      label: label.to_string(),
+      count,
+      freq: FreqStore::default(),
+    };
+    Self { items: tiers.into_iter().map(cluster).collect() }
+  }
 
-      let cluster = &mut self.items[i];
-      cluster.count = sample.count;
-      cluster.freq.push(sample.aggregate);
+  /// The two clusters the library reports, with the labels and core counts of `soc`, so their
+  /// boxes and the chip summary are complete before the first metrics sample.
+  pub(super) fn from_soc(soc: &SocInfo) -> Self {
+    let tiers = [(&soc.ecpu_label, soc.ecpu_cores), (&soc.pcpu_label, soc.pcpu_cores)];
+    Self::new(tiers.map(|(label, count)| (label.as_str(), usize::from(count))))
+  }
+
+  /// Adds a sample per cluster, in cluster order (see `cluster_samples`).
+  pub(super) fn push(&mut self, samples: &[FreqSample]) {
+    for (cluster, &sample) in self.items.iter_mut().zip(samples) {
+      cluster.freq.push(sample);
     }
   }
 }
 
-/// CPU clusters of a metrics sample, lowest tier first. The library reports two tiers today; the
-/// TUI takes any number of them.
-pub(super) fn cluster_samples<'a>(soc: &'a SocInfo, data: &Metrics) -> [ClusterSample<'a>; 2] {
-  let ecpu = FreqSample::new(data.ecpu_freq_mhz, data.ecpu_scaled_ratio, data.ecpu_active_ratio);
-  let pcpu = FreqSample::new(data.pcpu_freq_mhz, data.pcpu_scaled_ratio, data.pcpu_active_ratio);
+/// Samples of the two CPU clusters of a metrics sample, lowest tier first, as `CpuClusters::from_soc`
+/// orders them.
+pub(super) fn cluster_samples(data: &Metrics) -> [FreqSample; 2] {
   [
-    ClusterSample { label: &soc.ecpu_label, count: soc.ecpu_cores.into(), aggregate: ecpu },
-    ClusterSample { label: &soc.pcpu_label, count: soc.pcpu_cores.into(), aggregate: pcpu },
+    FreqSample::new(data.ecpu_freq_mhz, data.ecpu_scaled_ratio, data.ecpu_active_ratio),
+    FreqSample::new(data.pcpu_freq_mhz, data.pcpu_scaled_ratio, data.pcpu_active_ratio),
   ]
 }
 
@@ -235,7 +235,7 @@ fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
 mod tests {
   use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
-  use super::{ClusterSample, CpuClusters, FanStore, FreqSample, FreqStore};
+  use super::{CpuClusters, FanStore, FreqSample, FreqStore};
   use super::{HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN, TempStore};
   use super::{avg2, cluster_samples};
   use crate::config::RatioMode;
@@ -328,6 +328,17 @@ mod tests {
   }
 
   #[test]
+  fn ratio_history_rounds_like_the_title() {
+    // the metrics are f32: 0.42 is 0.41999998, still 42 % in the title and the graph
+    let mut store = FreqStore::default();
+    for ratio in [0.42f32, 0.77, 0.004, 0.006, 0.996, 1.0] {
+      store.push(FreqSample::new(1000, ratio, ratio));
+    }
+    assert_eq!(store.ratio(RatioMode::Scaled).items, [100, 100, 1, 0, 77, 42]);
+    assert_eq!(format!("{:.0}", 0.42f32 as f64 * 100.0), "42");
+  }
+
+  #[test]
   fn temp_store_skips_zero_without_history() {
     let mut store = TempStore::default();
     store.push(0.0);
@@ -364,33 +375,23 @@ mod tests {
     assert_eq!(store.last(), (MAX_TEMPS + 5) as f32);
   }
 
-  fn sample(label: &str, ratio: f32, count: usize) -> ClusterSample<'_> {
-    ClusterSample { label, count, aggregate: FreqSample::new(1000, ratio, ratio) }
-  }
-
   #[test]
-  fn cpu_clusters_follow_samples() {
-    let mut clusters = CpuClusters::default();
-
+  fn cpu_clusters_take_a_sample_each() {
     // three tiers, like M6 (6E + 4P + 2S)
-    let three = [sample("E", 0.1, 6), sample("P", 0.2, 4), sample("S", 0.3, 2)];
-    clusters.push(&three);
-    clusters.push(&three);
-    let labels: Vec<&str> = clusters.items.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels, ["E", "P", "S"]);
-    assert_eq!(clusters.items[2].count, 2);
-    assert_eq!(clusters.items[1].freq.ratio(RatioMode::Scaled).items, [20, 20]);
+    let mut clusters = CpuClusters::new([("E", 6), ("P", 4), ("S", 2)]);
+    let sample = |ratio: f32| FreqSample::new(1000, ratio, ratio);
+    clusters.push(&[sample(0.1), sample(0.2), sample(0.3)]);
+    clusters.push(&[sample(0.4), sample(0.5), sample(0.6)]);
 
-    // fewer clusters drop the rest, a changed label starts a new history
-    clusters.push(&[sample("E", 0.4, 6), sample("X", 0.5, 4)]);
-    assert_eq!(clusters.items.len(), 2);
-    assert_eq!(clusters.items[0].freq.ratio(RatioMode::Scaled).items, [40, 10, 10]);
-    assert_eq!(clusters.items[1].label, "X");
-    assert_eq!(clusters.items[1].freq.ratio(RatioMode::Scaled).items, [50]);
+    let labels: Vec<(&str, usize)> =
+      clusters.items.iter().map(|c| (c.label.as_str(), c.count)).collect();
+    assert_eq!(labels, [("E", 6), ("P", 4), ("S", 2)]);
+    let history = |i: usize| clusters.items[i].freq.ratio(RatioMode::Scaled).items.clone();
+    assert_eq!([history(0), history(1), history(2)], [[40, 10], [50, 20], [60, 30]]);
   }
 
   #[test]
-  fn cluster_samples_from_metrics() {
+  fn cpu_clusters_from_soc_and_metrics() {
     let soc = SocInfo {
       ecpu_cores: 6,
       pcpu_cores: 4,
@@ -406,12 +407,14 @@ mod tests {
       ..Default::default()
     };
 
-    let [low, high] = cluster_samples(&soc, &data);
-    assert_eq!((low.label, low.count), ("P", 6));
-    assert_eq!((high.label, high.count), ("S", 4));
+    // labels and core counts before any sample
+    let mut clusters = CpuClusters::from_soc(&soc);
+    let labels: Vec<(&str, usize)> =
+      clusters.items.iter().map(|c| (c.label.as_str(), c.count)).collect();
+    assert_eq!(labels, [("P", 6), ("S", 4)]);
+    assert!(clusters.items.iter().all(|c| c.freq.ratio(RatioMode::Scaled).items.is_empty()));
 
-    let mut clusters = CpuClusters::default();
-    clusters.push(&[low, high]);
+    clusters.push(&cluster_samples(&data));
     let [p, s] = [&clusters.items[0].freq, &clusters.items[1].freq];
     assert_eq!((p.freq_mhz, p.ratio(RatioMode::Scaled).ratio), (2000, 0.5));
     assert_eq!((s.freq_mhz, s.ratio(RatioMode::Active).ratio), (4000, 0.25));

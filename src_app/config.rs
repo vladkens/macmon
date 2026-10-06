@@ -1,7 +1,13 @@
 //! Persistent terminal UI settings.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;
+use serde_json::{Map, Value};
 
 pub(crate) const TUI_MIN_MS: u32 = 250;
 pub(crate) const TUI_MAX_MS: u32 = 10_000;
@@ -15,13 +21,6 @@ pub enum ViewType {
   Graph,
   /// Bar filled to the current load.
   Gauge,
-}
-
-/// Reads `view_type`; values of earlier redesign builds (`Braille`, `Block`) or anything else
-/// unknown fall back to the graph instead of resetting every setting.
-fn view_type_or_graph<'de, D: Deserializer<'de>>(de: D) -> Result<ViewType, D::Error> {
-  let value = serde_json::Value::deserialize(de)?;
-  Ok(ViewType::deserialize(value).unwrap_or(ViewType::Graph))
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
@@ -66,14 +65,13 @@ impl ProcSort {
   }
 }
 
-/// Settings saved in `~/.config/macmon.json`. Fields of older versions (`color`, `theme`,
-/// `per_core_view`, `panels`) are ignored, so old files keep loading.
+/// Settings saved in `~/.config/macmon.json`. Unknown fields (`color` and `per_core_view` of
+/// released versions) are ignored, so old files keep loading.
 #[serde_inline_default]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
   /// Graph or gauge in the CPU cluster, GPU and RAM boxes (`v`).
   #[serde_inline_default(ViewType::Graph)]
-  #[serde(deserialize_with = "view_type_or_graph")]
   pub view_type: ViewType,
 
   #[serde_inline_default(1000)]
@@ -91,6 +89,10 @@ pub struct Config {
 
   #[serde_inline_default(true)]
   pub proc_sort_desc: bool,
+
+  /// File the settings are saved to on every change; `None` keeps them in memory only.
+  #[serde(skip)]
+  path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -99,49 +101,81 @@ impl Default for Config {
   }
 }
 
+/// Whether macmon runs as root through `sudo`.
+fn under_sudo() -> bool {
+  sudo_root(unsafe { libc::geteuid() }, std::env::var_os("SUDO_UID"))
+}
+
+fn sudo_root(euid: u32, sudo_uid: Option<OsString>) -> bool {
+  euid == 0 && sudo_uid.is_some_and(|uid| !uid.is_empty())
+}
+
 impl Config {
   fn normalize(mut self) -> Self {
     self.interval = self.interval.clamp(TUI_MIN_MS, TUI_MAX_MS);
     self
   }
 
-  fn get_config_path() -> Option<String> {
-    // keep tests from reading or overwriting the user's real config
+  /// `~/.config/macmon.json`; none in tests, so they never read or overwrite the user's settings.
+  fn default_path() -> Option<PathBuf> {
     if cfg!(test) {
       return None;
     }
 
-    let home = match std::env::var("HOME") {
-      Ok(home) => home,
-      Err(_) => return None,
-    };
-
-    let filepath = format!("{}/.config/macmon.json", home);
-    let _ = std::fs::create_dir_all(std::path::Path::new(&filepath).parent().unwrap());
-    Some(filepath)
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join(".config").join("macmon.json"))
   }
 
-  /// Parses a config file; malformed content falls back to defaults.
-  fn from_reader(reader: impl std::io::Read) -> Self {
-    serde_json::from_reader::<_, Self>(reader).unwrap_or_default().normalize()
+  /// Parses a config file. A field with a bad value (wrong type, unknown name) gets its default
+  /// and the other fields keep theirs; anything but a JSON object gives the defaults.
+  fn from_reader(reader: impl Read) -> Self {
+    let Ok(Value::Object(fields)) = serde_json::from_reader(reader) else {
+      return Self::default().normalize();
+    };
+
+    // each field on its own, next to the defaults of the others
+    let valid = |(key, value): &(String, Value)| {
+      let field = Map::from_iter([(key.clone(), value.clone())]);
+      serde_json::from_value::<Self>(Value::Object(field)).is_ok()
+    };
+    let fields: Map<String, Value> = fields.into_iter().filter(valid).collect();
+    serde_json::from_value::<Self>(Value::Object(fields)).unwrap_or_default().normalize()
   }
 
   pub fn load() -> Self {
-    match Self::get_config_path().and_then(|path| std::fs::File::open(path).ok()) {
-      Some(file) => Self::from_reader(std::io::BufReader::new(file)),
-      None => Self::default().normalize(),
-    }
+    Self::load_from(Self::default_path())
   }
 
-  pub fn save(&self) {
-    if let Some(path) = Self::get_config_path() {
-      let file = match std::fs::File::create(path) {
-        Ok(file) => file,
-        Err(_) => return,
-      };
+  /// Settings from the file at `path` (the defaults when it is missing), saved back to it.
+  pub(crate) fn load_from(path: Option<PathBuf>) -> Self {
+    let file = path.as_ref().and_then(|path| File::open(path).ok());
+    let cfg = match file {
+      Some(file) => Self::from_reader(BufReader::new(file)),
+      None => Self::default().normalize(),
+    };
+    Self { path, ..cfg }
+  }
 
-      let writer = std::io::BufWriter::new(file);
-      let _ = serde_json::to_writer_pretty(writer, self);
+  /// Saves the settings. Under `sudo` (which keeps `HOME`) only an existing file is rewritten: a
+  /// new file or directory would belong to root, and the user's own runs couldn't save any more.
+  pub fn save(&self) {
+    self.write(under_sudo());
+  }
+
+  /// Writes the settings to their file; with `existing_only`, only to a file that exists.
+  fn write(&self, existing_only: bool) {
+    let Some(path) = &self.path else { return };
+    let file = if existing_only {
+      OpenOptions::new().write(true).truncate(true).open(path)
+    } else {
+      if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+      }
+      File::create(path)
+    };
+
+    if let Ok(file) = file {
+      let _ = serde_json::to_writer_pretty(BufWriter::new(file), self);
     }
   }
 
@@ -185,9 +219,48 @@ impl Config {
   }
 }
 
+/// A config file in the temp directory for tests, removed when dropped.
+#[cfg(test)]
+pub(crate) struct TempConfig(PathBuf);
+
+#[cfg(test)]
+impl TempConfig {
+  /// A path no other test uses, with no file there yet.
+  pub(crate) fn new(name: &str) -> Self {
+    let dir = std::env::temp_dir().join(format!("macmon-test-{}", std::process::id()));
+    let path = dir.join(format!("{name}.json"));
+    let _ = fs::remove_file(&path);
+    Self(path)
+  }
+
+  pub(crate) fn path(&self) -> PathBuf {
+    self.0.clone()
+  }
+
+  /// The saved settings as JSON.
+  pub(crate) fn saved(&self) -> Value {
+    let text = fs::read_to_string(&self.0).expect("settings saved");
+    serde_json::from_str(&text).expect("settings are JSON")
+  }
+}
+
+#[cfg(test)]
+impl Drop for TempConfig {
+  fn drop(&mut self) {
+    let _ = fs::remove_file(&self.0);
+    // the directory goes with the last file
+    let _ = self.0.parent().map(fs::remove_dir);
+  }
+}
+
 #[cfg(test)]
 mod tests {
-  use super::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, ViewType};
+  use std::ffi::OsString;
+  use std::fs;
+
+  use super::{
+    Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType, sudo_root,
+  };
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
@@ -210,9 +283,9 @@ mod tests {
 
   #[test]
   fn malformed_json_loads_defaults() {
-    assert_defaults(&parse(""));
-    assert_defaults(&parse("not json"));
-    assert_defaults(&parse(r#"{"interval": "fast"}"#));
+    for json in ["", "not json", "[1, 2]", "42", r#"{"interval": 500"#] {
+      assert_defaults(&parse(json));
+    }
   }
 
   #[test]
@@ -236,20 +309,34 @@ mod tests {
     assert_eq!(cfg.proc_sort, ProcSort::Cpu);
     assert!(cfg.proc_sort_desc);
 
-    // themes, graph styles, panels and the cores row of earlier redesign builds, unknown values too
-    for json in [
-      r#"{"view_type": "Sparkline", "color": "Green"}"#,
-      r#"{"view_type": "Braille", "theme": "nord"}"#,
-      r#"{"view_type": "Block", "theme": "dracula"}"#,
-      r#"{"view_type": "Unknown", "theme": 42, "color": null}"#,
-      r#"{"per_core_view": true, "panels": {"cpu": false, "proc": false}}"#,
-      r#"{"per_core_view": "yes", "panels": [1, 2]}"#,
-    ] {
-      assert_defaults(&parse(json));
-    }
-    let cfg = parse(r#"{"panels": {"proc": false}, "show_procs": false, "interval": 2000}"#);
+    // fields of earlier builds of this redesign
+    let cfg = parse(r#"{"theme": "nord", "panels": {"proc": false}, "show_procs": false}"#);
     assert!(!cfg.show_procs);
-    assert_eq!(cfg.interval, 2000);
+    assert_eq!(cfg.interval, 1000);
+  }
+
+  #[test]
+  fn bad_values_fall_back_one_field_at_a_time() {
+    // each bad value gets its default, the good ones stay
+    let cfg = parse(
+      r#"{
+        "view_type": "Braille",
+        "interval": 500,
+        "ratio_mode": 3,
+        "show_procs": "no",
+        "proc_sort": "Bogus",
+        "proc_sort_desc": false
+      }"#,
+    );
+    assert_eq!((cfg.view_type, cfg.ratio_mode), (ViewType::Graph, RatioMode::Scaled));
+    assert_eq!((cfg.show_procs, cfg.proc_sort), (true, ProcSort::Cpu));
+    assert_eq!((cfg.interval, cfg.proc_sort_desc), (500, false));
+
+    let cfg = parse(r#"{"view_type": "Gauge", "interval": "fast", "proc_sort": null}"#);
+    assert_eq!(
+      (cfg.view_type, cfg.interval, cfg.proc_sort),
+      (ViewType::Gauge, 1000, ProcSort::Cpu)
+    );
   }
 
   #[test]
@@ -268,7 +355,7 @@ mod tests {
     };
 
     let json = serde_json::to_string(&cfg).unwrap();
-    for old in ["color", "theme", "per_core_view", "panels"] {
+    for old in ["color", "per_core_view", "path"] {
       assert!(!json.contains(old), "{old} in {json}");
     }
 
@@ -301,15 +388,6 @@ mod tests {
   }
 
   #[test]
-  fn toggle_view_type_switches_graph_and_gauge() {
-    let mut cfg = Config::default();
-    cfg.toggle_view_type();
-    assert_eq!(cfg.view_type, ViewType::Gauge);
-    cfg.toggle_view_type();
-    assert_eq!(cfg.view_type, ViewType::Graph);
-  }
-
-  #[test]
   fn all_sort_keys_parse() {
     for (name, key) in [
       ("Cpu", ProcSort::Cpu),
@@ -325,15 +403,6 @@ mod tests {
   }
 
   #[test]
-  fn toggle_procs_flips_process_list() {
-    let mut cfg = Config::default();
-    cfg.toggle_procs();
-    assert!(!cfg.show_procs);
-    cfg.toggle_procs();
-    assert!(cfg.show_procs);
-  }
-
-  #[test]
   fn proc_sort_cycle_wraps() {
     use ProcSort::*;
     let mut sorts = vec![Cpu];
@@ -344,10 +413,71 @@ mod tests {
   }
 
   #[test]
-  fn set_proc_sort_updates_both_fields() {
-    let mut cfg = Config::default();
+  fn every_change_is_saved_to_the_file() {
+    let file = TempConfig::new("every_change");
+    // no file yet: the defaults, saved there on the first change
+    let mut cfg = Config::load_from(Some(file.path()));
+    assert_defaults(&cfg);
+    assert!(!file.path().exists());
+
+    let saved = |field: &str| file.saved()[field].clone();
+    cfg.toggle_procs();
+    assert_eq!(saved("show_procs"), false);
+    cfg.toggle_view_type();
+    assert_eq!(saved("view_type"), "Gauge");
+    cfg.toggle_ratio_mode();
+    assert_eq!(saved("ratio_mode"), "Active");
+    cfg.inc_interval();
+    assert_eq!(saved("interval"), 1250);
+    cfg.dec_interval();
+    assert_eq!(saved("interval"), 1000);
     cfg.set_proc_sort(ProcSort::Name, false);
-    assert_eq!(cfg.proc_sort, ProcSort::Name);
-    assert!(!cfg.proc_sort_desc);
+    assert_eq!((saved("proc_sort"), saved("proc_sort_desc")), ("Name".into(), false.into()));
+
+    // the next run starts where this one stopped
+    let cfg = Config::load_from(Some(file.path()));
+    assert_eq!((cfg.show_procs, cfg.view_type), (false, ViewType::Gauge));
+    assert_eq!((cfg.ratio_mode, cfg.interval), (RatioMode::Active, 1000));
+    assert_eq!((cfg.proc_sort, cfg.proc_sort_desc), (ProcSort::Name, false));
+
+    // and back
+    let mut cfg = cfg;
+    cfg.toggle_view_type();
+    assert_eq!(file.saved()["view_type"], "Sparkline");
+    assert_eq!(Config::load_from(Some(file.path())).view_type, ViewType::Graph);
+  }
+
+  #[test]
+  fn settings_without_a_file_stay_in_memory() {
+    let mut cfg = Config::default();
+    cfg.toggle_procs();
+    assert!(!cfg.show_procs);
+    assert!(Config::load_from(None).show_procs);
+  }
+
+  #[test]
+  fn under_sudo_only_an_existing_file_is_rewritten() {
+    let file = TempConfig::new("under_sudo");
+    let mut cfg = Config::load_from(Some(file.path()));
+    cfg.show_procs = false;
+
+    // no file, no directory: nothing is created that root would own
+    cfg.write(true);
+    assert!(!file.path().exists());
+
+    // a file the user's own runs created is rewritten in place
+    cfg.write(false);
+    cfg.show_procs = true;
+    cfg.write(true);
+    assert_eq!(file.saved()["show_procs"], true);
+    assert!(fs::read_to_string(file.path()).unwrap().contains("\"interval\": 1000"));
+
+    // root through sudo; root logged in, a user, an empty SUDO_UID aren't
+    let uid = |uid: &str| Some(OsString::from(uid));
+    assert!(sudo_root(0, uid("501")));
+    assert!(!sudo_root(0, None));
+    assert!(!sudo_root(0, uid("")));
+    assert!(!sudo_root(501, uid("501")));
+    assert!(!sudo_root(501, None));
   }
 }

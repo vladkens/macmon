@@ -1,48 +1,64 @@
-//! Colors from the terminal's own palette: default foreground / background and the 16 ANSI
-//! colors, so macmon follows the terminal theme.
+//! Colors from the terminal's own palette (the default foreground and the 16 ANSI colors), so
+//! macmon follows the terminal theme, and the bar glyphs the terminal draws without gaps.
+
+use std::borrow::Cow;
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 
 use super::palette::{Palette, Rgb};
+
+/// Borders: bright black (ANSI 8).
+pub const BORDER: Color = Color::DarkGray;
+/// Secondary text (separators, units, zeros): bright black (ANSI 8).
+pub const DIM: Color = Color::DarkGray;
+/// Titles and text: the terminal's default foreground.
+pub const TEXT: Color = Color::Reset;
+/// Selected process row: reverse video over the default colors, so the row reads as one bar
+/// instead of reversing each load color in it.
+pub const SELECTED: Style = Style::new().fg(TEXT).add_modifier(Modifier::REVERSED);
 
 /// Steps of the gradient without a smooth palette: green up to `GREEN_MAX`, yellow up to
 /// `YELLOW_MAX`, red above.
 const GREEN_MAX: f64 = 1.0 / 3.0;
 const YELLOW_MAX: f64 = 2.0 / 3.0;
 
-/// UI colors. Everything is a terminal color (`Color::Reset` or an ANSI index), except the load
-/// gradient on truecolor terminals with a known palette: it blends the terminal's own green,
-/// yellow and red in RGB.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Theme {
-  pub border: Color,
-  pub title: Color,
-  pub text: Color,
-  pub dim: Color,
-  /// Selected process row: reverse video over the default colors.
-  pub selected: Style,
-  /// RGB gradient stops (green, yellow, red); `None` steps through the ANSI colors instead.
-  smooth: Option<[Rgb; 3]>,
+/// Box or metric name: bold, in the default color.
+pub fn heading<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, Style::new().fg(TEXT).add_modifier(Modifier::BOLD))
 }
 
-impl Default for Theme {
-  fn default() -> Self {
-    Self::new(None, false)
-  }
+/// Text in the default color. The color is set, not left out, so text drawn over a border doesn't
+/// take the border's color.
+pub fn text<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, TEXT)
+}
+
+pub fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, DIM)
+}
+
+/// What depends on the terminal: the load gradient and the bar glyphs. The UI colors above are
+/// the same everywhere.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Theme {
+  /// RGB gradient stops (green, yellow, red) from the palette query; `None` steps through the
+  /// ANSI colors instead.
+  smooth: Option<[Rgb; 3]>,
+  /// Graph bars in three levels (blank, `▄`, `█`) instead of eighths: Apple Terminal draws gaps
+  /// between the eighth blocks.
+  pub three_level_bars: bool,
 }
 
 impl Theme {
-  /// Theme for a terminal with the given palette (`None` when the query went unanswered) and
-  /// color support. The gradient is smooth only with both.
-  pub fn new(palette: Option<Palette>, truecolor: bool) -> Self {
-    Self {
-      border: Color::DarkGray,
-      title: Color::Reset,
-      text: Color::Reset,
-      dim: Color::DarkGray,
-      selected: Style::new().fg(Color::Reset).add_modifier(Modifier::REVERSED),
-      smooth: palette.filter(|_| truecolor).map(|p| [p.green, p.yellow, p.red]),
-    }
+  /// Theme for a terminal that answered the palette query with `palette` (asked only on truecolor
+  /// terminals); without one the gradient steps through the ANSI colors.
+  pub fn new(palette: Option<Palette>) -> Self {
+    Self { smooth: palette.map(|p| [p.green, p.yellow, p.red]), three_level_bars: false }
+  }
+
+  pub fn with_three_level_bars(self, three_level_bars: bool) -> Self {
+    Self { three_level_bars, ..self }
   }
 
   /// Load color for `t` in `0.0..=1.0` (green → yellow → red), clamped outside the range.
@@ -72,11 +88,20 @@ fn supports_truecolor(colorterm: Option<&str>) -> bool {
   matches!(colorterm, Some("truecolor" | "24bit"))
 }
 
+/// True in Apple Terminal, which needs three-level bars (`TERM_PROGRAM`).
+pub fn detect_three_level_bars() -> bool {
+  is_apple_terminal(std::env::var("TERM_PROGRAM").ok().as_deref())
+}
+
+fn is_apple_terminal(term_program: Option<&str>) -> bool {
+  term_program == Some("Apple_Terminal")
+}
+
 #[cfg(test)]
 mod tests {
-  use ratatui::style::{Color, Modifier};
+  use ratatui::style::Color;
 
-  use super::{Theme, supports_truecolor};
+  use super::{Theme, is_apple_terminal, supports_truecolor};
   use crate::tui::palette::Palette;
 
   /// Solarized-like terminal colors.
@@ -84,19 +109,8 @@ mod tests {
     Palette { green: (0x85, 0x99, 0x00), yellow: (0xb5, 0x89, 0x00), red: (0xdc, 0x32, 0x2f) };
 
   #[test]
-  fn ui_colors_come_from_the_terminal() {
-    for theme in [Theme::default(), Theme::new(Some(PALETTE), true)] {
-      assert_eq!((theme.border, theme.dim), (Color::DarkGray, Color::DarkGray));
-      assert_eq!((theme.title, theme.text), (Color::Reset, Color::Reset));
-      assert_eq!(theme.selected.fg, Some(Color::Reset));
-      assert!(theme.selected.add_modifier.contains(Modifier::REVERSED));
-      assert_eq!(theme.selected.bg, None);
-    }
-  }
-
-  #[test]
   fn smooth_gradient_blends_terminal_colors() {
-    let theme = Theme::new(Some(PALETTE), true);
+    let theme = Theme::new(Some(PALETTE));
     assert_eq!(theme.gradient(0.0), Color::Rgb(0x85, 0x99, 0x00));
     assert_eq!(theme.gradient(0.5), Color::Rgb(0xb5, 0x89, 0x00));
     assert_eq!(theme.gradient(1.0), Color::Rgb(0xdc, 0x32, 0x2f));
@@ -106,9 +120,8 @@ mod tests {
   }
 
   #[test]
-  fn discrete_gradient_without_palette_or_truecolor() {
-    // a known palette needs truecolor, truecolor needs a known palette
-    for theme in [Theme::new(None, true), Theme::new(Some(PALETTE), false), Theme::default()] {
+  fn discrete_gradient_without_palette() {
+    for theme in [Theme::new(None), Theme::default()] {
       let steps = [
         (0.0, Color::Green),
         (1.0 / 3.0, Color::Green),
@@ -126,11 +139,18 @@ mod tests {
 
   #[test]
   fn gradient_clamps_out_of_range() {
-    for theme in [Theme::default(), Theme::new(Some(PALETTE), true)] {
+    for theme in [Theme::default(), Theme::new(Some(PALETTE))] {
       assert_eq!(theme.gradient(-1.0), theme.gradient(0.0));
       assert_eq!(theme.gradient(2.0), theme.gradient(1.0));
       assert_eq!(theme.gradient(f64::NAN), theme.gradient(0.0));
     }
+  }
+
+  #[test]
+  fn three_level_bars_keep_the_gradient() {
+    let theme = Theme::new(Some(PALETTE)).with_three_level_bars(true);
+    assert!(theme.three_level_bars && !Theme::new(Some(PALETTE)).three_level_bars);
+    assert_eq!(theme.gradient(0.25), Theme::new(Some(PALETTE)).gradient(0.25));
   }
 
   #[test]
@@ -140,5 +160,13 @@ mod tests {
     assert!(!supports_truecolor(Some("256color")));
     assert!(!supports_truecolor(Some("")));
     assert!(!supports_truecolor(None));
+  }
+
+  #[test]
+  fn detects_apple_terminal_from_term_program() {
+    assert!(is_apple_terminal(Some("Apple_Terminal")));
+    for other in [Some("iTerm.app"), Some("ghostty"), Some("tmux"), Some(""), None] {
+      assert!(!is_apple_terminal(other), "{other:?}");
+    }
   }
 }

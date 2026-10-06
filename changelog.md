@@ -2,28 +2,33 @@
 
 ### Breaking Changes
 
-- Removed the TUI color theme switch (`c`): colors now follow the terminal's own palette; old `color` and `theme` config fields are ignored
+- Removed the TUI color theme switch (`c`): colors now follow the terminal's own palette; the old `color` config field is ignored
 - Removed the TUI per-core view (`d`); the old `per_core_view` config field is ignored
 
 ### Features
 
 - Redesigned the TUI layout: the metric boxes (CPU clusters, GPU and RAM, then CPU / GPU / ANE power) take the top 40% of the window and a full-width process list the rest; with the list hidden, the boxes take the whole window
-- Added a process list with PID, name, user, CPU %, memory, power (W) and GPU % per process, without sudo (power only for the current user's processes)
+- Added a process list with PID, name, user, CPU %, memory, power (W) and GPU % per process, without sudo (power only for the current user's processes, on macOS 13+; memory is the physical footprint, the resident size for other users' processes)
 - Added process sorting (`s` / `S`, including by user), filtering by name or PID (`/`) and selection (arrows, PgUp / PgDn, Home / End)
 - Added mouse support in the process list: click a column header to sort by it (again to reverse), click `/ filter` to filter, click a process to select it, scroll with the wheel; hold Option (iTerm2) or Shift (Ghostty and most other terminals) to select text
 - Added `p` to show / hide the process list, saved in the config
-- Added a green → yellow → red load gradient in the terminal's colors, smooth on truecolor terminals
+- Added a green → yellow → red load gradient in the terminal's colors, smooth on truecolor terminals (`COLORTERM=truecolor` / `24bit`) that answer the palette query (OSC 4), stepped otherwise and over SSH
 
 ### Improvements
 
-- History charts fill their whole box at any window size, as solid bars colored by load; average and max still cover the last 128 samples
+- History charts fill their whole box at any window size, as solid bars colored by load (in three levels in Apple Terminal, as before); average and max still cover the last 128 samples
 - `v` still switches the CPU, GPU and RAM boxes between history charts and gauges (power boxes always show charts); gauges are colored by load and the choice is saved as before (`view_type`)
 - The RAM box title shows used RAM and swap (`RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB`) without the total RAM, which is in the chip title
 - Box titles get shorter step by step instead of being cut: frequency, GB values and power avg / max go first, percentages and current power stay; temperatures are shown in whole degrees
 - The power summary (`Power`, fans, `Total`) sits on the bottom border of the metrics box
 - Made the process list auto-hide in small windows; process sampling pauses while it is hidden
 - The footer lists the global keys (`q quit | p procs | v chart | r scaled | -/+ 1000ms`); process list controls sit in its own box: `/ filter` on its border and the sort arrow next to the sorted column
-- The terminal is restored (mouse capture off, main screen, normal mode) on errors and crashes too
+- The terminal is restored (mouse capture off, main screen, cursor shown, normal mode) on errors and crashes too
+- A bad value in `~/.config/macmon.json` resets only that setting instead of all of them
+
+### Fixes
+
+- Running with `sudo` no longer creates a root-owned `~/.config/macmon.json`, which kept later runs from saving settings; under `sudo` only an existing file is updated
 
 **Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.2...main
 

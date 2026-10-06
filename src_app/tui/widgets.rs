@@ -1,4 +1,9 @@
 //! History graph and gauge widgets.
+//!
+//! Both are drawn here rather than with ratatui's `Sparkline` / `Gauge`: `Sparkline` rounds bars
+//! down (a small non-zero sample stays blank) and scales to the largest sample of all its data
+//! (not only the columns on screen), and `Gauge` with an empty label still paints a reversed blank
+//! cell in the middle of its middle row.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,8 +16,10 @@ use super::theme::Theme;
 const BAR_LEVELS: u64 = 8;
 /// Code point before `▁`: the bar of level `n` is `BAR_BASE + n`.
 const BAR_BASE: u32 = 0x2580;
-/// Filled cell of a gauge.
+/// Filled cell of a gauge, and of a full bar.
 const FULL: char = '█';
+/// Half-filled cell of a three-level bar.
+const HALF: char = '▄';
 
 /// Gauge view of the original macmon: a bar across its whole area, filled from the left to `ratio`
 /// (rounded to whole cells) in the load color of `ratio`; the rest stays blank.
@@ -45,8 +52,8 @@ impl Widget for Gauge<'_> {
 
 /// History graph for newest-first samples over its whole area, right-aligned (newest sample on
 /// the right): one solid bar per column, growing from the bottom row up in eighths of a row
-/// (`▁`…`█`), each colored by its own value on the load gradient, or all in one color. Zero
-/// values leave the column blank.
+/// (`▁`…`█`; blank / `▄` / `█` with `Theme::three_level_bars`), each colored by its own value on
+/// the load gradient, or all in one color. Zero values leave the column blank.
 pub struct Graph<'a> {
   data: &'a [u64],
   max: Option<u64>,
@@ -55,19 +62,20 @@ pub struct Graph<'a> {
 }
 
 impl<'a> Graph<'a> {
+  /// Graph scaled to its largest visible sample, each bar in its load color.
   pub fn new(data: &'a [u64], theme: &'a Theme) -> Self {
     Self { data, max: None, color: None, theme }
   }
 
-  /// Value drawn at full height; `None` (the default) scales to the largest visible sample.
-  pub fn max(mut self, max: Option<u64>) -> Self {
-    self.max = max;
+  /// Value drawn at full height.
+  pub fn max(mut self, max: u64) -> Self {
+    self.max = Some(max);
     self
   }
 
-  /// Draws every bar in `color` instead of its load color (`None`, the default).
-  pub fn color(mut self, color: Option<Color>) -> Self {
-    self.color = color;
+  /// Draws every bar in `color` instead of its load color.
+  pub fn color(mut self, color: Color) -> Self {
+    self.color = Some(color);
     self
   }
 }
@@ -91,11 +99,24 @@ impl Widget for Graph<'_> {
         }
 
         let eighths = level.min(BAR_LEVELS);
-        let symbol = char::from_u32(BAR_BASE + eighths as u32).unwrap_or(' ');
-        buf[(x, y)].set_char(symbol).set_fg(color);
+        let symbol = bar_symbol(eighths, self.theme.three_level_bars);
+        if symbol != ' ' {
+          buf[(x, y)].set_char(symbol).set_fg(color);
+        }
         level -= eighths;
       }
     }
+  }
+}
+
+/// Glyph of a cell filled `eighths` of a row from the bottom: `▁`…`█`, or with three levels (as
+/// the original macmon in Apple Terminal) blank up to 1/8, `▄` up to 6/8 and `█` above.
+fn bar_symbol(eighths: u64, three_levels: bool) -> char {
+  match (three_levels, eighths) {
+    (_, 0) | (true, 1) => ' ',
+    (true, 2..=6) => HALF,
+    (true, _) => FULL,
+    (false, _) => char::from_u32(BAR_BASE + eighths.min(BAR_LEVELS) as u32).unwrap_or(' '),
   }
 }
 
@@ -118,14 +139,14 @@ mod tests {
   use ratatui::style::Color;
   use ratatui::widgets::Widget;
 
-  use super::{Gauge, Graph, bar_level};
+  use super::{Gauge, Graph, bar_level, bar_symbol};
   use crate::tui::palette::Palette;
   use crate::tui::theme::Theme;
 
   /// Theme with a smooth gradient, so every load level has its own color.
   fn smooth() -> Theme {
     let palette = Palette { green: (0, 255, 0), yellow: (255, 255, 0), red: (255, 0, 0) };
-    Theme::new(Some(palette), true)
+    Theme::new(Some(palette))
   }
 
   fn draw(widget: impl Widget, width: u16, height: u16) -> Buffer {
@@ -145,7 +166,7 @@ mod tests {
   /// Graph of `data` (newest first) scaled to `max`, `height` rows tall.
   fn graph(data: &[u64], max: u64, width: u16, height: u16) -> Vec<String> {
     let theme = Theme::default();
-    rows(&draw(Graph::new(data, &theme).max(Some(max)), width, height))
+    rows(&draw(Graph::new(data, &theme).max(max), width, height))
   }
 
   /// One-row graph of `data` scaled to `max`.
@@ -198,6 +219,28 @@ mod tests {
   }
 
   #[test]
+  fn graph_in_three_levels_for_apple_terminal() {
+    // the bar set of the original macmon in Apple Terminal: 1/8 blank, 2/8–6/8 `▄`, 7/8–8/8 `█`
+    let symbols: String = (0..=8).map(|eighths| bar_symbol(eighths, true)).collect();
+    assert_eq!(symbols, "  ▄▄▄▄▄██");
+    let symbols: String = (1..=8).map(|eighths| bar_symbol(eighths, false)).collect();
+    assert_eq!(symbols, "▁▂▃▄▅▆▇█");
+
+    // every level of a two-row bar: full cells below, the top cell in three levels, in its color
+    let theme = smooth().with_three_level_bars(true);
+    let levels: Vec<u64> = (1..=16).rev().collect();
+    let buf = draw(Graph::new(&levels, &theme).max(16), 16, 2);
+    assert_eq!(rows(&buf), ["         ▄▄▄▄▄██", " ▄▄▄▄▄██████████"]);
+    for x in 0..16 {
+      for y in 0..2 {
+        let cell = &buf[(x, y)];
+        let color = theme.gradient(f64::from(x + 1) / 16.0);
+        assert_eq!(cell.fg, if cell.symbol() == " " { Color::Reset } else { color }, "{x}, {y}");
+      }
+    }
+  }
+
+  #[test]
   fn graph_is_right_aligned_one_sample_per_column() {
     assert_eq!(bars(&[100; 3], 100, 5), "  ███");
     // newest sample is rightmost
@@ -213,15 +256,15 @@ mod tests {
     // the older 100 doesn't fit, so 20 is the full height
     let buf = draw(Graph::new(&[10, 20, 100], &theme), 2, 2);
     assert_eq!(rows(&buf), ["█ ", "██"]);
-    // `None` is the same as no maximum
-    let buf = draw(Graph::new(&[10, 20, 100], &theme).max(None), 2, 2);
-    assert_eq!(rows(&buf), ["█ ", "██"]);
+    // with all three on screen, 100 is
+    let buf = draw(Graph::new(&[10, 20, 100], &theme), 3, 2);
+    assert_eq!(rows(&buf), ["█  ", "█▄▂"]);
   }
 
   #[test]
   fn graph_colors_each_column_by_its_value() {
     for theme in [smooth(), Theme::default()] {
-      let buf = draw(Graph::new(&[90, 50, 10], &theme).max(Some(100)), 3, 4);
+      let buf = draw(Graph::new(&[90, 50, 10], &theme).max(100), 3, 4);
       // every cell of a bar in the bar's color
       for (x, t) in [(0, 0.1), (1, 0.5), (2, 0.9)] {
         for y in 0..4 {
@@ -235,7 +278,7 @@ mod tests {
 
     // the terminal's green / yellow / red without a palette, no RGB
     let theme = Theme::default();
-    let buf = draw(Graph::new(&[90, 50, 10], &theme).max(Some(100)), 3, 1);
+    let buf = draw(Graph::new(&[90, 50, 10], &theme).max(100), 3, 1);
     let colors: Vec<Color> = (0..3).map(|x| buf[(x, 0)].fg).collect();
     assert_eq!(colors, [Color::Green, Color::Yellow, Color::Red]);
   }
@@ -244,7 +287,7 @@ mod tests {
   fn graph_in_one_color() {
     let theme = smooth();
     let low = theme.gradient(0.0);
-    let buf = draw(Graph::new(&[4000, 2000, 0, 200], &theme).color(Some(low)), 4, 2);
+    let buf = draw(Graph::new(&[4000, 2000, 0, 200], &theme).color(low), 4, 2);
     assert_eq!(rows(&buf), ["   █", "▁ ██"]);
     for (x, y) in [(0, 1), (2, 1), (3, 1), (3, 0)] {
       assert_eq!(buf[(x, y)].fg, low, "{x}, {y}");
@@ -264,7 +307,7 @@ mod tests {
   fn graph_stays_inside_its_area() {
     let theme = Theme::default();
     let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
-    Graph::new(&[100; 10], &theme).max(Some(100)).render(Rect::new(2, 1, 3, 2), &mut buf);
+    Graph::new(&[100; 10], &theme).max(100).render(Rect::new(2, 1, 3, 2), &mut buf);
     assert_eq!(rows(&buf), ["      ", "  ███ ", "  ███ ", "      "]);
   }
 

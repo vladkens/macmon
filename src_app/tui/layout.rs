@@ -54,14 +54,15 @@ const BOTTOM_ROW: [Metric; 3] = [Metric::CpuPower, Metric::GpuPower, Metric::Ane
 /// Height of the metrics box over the process list on a screen `height` rows tall:
 /// `METRICS_HEIGHT_PCT` of it, rounded, but at least `METRICS_MIN_HEIGHT`.
 fn metrics_height(height: u16) -> u16 {
-  let share = (u32::from(height) * METRICS_HEIGHT_PCT + 50) / 100;
-  u16::try_from(share).unwrap_or(u16::MAX).max(METRICS_MIN_HEIGHT).min(height)
+  // a share of `height`, so it fits in u16
+  let share = ((u32::from(height) * METRICS_HEIGHT_PCT + 50) / 100) as u16;
+  share.max(METRICS_MIN_HEIGHT).min(height)
 }
 
-/// `count` boxes side by side splitting the width of `row` evenly; the odd cells are spread
-/// between them. Boxes without cells are left out.
+/// `count` (at least one) boxes side by side splitting the width of `row` evenly; the odd cells
+/// are spread between them. Boxes without cells are left out.
 fn split_row(row: Rect, count: usize) -> impl Iterator<Item = Rect> {
-  let (width, count) = (u64::from(row.width), count.max(1) as u64);
+  let (width, count) = (u64::from(row.width), count as u64);
   // offsets stay within `row.width`, so they fit in u16
   let edge = move |i: u64| (width * i / count) as u16;
   (0..count)
@@ -193,7 +194,7 @@ mod tests {
     let widths: Vec<u16> = plan.boxes[..5].iter().map(|(_, r)| r.width).collect();
     assert_eq!(widths, [39, 40, 39, 40, 40]);
 
-    // no metrics yet: GPU and RAM only
+    // no clusters: GPU and RAM only
     let plan = compute_layout(area, true, 0);
     assert_eq!(kinds(&plan), [Gpu, Ram, CpuPower, GpuPower, AnePower]);
   }
@@ -259,15 +260,17 @@ mod tests {
             }
           }
 
-          // the boxes of a row tile its width
-          if !inner.is_empty() {
-            let row: u32 = plan
-              .boxes
-              .iter()
-              .filter(|(_, r)| r.y == inner.y)
-              .map(|(_, r)| u32::from(r.width))
-              .sum();
-            assert_eq!(row, u32::from(inner.width), "{ctx}");
+          // the boxes of each row tile its width: the top row, then the bottom one (when the
+          // metrics box has a row for it)
+          let upper = inner.height.div_ceil(2);
+          let rows = [(inner.y, upper > 0), (inner.y + upper, inner.height > upper)];
+          for (y, shown) in rows {
+            let row: Vec<&Rect> =
+              plan.boxes.iter().filter(|(_, r)| r.y == y).map(|(_, r)| r).collect();
+            let width: u32 = row.iter().map(|r| u32::from(r.width)).sum();
+            let ctx = format!("{ctx}: row at {y}");
+            assert_eq!(width, if shown { u32::from(inner.width) } else { 0 }, "{ctx}");
+            assert!(row.windows(2).all(|w| w[0].right() == w[1].x), "{ctx}: gaps");
           }
         }
       }

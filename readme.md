@@ -90,7 +90,8 @@ Controls:
   - / + - change update interval
 
 Process list:
-  /     - filter by name or PID (Enter - keep, Esc - clear)
+  /     - filter by name or PID (Enter - keep, Esc - clear); while typing, every key
+          (q, p, v, r, -, + too) goes to the filter, only Ctrl-C quits
   s     - change sort column: CPU, MEM, POWER, GPU, PID, NAME, USER
   S     - reverse sort order
   ↑ ↓   - select process (also PgUp / PgDn / Home / End)
@@ -103,13 +104,19 @@ Mouse (process list):
   wheel                 - move the selection and scroll by 3 rows
 ```
 
-Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`. Colors come from your terminal's palette. The process list hides itself when the window is too small.
+Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`. The process list hides itself when the window is too small.
+
+Colors come from your terminal's palette: borders and text in its own colors, loads from its green through yellow to red. The gradient is smooth on truecolor terminals (`COLORTERM=truecolor` or `24bit`) that answer the palette query (OSC 4); otherwise, and over SSH, where the query is skipped, it steps through the three colors.
 
 While macmon runs, the terminal sends mouse input to it, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
 
 #### Process data without sudo
 
-CPU %, memory and GPU % are shown for every process. Power (W) is shown only for processes of the current user — macOS doesn't expose the energy counter of other users' processes without root, so those show `-` (run with `sudo` to see it for every process). CPU % follows Activity Monitor: 100% is one fully busy core.
+CPU %, memory and GPU % are shown for every process. Power (W) is shown only for processes of the current user — macOS doesn't expose the energy counter of other users' processes without root, so those show `-` (run with `sudo` to see it for every process). Per-process power needs macOS 13 or later. CPU % follows Activity Monitor: 100% is one fully busy core.
+
+Memory is the physical footprint (Activity Monitor's "Memory") for the current user's processes, and the resident size for other users' processes, which is all macOS gives without root. The two measure differently (resident size counts shared pages and leaves out compressed memory), so sorting by MEM compares them only roughly. With `sudo` every process shows its footprint.
+
+Under `sudo`, settings are saved only to an existing `~/.config/macmon.json`, so the file never ends up owned by root.
 
 ### JSON output
 

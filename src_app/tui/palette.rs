@@ -134,7 +134,7 @@ fn channel(hex: &str) -> Option<u8> {
   Some(((value * 255 + max / 2) / max) as u8)
 }
 
-/// Input that can wait for data.
+/// Input that can wait for data: the terminal, or a scripted one in tests.
 trait TimedRead {
   /// Reads the bytes available, waiting up to `timeout` for some to arrive; `Ok(0)` when none did.
   fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
@@ -164,17 +164,21 @@ fn read_until_da1(
 }
 
 /// Sends the palette query and reads the replies. Colors count only when they arrive within
-/// `QUERY_TIMEOUT`; without the DA1 reply by then, late replies are read and dropped until it
-/// arrives (at most `DRAIN_TIMEOUT`), so they don't turn into key presses later.
-fn query(term: &mut (impl Write + TimedRead)) -> io::Result<Option<Palette>> {
+/// `timeout` (`QUERY_TIMEOUT`); without the DA1 reply by then, late replies are read and dropped
+/// until it arrives (at most `drain`, `DRAIN_TIMEOUT`), so they don't turn into key presses later.
+fn query(
+  term: &mut (impl Write + TimedRead),
+  timeout: Duration,
+  drain: Duration,
+) -> io::Result<Option<Palette>> {
   term.write_all(QUERY)?;
   term.flush()?;
 
   let mut input = vec![];
-  let answered = read_until_da1(term, &mut input, QUERY_TIMEOUT)?;
+  let answered = read_until_da1(term, &mut input, timeout)?;
   let palette = Palette::from_replies(&parse_replies(&input));
   if !answered {
-    read_until_da1(term, &mut input, DRAIN_TIMEOUT)?;
+    read_until_da1(term, &mut input, drain)?;
   }
 
   Ok(palette)
@@ -199,32 +203,14 @@ fn wants_query(truecolor: bool, env: impl Fn(&str) -> Option<OsString>) -> bool 
 /// Asks the terminal for its palette. Needs raw mode and must run before anything else reads the
 /// terminal. `None` when the terminal doesn't answer in time or can't be opened.
 pub fn query_terminal() -> Option<Palette> {
-  let mut tty = Tty::open().ok()?;
-  query(&mut tty).ok().flatten()
+  let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+  query(&mut tty, QUERY_TIMEOUT, DRAIN_TIMEOUT).ok().flatten()
 }
 
-/// The controlling terminal.
-struct Tty(File);
-
-impl Tty {
-  fn open() -> io::Result<Self> {
-    OpenOptions::new().read(true).write(true).open("/dev/tty").map(Self)
-  }
-}
-
-impl Write for Tty {
-  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-    self.0.write(buf)
-  }
-
-  fn flush(&mut self) -> io::Result<()> {
-    self.0.flush()
-  }
-}
-
-impl TimedRead for Tty {
+/// The controlling terminal (`/dev/tty`).
+impl TimedRead for File {
   fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
-    let fd = self.0.as_raw_fd();
+    let fd = self.as_raw_fd();
     if !(0..libc::FD_SETSIZE as i32).contains(&fd) {
       return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
@@ -247,7 +233,7 @@ impl TimedRead for Tty {
 
       match ready {
         0 => return Ok(0),
-        1.. => return self.0.read(buf),
+        1.. => return self.read(buf),
         _ => {
           let err = io::Error::last_os_error();
           if err.kind() != io::ErrorKind::Interrupted {
@@ -265,12 +251,12 @@ mod tests {
   use std::ffi::OsString;
   use std::fs::File;
   use std::io::{self, Read, Write};
-  use std::os::fd::FromRawFd;
+  use std::os::fd::{AsRawFd, FromRawFd};
   use std::thread;
   use std::time::{Duration, Instant};
 
   use super::{
-    DRAIN_TIMEOUT, Palette, QUERY, QUERY_TIMEOUT, Replies, TimedRead, Tty, channel, parse_replies,
+    DRAIN_TIMEOUT, Palette, QUERY, QUERY_TIMEOUT, Replies, TimedRead, channel, parse_replies,
     query, wants_query,
   };
 
@@ -443,6 +429,11 @@ mod tests {
     Step::Data(bytes.to_vec())
   }
 
+  /// The palette query with the timeouts macmon uses.
+  fn ask(term: &mut FakeTerm) -> io::Result<Option<Palette>> {
+    query(term, QUERY_TIMEOUT, DRAIN_TIMEOUT)
+  }
+
   /// Environment lookup over `vars`.
   fn env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
     move |name| vars.iter().find(|(n, _)| *n == name).map(|(_, value)| OsString::from(value))
@@ -472,7 +463,7 @@ mod tests {
   #[test]
   fn query_sends_osc4_then_da1() {
     let mut term = FakeTerm::new([data(&answer())]);
-    assert_eq!(query(&mut term).unwrap(), Some(PALETTE));
+    assert_eq!(ask(&mut term).unwrap(), Some(PALETTE));
     assert_eq!(term.written, b"\x1b]4;1;?\x07\x1b]4;2;?\x07\x1b]4;3;?\x07\x1b[c");
     assert_eq!(term.written, QUERY);
     // one read, nothing more after the DA1 reply
@@ -483,7 +474,7 @@ mod tests {
   #[test]
   fn query_reads_replies_in_pieces() {
     let mut term = FakeTerm::new(answer().into_iter().map(|b| data(&[b])));
-    assert_eq!(query(&mut term).unwrap(), Some(PALETTE));
+    assert_eq!(ask(&mut term).unwrap(), Some(PALETTE));
     assert_eq!(term.waits.len(), answer().len());
     assert!(term.waits.windows(2).all(|w| w[1] <= w[0]), "one deadline for all reads");
   }
@@ -491,7 +482,7 @@ mod tests {
   #[test]
   fn query_without_osc4_support_stops_at_da1() {
     let mut term = FakeTerm::new([data(DA1), data(b"q")]);
-    assert_eq!(query(&mut term).unwrap(), None);
+    assert_eq!(ask(&mut term).unwrap(), None);
     assert_eq!(term.waits.len(), 1, "no wait for the timeout");
     assert_eq!(term.steps.len(), 1, "input after the DA1 reply is left alone");
   }
@@ -501,7 +492,7 @@ mod tests {
     // nothing within the timeout: the replies that come later are read up to the DA1 reply
     let mut term = FakeTerm::new([Step::Timeout, data(&answer()[..20]), data(&answer()[20..])]);
     term.steps.push_back(data(b"q"));
-    assert_eq!(query(&mut term).unwrap(), None, "late colors don't count");
+    assert_eq!(ask(&mut term).unwrap(), None, "late colors don't count");
     assert_eq!(term.steps.len(), 1, "input after the DA1 reply is left alone");
     assert_eq!(term.waits.len(), 3);
     assert!(term.waits[0] <= QUERY_TIMEOUT);
@@ -511,30 +502,30 @@ mod tests {
     let full = answer();
     let (head, tail) = full.split_at(10);
     let mut term = FakeTerm::new([data(head), Step::Timeout, data(tail)]);
-    assert_eq!(query(&mut term).unwrap(), None);
+    assert_eq!(ask(&mut term).unwrap(), None);
     assert!(term.steps.is_empty());
   }
 
   #[test]
   fn query_unanswered_gives_up() {
     let mut term = FakeTerm::new([]);
-    assert_eq!(query(&mut term).unwrap(), None);
+    assert_eq!(ask(&mut term).unwrap(), None);
     assert_eq!(term.waits.len(), 2, "query and drain");
 
     // colors without the DA1 reply still count when they arrive in time
     let replies = [RED, GREEN, YELLOW].concat();
     let mut term = FakeTerm::new([data(&replies)]);
-    assert_eq!(query(&mut term).unwrap(), Some(PALETTE));
+    assert_eq!(ask(&mut term).unwrap(), Some(PALETTE));
   }
 
   #[test]
   fn query_read_error() {
     let mut term = FakeTerm::new([data(RED), Step::Fail]);
-    assert!(query(&mut term).is_err());
+    assert!(ask(&mut term).is_err());
   }
 
   /// Pseudo terminal in raw mode: macmon's side and the terminal (master) side.
-  fn pty() -> (Tty, File) {
+  fn pty() -> (File, File) {
     use std::ptr::null_mut;
     let (mut master, mut slave) = (0, 0);
     unsafe {
@@ -543,20 +534,20 @@ mod tests {
       assert_eq!(libc::tcgetattr(slave, &mut attrs), 0);
       libc::cfmakeraw(&mut attrs);
       assert_eq!(libc::tcsetattr(slave, libc::TCSANOW, &attrs), 0);
-      (Tty(File::from_raw_fd(slave)), File::from_raw_fd(master))
+      (File::from_raw_fd(slave), File::from_raw_fd(master))
     }
   }
 
   /// Plays a terminal on the master side: reads the query, waits `delay`, then writes `answer`.
-  fn answer_query(mut master: File, delay: Duration, answer: Vec<u8>) -> thread::JoinHandle<()> {
+  /// The thread returns the master, so it stays open until the test joins it.
+  fn answer_query(mut master: File, delay: Duration, answer: Vec<u8>) -> thread::JoinHandle<File> {
     thread::spawn(move || {
       let mut query = vec![0u8; QUERY.len()];
       master.read_exact(&mut query).unwrap();
       assert_eq!(query, QUERY);
       thread::sleep(delay);
       master.write_all(&answer).unwrap();
-      // keep the master open until the test is done reading
-      thread::sleep(Duration::from_millis(300));
+      master
     })
   }
 
@@ -573,13 +564,16 @@ mod tests {
     assert_eq!(&buf[..read], b"abc");
   }
 
+  /// Long enough for a loaded machine, so the pty tests don't depend on its timing.
+  const PATIENT: Duration = Duration::from_secs(5);
+
   #[test]
   fn query_over_pty() {
     let (mut tty, master) = pty();
     let terminal = answer_query(master, Duration::ZERO, answer());
     let started = Instant::now();
-    assert_eq!(query(&mut tty).unwrap(), Some(PALETTE));
-    assert!(started.elapsed() < QUERY_TIMEOUT, "the DA1 reply ends the wait");
+    assert_eq!(query(&mut tty, PATIENT, PATIENT).unwrap(), Some(PALETTE));
+    assert!(started.elapsed() < PATIENT, "the DA1 reply ends the wait");
 
     // nothing left for crossterm to read
     let mut buf = [0u8; 64];
@@ -589,12 +583,36 @@ mod tests {
 
   #[test]
   fn late_replies_over_pty_are_drained() {
+    // the terminal answers only after the reply window
     let (mut tty, master) = pty();
-    let terminal = answer_query(master, QUERY_TIMEOUT + Duration::from_millis(100), answer());
-    assert_eq!(query(&mut tty).unwrap(), None);
+    let timeout = Duration::from_millis(50);
+    let terminal = answer_query(master, timeout * 4, answer());
+    assert_eq!(query(&mut tty, timeout, PATIENT).unwrap(), None);
 
     let mut buf = [0u8; 64];
     assert_eq!(tty.read_timeout(&mut buf, Duration::from_millis(50)).unwrap(), 0);
     terminal.join().unwrap();
+  }
+
+  #[test]
+  fn descriptors_select_cannot_watch_are_refused() {
+    // a descriptor past FD_SETSIZE would make select(2) write past its fd_set
+    let (tty, _master) = pty();
+    let limit = libc::FD_SETSIZE as libc::c_int;
+    let mut high = unsafe { libc::fcntl(tty.as_raw_fd(), libc::F_DUPFD, limit) };
+    if high < 0 {
+      // allow this process enough descriptors to get one that high
+      let mut rlimit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+      assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlimit) }, 0);
+      rlimit.rlim_cur = rlimit.rlim_max.min(2 * limit as libc::rlim_t);
+      assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlimit) }, 0);
+      high = unsafe { libc::fcntl(tty.as_raw_fd(), libc::F_DUPFD, limit) };
+    }
+    assert!(high >= limit, "no descriptor past FD_SETSIZE");
+
+    let mut high = unsafe { File::from_raw_fd(high) };
+    let mut buf = [0u8; 16];
+    let err = high.read_timeout(&mut buf, Duration::from_millis(10)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
   }
 }

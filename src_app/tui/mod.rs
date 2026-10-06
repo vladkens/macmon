@@ -1,8 +1,8 @@
 //! Terminal user interface.
 
+mod boxes;
 mod layout;
 mod palette;
-mod panels;
 mod proc_view;
 mod store;
 mod theme;
@@ -17,7 +17,7 @@ use std::time::Instant;
 use std::{sync::mpsc, time::Duration};
 
 use ratatui::crossterm::{
-  ExecutableCommand,
+  ExecutableCommand, cursor,
   event::{
     self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
     MouseEvent, MouseEventKind,
@@ -29,6 +29,7 @@ use ratatui::prelude::*;
 use crate::config::{Config, TUI_MAX_MS, TUI_MIN_MS};
 use crate::procs::{ProcInfo, ProcSampler};
 use macmon::{Metrics, Sampler, SocInfo};
+use palette::Palette;
 use proc_view::ProcView;
 use store::{CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
 use theme::Theme;
@@ -71,8 +72,10 @@ fn leave_term() {
   restore_term_once(&TERM_ACTIVE, &mut stdout(), terminal::disable_raw_mode);
 }
 
-/// Turns mouse capture off, leaves the alternate screen and turns raw mode off when `active` is
-/// set, and clears it. Every step runs even if an earlier one fails. Returns whether it ran.
+/// Turns mouse capture off, leaves the alternate screen, shows the cursor (ratatui hides it while
+/// drawing, and a panic aborts before the terminal is dropped) and turns raw mode off when
+/// `active` is set, and clears it. Every step runs even if an earlier one fails. Returns whether
+/// it ran.
 fn restore_term_once(
   active: &AtomicBool,
   out: &mut impl Write,
@@ -84,8 +87,24 @@ fn restore_term_once(
 
   let _ = out.execute(DisableMouseCapture);
   let _ = out.execute(terminal::LeaveAlternateScreen);
+  let _ = out.execute(cursor::Show);
   let _ = disable_raw_mode();
   true
+}
+
+/// Starts reading input once the terminal is in raw mode: `query` asks for the palette first,
+/// while nothing else reads the terminal (so its replies can't turn into key presses), then mouse
+/// capture goes on (so mouse reports can't mix with the replies), then `start` runs the input
+/// thread. Returns the palette.
+fn start_input(
+  out: &mut impl Write,
+  query: impl FnOnce() -> Option<Palette>,
+  start: impl FnOnce(),
+) -> io::Result<Option<Palette>> {
+  let palette = query();
+  out.execute(EnableMouseCapture)?;
+  start();
+  Ok(palette)
 }
 
 // MARK: Threads
@@ -95,23 +114,37 @@ enum Event {
   Procs(Vec<ProcInfo>),
   Key(KeyEvent),
   Mouse(MouseEvent),
+  /// Redraw: the periodic tick, and a resize, so the mouse targets follow the new layout at once.
   Tick,
 }
 
-/// Mouse input the app acts on: left clicks and the wheel. Mouse capture reports every move too;
-/// moves, drags and releases are dropped in the input thread, so they don't cost a frame each.
-fn is_mouse_action(mouse: &MouseEvent) -> bool {
-  matches!(
-    mouse.kind,
-    MouseEventKind::Down(MouseButton::Left) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-  )
+/// App event of a terminal event: keys, left clicks and the wheel, and a resize as a redraw.
+/// Mouse capture reports every move too; moves, drags and releases are dropped here, so they
+/// don't cost a frame each.
+fn input_event(event: event::Event) -> Option<Event> {
+  match event {
+    event::Event::Key(key) => Some(Event::Key(key)),
+    event::Event::Mouse(mouse) => {
+      let action = matches!(
+        mouse.kind,
+        MouseEventKind::Down(MouseButton::Left)
+          | MouseEventKind::ScrollUp
+          | MouseEventKind::ScrollDown
+      );
+      action.then_some(Event::Mouse(mouse))
+    }
+    event::Event::Resize(..) => Some(Event::Tick),
+    _ => None,
+  }
 }
 
-/// How often the paused process thread checks whether the panel is back.
+/// How often the paused process thread checks whether the panel is back, and the sleeping one
+/// whether it is still on screen.
 const PROCS_PAUSE_POLL: Duration = Duration::from_millis(100);
 /// Window of the first process sample after the panel shows up, so the list fills in quickly.
 const PROCS_WARMUP: Duration = Duration::from_millis(TUI_MIN_MS as u64);
 
+/// Sends input events and a `Tick` every `tick` ms; stops once the app is gone.
 fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
   let tick_rate = Duration::from_millis(tick);
 
@@ -119,41 +152,56 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
     let mut last_tick = Instant::now();
 
     loop {
-      if event::poll(Duration::from_millis(tick)).unwrap() {
-        match event::read().unwrap() {
-          event::Event::Key(key) => tx.send(Event::Key(key)).unwrap(),
-          event::Event::Mouse(mouse) if is_mouse_action(&mouse) => {
-            tx.send(Event::Mouse(mouse)).unwrap()
-          }
-          _ => {}
-        };
+      if event::poll(tick_rate).unwrap()
+        && let Some(event) = input_event(event::read().unwrap())
+        && tx.send(event).is_err()
+      {
+        return;
       }
 
       if last_tick.elapsed() >= tick_rate {
-        tx.send(Event::Tick).unwrap();
+        if tx.send(Event::Tick).is_err() {
+          return;
+        }
         last_tick = Instant::now();
       }
     }
   });
 }
 
+/// Sends metrics: the first sample after 100 ms, then one per interval; stops once the app is
+/// gone.
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   std::thread::spawn(move || {
     let mut sampler = Sampler::new().unwrap();
-
-    // Send initial metrics
-    tx.send(Event::Update(Box::new(sampler.get_metrics(100).unwrap()))).unwrap();
+    let mut window = 100;
 
     loop {
-      let msec = (*msec.read().unwrap()).max(TUI_MIN_MS);
-      tx.send(Event::Update(Box::new(sampler.get_metrics(msec).unwrap()))).unwrap();
+      let metrics = sampler.get_metrics(window).unwrap();
+      if tx.send(Event::Update(Box::new(metrics))).is_err() {
+        return;
+      }
+      window = (*msec.read().unwrap()).max(TUI_MIN_MS);
     }
   });
 }
 
+/// Sleeps `duration` in `PROCS_PAUSE_POLL` steps, and stops early once `active` is cleared.
+fn sleep_while(active: &AtomicBool, duration: Duration) {
+  let deadline = Instant::now() + duration;
+  while active.load(Ordering::Relaxed) {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+      return;
+    }
+    thread::sleep(left.min(PROCS_PAUSE_POLL));
+  }
+}
+
 /// Sends `Event::Procs` every `msec` while `active` is set (the process panel is on screen) and
 /// sleeps otherwise. A pause drops the sampler, so rates after it don't average over the hidden
-/// time. Exits when the receiver is gone.
+/// time; it is noticed within `PROCS_PAUSE_POLL`, also during a long interval. Exits when the
+/// receiver is gone.
 fn run_procs_thread(
   tx: mpsc::Sender<Event>,
   msec: Arc<RwLock<u32>>,
@@ -183,7 +231,8 @@ fn run_procs_thread(
           PROCS_WARMUP
         }
       };
-      thread::sleep(delay.saturating_sub(started.elapsed()));
+      // a pause during the wait goes back to the top, which drops the sampler
+      sleep_while(&active, delay.saturating_sub(started.elapsed()));
     }
   })
 }
@@ -193,7 +242,8 @@ fn run_procs_thread(
 #[derive(Debug, Default)]
 pub struct App {
   cfg: Config,
-  /// Terminal colors; the gradient steps through ANSI colors until `run_loop` queries the palette.
+  /// Gradient and bar glyphs of the terminal; the gradient steps through ANSI colors until
+  /// `run_loop` queries the palette.
   theme: Theme,
 
   soc: SocInfo,
@@ -221,10 +271,15 @@ pub struct App {
 
 impl App {
   pub fn new() -> WithError<Self> {
-    let soc = SocInfo::new()?;
-    let cfg = Config::load();
+    Ok(Self::with(SocInfo::new()?, Config::load()))
+  }
+
+  /// App for the chip `soc` with the settings `cfg`. The CPU clusters come from the chip, so the
+  /// first frame already has their boxes and the chip title its core counts.
+  fn with(soc: SocInfo, cfg: Config) -> Self {
+    let clusters = CpuClusters::from_soc(&soc);
     let proc_view = ProcView::new(cfg.proc_sort, cfg.proc_sort_desc);
-    Ok(Self { cfg, soc, proc_view, ..Default::default() })
+    Self { cfg, soc, clusters, proc_view, ..Default::default() }
   }
 
   fn update_metrics(&mut self, data: Metrics) {
@@ -234,7 +289,7 @@ impl App {
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
-    self.clusters.push(&store::cluster_samples(&self.soc, &data));
+    self.clusters.push(&store::cluster_samples(&data));
     let igpu = FreqSample::new(data.gpu_freq_mhz, data.gpu_scaled_ratio, data.gpu_active_ratio);
     self.igpu_freq.push(igpu);
 
@@ -264,6 +319,25 @@ impl App {
     if self.procs_visible() {
       self.proc_view.set_procs(procs);
     }
+  }
+
+  /// Applies one event. Returns `Break` when the app should quit. Keys can change the interval,
+  /// which `msec` hands on to the sampling threads.
+  fn handle_event(&mut self, event: Event, msec: &RwLock<u32>) -> ControlFlow<()> {
+    match event {
+      Event::Update(data) => self.update_metrics(*data),
+      Event::Procs(procs) => self.update_procs(procs),
+      Event::Key(key) => {
+        if self.handle_key(key).is_break() {
+          return ControlFlow::Break(());
+        }
+        *msec.write().unwrap() = self.cfg.interval;
+      }
+      Event::Mouse(mouse) => self.handle_mouse(mouse),
+      Event::Tick => {}
+    }
+
+    ControlFlow::Continue(())
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit.
@@ -334,30 +408,17 @@ impl App {
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
 
-    // raw mode is on and the input thread doesn't read the terminal yet, so the palette replies
-    // can't turn into key presses; the palette only matters for a smooth (truecolor) gradient,
-    // and SSH sessions skip the query (late replies)
+    // the palette only matters for a smooth (truecolor) gradient, and SSH sessions skip the query
+    // (late replies)
     let truecolor = theme::detect_truecolor();
-    let palette = if palette::should_query(truecolor) { palette::query_terminal() } else { None };
-    self.theme = Theme::new(palette, truecolor);
-    // after the query, so mouse reports can't mix with its replies
-    stdout().execute(EnableMouseCapture)?;
-    run_inputs_thread(tx.clone(), 250);
+    let query = || if palette::should_query(truecolor) { palette::query_terminal() } else { None };
+    let palette = start_input(&mut stdout(), query, || run_inputs_thread(tx.clone(), 250))?;
+    self.theme = Theme::new(palette).with_three_level_bars(theme::detect_three_level_bars());
 
     loop {
       term.draw(|f| self.render(f))?;
-
-      match rx.recv()? {
-        Event::Update(data) => self.update_metrics(*data),
-        Event::Procs(procs) => self.update_procs(procs),
-        Event::Key(key) => {
-          if self.handle_key(key).is_break() {
-            break;
-          }
-          *msec.write().unwrap() = self.cfg.interval;
-        }
-        Event::Mouse(mouse) => self.handle_mouse(mouse),
-        Event::Tick => {}
+      if self.handle_event(rx.recv()?, &msec).is_break() {
+        break;
       }
     }
 
@@ -367,10 +428,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::RefCell;
   use std::io::{self, Write};
   use std::ops::ControlFlow;
+  use std::rc::Rc;
   use std::sync::atomic::{AtomicBool, Ordering};
   use std::sync::{Arc, RwLock, mpsc};
+  use std::thread;
   use std::time::{Duration, Instant};
 
   use macmon::{FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
@@ -379,17 +443,21 @@ mod tests {
   use ratatui::buffer::Buffer;
   use ratatui::crossterm::ExecutableCommand;
   use ratatui::crossterm::event::{
-    EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self as term_event, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
+    MouseEvent, MouseEventKind,
   };
   use ratatui::layout::{Margin, Rect};
   use ratatui::style::{Color, Modifier};
 
   use super::layout::Metric;
   use super::palette::{Palette, Rgb};
-  use super::store::{ClusterSample, CpuClusters, FreqSample};
-  use super::theme::Theme;
-  use super::{App, Event, is_mouse_action, restore_term_once, run_procs_thread};
-  use crate::config::{ProcSort, RatioMode, TUI_MIN_MS, ViewType};
+  use super::store::{CpuClusters, FreqSample};
+  use super::theme::{self, Theme};
+  use super::{
+    App, Event, PROCS_PAUSE_POLL, PROCS_WARMUP, input_event, restore_term_once, run_procs_thread,
+    start_input,
+  };
+  use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -430,7 +498,8 @@ mod tests {
     for mode in modes {
       assert!(text.contains(&format!("\x1b[?{mode}l")), "{mode} stays on: {text:?}");
     }
-    assert!(text.ends_with("\x1b[?1049l"), "{text:?}");
+    // the main screen, with the cursor that drawing hid (a panic never drops the terminal)
+    assert!(text.ends_with("\x1b[?1049l\x1b[?25h"), "{text:?}");
     assert_eq!(raw_off, 1);
 
     // the normal exit, the guard of an error return and the panic hook can all get here: only
@@ -466,16 +535,102 @@ mod tests {
   }
 
   #[test]
-  fn input_thread_forwards_clicks_and_wheel_only() {
+  fn input_thread_forwards_keys_clicks_wheel_and_resizes() {
     use MouseButton::*;
     use MouseEventKind::*;
     for kind in [Down(Left), ScrollUp, ScrollDown] {
-      assert!(is_mouse_action(&mouse(kind, 3, 4)), "{kind:?}");
+      let event = input_event(term_event::Event::Mouse(mouse(kind, 3, 4)));
+      assert!(matches!(event, Some(Event::Mouse(m)) if m == mouse(kind, 3, 4)), "{kind:?}");
     }
     let ignored = [Down(Right), Down(Middle), Up(Left), Drag(Left), Moved, ScrollLeft, ScrollRight];
     for kind in ignored {
-      assert!(!is_mouse_action(&mouse(kind, 3, 4)), "{kind:?}");
+      assert!(input_event(term_event::Event::Mouse(mouse(kind, 3, 4))).is_none(), "{kind:?}");
     }
+
+    let event = input_event(term_event::Event::Key(key('q')));
+    assert!(matches!(event, Some(Event::Key(k)) if k == key('q')));
+    // a resize redraws at once, so clicks don't hit the cells of the old layout
+    assert!(matches!(input_event(term_event::Event::Resize(80, 24)), Some(Event::Tick)));
+    for other in [term_event::Event::FocusGained, term_event::Event::Paste("x".into())] {
+      assert!(input_event(other).is_none());
+    }
+  }
+
+  #[test]
+  fn input_starts_after_the_palette_query_and_mouse_capture() {
+    // one log for the query, the terminal output and the input thread
+    #[derive(Clone, Default)]
+    struct Log(Rc<RefCell<Vec<String>>>);
+    impl Write for Log {
+      fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().push(String::from_utf8_lossy(buf).into_owned());
+        Ok(buf.len())
+      }
+      fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+      }
+    }
+
+    let log = Log::default();
+    let mut out = log.clone();
+    let query = || {
+      log.0.borrow_mut().push("query".into());
+      Some(PALETTE)
+    };
+    let palette = start_input(&mut out, query, || log.0.borrow_mut().push("input".into()));
+    assert_eq!(palette.unwrap(), Some(PALETTE));
+
+    let mut capture = vec![];
+    capture.execute(EnableMouseCapture).unwrap();
+    let steps = log.0.borrow().clone();
+    assert_eq!(steps.first().map(String::as_str), Some("query"), "{steps:?}");
+    assert_eq!(steps.last().map(String::as_str), Some("input"), "{steps:?}");
+    assert_eq!(steps[1..steps.len() - 1].concat().into_bytes(), capture, "{steps:?}");
+
+    // no mouse capture: no input thread either
+    struct Closed;
+    impl Write for Closed {
+      fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other("closed"))
+      }
+      fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+      }
+    }
+    let mut started = false;
+    assert!(start_input(&mut Closed, || None, || started = true).is_err());
+    assert!(!started);
+  }
+
+  #[test]
+  fn events_reach_their_handlers() {
+    let file = TempConfig::new("events_reach_their_handlers");
+    let mut app = saving_app(&file);
+    let msec = RwLock::new(1000);
+    let handle = |app: &mut App, event: Event| app.handle_event(event, &msec);
+
+    // metrics and processes
+    let metrics = Metrics { gpu_freq_mhz: 777, ..test_metrics() };
+    assert!(handle(&mut app, Event::Update(Box::new(metrics))).is_continue());
+    assert_eq!(app.igpu_freq.freq_mhz, 777);
+    render_buffer(&mut app, 200, 50);
+    assert!(handle(&mut app, Event::Procs(varied_procs())).is_continue());
+    assert_eq!(app.proc_view.row_count(), 3);
+    assert!(handle(&mut app, Event::Tick).is_continue());
+
+    // a key changing the interval hands it on to the sampling threads
+    assert!(handle(&mut app, Event::Key(key('+'))).is_continue());
+    assert_eq!(*msec.read().unwrap(), 1250);
+    assert_eq!(file.saved()["interval"], 1250);
+
+    // the mouse: a click on the MEM header sorts by it
+    let header = proc_row(&render_buffer(&mut app, 200, 50), 1);
+    let at = mouse(MouseEventKind::Down(MouseButton::Left), x_of(&header, "MEM"), PROC_Y + 1);
+    assert!(handle(&mut app, Event::Mouse(at)).is_continue());
+    assert_eq!(app.proc_view.sort, ProcSort::Mem);
+
+    assert!(handle(&mut app, Event::Key(key('q'))).is_break());
+    assert_eq!(*msec.read().unwrap(), 1250);
   }
 
   fn test_soc() -> SocInfo {
@@ -519,9 +674,9 @@ mod tests {
     }
   }
 
-  /// App with `samples` samples of `test_metrics` changed by `edit`.
+  /// App for `test_soc` with `samples` samples of `test_metrics` changed by `edit`.
   fn app_with_samples(samples: usize, edit: impl Fn(&mut Metrics)) -> App {
-    let mut app = App { soc: test_soc(), ..Default::default() };
+    let mut app = App::with(test_soc(), Config::default());
     for _ in 0..samples {
       let mut metrics = test_metrics();
       edit(&mut metrics);
@@ -537,6 +692,20 @@ mod tests {
 
   fn test_app() -> App {
     test_app_with(|_| {})
+  }
+
+  /// `test_app` saving its settings to `file`.
+  fn saving_app(file: &TempConfig) -> App {
+    let mut app = App::with(test_soc(), Config::load_from(Some(file.path())));
+    for _ in 0..3 {
+      app.update_metrics(test_metrics());
+    }
+    app
+  }
+
+  /// Theme with a smooth gradient between the colors of `PALETTE`, so close loads differ in color.
+  fn smooth() -> Theme {
+    Theme::new(Some(PALETTE))
   }
 
   fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -573,23 +742,6 @@ mod tests {
   }
 
   #[test]
-  fn removed_keys_do_nothing() {
-    // no theme switch, no cores row, no panel keys
-    let mut app = app_with_procs(varied_procs());
-    let cfg = serde_json::to_string(&app.cfg).unwrap();
-    let theme = app.theme;
-    let screen = render_to_string(&mut app, 200, 50);
-    for c in ['c', 'd', 'C', 'V', 'D', '0', '1', '2', '3', '4', '5', '6', '9'] {
-      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?}");
-    }
-
-    assert_eq!(serde_json::to_string(&app.cfg).unwrap(), cfg);
-    assert_eq!(app.theme, theme);
-    assert!(!app.proc_view.typing() && app.proc_view.filter().is_empty());
-    assert_eq!(render_to_string(&mut app, 200, 50), screen);
-  }
-
-  #[test]
   fn r_toggles_ratio_mode() {
     let mut app = App::default();
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
@@ -623,18 +775,28 @@ mod tests {
     assert_eq!(app.cfg.ratio_mode, RatioMode::Scaled);
     assert_eq!(app.cfg.interval, 1000);
     assert!(app.cfg.show_procs);
+
+    // keys without a binding (the old theme, cores and panel keys among them) change nothing
+    let file = TempConfig::new("unknown_keys_are_ignored");
+    let mut app = with_procs(saving_app(&file), varied_procs());
+    let screen = render_to_string(&mut app, 200, 50);
+    for c in ['c', 'd', 'x', 'C', 'V', 'D', '0', '1', '5', '9'] {
+      assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?}");
+    }
+    assert!(!file.path().exists(), "nothing saved");
+    assert!(!app.proc_view.typing() && app.proc_view.filter().is_empty());
+    assert_eq!(render_to_string(&mut app, 200, 50), screen);
   }
 
   #[test]
   fn p_toggles_process_list() {
-    let mut app = app_with_procs(varied_procs());
+    let file = TempConfig::new("p_toggles_process_list");
+    let mut app = with_procs(saving_app(&file), varied_procs());
     assert!(procs_active(&app));
 
     assert_eq!(app.handle_key(key('p')), ControlFlow::Continue(()));
     assert!(!app.cfg.show_procs);
-    // saved with the other settings
-    let json = serde_json::to_string(&app.cfg).unwrap();
-    assert!(json.contains(r#""show_procs":false"#), "{json}");
+    assert_eq!(file.saved()["show_procs"], false);
 
     // the metrics take the whole screen, the same hints move next to the power summary
     let buf = render_buffer(&mut app, 200, 50);
@@ -648,6 +810,7 @@ mod tests {
     // shown again: collecting until the next sample, its controls in its box
     assert_eq!(app.handle_key(key('p')), ControlFlow::Continue(()));
     assert!(app.cfg.show_procs);
+    assert_eq!(file.saved()["show_procs"], true);
     let buf = render_buffer(&mut app, 200, 50);
     let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
     assert!(screen.contains("collecting…"));
@@ -675,8 +838,9 @@ mod tests {
 
   #[test]
   fn renders_terminal_colors_without_smooth_palette() {
-    // no palette, no truecolor, or neither: ANSI colors only
-    let themes = [Theme::new(None, true), Theme::new(Some(PALETTE), false), Theme::default()];
+    // no palette (not asked without truecolor, or not answered): ANSI colors only, with either
+    // bar set
+    let themes = [Theme::new(None), Theme::default().with_three_level_bars(true)];
     let ansi = [Color::Reset, Color::DarkGray, Color::Green, Color::Yellow, Color::Red];
     for theme in themes {
       let mut app = colorful_app(theme);
@@ -699,7 +863,7 @@ mod tests {
 
   #[test]
   fn smooth_gradient_blends_queried_colors() {
-    let theme = Theme::new(Some(PALETTE), true);
+    let theme = smooth();
     let mut app = colorful_app(theme);
     let buf = render_buffer(&mut app, 200, 50);
 
@@ -836,17 +1000,52 @@ mod tests {
       (60, 15, true),
       (60, 12, false),
     ];
-    let labels =
-      ["─ E-CPU ", "─ P-CPU ", "─ GPU ", "─ RAM ", "─ CPU ", "─ ANE ", "─ Power: 6.60W", "q quit"];
+    use Metric::*;
+    let names = [
+      (Cluster(0), "E-CPU "),
+      (Cluster(1), "P-CPU "),
+      (Gpu, "GPU "),
+      (Ram, "RAM "),
+      (CpuPower, "CPU "),
+      (GpuPower, "GPU "),
+      (AnePower, "ANE "),
+    ];
     for (width, height, proc) in sizes {
       let mut app = test_app();
-      let screen = render_to_string(&mut app, width, height);
+      let buf = render_buffer(&mut app, width, height);
+      let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
       let ctx = format!("{width}x{height}");
-      for label in labels.iter().chain(&["╭─ Apple M3 Pro (6E+6P+18GPU 36GB) "]) {
+
+      // every box, each with its own name
+      let boxes: Vec<Metric> = app.layout(buf.area).boxes.iter().map(|(m, _)| *m).collect();
+      assert_eq!(boxes, names.map(|(metric, _)| metric), "{ctx}");
+      for (metric, name) in names {
+        let top = box_top(&app, &buf, metric);
+        assert!(top.starts_with(&format!("╭─ {name}")), "{metric:?} ({ctx}): {top}");
+      }
+
+      for label in ["╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ", "─ Power: 6.60W", "q quit"] {
         assert!(screen.contains(label), "missing {label:?} ({ctx})");
       }
       assert_eq!(screen.contains(" proc "), proc, "{ctx}");
     }
+  }
+
+  #[test]
+  fn first_frame_has_every_cluster_box() {
+    // before the first metrics sample: the cluster boxes and core counts come from the chip
+    let mut app = App::with(test_soc(), Config::default());
+    let buf = render_buffer(&mut app, 200, 50);
+    let plan = app.layout(buf.area);
+    assert!(row(&buf, 0).starts_with("╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ─"), "{}", row(&buf, 0));
+    assert!(box_top(&app, &buf, Metric::Cluster(0)).starts_with("╭─ E-CPU 0% @ 0 MHz ─"));
+    assert!(box_top(&app, &buf, Metric::Cluster(1)).starts_with("╭─ P-CPU 0% @ 0 MHz ─"));
+
+    // the first sample fills them in without moving a box
+    app.update_metrics(test_metrics());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert_eq!(app.layout(buf.area), plan);
+    assert!(box_top(&app, &buf, Metric::Cluster(0)).starts_with("╭─ E-CPU 42% @ 1800 MHz ─"));
   }
 
   #[test]
@@ -861,8 +1060,8 @@ mod tests {
 
     // the chip name plain, the details in parentheses dim
     let buf = render_buffer(&mut app, 100, 30);
-    assert_eq!((buf[(3, 0)].symbol(), buf[(3, 0)].fg), ("A", app.theme.text));
-    assert_eq!((buf[(16, 0)].symbol(), buf[(16, 0)].fg), ("(", app.theme.dim));
+    assert_eq!((buf[(3, 0)].symbol(), buf[(3, 0)].fg), ("A", theme::TEXT));
+    assert_eq!((buf[(16, 0)].symbol(), buf[(16, 0)].fg), ("(", theme::DIM));
 
     // narrower: the version is dropped
     let top = row(&render_buffer(&mut app, 40, 30), 0);
@@ -895,7 +1094,7 @@ mod tests {
     assert_eq!(rows[1], format!("│{tops}│"));
 
     // 4 graph rows, top to bottom; the samples are constant, so every column of a graph is the
-    // same: E-CPU 41% is 14 eighths of 32, P-CPU 76% 25, GPU 23% 8, RAM 20 of 36 GB 18
+    // same: E-CPU 42% is 14 eighths of 32, P-CPU 77% 25, GPU 23% 8, RAM 20 of 36 GB 18
     let columns =
       [[' ', ' ', '▆', '█'], ['▁', '█', '█', '█'], [' ', ' ', ' ', '█'], [' ', '▂', '█', '█']];
     for (y, row) in rows[2..6].iter().enumerate() {
@@ -936,7 +1135,7 @@ mod tests {
   /// average and maximum differ too: CPU 5 / 4 / 6 W, GPU 2.5 / 2 / 3, ANE 0.25 / 0.2 / 0.3,
   /// Power 9.5 / 8 / 12, Total 16 / 14 / 20.
   fn varied_power_app() -> App {
-    let mut app = App { soc: test_soc(), ..Default::default() };
+    let mut app = App::with(test_soc(), Config::default());
     let samples =
       [(2.0, 1.0, 0.1, 10.0, 5.0), (4.0, 2.0, 0.2, 12.0, 7.0), (6.0, 3.0, 0.3, 20.0, 12.0)];
     for (cpu_power, gpu_power, ane_power, sys_power, all_power) in samples {
@@ -949,7 +1148,8 @@ mod tests {
 
   #[test]
   fn power_boxes_show_current_avg_max_and_temperature() {
-    let mut app = varied_power_app();
+    // smooth, so the temperature's color tells 45 °C apart from the graph's low color
+    let mut app = App { theme: smooth(), ..varied_power_app() };
     let buf = render_buffer(&mut app, 200, 50);
 
     // 66 cells: current, average and maximum left, the temperature right
@@ -970,12 +1170,17 @@ mod tests {
     let cell = |dx: u16| &buf[(cpu.x + dx, cpu.y)];
     assert_eq!(cell(3).symbol(), "C");
     assert!(cell(3).modifier.contains(Modifier::BOLD));
-    assert_eq!((cell(7).symbol(), cell(7).fg), ("5", app.theme.text));
+    assert_eq!((cell(7).symbol(), cell(7).fg), ("5", theme::TEXT));
     assert!(!cell(7).modifier.contains(Modifier::BOLD));
-    assert_eq!((cell(13).symbol(), cell(13).fg), ("(", app.theme.dim));
-    assert_eq!((cell(14).symbol(), cell(14).fg), ("4", app.theme.dim));
+    assert_eq!((cell(13).symbol(), cell(13).fg), ("(", theme::DIM));
+    assert_eq!((cell(14).symbol(), cell(14).fg), ("4", theme::DIM));
     let top = box_top(&app, &buf, Metric::CpuPower);
-    assert_eq!(cell(x_of(&top, "45°C")).fg, app.theme.gradient((45.0 - 30.0) / 70.0));
+    let temp = app.theme.gradient((45.0 - 30.0) / 70.0);
+    assert_eq!(cell(x_of(&top, "45°C")).fg, temp);
+    assert_ne!(temp, app.theme.gradient(0.0));
+    let gpu = box_top(&app, &buf, Metric::GpuPower);
+    let gpu_x = app.layout(buf.area).boxes[5].1.x + x_of(&gpu, "40°C");
+    assert_eq!(buf[(gpu_x, cpu.y)].fg, app.theme.gradient((40.0 - 30.0) / 70.0));
 
     // the summary: Power (avg / max), the fan, Total (avg / max)
     let summary =
@@ -983,12 +1188,12 @@ mod tests {
     let bottom = row(&buf, PROC_Y - 1);
     assert_eq!(bottom, border(200, summary, ""));
     let fg = |text: &str| buf[(x_of(&bottom, text), PROC_Y - 1)].fg;
-    assert_eq!(fg("Power:"), app.theme.text);
-    assert_eq!(fg("(avg"), app.theme.dim);
-    assert_eq!(fg("| Fan"), app.theme.dim);
-    assert_eq!(fg("Fan"), app.theme.text);
-    assert_eq!(fg("Total"), app.theme.text);
-    assert_eq!(fg("(14.00"), app.theme.dim);
+    assert_eq!(fg("Power:"), theme::TEXT);
+    assert_eq!(fg("(avg"), theme::DIM);
+    assert_eq!(fg("| Fan"), theme::DIM);
+    assert_eq!(fg("Fan"), theme::TEXT);
+    assert_eq!(fg("Total"), theme::TEXT);
+    assert_eq!(fg("(14.00"), theme::DIM);
   }
 
   const GIB: f64 = (1u64 << 30) as f64;
@@ -1082,7 +1287,9 @@ mod tests {
 
   #[test]
   fn ram_title_styles() {
-    let mut app = ram_app(true);
+    // smooth, so 70 % and 79 % get colors of their own
+    let mut app = App { theme: smooth(), ..ram_app(true) };
+    assert_ne!(app.theme.gradient(16.81 / 24.0), app.theme.gradient(2.37 / 3.0));
     let buf = render_buffer(&mut app, 60 * 4 + 2, 50);
     let ram = app.layout(buf.area).boxes[3].1;
     let top = box_top(&app, &buf, Metric::Ram);
@@ -1091,9 +1298,9 @@ mod tests {
     // names bold, the separator dim, the RAM percent on the gradient
     assert!(cell("RAM").modifier.contains(Modifier::BOLD));
     assert!(cell("SWAP").modifier.contains(Modifier::BOLD));
-    assert_eq!(cell("·").fg, app.theme.dim);
+    assert_eq!(cell("·").fg, theme::DIM);
     assert_eq!(cell("70.0%").fg, app.theme.gradient(16.81 / 24.0));
-    assert_eq!(cell("16.81").fg, app.theme.text);
+    assert_eq!(cell("16.81").fg, theme::TEXT);
 
     // shorter steps: both percents on the gradient
     let buf = render_buffer(&mut app, 30 * 4 + 2, 50);
@@ -1206,8 +1413,8 @@ mod tests {
     assert!(cell(x("p procs")).modifier.contains(Modifier::BOLD));
     assert!(cell(x("v chart")).modifier.contains(Modifier::BOLD));
     assert!(!cell(x("quit")).modifier.contains(Modifier::BOLD));
-    assert_eq!(cell(x("quit")).fg, app.theme.text);
-    assert_eq!(cell(x("| p")).fg, app.theme.dim);
+    assert_eq!(cell(x("quit")).fg, theme::TEXT);
+    assert_eq!(cell(x("| p")).fg, theme::DIM);
 
     // the current ratio mode and interval; the label of `v` doesn't change with the view
     assert!(app.handle_key(key('r')).is_continue());
@@ -1278,17 +1485,11 @@ mod tests {
 
   /// App with synthetic CPU clusters of `(label, cores, load)`.
   fn clusters_app(clusters: &[(&str, usize, f32)]) -> App {
-    let samples: Vec<ClusterSample> = clusters
-      .iter()
-      .map(|&(label, count, ratio)| ClusterSample {
-        label,
-        count,
-        aggregate: FreqSample::new(2000, ratio, ratio),
-      })
-      .collect();
+    let samples: Vec<FreqSample> =
+      clusters.iter().map(|&(_, _, ratio)| FreqSample::new(2000, ratio, ratio)).collect();
 
     let mut app = test_app();
-    app.clusters = CpuClusters::default();
+    app.clusters = CpuClusters::new(clusters.iter().map(|&(label, count, _)| (label, count)));
     for _ in 0..3 {
       app.clusters.push(&samples);
     }
@@ -1408,7 +1609,23 @@ mod tests {
         if bits & 8 != 0 {
           app.proc_view.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         }
-        render_buffer(&mut app, width, height);
+        let buf = render_buffer(&mut app, width, height);
+
+        // every box drawn where the layout puts it: no title, summary, hint, graph or table
+        // cell lands on a corner
+        let plan = app.layout(buf.area);
+        let boxes = plan.top.into_iter().chain(plan.proc).chain(plan.boxes.iter().map(|b| b.1));
+        for r in boxes.filter(|r| r.width >= 2 && r.height >= 2) {
+          let corners = [
+            (r.left(), r.top(), "╭"),
+            (r.right() - 1, r.top(), "╮"),
+            (r.left(), r.bottom() - 1, "╰"),
+            (r.right() - 1, r.bottom() - 1, "╯"),
+          ];
+          for (x, y, corner) in corners {
+            assert_eq!(buf[(x, y)].symbol(), corner, "{width}x{height} bits {bits}: {r:?}");
+          }
+        }
       }
     }
   }
@@ -1420,37 +1637,40 @@ mod tests {
       app.update_metrics(test_metrics());
     }
 
-    for (width, height) in [(200, 50), (120, 40), (60, 15)] {
-      let buf = render_buffer(&mut app, width, height);
-      let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
-      let ctx = format!("{width}x{height}");
+    for three_levels in [false, true] {
+      app.theme = Theme::default().with_three_level_bars(three_levels);
+      for (width, height) in [(200, 50), (120, 40), (60, 15)] {
+        let buf = render_buffer(&mut app, width, height);
+        let screen: String = buf.content.iter().map(|cell| cell.symbol()).collect();
+        let ctx = format!("{width}x{height}, three levels {three_levels}");
+        assert!(screen.chars().filter(|c| is_bar(*c)).count() > 40, "{ctx}");
 
-      // solid bars only: no braille, no meters
-      assert!(screen.chars().filter(|c| is_bar(*c)).count() > 40, "{ctx}");
-      let braille = |c: char| ('\u{2800}'..='\u{28ff}').contains(&c);
-      assert!(!screen.chars().any(|c| braille(c) || c == '▰' || c == '▱'), "{ctx}");
-
-      // every box has a graph standing on its bottom row
-      for (metric, r) in app.layout(buf.area).boxes {
-        let graph = r.inner(Margin::new(1, 1));
-        let bottom = text(&buf, Rect { y: graph.bottom() - 1, height: 1, ..graph });
-        assert!(bottom.chars().any(is_bar), "{ctx}: {metric:?} {bottom:?}");
+        // every box has a graph standing on its bottom row; Apple Terminal gets only `▄` and `█`
+        for (metric, r) in app.layout(buf.area).boxes {
+          let graph = r.inner(Margin::new(1, 1));
+          let bottom = text(&buf, Rect { y: graph.bottom() - 1, height: 1, ..graph });
+          assert!(bottom.chars().any(is_bar), "{ctx}: {metric:?} {bottom:?}");
+          if three_levels {
+            let cells = (graph.top()..graph.bottom()).map(|y| text(&buf, Rect { y, ..graph }));
+            let glyphs: String = cells.collect();
+            assert!(glyphs.chars().all(|c| [' ', '▄', '█'].contains(&c)), "{ctx}: {glyphs}");
+          }
+        }
       }
     }
   }
 
   #[test]
   fn graph_columns_follow_their_own_load_power_graphs_stay_low() {
-    // E-CPU load cycles through 10%, 50%, 89% (0.9 as f32), the newest is 89%
+    // E-CPU load cycles through 10%, 50%, 90%, the newest is 90%
     let loads = [0.1, 0.5, 0.9];
-    let smooth = Theme::new(Some(PALETTE), true);
-    for theme in [Theme::default(), smooth] {
-      let mut app = App { soc: test_soc(), theme, ..Default::default() };
+    for theme in [Theme::default(), smooth()] {
+      let mut app = App { theme, ..App::with(test_soc(), Config::default()) };
       for i in 0..60 {
         app.update_metrics(Metrics { ecpu_scaled_ratio: loads[i % 3], ..test_metrics() });
       }
 
-      // 100x30: E-CPU graph 3 rows (24 eighths) tall: 10% ▃, 50% █ under ▄, 89% █ █ ▆
+      // 100x30: E-CPU graph 3 rows (24 eighths) tall: 10% ▃, 50% █ under ▄, 90% █ █ ▆
       let buf = render_buffer(&mut app, 100, 30);
       let graph = graph_area(&app, buf.area, Metric::Cluster(0));
       assert_eq!(graph.height, 3);
@@ -1463,7 +1683,7 @@ mod tests {
       // every cell of a column in the color of its own load
       for x in graph.left()..graph.right() {
         let age = usize::from(graph.right() - 1 - x);
-        let load = [0.1, 0.5, 0.89][(59 - age) % 3];
+        let load = [0.1, 0.5, 0.9][(59 - age) % 3];
         for y in graph.top()..graph.bottom() {
           let cell = &buf[(x, y)];
           if cell.symbol() != " " {
@@ -1559,12 +1779,12 @@ mod tests {
       let buf = render_buffer(&mut app, width, height);
       let ctx = format!("{width}x{height} procs {procs}");
 
-      // (metric, load, age of the column): RAM at 70 % and an older 60 % column, E-CPU 41 %
+      // (metric, load, age of the column): RAM at 70 % and an older 60 % column, E-CPU 42 %
       // (stored in whole percent), GPU 23 %, all scaled to a full load
       let cases = [
         (Metric::Ram, 0.7, 0),
         (Metric::Ram, 0.6, 7),
-        (Metric::Cluster(0), 0.41, 0),
+        (Metric::Cluster(0), 0.42, 0),
         (Metric::Gpu, 0.23, 0),
       ];
       for (metric, load, age) in cases {
@@ -1588,13 +1808,16 @@ mod tests {
 
   #[test]
   fn v_switches_load_boxes_to_gauges() {
-    let mut app = app_with_samples(60, |_| {});
+    let file = TempConfig::new("v_switches_load_boxes_to_gauges");
+    let mut app = saving_app(&file);
+    for _ in 3..60 {
+      app.update_metrics(test_metrics());
+    }
     let graphs = render_buffer(&mut app, 200, 50);
 
     assert!(app.handle_key(key('v')).is_continue());
     assert_eq!(app.cfg.view_type, ViewType::Gauge);
-    let json = serde_json::to_string(&app.cfg).unwrap();
-    assert!(json.contains(r#""view_type":"Gauge""#), "{json}");
+    assert_eq!(file.saved()["view_type"], "Gauge");
 
     // every row filled to the load in its load color: E-CPU 42 % of 47 cells, P-CPU 77 % of 48,
     // GPU 23 % of 47, RAM 20 of 36 GB of 48
@@ -1646,7 +1869,7 @@ mod tests {
     // `v` again: back to the graphs
     assert!(app.handle_key(key('v')).is_continue());
     assert_eq!(app.cfg.view_type, ViewType::Graph);
-    assert!(serde_json::to_string(&app.cfg).unwrap().contains(r#""view_type":"Sparkline""#));
+    assert_eq!(file.saved()["view_type"], "Sparkline");
     assert_eq!(render_buffer(&mut app, 200, 50), graphs);
   }
 
@@ -1662,7 +1885,6 @@ mod tests {
   fn test_procs() -> Vec<ProcInfo> {
     let proc = |pid: i32, name: &str| ProcInfo {
       pid,
-      ppid: 1,
       name: name.to_string(),
       user: "root".to_string(),
       cpu_pct: 12.5,
@@ -1742,12 +1964,16 @@ mod tests {
     assert!(render_to_string(&mut app, 200, 50).contains(" proc 3 "));
   }
 
-  /// App with the process panel on screen at 200x50 and `procs` in it.
-  fn app_with_procs(procs: Vec<ProcInfo>) -> App {
-    let mut app = test_app();
+  /// `app` with the process panel on screen at 200x50 and `procs` in it.
+  fn with_procs(mut app: App, procs: Vec<ProcInfo>) -> App {
     render_buffer(&mut app, 200, 50);
     app.update_procs(procs);
     app
+  }
+
+  /// `test_app` with the process panel on screen at 200x50 and `procs` in it.
+  fn app_with_procs(procs: Vec<ProcInfo>) -> App {
+    with_procs(test_app(), procs)
   }
 
   /// Screen row where the process box starts in a 200x50 window: right under the metrics box, 40 %
@@ -1762,7 +1988,6 @@ mod tests {
   fn varied_procs() -> Vec<ProcInfo> {
     let proc = |pid: i32, name: &str, cpu, mem_mb: u64, power_w, gpu_pct| ProcInfo {
       pid,
-      ppid: 1,
       name: name.to_string(),
       user: if pid < 100 { "root" } else { "vlad" }.to_string(),
       cpu_pct: cpu,
@@ -1779,7 +2004,9 @@ mod tests {
 
   #[test]
   fn proc_table_renders_rows() {
+    // smooth, so every value has a color of its own
     let mut app = app_with_procs(varied_procs());
+    app.theme = smooth();
     let buf = render_buffer(&mut app, 200, 50);
 
     // title: count and the filter label, nothing on the right
@@ -1815,12 +2042,33 @@ mod tests {
     let cell = |y: u16, row: &str, text: &str| buf[(x_of(row, text), PROC_Y + y)].fg;
     assert_eq!(cell(2, &rows[0], "25.0"), app.theme.gradient(0.25));
     assert_eq!(cell(2, &rows[0], "40.0"), app.theme.gradient(0.4));
-    assert_eq!(cell(4, &rows[2], "-"), app.theme.dim);
-    assert_eq!(cell(4, &rows[2], "0.0"), app.theme.dim);
-    assert_eq!(cell(4, &rows[2], "launchd"), app.theme.text);
+    // MEM by its share of the RAM (36 GB), POWER against 10 W
+    assert_eq!(cell(2, &rows[0], "300M"), app.theme.gradient(300.0 / (36.0 * 1024.0)));
+    assert_eq!(cell(3, &rows[1], "1.5G"), app.theme.gradient(1.5 / 36.0));
+    assert_eq!(cell(2, &rows[0], "1.50W"), app.theme.gradient(0.15));
+    assert_eq!(cell(3, &rows[1], "0.80W"), app.theme.gradient(0.08));
+    assert_ne!(app.theme.gradient(0.15), app.theme.gradient(0.08));
+    assert_eq!(cell(4, &rows[2], "-"), theme::DIM);
+    assert_eq!(cell(4, &rows[2], "0.0"), theme::DIM);
+    assert_eq!(cell(4, &rows[2], "launchd"), theme::TEXT);
     // the sorted column header stands out
-    assert_eq!(cell(1, &header, "CPU%"), app.theme.title);
-    assert_eq!(cell(1, &header, "MEM"), app.theme.dim);
+    assert_eq!(cell(1, &header, "CPU%"), theme::TEXT);
+    assert_eq!(cell(1, &header, "MEM"), theme::DIM);
+  }
+
+  #[test]
+  fn zero_power_is_a_dim_number_missing_power_a_dash() {
+    let mut procs = varied_procs();
+    procs[0].power_w = Some(0.0); // launchd, last by CPU
+    let mut app = app_with_procs(procs);
+    let buf = render_buffer(&mut app, 200, 50);
+    let line = proc_row(&buf, 4);
+    assert!(line.ends_with("   0.0    20M   0.00W    0.0 │"), "{line}");
+    assert_eq!(buf[(x_of(&line, "0.00W"), PROC_Y + 4)].fg, theme::DIM);
+
+    app.update_procs(varied_procs());
+    let line = proc_row(&render_buffer(&mut app, 200, 50), 4);
+    assert!(line.ends_with("   0.0    20M       -    0.0 │"), "{line}");
   }
 
   #[test]
@@ -1884,10 +2132,13 @@ mod tests {
 
   #[test]
   fn proc_sort_keys_persist_in_config() {
-    let mut app = app_with_procs(varied_procs());
+    let file = TempConfig::new("proc_sort_keys_persist_in_config");
+    let mut app = with_procs(saving_app(&file), varied_procs());
     assert!(app.handle_key(key('s')).is_continue());
     assert_eq!(app.cfg.proc_sort, ProcSort::Mem);
     assert!(app.cfg.proc_sort_desc);
+    assert_eq!(file.saved()["proc_sort"], "Mem");
+    assert_eq!(file.saved()["proc_sort_desc"], true);
 
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 1).contains(" CPU%  MEM ↓ "), "{}", proc_row(&buf, 1));
@@ -1895,9 +2146,17 @@ mod tests {
 
     assert!(app.handle_key(key('S')).is_continue());
     assert!(!app.cfg.proc_sort_desc);
+    assert_eq!(file.saved()["proc_sort_desc"], false);
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 1).contains(" CPU%  MEM ↑ "), "{}", proc_row(&buf, 1));
     assert!(proc_row(&buf, 2).contains("launchd"));
+
+    // the next run starts with the saved sort
+    let app = App::with(test_soc(), Config::load_from(Some(file.path())));
+    let mut app = with_procs(app, varied_procs());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 1).contains(" CPU%  MEM ↑ "), "{}", proc_row(&buf, 1));
+    assert_eq!(shown_pids(&app), [1, 631, 2301]);
   }
 
   #[test]
@@ -1971,7 +2230,8 @@ mod tests {
   #[test]
   fn click_on_header_sorts_and_again_reverses() {
     use ProcSort::*;
-    let mut app = app_with_procs(varied_procs());
+    let file = TempConfig::new("click_on_header_sorts_and_again_reverses");
+    let mut app = with_procs(saving_app(&file), varied_procs());
 
     // (header, sort key, pids descending, pids ascending); a new column keeps the direction
     let cases = [
@@ -1997,6 +2257,9 @@ mod tests {
       let arrow = x_of(&line, &format!("{header} ↓")) + header.len() as u16 + 1;
       click(&mut app, arrow, PROC_Y + 1);
       assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, false), "{header}");
+      // saved like `s` / `S`
+      assert_eq!(file.saved()["proc_sort"], format!("{sort:?}"), "{header}");
+      assert_eq!(file.saved()["proc_sort_desc"], false, "{header}");
       assert_eq!(shown_pids(&app), asc, "{header}");
       let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
       assert!(line.contains(&format!("{header} ↑")), "{line}");
@@ -2006,9 +2269,8 @@ mod tests {
       assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, true), "{header}");
     }
 
-    // saved like `s` / `S`
-    let json = serde_json::to_string(&app.cfg).unwrap();
-    assert!(json.contains(r#""proc_sort":"Cpu","proc_sort_desc":true"#), "{json}");
+    assert_eq!(file.saved()["proc_sort"], "Cpu");
+    assert_eq!(file.saved()["proc_sort_desc"], true);
   }
 
   #[test]
@@ -2039,6 +2301,56 @@ mod tests {
     click(&mut app, x_of(&title, "/saf") + 2, PROC_Y);
     assert!(app.proc_view.typing());
     assert_eq!(app.proc_view.filter(), "saf");
+  }
+
+  #[test]
+  fn long_filter_keeps_its_end_and_cursor_on_the_border() {
+    let mut app = app_with_procs(varied_procs());
+    let filter = "abcdefghij".repeat(25);
+    for c in format!("/{filter}").chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+
+    // `/…`, the end of the filter and the cursor, next to the count
+    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
+    assert_eq!(title, format!("╭─ proc 0/3 ─ /…{}█ ─╮", &filter[70..]));
+
+    // kept: one more character instead of the cursor, and a click on it edits it again
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
+    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
+    assert_eq!(title, format!("╭─ proc 0/3 ─ /…{} ─╮", &filter[69..]));
+    click(&mut app, 190, PROC_Y);
+    assert!(app.proc_view.typing());
+
+    // no room next to the count: the filter takes its place
+    let buf = render_buffer(&mut app, 20, 50);
+    assert_eq!(app.layout(buf.area).proc.map(|r| r.y), Some(PROC_Y));
+    assert_eq!(proc_row(&buf, 0), format!("╭─ /…{}█ ─╮", &filter[239..]));
+    assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_continue());
+    let buf = render_buffer(&mut app, 20, 50);
+    assert_eq!(proc_row(&buf, 0), format!("╭─ /…{} ─╮", &filter[238..]));
+    click(&mut app, 5, PROC_Y);
+    assert!(app.proc_view.typing());
+  }
+
+  #[test]
+  fn narrow_process_box_drops_the_filter_label_and_its_click() {
+    let mut app = app_with_procs(varied_procs());
+    let buf = render_buffer(&mut app, 23, 50);
+    assert_eq!(proc_row(&buf, 0), "╭─ proc 3 ─ / filter ─╮");
+
+    // one cell less: no label, and nothing on the border starts typing
+    let buf = render_buffer(&mut app, 22, 50);
+    assert_eq!(proc_row(&buf, 0), format!("╭─ proc 3 {}╮", "─".repeat(11)));
+    for x in 0..22 {
+      click(&mut app, x, PROC_Y);
+      assert!(!app.proc_view.typing(), "x {x}");
+    }
+
+    // `/` still does, and the filter shows up
+    assert!(app.handle_key(key('/')).is_continue());
+    let title = proc_row(&render_buffer(&mut app, 22, 50), 0);
+    assert!(title.starts_with("╭─ proc 3 ─ /█ ─"), "{title}");
   }
 
   /// App with 100 processes `proc0`… (pids 1000…) in the same order by CPU and pid; 27 of them
@@ -2270,16 +2582,26 @@ mod tests {
   fn procs_thread_samples_only_while_active() {
     let (tx, rx) = mpsc::channel();
     let active = Arc::new(AtomicBool::new(false));
-    let thread = run_procs_thread(tx, Arc::new(RwLock::new(TUI_MIN_MS)), active.clone());
+    let msec = Arc::new(RwLock::new(TUI_MIN_MS));
+    let sampler = run_procs_thread(tx, msec.clone(), active.clone());
 
-    // paused: a sample (baseline + warm-up + delta) would take longer than ~250 ms
+    // Shows the panel; returns how long the first sample took and the sample.
+    let show = |active: &AtomicBool| {
+      let shown = Instant::now();
+      active.store(true, Ordering::Relaxed);
+      let Ok(Event::Procs(procs)) = rx.recv_timeout(Duration::from_secs(5)) else {
+        panic!("no process sample");
+      };
+      (shown.elapsed(), procs)
+    };
+
+    // paused: nothing
     assert!(rx.recv_timeout(Duration::from_millis(600)).is_err(), "sampled while paused");
 
-    // active: the first message is already a delta sample with the own process in it
-    active.store(true, Ordering::Relaxed);
-    let Ok(Event::Procs(procs)) = rx.recv_timeout(Duration::from_secs(10)) else {
-      panic!("no process sample");
-    };
+    // shown: the baseline sample stays silent, the first message comes after the warm-up with
+    // the own process in it
+    let (waited, procs) = show(&active);
+    assert!(waited >= PROCS_WARMUP, "{waited:?}: the baseline sample was sent");
     let pid = std::process::id() as i32;
     assert!(procs.iter().any(|p| p.pid == pid && !p.name.is_empty()));
 
@@ -2294,9 +2616,28 @@ mod tests {
     }
     assert!(late <= 1, "{late} samples after pausing");
 
-    // exits once the receiver is gone
+    // the pause dropped the sampler: a new baseline and warm-up, then the long interval
+    *msec.write().unwrap() = TUI_MAX_MS;
+    let (waited, _) = show(&active);
+    assert!(waited >= PROCS_WARMUP, "{waited:?}: no new baseline after the pause");
+
+    // hidden and shown again well within the 10 s interval: noticed during the wait, so the list
+    // fills in after a new warm-up, not after the rest of the interval
+    active.store(false, Ordering::Relaxed);
+    thread::sleep(PROCS_PAUSE_POLL * 5);
+    let (waited, _) = show(&active);
+    assert!(waited >= PROCS_WARMUP, "{waited:?}");
+
+    // exits once the receiver is gone (at its next send, after a pause cuts the wait short)
     drop(rx);
+    active.store(false, Ordering::Relaxed);
+    thread::sleep(PROCS_PAUSE_POLL * 5);
     active.store(true, Ordering::Relaxed);
-    thread.join().expect("process thread exits cleanly");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !sampler.is_finished() {
+      assert!(Instant::now() < deadline, "the process thread doesn't exit");
+      thread::sleep(Duration::from_millis(10));
+    }
+    sampler.join().expect("process thread exits cleanly");
   }
 }

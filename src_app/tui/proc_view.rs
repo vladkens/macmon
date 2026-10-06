@@ -13,7 +13,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::panels::{Titles, ratio};
+use super::boxes::{Titles, draw_box, ratio};
+use super::theme::{self, dim, heading, text};
 use crate::config::ProcSort;
 use crate::procs::ProcInfo;
 
@@ -23,20 +24,15 @@ const NAME_MIN_WIDTH: u16 = 8;
 const POWER_HOT_W: f64 = 10.0;
 /// Cursor shown after the filter text while typing it.
 const FILTER_CURSOR: &str = "█";
+/// Stands for the start of a filter too long for the border.
+const ELLIPSIS: &str = "…";
+/// Cells of the shortest filter title worth showing next to the count: `/…x█`.
+const FILTER_MIN_WIDTH: usize = 4;
 /// Rows one wheel step moves the selection and scrolls the table.
 const WHEEL_ROWS: usize = 3;
 
-/// Process table column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Column {
-  Pid,
-  Name,
-  User,
-  Cpu,
-  Mem,
-  Power,
-  Gpu,
-}
+/// Process table column: one per sort key, so each header sorts by its own column.
+type Column = ProcSort;
 
 /// Columns in display order.
 const COLUMNS: [Column; 7] =
@@ -46,6 +42,7 @@ const COLUMNS: [Column; 7] =
 const DROP_ORDER: [Column; 5] =
   [Column::User, Column::Power, Column::Gpu, Column::Mem, Column::Cpu];
 
+/// The table column of each sort key.
 impl Column {
   fn header(self) -> &'static str {
     match self {
@@ -77,21 +74,9 @@ impl Column {
     !matches!(self, Self::Name | Self::User)
   }
 
-  fn sort(self) -> ProcSort {
-    match self {
-      Self::Pid => ProcSort::Pid,
-      Self::Name => ProcSort::Name,
-      Self::User => ProcSort::User,
-      Self::Cpu => ProcSort::Cpu,
-      Self::Mem => ProcSort::Mem,
-      Self::Power => ProcSort::Power,
-      Self::Gpu => ProcSort::Gpu,
-    }
-  }
-
   /// Header text, with the sort arrow when the table is sorted by this column: `MEM ↓`.
   fn header_text(self, sort: ProcSort, desc: bool) -> String {
-    match (self.sort() == sort, desc) {
+    match (self == sort, desc) {
       (true, true) => format!("{} ↓", self.header()),
       (true, false) => format!("{} ↑", self.header()),
       (false, _) => self.header().to_string(),
@@ -127,16 +112,22 @@ fn fit_columns(width: u16) -> Vec<(Column, u16)> {
     .collect()
 }
 
-/// Memory size in the most readable unit: `512K`, `64M`, `1.5G`.
+/// Memory size in the most readable unit: `512K`, `64M`, `1.5G`, `128G`. The unit follows the
+/// rounded value, so 1023.9 MiB reads `1.0G`, not `1024M`.
 fn format_mem(bytes: u64) -> String {
   const KB: f64 = 1024.0;
-  let bytes = bytes as f64;
-  if bytes >= KB * KB * KB {
-    format!("{:.1}G", bytes / (KB * KB * KB))
-  } else if bytes >= KB * KB {
-    format!("{:.0}M", bytes / (KB * KB))
+  let kb = bytes as f64 / KB;
+  let mb = kb / KB;
+  let gb = mb / KB;
+  // no decimal from `100.0G` on
+  if (gb * 10.0).round() >= 1000.0 {
+    format!("{gb:.0}G")
+  } else if mb.round() >= KB {
+    format!("{gb:.1}G")
+  } else if kb.round() >= KB {
+    format!("{mb:.0}M")
   } else {
-    format!("{:.0}K", bytes / KB)
+    format!("{kb:.0}K")
   }
 }
 
@@ -191,28 +182,16 @@ fn scroll_offset(offset: usize, selected: Option<usize>, height: usize, len: usi
   offset.min(len.saturating_sub(height))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Nav {
-  Up,
-  Down,
-  PageUp,
-  PageDown,
-  Home,
-  End,
-}
-
-impl Nav {
-  fn from_key(code: KeyCode) -> Option<Self> {
-    match code {
-      KeyCode::Up => Some(Self::Up),
-      KeyCode::Down => Some(Self::Down),
-      KeyCode::PageUp => Some(Self::PageUp),
-      KeyCode::PageDown => Some(Self::PageDown),
-      KeyCode::Home => Some(Self::Home),
-      KeyCode::End => Some(Self::End),
-      _ => None,
+/// The longest end of `text` (whole characters) at most `max` cells wide.
+fn tail(text: &str, max: usize) -> &str {
+  let mut start = text.len();
+  for (i, _) in text.char_indices().rev() {
+    if Span::raw(&text[i..]).width() > max {
+      break;
     }
+    start = i;
   }
+  &text[start..]
 }
 
 /// Selected process: its pid, and its row to fall back on when the process goes away.
@@ -359,27 +338,31 @@ impl ProcView {
     self.selected = self.rows.get(index).map(|&i| Selection { pid: procs[i].pid, index });
   }
 
-  /// Moves the selection; without one, it starts above the first row.
-  fn navigate(&mut self, nav: Nav) {
-    let Some(last) = self.rows.len().checked_sub(1) else { return };
+  /// Moves the selection for a navigation key (arrows, PgUp / PgDn, Home / End); without a
+  /// selection it starts above the first row. Returns `false` for other keys.
+  fn navigate(&mut self, code: KeyCode) -> bool {
     let page = self.page.max(1);
-    let index = match (nav, self.selected.map(|s| s.index)) {
-      (Nav::Home, _) | (Nav::Up | Nav::PageUp | Nav::Down, None) => 0,
-      (Nav::End, _) => last,
-      (Nav::PageDown, None) => page - 1,
-      (Nav::Up, Some(i)) => i.saturating_sub(1),
-      (Nav::Down, Some(i)) => i + 1,
-      (Nav::PageUp, Some(i)) => i.saturating_sub(page),
-      (Nav::PageDown, Some(i)) => i + page,
+    let index = match (code, self.selected.map(|s| s.index)) {
+      (KeyCode::Home, _) | (KeyCode::Up | KeyCode::PageUp | KeyCode::Down, None) => 0,
+      (KeyCode::End, _) => usize::MAX,
+      (KeyCode::PageDown, None) => page - 1,
+      (KeyCode::Up, Some(i)) => i.saturating_sub(1),
+      (KeyCode::Down, Some(i)) => i + 1,
+      (KeyCode::PageUp, Some(i)) => i.saturating_sub(page),
+      (KeyCode::PageDown, Some(i)) => i + page,
+      _ => return false,
     };
-    self.select(index.min(last));
+
+    if let Some(last) = self.rows.len().checked_sub(1) {
+      self.select(index.min(last));
+    }
+    true
   }
 
   /// Applies a key press. Returns `false` for keys the panel doesn't use, so they can act as
   /// global shortcuts; while typing a filter every key is used.
   pub fn handle_key(&mut self, key: KeyEvent) -> bool {
-    if let Some(nav) = Nav::from_key(key.code) {
-      self.navigate(nav);
+    if self.navigate(key.code) {
       return true;
     }
 
@@ -439,7 +422,7 @@ impl ProcView {
   fn click(&mut self, at: Position) {
     let targets = &self.targets;
     if let Some(&(column, _)) = targets.headers.iter().find(|(_, cells)| cells.contains(at)) {
-      self.sort_by(column.sort());
+      self.sort_by(column);
     } else if targets.filter.is_some_and(|label| label.contains(at)) {
       self.typing = true;
     } else if targets.body.contains(at) {
@@ -490,10 +473,11 @@ impl App {
   /// Process panel: count and filter in the title, a header row with the sort arrow and the
   /// process rows. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
-    let (inner, titles) = self.draw_box(f, area, self.proc_titles());
+    let (titles, filter) = self.proc_titles(area.width);
+    let (inner, titles) = draw_box(f, area, titles);
     let (headers, body) = self.render_proc_table(f, inner);
-    // the filter label is the second title, when it fits
-    let filter = titles.get(1).copied();
+    // the filter title, when it fits
+    let filter = titles.get(filter).copied();
     self.proc_view.targets = Targets { area, filter, headers, body };
   }
 
@@ -502,7 +486,7 @@ impl App {
   fn render_proc_table(&mut self, f: &mut Frame, inner: Rect) -> (Vec<(Column, Rect)>, Rect) {
     if self.proc_view.procs().is_none() {
       let row = inner.centered_vertically(Constraint::Length(1));
-      f.render_widget(Line::from(self.dim("collecting…")).centered(), row);
+      f.render_widget(Line::from(dim("collecting…")).centered(), row);
       return Default::default();
     }
 
@@ -519,7 +503,7 @@ impl App {
 
     let (sort, desc) = (self.proc_view.sort, self.proc_view.sort_desc);
     let header = columns.iter().map(|&(column, _)| {
-      let color = if column.sort() == sort { self.theme.title } else { self.theme.dim };
+      let color = if column == sort { theme::TEXT } else { theme::DIM };
       let style = Style::new().fg(color).add_modifier(Modifier::BOLD);
       Span::styled(column.header_text(sort, desc), style)
     });
@@ -530,54 +514,78 @@ impl App {
       let y = body.y + i as u16;
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
       draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
-      // reverse video in the default colors from border to border, so the row reads as one bar
+      // from border to border, so the row reads as one bar
       if selected {
-        buf.set_style(Rect { y, height: 1, ..inner }, self.theme.selected);
+        buf.set_style(Rect { y, height: 1, ..inner }, theme::SELECTED);
       }
     }
 
     (column_areas(header_row, &columns), body)
   }
 
-  /// `proc 412` (`proc 12/412` with a filter), then `/ filter`, or the filter text once there is
-  /// one or it is being typed.
-  fn proc_titles(&self) -> Titles<'static> {
+  /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
+  /// `/ filter`, or the filter once there is one or it is being typed. A filter too long for the
+  /// border shows its end (`/…ari█`); with no room for that next to the count, the filter takes
+  /// the count's place. Returns the titles and the index of the filter title.
+  fn proc_titles(&self, width: u16) -> (Titles<'static>, usize) {
     let view = &self.proc_view;
-    let mut name = vec![self.heading("proc")];
+    let mut name = vec![heading("proc")];
     if let Some(procs) = view.procs() {
       let count = if view.filter().is_empty() {
         format!(" {}", procs.len())
       } else {
         format!(" {}/{}", view.row_count(), procs.len())
       };
-      name.push(self.text(count));
+      name.push(text(count));
     }
 
-    let filter = if view.typing() || !view.filter().is_empty() {
-      let mut filter = vec![self.heading("/"), self.text(view.filter().to_string())];
-      if view.typing() {
-        filter.push(Span::styled(FILTER_CURSOR, self.theme.title));
-      }
-      filter
-    } else {
+    if !view.typing() && view.filter().is_empty() {
       // as a key hint: the key bold, the label plain
-      vec![self.heading("/"), self.text(" filter")]
-    };
+      return (Titles::new(name).left(vec![heading("/"), text(" filter")]), 1);
+    }
 
-    Titles::new(name).left(filter)
+    // the filter's text after `╭─ ` + the count + ` ─ ` and before ` ─╮`, or alone between them
+    let name_width: usize = name.iter().map(Span::width).sum();
+    let beside = usize::from(width).saturating_sub(name_width + 9);
+    if beside >= FILTER_MIN_WIDTH {
+      (Titles::new(name).left(self.filter_title(beside)), 1)
+    } else {
+      (Titles::new(self.filter_title(usize::from(width).saturating_sub(6))), 0)
+    }
+  }
+
+  /// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after
+  /// `…`.
+  fn filter_title(&self, room: usize) -> Vec<Span<'static>> {
+    let view = &self.proc_view;
+    let filter = view.filter();
+    // `/` and the cursor (one cell each) around the filter text
+    let text_room = room.saturating_sub(1 + usize::from(view.typing()));
+
+    let mut spans = vec![heading("/")];
+    if Span::raw(filter).width() <= text_room {
+      spans.push(text(filter.to_string()));
+    } else {
+      spans.push(dim(ELLIPSIS));
+      spans.push(text(tail(filter, text_room.saturating_sub(1)).to_string()));
+    }
+    if view.typing() {
+      spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
+    }
+    spans
   }
 
   /// Text of one table cell. Load values are colored by the gradient, zeros are dim and missing
   /// values show as a dim `-`.
   fn proc_cell(&self, column: Column, proc: &ProcInfo) -> Span<'static> {
     let load = |value: f64, ratio: f64, text: String| {
-      if value > 0.0 { Span::styled(text, self.theme.gradient(ratio)) } else { self.dim(text) }
+      if value > 0.0 { Span::styled(text, self.theme.gradient(ratio)) } else { dim(text) }
     };
 
     match column {
-      Column::Pid => self.text(proc.pid.to_string()),
-      Column::Name => self.text(proc.name.clone()),
-      Column::User => self.text(proc.user.clone()),
+      Column::Pid => text(proc.pid.to_string()),
+      Column::Name => text(proc.name.clone()),
+      Column::User => text(proc.user.clone()),
       Column::Cpu => {
         let cpu = f64::from(proc.cpu_pct);
         load(cpu, cpu / 100.0, format!("{cpu:.1}"))
@@ -591,7 +599,7 @@ impl App {
           let watts = f64::from(watts);
           load(watts, watts / POWER_HOT_W, format!("{watts:.2}W"))
         }
-        None => self.dim("-"),
+        None => dim("-"),
       },
       Column::Gpu => {
         let gpu = f64::from(proc.gpu_pct);
@@ -645,7 +653,7 @@ mod tests {
   use ratatui::layout::Rect;
 
   use super::{
-    COLUMNS, Column, ProcView, Targets, column_areas, fit_columns, format_mem, scroll_offset,
+    COLUMNS, Column, ProcView, Targets, column_areas, fit_columns, format_mem, scroll_offset, tail,
   };
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
@@ -655,7 +663,6 @@ mod tests {
   fn proc(pid: i32, name: &str, cpu: f32, mem_mb: u64, power: Option<f32>, gpu: f32) -> ProcInfo {
     ProcInfo {
       pid,
-      ppid: 1,
       name: name.to_string(),
       user: "user".to_string(),
       cpu_pct: cpu,
@@ -1019,7 +1026,7 @@ mod tests {
 
   #[test]
   fn columns_drop_by_priority_at_narrow_widths() {
-    use Column::*;
+    use ProcSort::*;
     let names = |width| fit_columns(width).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
 
     let all = [(Pid, 5), (Name, 154), (User, 10), (Cpu, 6), (Mem, 6), (Power, 7), (Gpu, 6)];
@@ -1049,17 +1056,22 @@ mod tests {
     assert_eq!(Column::Mem.header_text(ProcSort::Mem, false), "MEM ↑");
     assert_eq!(Column::Mem.header_text(ProcSort::Cpu, true), "MEM");
 
-    // every column sorts by its own key and fits its header with the arrow
+    // every column fits its header with the arrow
     for column in COLUMNS {
-      let text = column.header_text(column.sort(), true);
+      let text = column.header_text(column, true);
       assert!(text.chars().count() <= usize::from(column.width()), "{text}");
-      assert_eq!(COLUMNS.iter().filter(|c| c.sort() == column.sort()).count(), 1);
+    }
+    // and every sort key has its column
+    let mut sort = ProcSort::Cpu;
+    for _ in 0..COLUMNS.len() {
+      assert!(COLUMNS.contains(&sort), "{sort:?}");
+      sort = sort.next();
     }
   }
 
   #[test]
   fn column_areas_follow_the_columns_and_stop_at_the_edge() {
-    use Column::*;
+    use ProcSort::*;
     let columns = [(Pid, 5), (Name, 10), (Cpu, 6), (Mem, 6)];
     let cells = |width: u16| {
       let areas = column_areas(Rect::new(2, 5, width, 1), &columns);
@@ -1131,6 +1143,28 @@ mod tests {
   }
 
   #[test]
+  fn mouse_works_while_typing() {
+    let left = MouseEventKind::Down(MouseButton::Left);
+    let mut view = rendered_view();
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "ar"); // [4410, 2301, 77]
+
+    // a header click sorts the filtered rows, a row click selects one of them
+    view.handle_mouse(mouse(left, 6, 1));
+    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, true));
+    assert_eq!(pids(&view), [4410, 2301, 77]);
+    view.handle_mouse(mouse(left, 20, 3));
+    assert_eq!(view.selected_pid(), Some(2301));
+    view.handle_mouse(mouse(MouseEventKind::ScrollDown, 20, 3));
+    assert_eq!(view.selected_pid(), Some(77));
+
+    // and the filter is still being typed
+    assert!(view.typing());
+    type_str(&mut view, "i");
+    assert_eq!((view.filter(), pids(&view)), ("ari", vec![2301, 77]));
+  }
+
+  #[test]
   fn wheel_moves_selection_and_offset_together() {
     let mut view = rendered_view(); // [4410, 631, 2301, 1, 77], 3 rows on screen
     let page = |view: &ProcView| view.page_rows().map(|(sel, p)| (sel, p.pid)).collect::<Vec<_>>();
@@ -1194,5 +1228,84 @@ mod tests {
     assert_eq!(format_mem(64 << 20), "64M");
     assert_eq!(format_mem(1536 << 20), "1.5G");
     assert_eq!(format_mem(40 << 30), "40.0G");
+
+    // the unit follows the rounded value: no `1024K` or `1024M`
+    const KB: f64 = 1024.0;
+    let bytes = |value: f64| value.round() as u64;
+    assert_eq!(format_mem(bytes(1023.4 * KB)), "1023K");
+    assert_eq!(format_mem(bytes(1023.6 * KB)), "1M");
+    assert_eq!(format_mem(1 << 20), "1M");
+    assert_eq!(format_mem(bytes(1023.4 * KB * KB)), "1023M");
+    assert_eq!(format_mem(bytes(1023.9 * KB * KB)), "1.0G");
+    assert_eq!(format_mem(1 << 30), "1.0G");
+    assert_eq!(format_mem(bytes(99.9 * KB * KB * KB)), "99.9G");
+    assert_eq!(format_mem(bytes(99.96 * KB * KB * KB)), "100G");
+    assert_eq!(format_mem(512 << 30), "512G");
+    // every size up to 16 TiB fits the MEM column
+    for shift in 0..45 {
+      for bytes in [(1u64 << shift) - 1, 1 << shift, (1 << shift) * 3 / 2] {
+        assert!(format_mem(bytes).len() <= usize::from(Column::Mem.width()), "{bytes}");
+      }
+    }
+  }
+
+  #[test]
+  fn tail_keeps_whole_characters_from_the_end() {
+    assert_eq!(tail("safari", 10), "safari");
+    assert_eq!(tail("safari", 6), "safari");
+    assert_eq!(tail("safari", 3), "ari");
+    assert_eq!(tail("safari", 0), "");
+    assert_eq!(tail("", 3), "");
+    // wide characters take two cells
+    assert_eq!(tail("ab漢字", 4), "漢字");
+    assert_eq!(tail("ab漢字", 3), "字");
+    assert_eq!(tail("ab漢字", 1), "");
+  }
+
+  #[test]
+  fn navigation_keys_work_while_typing() {
+    let mut view = view(); // [4410, 631, 2301, 1, 77]
+    view.fit(2);
+    assert!(press(&mut view, KeyCode::Char('/')));
+    // [4410 cargo, 2301 Safari, 77 safaribookmarksyncagent]
+    type_str(&mut view, "ar");
+    for (code, pid) in [
+      (KeyCode::Down, 4410),
+      (KeyCode::Down, 2301),
+      (KeyCode::PageDown, 77),
+      (KeyCode::Up, 2301),
+      (KeyCode::PageUp, 4410),
+      (KeyCode::End, 77),
+      (KeyCode::Home, 4410),
+    ] {
+      assert!(press(&mut view, code), "{code:?}");
+      assert_eq!(view.selected_pid(), Some(pid), "{code:?}");
+    }
+    assert!(view.typing());
+    assert_eq!(view.filter(), "ar", "navigation keys don't edit the filter");
+  }
+
+  #[test]
+  fn filter_hiding_the_selected_process_moves_the_selection() {
+    let mut view = view(); // [4410, 631, 2301, 1, 77]
+    assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::Down));
+    assert_eq!(view.selected_pid(), Some(631));
+
+    // `s` keeps WindowServer ([631, 2301, 77]), `sa` doesn't: the row at its position takes the
+    // selection
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "s");
+    assert_eq!((pids(&view), view.selected_pid()), (vec![631, 2301, 77], Some(631)));
+    type_str(&mut view, "af");
+    assert_eq!(pids(&view), [2301, 77]);
+    assert_eq!(view.selected_pid(), Some(2301));
+
+    // nothing matches: no selection, and it doesn't come back with the rows
+    type_str(&mut view, "zz");
+    assert_eq!(view.selected_pid(), None);
+    assert!(press(&mut view, KeyCode::Esc));
+    assert_eq!(pids(&view).len(), 5);
+    assert_eq!(view.selected_pid(), None);
   }
 }

@@ -2,18 +2,17 @@
 //! power) and the box frame it shares with the process list: rounded borders, titles fitted on
 //! the top border, the power summary and the key hints on the bottom border.
 
-use std::borrow::Cow;
-
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
 
 use super::App;
 use super::layout::{LayoutPlan, Metric, compute_layout};
 use super::store::{FreqStore, PowerStore};
+use super::theme::{self, dim, heading, text};
 use super::widgets::{Gauge, Graph};
 use crate::config::ViewType;
 
@@ -156,20 +155,6 @@ fn place_titles(width: u16, left: &[u16], right: Option<u16>) -> TitleSlots {
   slots
 }
 
-/// Number of leading `items` (by width) that fit in `room` cells with `gap` cells between them.
-fn fit_count(room: u16, items: &[u16], gap: u16) -> usize {
-  let mut used = 0u32;
-  for (i, &item) in items.iter().enumerate() {
-    let need = u32::from(item) + if i == 0 { 0 } else { u32::from(gap) };
-    if used + need > u32::from(room) {
-      return i;
-    }
-    used += need;
-  }
-
-  items.len()
-}
-
 /// Cells of `items` (by width) joined by ` | `, with a blank cell at both ends; 0 for none.
 fn joined_width(items: &[u16]) -> u16 {
   if items.is_empty() {
@@ -183,7 +168,17 @@ fn joined_width(items: &[u16]) -> u16 {
 
 /// Number of leading `items` (by width) that fit in `room` cells joined as by `joined_width`.
 fn fit_joined(room: u16, items: &[u16]) -> usize {
-  fit_count(room.saturating_sub(2), items, SEPARATOR.len() as u16)
+  // the blank cells at both ends, then each item after its separator
+  let mut used = 2;
+  for (i, &item) in items.iter().enumerate() {
+    let gap = if i == 0 { 0 } else { SEPARATOR.len() as u32 };
+    used += gap + u32::from(item);
+    if used > u32::from(room) {
+      return i;
+    }
+  }
+
+  items.len()
 }
 
 /// What fits on a bottom border: power summary parts on the left, key hints on the right.
@@ -226,47 +221,53 @@ fn share_border(width: u16, summary: &[u16], hints: &[u16]) -> BorderFit {
   }
 }
 
+/// How a metric box draws its history.
+enum Scale {
+  /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
+  /// switches it to a gauge of the current `load` (`0.0..=1.0`).
+  Load { max: u64, load: f64 },
+  /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
+  /// original; no gauge.
+  Power,
+}
+
 /// Titles and graph of one metric box.
 struct MetricBox<'a> {
   /// Title variants, longest first; the box shows the first that fits (see `fit_titles`).
   titles: Vec<Titles<'static>>,
   /// History, newest first.
   data: &'a [u64],
-  /// Value at full height; `None` scales the graph to its largest visible sample.
-  max: Option<u64>,
-  /// One color for every bar instead of its load color.
-  color: Option<Color>,
-  /// Current load (`0.0..=1.0`) for the gauge view (`v`); `None` keeps the graph in both views.
-  gauge: Option<f64>,
+  scale: Scale,
+}
+
+/// Draws a rounded box with `titles` on the top border. Returns the area inside the borders and
+/// the cells of the left titles' text that fit (see `Titles::render`).
+pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<Rect>) {
+  let block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::BORDER);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+  // title text without a color of its own in the text color, not the border's
+  let texts = titles.render(area, f.buffer_mut(), Style::new().fg(theme::TEXT));
+  (inner, texts)
+}
+
+/// `items` joined by a dim ` | `, with a blank cell at both ends.
+fn joined<'a>(items: impl IntoIterator<Item = Vec<Span<'a>>>) -> Line<'a> {
+  let mut spans = vec![Span::raw(" ")];
+  for (i, item) in items.into_iter().enumerate() {
+    if i > 0 {
+      spans.push(dim(SEPARATOR));
+    }
+    spans.extend(item);
+  }
+  spans.push(Span::raw(" "));
+  Line::from(spans)
 }
 
 impl App {
-  /// Box or metric name: title color, bold.
-  pub(super) fn heading<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(text, Style::new().fg(self.theme.title).add_modifier(Modifier::BOLD))
-  }
-
-  pub(super) fn text<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(text, self.theme.text)
-  }
-
-  pub(super) fn dim<'a>(&self, text: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(text, self.theme.dim)
-  }
-
   /// `load` (`0.0..=1.0`) as a percent with `decimals`, in its load color.
   fn percent(&self, load: f64, decimals: usize) -> Span<'static> {
     Span::styled(format!("{:.decimals$}%", load * 100.0), self.theme.gradient(load))
-  }
-
-  /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders and
-  /// the cells of the left titles' text that fit (see `Titles::render`).
-  pub(super) fn draw_box(&self, f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<Rect>) {
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(self.theme.border);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    let texts = titles.render(area, f.buffer_mut(), Style::new().fg(self.theme.text));
-    (inner, texts)
   }
 
   /// Global key hints in the order of the original UI: `q quit`, `p procs`, `v chart`,
@@ -279,23 +280,7 @@ impl App {
       ("r", self.cfg.ratio_mode.label().to_string()),
       ("-/+", format!("{}ms", self.cfg.interval)),
     ];
-    hints
-      .into_iter()
-      .map(|(key, label)| vec![self.heading(key), self.text(format!(" {label}"))])
-      .collect()
-  }
-
-  /// `items` joined by a dim ` | `, with a blank cell at both ends.
-  fn joined<'a>(&self, items: impl IntoIterator<Item = Vec<Span<'a>>>) -> Line<'a> {
-    let mut spans = vec![Span::raw(" ")];
-    for (i, item) in items.into_iter().enumerate() {
-      if i > 0 {
-        spans.push(self.dim(SEPARATOR));
-      }
-      spans.extend(item);
-    }
-    spans.push(Span::raw(" "));
-    Line::from(spans)
+    hints.into_iter().map(|(key, label)| vec![heading(key), text(format!(" {label}"))]).collect()
   }
 
   /// Draws the `summary` parts (left) and, with `hints`, the global key hints (right-aligned)
@@ -314,12 +299,12 @@ impl App {
     let y = area.bottom() - 1;
 
     if fit.summary > 0 {
-      let line = self.joined(summary.into_iter().take(fit.summary));
+      let line = joined(summary.into_iter().take(fit.summary));
       f.buffer_mut().set_line(area.x + 2, y, &line, fit.summary_width);
     }
 
     if fit.hints > 0 {
-      let line = self.joined(hints.into_iter().take(fit.hints));
+      let line = joined(hints.into_iter().take(fit.hints));
       let width = width_u16(&line);
       f.buffer_mut().set_line(area.right() - 2 - width, y, &line, width);
     }
@@ -341,17 +326,18 @@ impl App {
   /// the bottom border, with the key hints when it is the lowest box.
   pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
     let Some(area) = plan.top else { return };
-    self.draw_box(f, area, self.metrics_titles());
+    draw_box(f, area, self.metrics_titles());
 
     for &(metric, r) in &plan.boxes {
-      let Some(metric) = self.metric_box(metric) else { continue };
-      let (inner, _) = self.draw_box(f, r, fit_titles(r.width, metric.titles));
-      match metric.gauge.filter(|_| self.cfg.view_type == ViewType::Gauge) {
-        Some(load) => f.render_widget(Gauge::new(load, &self.theme), inner),
-        None => {
-          let graph = Graph::new(metric.data, &self.theme).max(metric.max).color(metric.color);
-          f.render_widget(graph, inner);
+      let metric = self.metric_box(metric);
+      let (inner, _) = draw_box(f, r, fit_titles(r.width, metric.titles));
+      let graph = Graph::new(metric.data, &self.theme);
+      match metric.scale {
+        Scale::Load { load, .. } if self.cfg.view_type == ViewType::Gauge => {
+          f.render_widget(Gauge::new(load, &self.theme), inner)
         }
+        Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
+        Scale::Power => f.render_widget(graph.color(self.theme.gradient(0.0)), inner),
       }
     }
 
@@ -362,7 +348,7 @@ impl App {
   /// version gives way to the chip.
   fn metrics_titles(&self) -> Titles<'static> {
     let version = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    Titles::new(self.chip_title()).right(self.text(version))
+    Titles::new(self.chip_title()).right(text(version))
   }
 
   /// `Apple M3 Pro (6E+6P+18GPU 36GB)`, the details in parentheses dim. Core counts come from the
@@ -383,10 +369,11 @@ impl App {
       details.push_str(&format!("{}GB", soc.memory_gb));
     }
 
+    // a chip name the library couldn't read still leaves a title
     let name = if soc.chip_name.is_empty() { env!("CARGO_PKG_NAME") } else { &soc.chip_name };
-    let mut spans = vec![self.text(name.to_string())];
+    let mut spans = vec![text(name.to_string())];
     if !details.is_empty() {
-      spans.push(self.dim(format!(" ({details})")));
+      spans.push(dim(format!(" ({details})")));
     }
     Line::from(spans)
   }
@@ -397,30 +384,31 @@ impl App {
   fn power_summary(&self) -> Vec<Vec<Span<'static>>> {
     let all = &self.all_power;
     let mut parts = vec![vec![
-      self.text(format!("Power: {:.2}W", all.top_value)),
-      self.dim(format!(" (avg {:.2}W, max {:.2}W)", all.avg_value, all.max_value)),
+      text(format!("Power: {:.2}W", all.top_value)),
+      dim(format!(" (avg {:.2}W, max {:.2}W)", all.avg_value, all.max_value)),
     ]];
 
     let fans = self.fans.label();
     if !fans.is_empty() {
-      parts.push(vec![self.text(fans)]);
+      parts.push(vec![text(fans)]);
     }
 
     let sys = &self.sys_power;
     if sys.top_value > 0.0 {
       parts.push(vec![
-        self.text(format!("Total {:.2}W", sys.top_value)),
-        self.dim(format!(" ({:.2}, {:.2})", sys.avg_value, sys.max_value)),
+        text(format!("Total {:.2}W", sys.top_value)),
+        dim(format!(" ({:.2}, {:.2})", sys.avg_value, sys.max_value)),
       ]);
     }
 
     parts
   }
 
-  fn metric_box(&self, metric: Metric) -> Option<MetricBox<'_>> {
-    Some(match metric {
+  /// Titles and history of `metric`; its cluster comes from the same list the layout counts.
+  fn metric_box(&self, metric: Metric) -> MetricBox<'_> {
+    match metric {
       Metric::Cluster(i) => {
-        let cluster = self.clusters.items.get(i)?;
+        let cluster = &self.clusters.items[i];
         self.freq_box(format!("{}-CPU", cluster.label), &cluster.freq)
       }
       Metric::Gpu => self.freq_box("GPU".to_string(), &self.igpu_freq),
@@ -428,23 +416,21 @@ impl App {
       Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
       Metric::GpuPower => self.power_box("GPU", &self.gpu_power, self.gpu_temp.last()),
       Metric::AnePower => self.power_box("ANE", &self.ane_power, 0.0),
-    })
+    }
   }
 
   /// `E-CPU 42% @ 1800 MHz` (the percent colored by load), or `E-CPU 42%` when the frequency
   /// doesn't fit, over the usage history scaled to 100 %, or a gauge.
   fn freq_box<'a>(&self, label: String, freq: &'a FreqStore) -> MetricBox<'a> {
     let series = freq.ratio(self.cfg.ratio_mode);
-    let short = vec![self.heading(label), self.text(" "), self.percent(series.ratio, 0)];
+    let short = vec![heading(label), text(" "), self.percent(series.ratio, 0)];
     let mut full = short.clone();
-    full.push(self.text(format!(" @ {} MHz", freq.freq_mhz)));
+    full.push(text(format!(" @ {} MHz", freq.freq_mhz)));
 
     MetricBox {
       titles: vec![Titles::new(full), Titles::new(short)],
       data: &series.items,
-      max: Some(100),
-      color: None,
-      gauge: Some(series.ratio),
+      scale: Scale::Load { max: 100, load: series.ratio },
     }
   }
 
@@ -469,22 +455,18 @@ impl App {
     MetricBox {
       titles: titles.into_iter().map(Titles::new).collect(),
       data: &mem.items,
-      max: Some(mem.ram_total),
-      color: None,
-      gauge: Some(ram.1),
+      scale: Scale::Load { max: mem.ram_total, load: ram.1 },
     }
   }
 
   /// RAM part of the RAM box title at `step` for `(used GB, load)`: `RAM 16.81 GB (70.0%)`, `RAM
   /// 16.8G 70%`, then `RAM 70%`.
   fn ram_part(&self, step: usize, (used, load): (f64, f64)) -> Vec<Span<'static>> {
-    let mut spans = vec![self.heading("RAM")];
+    let mut spans = vec![heading("RAM")];
     match step {
-      0 => {
-        spans.extend([self.text(format!(" {used:.2} GB (")), self.percent(load, 1), self.text(")")])
-      }
-      1 => spans.extend([self.text(format!(" {used:.1}G ")), self.percent(load, 0)]),
-      _ => spans.extend([self.text(" "), self.percent(load, 0)]),
+      0 => spans.extend([text(format!(" {used:.2} GB (")), self.percent(load, 1), text(")")]),
+      1 => spans.extend([text(format!(" {used:.1}G ")), self.percent(load, 0)]),
+      _ => spans.extend([text(" "), self.percent(load, 0)]),
     }
     spans
   }
@@ -493,13 +475,13 @@ impl App {
   /// RAM part: ` · SWAP 2.37 / 3.0 GB`, ` · SWAP 2.4G 79%`, ` · SWAP 79%`, then ` SW 79%`.
   fn swap_part(&self, step: usize, (used, total): (f64, f64), load: f64) -> Vec<Span<'static>> {
     let mut spans = match step {
-      0..=2 => vec![self.dim(" · "), self.heading("SWAP")],
-      _ => vec![self.text(" "), self.heading("SW")],
+      0..=2 => vec![dim(" · "), heading("SWAP")],
+      _ => vec![text(" "), heading("SW")],
     };
     match step {
-      0 => spans.push(self.text(format!(" {used:.2} / {total:.1} GB"))),
-      1 => spans.extend([self.text(format!(" {used:.1}G ")), self.percent(load, 0)]),
-      _ => spans.extend([self.text(" "), self.percent(load, 0)]),
+      0 => spans.push(text(format!(" {used:.2} / {total:.1} GB"))),
+      1 => spans.extend([text(format!(" {used:.1}G ")), self.percent(load, 0)]),
+      _ => spans.extend([text(" "), self.percent(load, 0)]),
     }
     spans
   }
@@ -509,9 +491,9 @@ impl App {
   /// scaled to its largest visible sample. Narrow boxes drop the temperature, then the average
   /// and maximum. Always a graph, as in the original.
   fn power_box<'a>(&self, label: &'static str, store: &'a PowerStore, temp: f32) -> MetricBox<'a> {
-    let short = vec![self.heading(label), self.text(format!(" {:.2}W", store.top_value))];
+    let short = vec![heading(label), text(format!(" {:.2}W", store.top_value))];
     let mut full = short.clone();
-    full.push(self.dim(format!(" ({:.2}, {:.2})", store.avg_value, store.max_value)));
+    full.push(dim(format!(" ({:.2}, {:.2})", store.avg_value, store.max_value)));
 
     let mut titles = vec![];
     if temp > 0.0 {
@@ -520,8 +502,7 @@ impl App {
     }
     titles.extend([Titles::new(full), Titles::new(short)]);
 
-    let color = Some(self.theme.gradient(0.0));
-    MetricBox { titles, data: &store.items, max: None, color, gauge: None }
+    MetricBox { titles, data: &store.items, scale: Scale::Power }
   }
 }
 
@@ -532,8 +513,8 @@ mod tests {
   use ratatui::style::Style;
 
   use super::{
-    BorderFit, TitleSlots, Titles, fit_count, fit_titles, joined_width, place_titles, share_border,
-    temp_ratio,
+    BorderFit, TitleSlots, Titles, fit_joined, fit_titles, joined_width, place_titles,
+    share_border, temp_ratio,
   };
 
   #[test]
@@ -549,10 +530,11 @@ mod tests {
     let slots = place_titles(40, &[30], Some(20));
     assert_eq!(slots, TitleSlots { left: vec![(2, 30)], right: None });
 
-    // exactly one border cell between them still fits
+    // the left title takes cells 2..17; one border cell between them still fits, none doesn't
     let slots = place_titles(40, &[15], Some(20));
-    assert_eq!(slots.right, Some(18));
-    assert_eq!(2 + 15 + 1, 18);
+    assert_eq!(slots, TitleSlots { left: vec![(2, 15)], right: Some(18) });
+    let slots = place_titles(40, &[16], Some(20));
+    assert_eq!(slots, TitleSlots { left: vec![(2, 16)], right: None });
   }
 
   #[test]
@@ -659,13 +641,20 @@ mod tests {
   }
 
   #[test]
-  fn fit_count_keeps_leading_items() {
-    assert_eq!(fit_count(30, &[6, 9, 9], 2), 3); // 6 + 2 + 9 + 2 + 9 = 28
-    assert_eq!(fit_count(27, &[6, 9, 9], 2), 2);
-    assert_eq!(fit_count(6, &[6, 9, 9], 2), 1);
-    assert_eq!(fit_count(5, &[6, 9, 9], 2), 0);
-    assert_eq!(fit_count(0, &[], 2), 0);
-    assert_eq!(fit_count(u16::MAX, &[u16::MAX, u16::MAX], 2), 1);
+  fn fit_joined_keeps_leading_items() {
+    // ` 6 | 9 | 9 `: 1 + 6 + 3 + 9 + 3 + 9 + 1 = 32 cells, as `joined_width` counts them
+    let items = [6, 9, 9];
+    assert_eq!(joined_width(&items), 32);
+    assert_eq!(fit_joined(32, &items), 3);
+    assert_eq!(fit_joined(31, &items), 2);
+    assert_eq!(fit_joined(20, &items), 2);
+    assert_eq!(fit_joined(19, &items), 1);
+    assert_eq!(fit_joined(8, &items), 1);
+    assert_eq!(fit_joined(7, &items), 0);
+    assert_eq!(fit_joined(0, &[]), 0);
+    // no overflow
+    assert_eq!(fit_joined(u16::MAX, &[65_000, 65_000]), 1);
+    assert_eq!(fit_joined(u16::MAX, &[u16::MAX]), 0);
   }
 
   #[test]
