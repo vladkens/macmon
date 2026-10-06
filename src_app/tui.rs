@@ -18,8 +18,8 @@ use macmon::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, SocInfo};
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
 const GB: u64 = 1024 * 1024 * 1024;
-const MAX_SPARKLINE: usize = 128;
 const MAX_TEMPS: usize = 8;
+const MAX_SPARKLINE: usize = 128;
 
 // MARK: Term utils
 
@@ -196,6 +196,7 @@ impl MemoryStore {
 #[derive(Debug, Default)]
 struct TempStore {
   items: Vec<f32>,
+  unavailable: bool,
 }
 
 impl TempStore {
@@ -203,7 +204,9 @@ impl TempStore {
     *self.items.first().unwrap_or(&0.0)
   }
 
-  fn push(&mut self, value: f32) {
+  fn push(&mut self, value: Option<f32>) {
+    self.unavailable = value.is_none();
+    let value = value.unwrap_or(0.0);
     // https://www.tunabellysoftware.com/blog/files/tg-pro-apple-silicon-m3-series-support.html
     // https://github.com/vladkens/macmon/issues/12
     let value = if value == 0.0 { self.trend_ema(0.8) } else { value };
@@ -230,6 +233,15 @@ impl TempStore {
     }
 
     ema
+  }
+}
+
+fn temperature_label(temp: Option<&TempStore>) -> String {
+  match temp {
+    None => String::new(),
+    Some(store) if store.items.is_empty() => "N/A".to_string(),
+    Some(store) if store.unavailable => format!("~{:.1}°C", store.last()),
+    Some(store) => format!("{:.1}°C", store.last()),
   }
 }
 
@@ -420,7 +432,12 @@ impl App {
     block
   }
 
-  fn get_power_block<'a>(&self, label: &str, val: &'a PowerStore, temp: f32) -> Sparkline<'a> {
+  fn get_power_block<'a>(
+    &self,
+    label: &str,
+    val: &'a PowerStore,
+    temp: Option<&TempStore>,
+  ) -> Sparkline<'a> {
     let label_l = format!(
       "{} {:.2}W ({:.2}, {:.2})",
       // "{} {:.2}W (avg: {:.2}W, max: {:.2}W)",
@@ -431,7 +448,7 @@ impl App {
       val.max_value
     );
 
-    let label_r = if temp > 0.0 { format!("{:.1}°C", temp) } else { "".to_string() };
+    let label_r = temperature_label(temp);
 
     Sparkline::default()
       .block(self.title_block(label_l.as_str(), label_r.as_str()))
@@ -767,9 +784,9 @@ impl App {
       .constraints([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)].as_ref())
       .split(iarea);
 
-    f.render_widget(self.get_power_block("CPU", &self.cpu_power, self.cpu_temp.last()), ha[0]);
-    f.render_widget(self.get_power_block("GPU", &self.gpu_power, self.gpu_temp.last()), ha[1]);
-    f.render_widget(self.get_power_block("ANE", &self.ane_power, 0.0), ha[2]);
+    f.render_widget(self.get_power_block("CPU", &self.cpu_power, Some(&self.cpu_temp)), ha[0]);
+    f.render_widget(self.get_power_block("GPU", &self.gpu_power, Some(&self.gpu_temp)), ha[1]);
+    f.render_widget(self.get_power_block("ANE", &self.ane_power, None), ha[2]);
   }
 
   pub fn run_loop(&mut self, interval: Option<u32>) -> WithError<()> {
@@ -807,5 +824,27 @@ impl App {
 
     leave_term();
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod temperature_tests {
+  use super::{TempStore, temperature_label};
+
+  #[test]
+  fn unavailable_sample_marks_the_previous_estimate() {
+    let mut store = TempStore::default();
+    assert_eq!(temperature_label(Some(&store)), "N/A");
+    store.push(Some(50.0));
+    assert_eq!(temperature_label(Some(&store)), "50.0°C");
+    store.push(None);
+    assert_eq!(temperature_label(Some(&store)), "~50.0°C");
+    store.push(Some(60.0));
+    assert_eq!(temperature_label(Some(&store)), "60.0°C");
+  }
+
+  #[test]
+  fn a_block_without_a_temperature_has_no_label() {
+    assert_eq!(temperature_label(None), "");
   }
 }

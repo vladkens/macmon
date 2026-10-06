@@ -254,6 +254,12 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
 
 </details>
 
+Temperature fields contain a number in Celsius or `null` when no valid sensor value exists.
+The terminal preserves its historical estimate during a sensor outage and marks it with `~`.
+The terminal shows `N/A` if no previous temperature exists.
+The Prometheus endpoint omits its temperature gauge until a valid value returns.
+The Rust fields use `Option<f32>`, so library clients must handle `None`.
+
 ### Active and scaled ratios
 
 `active_ratio` is the share of the sampling interval during which the processor was doing any work. `scaled_ratio` is the same measure adjusted for operating frequency, showing the share of the processor's maximum possible capacity that was used.
@@ -309,7 +315,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("CPU power:  {:.2} W", metrics.cpu_power);
     println!("GPU power:  {:.2} W", metrics.gpu_power);
-    println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
+    match metrics.temp.cpu_temp_avg {
+        Some(value) => println!("CPU temp:   {value:.1} °C"),
+        None => println!("CPU temp:   N/A"),
+    }
     println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
     println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio * 100.0);
     println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio * 100.0);

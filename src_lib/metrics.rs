@@ -24,10 +24,15 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 /// Average hardware temperatures.
 #[derive(Debug, Default, Serialize)]
 pub struct TempMetrics {
-  /// Average CPU temperature in Celsius.
-  pub cpu_temp_avg: f32,
-  /// Average GPU temperature in Celsius.
-  pub gpu_temp_avg: f32,
+  /// Average CPU temperature in Celsius, or None when unavailable.
+  pub cpu_temp_avg: Option<f32>,
+  /// Average GPU temperature in Celsius, or None when unavailable.
+  pub gpu_temp_avg: Option<f32>,
+}
+
+fn temperature_average(values: impl Iterator<Item = f32>) -> Option<f32> {
+  let values: Vec<_> = values.filter(|v| is_valid_temp(*v)).collect();
+  if values.is_empty() { None } else { Some(values.iter().sum::<f32>() / values.len() as f32) }
 }
 
 /// Memory and swap usage.
@@ -403,8 +408,8 @@ impl Sampler {
       }
     }
 
-    let cpu_temp_avg = zero_div(cpu_metrics.iter().sum::<f32>(), cpu_metrics.len() as f32);
-    let gpu_temp_avg = zero_div(gpu_metrics.iter().sum::<f32>(), gpu_metrics.len() as f32);
+    let cpu_temp_avg = temperature_average(cpu_metrics.into_iter());
+    let gpu_temp_avg = temperature_average(gpu_metrics.into_iter());
 
     Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
   }
@@ -433,8 +438,8 @@ impl Sampler {
       }
     }
 
-    let cpu_temp_avg = zero_div(cpu_values.iter().sum(), cpu_values.len() as f32);
-    let gpu_temp_avg = zero_div(gpu_values.iter().sum(), gpu_values.len() as f32);
+    let cpu_temp_avg = temperature_average(cpu_values.into_iter());
+    let gpu_temp_avg = temperature_average(gpu_values.into_iter());
 
     Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
   }
@@ -579,9 +584,25 @@ mod tests {
   use crate::sources::SocInfo;
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, Metrics, aggregate_ioreport_metrics, calc_freq_from_residencies,
-    collect_cpu_core_metrics, parse_cpu_core_channel, smc_numeric_value,
+    CpuCoreKind, CpuCoreMetrics, Metrics, TempMetrics, aggregate_ioreport_metrics,
+    calc_freq_from_residencies, collect_cpu_core_metrics, parse_cpu_core_channel,
+    smc_numeric_value, temperature_average,
   };
+
+  #[test]
+  fn temperature_average_rejects_missing_and_invalid_values() {
+    assert_eq!(temperature_average([].into_iter()), None);
+    assert_eq!(temperature_average([0.0, -1.0, 151.0, f32::NAN, f32::INFINITY].into_iter()), None);
+    assert_eq!(temperature_average([0.0, 40.0, f32::NAN, 60.0].into_iter()), Some(50.0));
+  }
+
+  #[test]
+  fn unavailable_temperature_is_json_null() {
+    let metrics = TempMetrics { cpu_temp_avg: Some(45.0), gpu_temp_avg: None };
+    let value = serde_json::to_value(metrics).unwrap();
+    assert_eq!(value["cpu_temp_avg"], 45.0);
+    assert!(value["gpu_temp_avg"].is_null());
+  }
 
   fn core(
     die_id: usize,

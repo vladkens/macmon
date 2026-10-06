@@ -1,3 +1,16 @@
+## Unreleased
+
+### Breaking Changes
+
+- Temperature fields use `Option<f32>` in Rust and number-or-null values in JSON.
+- An unavailable temperature produces no Prometheus gauge.
+- The terminal marks its historical estimate with `~` during a sensor outage.
+- The terminal shows `N/A` before its first valid temperature.
+
+### Fixes
+
+- An empty set of valid temperature values no longer produces a false zero-degree measurement.
+
 ## v0.8.2 – 2026-08-04
 
 ### Fixes

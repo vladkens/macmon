@@ -22,8 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ecpu = format!("{:5.1}%", metrics.ecpu_active_ratio * 100.0);
     let pcpu = format!("{:5.1}%", metrics.pcpu_active_ratio * 100.0);
     let gpu_load = format!("{:5.1}%", metrics.gpu_active_ratio * 100.0);
-    let cpu_temp = format!("{:6.1}", metrics.temp.cpu_temp_avg);
-    let gpu_temp = format!("{:6.1}", metrics.temp.gpu_temp_avg);
+    let cpu_temp = metrics
+      .temp
+      .cpu_temp_avg
+      .map_or_else(|| format!("{:>6}", "N/A"), |value| format!("{value:6.1}"));
+    let gpu_temp = metrics
+      .temp
+      .gpu_temp_avg
+      .map_or_else(|| format!("{:>6}", "N/A"), |value| format!("{value:6.1}"));
     let ram = format!(
       "{:5.1}/{:5.1}",
       metrics.memory.ram_usage as f64 / GIB,
