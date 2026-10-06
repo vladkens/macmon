@@ -576,10 +576,12 @@ impl App {
     let (inner, titles) = draw_box(f, area, titles);
     let (headers, body) = self.render_proc_table(f, inner);
     let power_shown = headers.iter().any(|&(column, _)| column == Column::Power);
-    // the filter title and the sort hint after it, when they fit
-    let sort = titles
-      .get(filter + 1)
-      .map(|&area| KeyTarget { area, codes: vec![KeyCode::Left, KeyCode::Right] });
+    // the filter title and the sort hint after it, when they fit; the hint is never cut, so its
+    // arrows are its first and last cells
+    let sort = titles.get(filter + 1).map(|&area| {
+      let last = area.width.saturating_sub(1);
+      KeyTarget { area, keys: vec![(0..1, KeyCode::Left), (last..area.width, KeyCode::Right)] }
+    });
     self.proc_view.targets = Targets { area, filter: titles.get(filter).copied(), headers, body };
 
     let hints = self.footer_hints();

@@ -2,6 +2,8 @@
 //! power) and the box frame it shares with the process list: rounded borders, titles fitted on
 //! the top border, the power summary and the key hints on the bottom border.
 
+use std::ops::Range;
+
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
@@ -159,30 +161,59 @@ fn place_titles(width: u16, left: &[u16], right: Option<u16>) -> TitleSlots {
 /// Parts of a summary on a bottom border, joined by ` | `.
 pub(super) type Parts = Vec<Vec<Span<'static>>>;
 
-/// A key hint on a bottom border: the keys bold, then what they do. A click on it presses its key;
-/// on a hint for two keys (`-/+ 1000ms`) the left half presses the first one.
+/// A key hint on a bottom border: the key symbols bold, then what they do. A click on it presses
+/// its key; on a hint for two keys (`-/+ 1000ms`), the key of the symbol clicked or nearest to
+/// the click (see `KeyTarget`).
 pub(super) struct Hint {
-  keys: &'static str,
+  /// Symbols with the keys they press, drawn joined by `joiner`.
+  keys: Vec<(&'static str, KeyCode)>,
+  joiner: &'static str,
   label: String,
-  codes: Vec<KeyCode>,
 }
 
 impl Hint {
-  pub(super) fn new(keys: &'static str, label: impl Into<String>, codes: &[KeyCode]) -> Self {
-    Self { keys, label: label.into(), codes: codes.to_vec() }
+  /// A hint for one key: `q quit`.
+  pub(super) fn new(key: &'static str, label: impl Into<String>, code: KeyCode) -> Self {
+    Self { keys: vec![(key, code)], joiner: "", label: label.into() }
+  }
+
+  /// A hint for two keys with their symbols joined by `joiner`: `-/+ 1000ms`, `↑↓ select`.
+  pub(super) fn pair(
+    first: (&'static str, KeyCode),
+    joiner: &'static str,
+    second: (&'static str, KeyCode),
+    label: impl Into<String>,
+  ) -> Self {
+    Self { keys: vec![first, second], joiner, label: label.into() }
   }
 
   fn spans(&self) -> Vec<Span<'static>> {
-    vec![heading(self.keys), text(format!(" {}", self.label))]
+    let keys: Vec<&str> = self.keys.iter().map(|&(key, _)| key).collect();
+    vec![heading(keys.join(self.joiner)), text(format!(" {}", self.label))]
+  }
+
+  /// Cells of each key's symbol from the left of the hint, with the key.
+  fn key_cells(&self) -> Vec<(Range<u16>, KeyCode)> {
+    let width = |s: &str| Span::raw(s).width().min(usize::from(u16::MAX)) as u16;
+    let mut x = 0u16;
+    let mut cells = vec![];
+    for &(key, code) in &self.keys {
+      let end = x.saturating_add(width(key));
+      cells.push((x..end, code));
+      x = end.saturating_add(width(self.joiner));
+    }
+    cells
   }
 }
 
-/// Cells of the last frame that press keys when clicked, split evenly between the keys from left
-/// to right.
+/// Cells of the last frame that press keys when clicked: a key hint with the cells of its key
+/// symbols. A click on a symbol presses its key, one elsewhere on the hint the key of the nearest
+/// symbol (the left one when two are as near).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KeyTarget {
   pub area: Rect,
-  pub codes: Vec<KeyCode>,
+  /// Cells of each key's symbol, from the left of `area`, with the key.
+  pub keys: Vec<(Range<u16>, KeyCode)>,
 }
 
 impl KeyTarget {
@@ -191,8 +222,12 @@ impl KeyTarget {
     if !self.area.contains(at) {
       return None;
     }
-    let i = usize::from(at.x - self.area.x) * self.codes.len() / usize::from(self.area.width);
-    self.codes.get(i).copied()
+    let x = at.x - self.area.x;
+    // cells from `x` to the symbol, 0 on it
+    let distance =
+      |cells: &Range<u16>| cells.start.saturating_sub(x) + (x + 1).saturating_sub(cells.end);
+    // the first of equally near symbols
+    self.keys.iter().min_by_key(|(cells, _)| distance(cells)).map(|&(_, code)| code)
   }
 }
 
@@ -352,14 +387,13 @@ impl App {
   pub(super) fn footer_hints(&self) -> Vec<Hint> {
     use KeyCode::{Char, Down, Enter, Esc, Up};
     if self.proc_view.typing() {
-      let select = Hint::new("↑↓", "select", &[Up, Down]);
-      return vec![Hint::new("Enter", "keep", &[Enter]), Hint::new("Esc", "clear", &[Esc]), select];
+      let select = Hint::pair(("↑", Up), "", ("↓", Down), "select");
+      return vec![Hint::new("Enter", "keep", Enter), Hint::new("Esc", "clear", Esc), select];
     }
 
-    let mut hints =
-      vec![Hint::new("q", "quit", &[Char('q')]), Hint::new("?", "help", &[Char('?')])];
+    let mut hints = vec![Hint::new("q", "quit", Char('q')), Hint::new("?", "help", Char('?'))];
     if !self.procs_auto_hidden() {
-      hints.push(Hint::new("p", "procs", &[Char('p')]));
+      hints.push(Hint::new("p", "procs", Char('p')));
     }
     let view = match self.cfg.view_type {
       ViewType::Graph => "graph",
@@ -367,9 +401,9 @@ impl App {
     };
     let interval = format!("{}ms", self.cfg.interval());
     hints.extend([
-      Hint::new("v", view, &[Char('v')]),
-      Hint::new("r", self.cfg.ratio_mode.label(), &[Char('r')]),
-      Hint::new("-/+", interval, &[Char('-'), Char('+')]),
+      Hint::new("v", view, Char('v')),
+      Hint::new("r", self.cfg.ratio_mode.label(), Char('r')),
+      Hint::pair(("-", Char('-')), "/", ("+", Char('+')), interval),
     ]);
     hints
   }
@@ -409,7 +443,7 @@ impl App {
       // each hint after its blank cell or separator
       for (hint, width) in hints.into_iter().zip(hint_widths).take(fit.hints) {
         x += if targets.is_empty() { 1 } else { SEPARATOR.len() as u16 };
-        targets.push(KeyTarget { area: Rect::new(x, y, width, 1), codes: hint.codes });
+        targets.push(KeyTarget { area: Rect::new(x, y, width, 1), keys: hint.key_cells() });
         x += width;
       }
     }
@@ -627,8 +661,8 @@ mod tests {
   use ratatui::style::Style;
 
   use super::{
-    BorderFit, KeyTarget, TitleSlots, Titles, fit_bottom, fit_joined, fit_titles, joined_width,
-    place_titles, share_border, summary_room, temp_ratio, text_room,
+    BorderFit, Hint, KeyTarget, TitleSlots, Titles, fit_bottom, fit_joined, fit_titles,
+    joined_width, place_titles, share_border, spans_width, summary_room, temp_ratio, text_room,
   };
 
   #[test]
@@ -910,22 +944,51 @@ mod tests {
   }
 
   #[test]
-  fn key_targets_split_between_their_keys() {
-    let one = KeyTarget { area: Rect::new(10, 5, 6, 1), codes: vec![KeyCode::Char('q')] };
-    assert_eq!(one.key_at(Position::new(10, 5)), Some(KeyCode::Char('q')));
-    assert_eq!(one.key_at(Position::new(15, 5)), Some(KeyCode::Char('q')));
+  fn key_targets_press_the_key_clicked_or_nearest() {
+    use KeyCode::{Char, Down, Enter, Esc, Left, Right, Up};
+    // the target of `hint` drawn at `x`, `y`
+    let target = |hint: &Hint, x, y| {
+      let area = Rect::new(x, y, spans_width(&hint.spans()), 1);
+      KeyTarget { area, keys: hint.key_cells() }
+    };
+    // the key each cell of `target` presses, one char per cell
+    let keys = |target: &KeyTarget| {
+      let name = |code| match code {
+        Char(c) => c,
+        Up | Left => '<',
+        Down | Right => '>',
+        Enter => 'E',
+        Esc => 'X',
+        _ => '?',
+      };
+      let area = target.area;
+      let key = |x| target.key_at(Position::new(x, area.y)).map_or('?', name);
+      (area.x..area.right()).map(key).collect::<String>()
+    };
+
+    // one key: the whole hint, nothing around it
+    let quit = target(&Hint::new("q", "quit", Char('q')), 10, 5);
+    assert_eq!(quit.area.width, 6);
+    assert_eq!(keys(&quit), "qqqqqq");
     for (x, y) in [(9, 5), (16, 5), (12, 4), (12, 6)] {
-      assert_eq!(one.key_at(Position::new(x, y)), None, "{x}, {y}");
+      assert_eq!(quit.key_at(Position::new(x, y)), None, "{x}, {y}");
     }
 
-    // `-/+ 1000ms`: the left half `-`, the right half `+`
-    let codes = vec![KeyCode::Char('-'), KeyCode::Char('+')];
-    let two = KeyTarget { area: Rect::new(0, 0, 10, 1), codes };
-    let key = |x| match two.key_at(Position::new(x, 0)) {
-      Some(KeyCode::Char(c)) => c,
-      _ => '?',
-    };
-    assert_eq!((0..10).map(key).collect::<String>(), "-----+++++");
+    // `-/+ 1000ms`: `+` (and the interval after it) presses `+`, `-` and the `/` after it `-`
+    let interval = Hint::pair(("-", Char('-')), "/", ("+", Char('+')), "1000ms");
+    assert_eq!(interval.key_cells(), vec![(0..1, Char('-')), (2..3, Char('+'))]);
+    assert_eq!(keys(&target(&interval, 3, 0)), "--++++++++");
+    // `↑↓ select`: `↓` presses Down
+    let select = Hint::pair(("↑", Up), "", ("↓", Down), "select");
+    assert_eq!(select.key_cells(), vec![(0..1, Up), (1..2, Down)]);
+    assert_eq!(keys(&target(&select, 0, 0)), "<>>>>>>>>");
+    // symbols wider than a cell: each owns its cells, the joiner goes to the left one on a tie
+    let wide = Hint::pair(("Enter", Enter), "/", ("Esc", Esc), "x");
+    assert_eq!(keys(&target(&wide, 0, 0)), "EEEEEEXXXXX");
+
+    // `← sort →` on the process box border: arrows at both ends, so each takes half
+    let sort = KeyTarget { area: Rect::new(4, 0, 8, 1), keys: vec![(0..1, Left), (7..8, Right)] };
+    assert_eq!(keys(&sort), "<<<<>>>>");
   }
 
   #[test]

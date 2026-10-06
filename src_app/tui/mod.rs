@@ -719,7 +719,7 @@ mod tests {
     let at = mouse(left, x_of(&proc_row(&buf, 1), "MEM"), PROC_Y + 1);
     assert!(handle(&mut app, Event::Mouse(at)).is_continue());
     assert_eq!(app.proc_view.sort, ProcSort::Mem);
-    let at = mouse(left, x_of(&row(&buf, 49), "1250ms") + 4, 49);
+    let at = mouse(left, x_of(&row(&buf, 49), "-/+ 1250ms") + 2, 49);
     assert!(handle(&mut app, Event::Mouse(at)).is_continue());
     assert_eq!(*msec.read().unwrap(), 1500);
     assert!(handle(&mut app, Event::Key(key('-'))).is_continue());
@@ -2926,10 +2926,10 @@ mod tests {
     assert_eq!(file.saved()["view_type"], "Gauge");
     assert!(click_hint(&mut app, "r scaled", 0).is_continue());
     assert_eq!(file.saved()["ratio_mode"], "Active");
-    // the left half of `-/+ 1000ms` is `-`, the right half `+`
-    assert!(click_hint(&mut app, "-/+ 1000ms", 4).is_continue());
+    // `-/+ 1000ms`: its `-` presses `-`, its `+` presses `+`
+    assert!(click_hint(&mut app, "-/+ 1000ms", 0).is_continue());
     assert_eq!((file.saved()["interval"].clone(), *msec.read().unwrap()), (750.into(), 750));
-    assert!(click_hint(&mut app, "-/+ 750ms", 5).is_continue());
+    assert!(click_hint(&mut app, "-/+ 750ms", 2).is_continue());
     assert_eq!((file.saved()["interval"].clone(), *msec.read().unwrap()), (1000.into(), 1000));
     assert!(click_hint(&mut app, "? help", 0).is_continue());
     assert!(app.help.is_some());
@@ -2952,7 +2952,21 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     assert_eq!(row(&buf, 49), border(200, NOTE, typing));
 
-    // its hints are clickable too: Enter keeps the filter
+    // its hints are clickable too: `↓` and `↑` of `↑↓ select` move the selection
+    let click_footer = |app: &mut App, text: &str| {
+      let footer = row(&render_buffer(app, 200, 50), 49);
+      click(app, x_of(&footer, text), 49)
+    };
+    assert!(click_footer(&mut app, "↓").is_continue());
+    let first = app.proc_view.selected_pid().expect("↓ selects the top row");
+    assert!(click_footer(&mut app, "↓").is_continue());
+    let second = app.proc_view.selected_pid();
+    assert!(second.is_some() && second != Some(first), "↓ moves down");
+    assert!(click_footer(&mut app, "↑").is_continue());
+    assert_eq!(app.proc_view.selected_pid(), Some(first));
+    assert!(app.proc_view.typing());
+
+    // Enter keeps the filter
     for c in "zz".chars() {
       assert!(app.handle_key(key(c)).is_continue());
     }

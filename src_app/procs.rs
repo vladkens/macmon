@@ -527,11 +527,13 @@ fn gpu_times() -> HashMap<i32, u64> {
 }
 
 /// CPU % of a `ps` row from its CPU time `cpu_ns` at `now_ns` and its earlier `(time, CPU time)`
-/// snapshots, oldest first: the average since the oldest one. Zero until there are two, so the
-/// first rate of a process, over the short warm-up of a new sampler, is skipped.
+/// snapshots, oldest first: the average since the oldest one. Zero without a snapshot, and over
+/// the short warm-up of a new sampler (from its first sample, at time 0, to the next), which is
+/// skipped; a process that shows up later gets a rate on its second sample, as libproc rows do.
 fn averaged_cpu_pct(history: &[(u64, u64)], now_ns: u64, cpu_ns: u64) -> f32 {
   match history {
-    [(time, cpu), _, ..] if now_ns > *time && cpu_ns >= *cpu => {
+    [(0, _)] => 0.0,
+    [(time, cpu), ..] if now_ns > *time && cpu_ns >= *cpu => {
       ((cpu_ns - cpu) as f64 / (now_ns - time) as f64 * 100.0) as f32
     }
     _ => 0.0,
@@ -973,6 +975,9 @@ mod tests {
     assert_eq!(procs[0].cpu_pct, 0.0);
     assert_eq!(sampler.known[&A].cpu_history, [(ms(525), ms(1))]);
     assert!(!sampler.known.contains_key(&B));
+    // and, past the warm-up, gets a rate on its second sample, as a libproc row does
+    let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100));
+    assert_eq!(procs[0].cpu_pct, pct(2, 100));
   }
 
   #[test]
@@ -980,7 +985,9 @@ mod tests {
     let history = [(0, 0), (SEC, SEC / 2), (2 * SEC, SEC)];
     assert_eq!(averaged_cpu_pct(&history, 3 * SEC, 3 * SEC / 2), 50.0);
     assert_eq!(averaged_cpu_pct(&history[..2], 2 * SEC, SEC), 50.0);
-    // one snapshot or none: zero
+    // one snapshot taken after the sampler's first sample: the rate since it
+    assert_eq!(averaged_cpu_pct(&history[1..2], 2 * SEC, SEC), 50.0);
+    // only the first sample's snapshot (the warm-up) or none: zero
     assert_eq!(averaged_cpu_pct(&history[..1], SEC, SEC), 0.0);
     assert_eq!(averaged_cpu_pct(&[], SEC, SEC), 0.0);
     // the counter going backwards or no time passed: zero, no spike

@@ -240,16 +240,17 @@ impl Config {
   }
 }
 
-/// A config file in the temp directory for tests, removed when dropped.
+/// A config file in the temp directory for tests, removed with its directory when dropped.
 #[cfg(test)]
 pub(crate) struct TempConfig(PathBuf);
 
 #[cfg(test)]
 impl TempConfig {
-  /// A path no other test uses, with no file there yet.
+  /// A path no other test uses, with no file there yet. Each test gets a directory of its own:
+  /// with a shared one, a test removing it could race another creating its file there.
   pub(crate) fn new(name: &str) -> Self {
-    let dir = std::env::temp_dir().join(format!("macmon-test-{}", std::process::id()));
-    let path = dir.join(format!("{name}.json"));
+    let dir = std::env::temp_dir().join(format!("macmon-test-{}-{name}", std::process::id()));
+    let path = dir.join("macmon.json");
     let _ = fs::remove_file(&path);
     Self(path)
   }
@@ -269,7 +270,6 @@ impl TempConfig {
 impl Drop for TempConfig {
   fn drop(&mut self) {
     let _ = fs::remove_file(&self.0);
-    // the directory goes with the last file
     let _ = self.0.parent().map(fs::remove_dir);
   }
 }
