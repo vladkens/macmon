@@ -100,6 +100,26 @@ impl Default for Config {
   }
 }
 
+/// The real user behind `sudo` (`SUDO_UID` / `SUDO_GID` while running as root): files saved into
+/// their home are handed back to them, so their own runs can still update the settings.
+fn sudo_owner() -> Option<(u32, u32)> {
+  let var = |name| std::env::var(name).ok();
+  owner_behind_sudo(unsafe { libc::geteuid() }, var("SUDO_UID"), var("SUDO_GID"))
+}
+
+fn owner_behind_sudo(euid: u32, uid: Option<String>, gid: Option<String>) -> Option<(u32, u32)> {
+  if euid != 0 {
+    return None;
+  }
+  Some((uid?.parse().ok()?, gid?.parse().ok()?))
+}
+
+fn give_to(path: &Path, owner: Option<(u32, u32)>) {
+  if let Some((uid, gid)) = owner {
+    let _ = std::os::unix::fs::chown(path, Some(uid), Some(gid));
+  }
+}
+
 impl Config {
   fn normalize(mut self) -> Self {
     self.interval = self.interval.clamp(TUI_MIN_MS, TUI_MAX_MS);
@@ -149,12 +169,16 @@ impl Config {
   /// Writes the settings to their file.
   pub fn save(&self) {
     let Some(path) = &self.path else { return };
-    if let Some(dir) = path.parent() {
-      let _ = fs::create_dir_all(dir);
+    let owner = sudo_owner();
+    if let Some(dir) = path.parent().filter(|dir| !dir.exists())
+      && fs::create_dir_all(dir).is_ok()
+    {
+      give_to(dir, owner);
     }
 
     if let Ok(file) = File::create(path) {
       let _ = serde_json::to_writer_pretty(BufWriter::new(file), self);
+      give_to(path, owner);
     }
   }
 
@@ -249,7 +273,17 @@ impl Drop for TempConfig {
 
 #[cfg(test)]
 mod tests {
-  use super::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
+  use super::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType, owner_behind_sudo};
+
+  #[test]
+  fn files_saved_under_sudo_go_to_the_real_user() {
+    let id = |s: &str| Some(s.to_string());
+    assert_eq!(owner_behind_sudo(0, id("501"), id("20")), Some((501, 20)));
+    // not root, root without sudo, or broken variables: files stay as created
+    assert_eq!(owner_behind_sudo(501, id("501"), id("20")), None);
+    assert_eq!(owner_behind_sudo(0, None, None), None);
+    assert_eq!(owner_behind_sudo(0, id("x"), id("20")), None);
+  }
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
