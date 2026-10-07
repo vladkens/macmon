@@ -23,14 +23,14 @@ const HALF: char = '▄';
 
 /// Gauge view of the original macmon: a bar across its whole area, filled from the left to `ratio`
 /// (rounded to whole cells) in the load color of `ratio`; the rest stays blank.
-pub struct Gauge<'a> {
+pub(super) struct Gauge<'a> {
   ratio: f64,
   theme: &'a Theme,
 }
 
 impl<'a> Gauge<'a> {
   /// Gauge for `ratio` in `0.0..=1.0`, clamped outside the range.
-  pub fn new(ratio: f64, theme: &'a Theme) -> Self {
+  pub(super) fn new(ratio: f64, theme: &'a Theme) -> Self {
     let ratio = if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) };
     Self { ratio, theme }
   }
@@ -54,7 +54,7 @@ impl Widget for Gauge<'_> {
 /// the right): one solid bar per column, growing from the bottom row up in eighths of a row
 /// (`▁`…`█`; blank / `▄` / `█` with `Theme::three_level_bars`), each colored by its own value on
 /// the load gradient, or all in one color. Zero values leave the column blank.
-pub struct Graph<'a> {
+pub(super) struct Graph<'a> {
   data: &'a [u64],
   max: Option<u64>,
   color: Option<Color>,
@@ -63,18 +63,18 @@ pub struct Graph<'a> {
 
 impl<'a> Graph<'a> {
   /// Graph scaled to its largest visible sample, each bar in its load color.
-  pub fn new(data: &'a [u64], theme: &'a Theme) -> Self {
+  pub(super) fn new(data: &'a [u64], theme: &'a Theme) -> Self {
     Self { data, max: None, color: None, theme }
   }
 
   /// Value drawn at full height.
-  pub fn max(mut self, max: u64) -> Self {
+  pub(super) fn max(mut self, max: u64) -> Self {
     self.max = Some(max);
     self
   }
 
   /// Draws every bar in `color` instead of its load color.
-  pub fn color(mut self, color: Color) -> Self {
+  pub(super) fn color(mut self, color: Color) -> Self {
     self.color = Some(color);
     self
   }
@@ -99,7 +99,7 @@ impl Widget for Graph<'_> {
         }
 
         let eighths = level.min(BAR_LEVELS);
-        let symbol = bar_symbol(eighths, self.theme.three_level_bars);
+        let symbol = bar_symbol(eighths, self.theme.three_level_bars());
         if symbol != ' ' {
           buf[(x, y)].set_char(symbol).set_fg(color);
         }

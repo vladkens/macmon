@@ -23,6 +23,15 @@ pub enum ViewType {
   Gauge,
 }
 
+impl ViewType {
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Graph => "graph",
+      Self::Gauge => "gauge",
+    }
+  }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub enum RatioMode {
   Scaled,
@@ -38,7 +47,7 @@ impl RatioMode {
   }
 }
 
-/// Process list sort key.
+/// Process list sort key, one per column of the process table (see `tui::proc_view`).
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub enum ProcSort {
   Cpu,
@@ -48,21 +57,6 @@ pub enum ProcSort {
   Pid,
   Name,
   User,
-}
-
-impl ProcSort {
-  /// Next key in the `s` cycle: CPU → MEM → POWER → GPU → PID → NAME → USER → CPU.
-  pub fn next(self) -> Self {
-    match self {
-      Self::Cpu => Self::Mem,
-      Self::Mem => Self::Power,
-      Self::Power => Self::Gpu,
-      Self::Gpu => Self::Pid,
-      Self::Pid => Self::Name,
-      Self::Name => Self::User,
-      Self::User => Self::Cpu,
-    }
-  }
 }
 
 /// Settings saved in `~/.config/macmon.json`. Unknown fields (`color` and `per_core_view` of
@@ -421,16 +415,6 @@ mod tests {
     ] {
       assert_eq!(parse(&format!(r#"{{"proc_sort": "{name}"}}"#)).proc_sort, key);
     }
-  }
-
-  #[test]
-  fn proc_sort_cycle_wraps() {
-    use ProcSort::*;
-    let mut sorts = vec![Cpu];
-    for _ in 0..7 {
-      sorts.push(sorts.last().unwrap().next());
-    }
-    assert_eq!(sorts, [Cpu, Mem, Power, Gpu, Pid, Name, User, Cpu]);
   }
 
   #[test]

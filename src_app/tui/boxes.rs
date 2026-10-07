@@ -13,32 +13,37 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
 
 use super::App;
-use super::layout::{LayoutPlan, Metric, compute_layout};
-use super::store::{FreqStore, PowerStore};
+use super::layout::{LayoutPlan, Metric};
+use super::store::{FreqStore, PowerStore, ratio};
 use super::theme::{self, dim, heading, text};
 use super::widgets::{Gauge, Graph};
 use crate::config::ViewType;
 
-const GB: f64 = (1u64 << 30) as f64;
+/// Bytes in a GiB, the unit of the RAM box title.
+const GIB: f64 = (1u64 << 30) as f64;
 /// Between the parts of the power summary and between the key hints on a bottom border.
 const SEPARATOR: &str = " | ";
-
-pub(super) fn ratio(value: f64, total: f64) -> f64 {
-  if total == 0.0 { 0.0 } else { value / total }
-}
 
 /// Temperature position on the load gradient: 30 °C is cool, 100 °C is hot.
 fn temp_ratio(celsius: f32) -> f64 {
   (f64::from(celsius) - 30.0) / 70.0
 }
 
+/// `width` cells as `u16`, the type of screen coordinates; saturating, as no text on screen is
+/// wider than the screen.
+pub(super) fn cells(width: usize) -> u16 {
+  u16::try_from(width).unwrap_or(u16::MAX)
+}
+
 fn width_u16(line: &Line) -> u16 {
-  line.width().min(u16::MAX as usize) as u16
+  cells(line.width())
 }
 
 fn spans_width(spans: &[Span]) -> u16 {
-  spans.iter().map(Span::width).sum::<usize>().min(u16::MAX as usize) as u16
+  cells(spans.iter().map(Span::width).sum())
 }
+
+// MARK: Titles
 
 /// Titles on the top border of a box: left titles and an optional right one. When the border is
 /// too short, the first left title is truncated, while later left titles and then the right
@@ -132,38 +137,55 @@ struct TitleSlots {
 /// cell between each other and next to the corners. The first left title is truncated to fit; the
 /// other titles are placed in full or dropped: left ones first, then the right one.
 fn place_titles(width: u16, left: &[u16], right: Option<u16>) -> TitleSlots {
-  let mut slots = TitleSlots::default();
-  // free cells for titles: [start, end)
-  let mut start = 2;
-  let end = width.saturating_sub(2);
+  let (left, free) = place_left(width, left);
+  let right = right.filter(|&title| title > 0 && free.start.saturating_add(title) <= free.end);
+  TitleSlots { left, right: right.map(|title| free.end - title) }
+}
 
+/// The left titles of `place_titles`: their `(x, visible width)` and the cells still free after
+/// them, `[start, end)`.
+fn place_left(width: u16, left: &[u16]) -> (Vec<(u16, u16)>, Range<u16>) {
+  let mut slots = vec![];
+  let mut free = 2..width.saturating_sub(2);
   for (i, &title) in left.iter().enumerate() {
-    let room = end.saturating_sub(start);
+    let room = free.end.saturating_sub(free.start);
     if room == 0 || (i > 0 && title > room) {
       break;
     }
 
     let title = title.min(room);
-    slots.left.push((start, title));
-    start = start.saturating_add(title).saturating_add(1);
+    slots.push((free.start, title));
+    free.start = free.start.saturating_add(title).saturating_add(1);
   }
-
-  if let Some(title) = right
-    && title > 0
-    && start.saturating_add(title) <= end
-  {
-    slots.right = Some(end - title);
-  }
-
-  slots
+  (slots, free)
 }
 
-/// Parts of a summary on a bottom border, joined by ` | `.
-pub(super) type Parts = Vec<Vec<Span<'static>>>;
+/// Cells for the text of one more left title after `titles` on the top border of a box `width`
+/// cells wide, as `place_titles` places them: the cells still free, without the blank cell on both
+/// sides of the text.
+pub(super) fn title_text_room(width: u16, titles: &[Line]) -> u16 {
+  let padded: Vec<u16> = titles.iter().map(|title| width_u16(title).saturating_add(2)).collect();
+  let (_, free) = place_left(width, &padded);
+  free.end.saturating_sub(free.start).saturating_sub(2)
+}
 
-/// A key hint on a bottom border: the key symbols bold, then what they do. A click on it presses
-/// its key; on a hint for two keys (`-/+ 1000ms`), the key of the symbol clicked or nearest to
-/// the click (see `KeyTarget`).
+/// Draws a rounded box with `titles` on the top border. Returns the area inside the borders and
+/// the cells of the left titles' text that fit (see `Titles::render`).
+pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<Rect>) {
+  let block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::BORDER);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+  // title text without a color of its own in the text color, not the border's
+  let texts = titles.render(area, f.buffer_mut(), Style::new().fg(theme::TEXT));
+  (inner, texts)
+}
+
+// MARK: Bottom border
+
+/// A key hint: the key symbols bold, then what they do. A click on it presses its key; on a hint
+/// for two keys (`-/+ 1000ms`), the key of the symbol clicked or nearest to the click (see
+/// `KeyTarget`).
+#[derive(Debug, Clone)]
 pub(super) struct Hint {
   /// Symbols with the keys they press, drawn joined by `joiner`.
   keys: Vec<(&'static str, KeyCode)>,
@@ -172,9 +194,9 @@ pub(super) struct Hint {
 }
 
 impl Hint {
-  /// A hint for one key: `q quit`.
-  pub(super) fn new(key: &'static str, label: impl Into<String>, code: KeyCode) -> Self {
-    Self { keys: vec![(key, code)], joiner: "", label: label.into() }
+  /// A hint for one key, given as its symbol and code: `q quit`.
+  pub(super) fn new(key: (&'static str, KeyCode), label: impl Into<String>) -> Self {
+    Self { keys: vec![key], joiner: "", label: label.into() }
   }
 
   /// A hint for two keys with their symbols joined by `joiner`: `-/+ 1000ms`, `↑↓ select`.
@@ -187,14 +209,19 @@ impl Hint {
     Self { keys: vec![first, second], joiner, label: label.into() }
   }
 
-  fn spans(&self) -> Vec<Span<'static>> {
+  /// The hint's text: the key symbols bold, the label plain.
+  pub(super) fn spans(&self) -> Vec<Span<'static>> {
     let keys: Vec<&str> = self.keys.iter().map(|&(key, _)| key).collect();
     vec![heading(keys.join(self.joiner)), text(format!(" {}", self.label))]
   }
 
+  fn width(&self) -> u16 {
+    spans_width(&self.spans())
+  }
+
   /// Cells of each key's symbol from the left of the hint, with the key.
   fn key_cells(&self) -> Vec<(Range<u16>, KeyCode)> {
-    let width = |s: &str| Span::raw(s).width().min(usize::from(u16::MAX)) as u16;
+    let width = |s: &str| cells(Span::raw(s).width());
     let mut x = 0u16;
     let mut cells = vec![];
     for &(key, code) in &self.keys {
@@ -204,6 +231,11 @@ impl Hint {
     }
     cells
   }
+
+  /// Click target of the hint drawn in `area`, its first cell where the hint starts.
+  pub(super) fn target(&self, area: Rect) -> KeyTarget {
+    KeyTarget { area, keys: self.key_cells() }
+  }
 }
 
 /// Cells of the last frame that press keys when clicked: a key hint with the cells of its key
@@ -211,9 +243,9 @@ impl Hint {
 /// symbol (the left one when two are as near).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct KeyTarget {
-  pub area: Rect,
+  area: Rect,
   /// Cells of each key's symbol, from the left of `area`, with the key.
-  pub keys: Vec<(Range<u16>, KeyCode)>,
+  keys: Vec<(Range<u16>, KeyCode)>,
 }
 
 impl KeyTarget {
@@ -231,6 +263,46 @@ impl KeyTarget {
   }
 }
 
+/// One part of a summary on a bottom border: text, or a key hint, which presses its key when
+/// clicked like the hints on the right.
+#[derive(Debug, Clone)]
+enum Part {
+  Text(Vec<Span<'static>>),
+  Hint(Hint),
+}
+
+impl Part {
+  fn spans(&self) -> Vec<Span<'static>> {
+    match self {
+      Self::Text(spans) => spans.clone(),
+      Self::Hint(hint) => hint.spans(),
+    }
+  }
+}
+
+/// One way to write the summary on the left of a bottom border: its parts, joined by ` | `.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Summary(Vec<Part>);
+
+impl Summary {
+  /// Adds a part of text.
+  pub(super) fn text(mut self, spans: Vec<Span<'static>>) -> Self {
+    self.0.push(Part::Text(spans));
+    self
+  }
+
+  /// Adds a key hint.
+  pub(super) fn hint(mut self, hint: Hint) -> Self {
+    self.0.push(Part::Hint(hint));
+    self
+  }
+
+  /// Cells of each part.
+  fn widths(&self) -> Vec<u16> {
+    self.0.iter().map(|part| spans_width(&part.spans())).collect()
+  }
+}
+
 /// Cells of `items` (by width) joined by ` | `, with a blank cell at both ends; 0 for none.
 fn joined_width(items: &[u16]) -> u16 {
   if items.is_empty() {
@@ -238,8 +310,32 @@ fn joined_width(items: &[u16]) -> u16 {
   }
 
   let gaps = (items.len() - 1) * SEPARATOR.len();
-  let text = items.iter().map(|&w| usize::from(w)).sum::<usize>() + gaps + 2;
-  text.min(usize::from(u16::MAX)) as u16
+  cells(items.iter().map(|&w| usize::from(w)).sum::<usize>() + gaps + 2)
+}
+
+/// Cells of each of `items` (by width) in the line `joined` draws at `x`, `y`: after its blank
+/// cell, with a separator between them.
+fn joined_cells(x: u16, y: u16, items: &[u16]) -> Vec<Rect> {
+  let mut x = x.saturating_add(1);
+  let mut cells = vec![];
+  for &width in items {
+    cells.push(Rect::new(x, y, width, 1));
+    x = x.saturating_add(width).saturating_add(SEPARATOR.len() as u16);
+  }
+  cells
+}
+
+/// `items` joined by a dim ` | `, with a blank cell at both ends.
+fn joined<'a>(items: impl IntoIterator<Item = Vec<Span<'a>>>) -> Line<'a> {
+  let mut spans = vec![Span::raw(" ")];
+  for (i, item) in items.into_iter().enumerate() {
+    if i > 0 {
+      spans.push(dim(SEPARATOR));
+    }
+    spans.extend(item);
+  }
+  spans.push(Span::raw(" "));
+  Line::from(spans)
 }
 
 /// Number of leading `items` (by width) that fit in `room` cells joined as by `joined_width`.
@@ -289,9 +385,9 @@ fn text_room(width: u16, hints: &[u16]) -> u16 {
 }
 
 /// `text_room` for `hints`.
-pub(super) fn summary_text_room(width: u16, hints: &[Hint]) -> usize {
-  let hints: Vec<u16> = hints.iter().map(|hint| spans_width(&hint.spans())).collect();
-  usize::from(text_room(width, &hints))
+pub(super) fn summary_text_room(width: u16, hints: &[Hint]) -> u16 {
+  let hints: Vec<u16> = hints.iter().map(Hint::width).collect();
+  text_room(width, &hints)
 }
 
 /// Shares a bottom border `width` cells wide between the power summary (left) and the key hints
@@ -331,6 +427,99 @@ fn fit_bottom(width: u16, variants: &[Vec<u16>], hints: &[u16]) -> (usize, Borde
   (0, share_border(width, &[], hints))
 }
 
+/// Draws a summary (left) and `hints` (right-aligned) over the bottom border of box `area`.
+/// `summaries` are variants of the summary, longest first: the first that fits whole next to
+/// every hint is drawn, else the last one, sharing the border as `share_border` does. Returns
+/// the click targets of the hints drawn, those in the summary too.
+pub(super) fn render_bottom_border(
+  f: &mut Frame,
+  area: Rect,
+  summaries: Vec<Summary>,
+  hints: Vec<Hint>,
+) -> Vec<KeyTarget> {
+  let hint_widths: Vec<u16> = hints.iter().map(Hint::width).collect();
+  let variants: Vec<Vec<u16>> = summaries.iter().map(Summary::widths).collect();
+  let (variant, fit) = fit_bottom(area.width, &variants, &hint_widths);
+  let y = area.bottom() - 1;
+  let mut targets = vec![];
+
+  let summary = summaries.into_iter().nth(variant).unwrap_or_default();
+  if fit.summary > 0 {
+    let parts = &summary.0[..fit.summary];
+    let drawn = Rect::new(area.x + 2, y, fit.summary_width, 1);
+    f.buffer_mut().set_line(drawn.x, y, &joined(parts.iter().map(Part::spans)), drawn.width);
+
+    // a hint in a cut summary keeps the cells drawn
+    let cells = joined_cells(drawn.x, y, &variants[variant][..fit.summary]);
+    for (part, cells) in parts.iter().zip(cells) {
+      let cells = cells.intersection(drawn);
+      if let Part::Hint(hint) = part
+        && !cells.is_empty()
+      {
+        targets.push(hint.target(cells));
+      }
+    }
+  }
+
+  if fit.hints > 0 {
+    let line = joined(hints.iter().take(fit.hints).map(Hint::spans));
+    let width = width_u16(&line);
+    let x = area.right() - 2 - width;
+    f.buffer_mut().set_line(x, y, &line, width);
+    let cells = joined_cells(x, y, &hint_widths[..fit.hints]);
+    targets.extend(hints.iter().zip(cells).map(|(hint, cells)| hint.target(cells)));
+  }
+  targets
+}
+
+// MARK: Metric boxes
+
+/// Steps of the power summary, longest first (see `App::power_summary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerDetail {
+  /// `Power: 6.60W (avg 6.60W, max 6.60W) | Fan 1200 RPM | Total 12.00W (12.00, 12.00)`
+  Full,
+  /// Without the averages and maxima: `Power: 6.60W | Fan 1200 RPM | Total 12.00W`
+  Current,
+  /// Without the fans too: `Power: 6.60W | Total 12.00W`
+  NoFans,
+}
+
+impl PowerDetail {
+  const ALL: [Self; 3] = [Self::Full, Self::Current, Self::NoFans];
+}
+
+/// How much of the RAM or swap usage the RAM box title shows, longest first.
+#[derive(Debug, Clone, Copy)]
+enum MemDetail {
+  /// `RAM 16.81 GB (70.0%)`, `SWAP 2.37 / 3.0 GB`
+  Full,
+  /// `RAM 16.8G 70%`, `SWAP 2.4G 79%`
+  Short,
+  /// `RAM 70%`, `SWAP 79%`
+  Percent,
+}
+
+/// How the swap part of the RAM box title starts after the RAM part, longest first.
+#[derive(Debug, Clone, Copy)]
+enum SwapName {
+  /// ` · SWAP`
+  Dotted,
+  /// ` SWAP`
+  Plain,
+  /// ` SW`
+  Short,
+}
+
+/// Steps of the RAM box title with swap, longest first; `RAM 70%`, `70%` and no title follow.
+const SWAP_STEPS: [(MemDetail, SwapName); 5] = [
+  (MemDetail::Full, SwapName::Dotted),
+  (MemDetail::Short, SwapName::Dotted),
+  (MemDetail::Percent, SwapName::Dotted),
+  (MemDetail::Percent, SwapName::Plain),
+  (MemDetail::Percent, SwapName::Short),
+];
+
 /// How a metric box draws its history.
 enum Scale {
   /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
@@ -350,30 +539,6 @@ struct MetricBox<'a> {
   scale: Scale,
 }
 
-/// Draws a rounded box with `titles` on the top border. Returns the area inside the borders and
-/// the cells of the left titles' text that fit (see `Titles::render`).
-pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<Rect>) {
-  let block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::BORDER);
-  let inner = block.inner(area);
-  f.render_widget(block, area);
-  // title text without a color of its own in the text color, not the border's
-  let texts = titles.render(area, f.buffer_mut(), Style::new().fg(theme::TEXT));
-  (inner, texts)
-}
-
-/// `items` joined by a dim ` | `, with a blank cell at both ends.
-fn joined<'a>(items: impl IntoIterator<Item = Vec<Span<'a>>>) -> Line<'a> {
-  let mut spans = vec![Span::raw(" ")];
-  for (i, item) in items.into_iter().enumerate() {
-    if i > 0 {
-      spans.push(dim(SEPARATOR));
-    }
-    spans.extend(item);
-  }
-  spans.push(Span::raw(" "));
-  Line::from(spans)
-}
-
 impl App {
   /// `load` (`0.0..=1.0`) as a percent with `decimals`, in its load color.
   fn percent(&self, load: f64, decimals: usize) -> Span<'static> {
@@ -388,71 +553,20 @@ impl App {
     use KeyCode::{Char, Down, Enter, Esc, Up};
     if self.proc_view.typing() {
       let select = Hint::pair(("↑", Up), "", ("↓", Down), "select");
-      return vec![Hint::new("Enter", "keep", Enter), Hint::new("Esc", "clear", Esc), select];
+      return vec![Hint::new(("Enter", Enter), "keep"), Hint::new(("Esc", Esc), "clear"), select];
     }
 
-    let mut hints = vec![Hint::new("q", "quit", Char('q')), Hint::new("?", "help", Char('?'))];
-    if !self.procs_auto_hidden() {
-      hints.push(Hint::new("p", "procs", Char('p')));
+    let mut hints = vec![Hint::new(("q", Char('q')), "quit"), Hint::new(("?", Char('?')), "help")];
+    if self.procs_fit {
+      hints.push(Hint::new(("p", Char('p')), "procs"));
     }
-    let view = match self.cfg.view_type {
-      ViewType::Graph => "graph",
-      ViewType::Gauge => "gauge",
-    };
     let interval = format!("{}ms", self.cfg.interval());
     hints.extend([
-      Hint::new("v", view, Char('v')),
-      Hint::new("r", self.cfg.ratio_mode.label(), Char('r')),
+      Hint::new(("v", Char('v')), self.cfg.view_type.label()),
+      Hint::new(("r", Char('r')), self.cfg.ratio_mode.label()),
       Hint::pair(("-", Char('-')), "/", ("+", Char('+')), interval),
     ]);
     hints
-  }
-
-  /// Draws a summary (left) and `hints` (right-aligned) over the bottom border of box `area`.
-  /// `summaries` are variants of the summary, longest first: the first that fits whole next to
-  /// every hint is drawn, else the last one, sharing the border as `share_border` does. Returns
-  /// the click targets of the hints drawn.
-  pub(super) fn render_bottom_border(
-    &self,
-    f: &mut Frame,
-    area: Rect,
-    summaries: Vec<Parts>,
-    hints: Vec<Hint>,
-  ) -> Vec<KeyTarget> {
-    let widths =
-      |items: &[Vec<Span>]| items.iter().map(|item| spans_width(item)).collect::<Vec<_>>();
-    let hint_spans: Vec<Vec<Span>> = hints.iter().map(Hint::spans).collect();
-    let hint_widths = widths(&hint_spans);
-    let variants: Vec<Vec<u16>> = summaries.iter().map(|summary| widths(summary)).collect();
-    let (variant, fit) = fit_bottom(area.width, &variants, &hint_widths);
-    let y = area.bottom() - 1;
-
-    let summary = summaries.into_iter().nth(variant).unwrap_or_default();
-    if fit.summary > 0 {
-      let line = joined(summary.into_iter().take(fit.summary));
-      f.buffer_mut().set_line(area.x + 2, y, &line, fit.summary_width);
-    }
-
-    let mut targets = vec![];
-    if fit.hints > 0 {
-      let line = joined(hint_spans.into_iter().take(fit.hints));
-      let width = width_u16(&line);
-      let mut x = area.right() - 2 - width;
-      f.buffer_mut().set_line(x, y, &line, width);
-
-      // each hint after its blank cell or separator
-      for (hint, width) in hints.into_iter().zip(hint_widths).take(fit.hints) {
-        x += if targets.is_empty() { 1 } else { SEPARATOR.len() as u16 };
-        targets.push(KeyTarget { area: Rect::new(x, y, width, 1), keys: hint.key_cells() });
-        x += width;
-      }
-    }
-    targets
-  }
-
-  /// Screen layout for the current metrics.
-  pub(super) fn layout(&self, area: Rect) -> LayoutPlan {
-    compute_layout(area, self.cfg.show_procs, self.clusters.items.len())
   }
 
   /// Metrics box: chip and version in the title, the metric boxes inside and the power summary on
@@ -476,8 +590,8 @@ impl App {
     }
 
     let hints = if plan.proc.is_none() { self.footer_hints() } else { vec![] };
-    let summaries = (0..3).map(|step| self.power_summary(step)).collect();
-    self.render_bottom_border(f, area, summaries, hints)
+    let summaries = PowerDetail::ALL.map(|detail| self.power_summary(detail)).into();
+    render_bottom_border(f, area, summaries, hints)
   }
 
   /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, `macmon vX` right; the
@@ -514,33 +628,34 @@ impl App {
     Line::from(spans)
   }
 
-  /// Power summary of the original UI for the bottom border of the metrics box at `step`: `Power:
-  /// 6.60W (avg 6.60W, max 6.60W)` (CPU + GPU + ANE), the fans (`Fan 1200 RPM`) and `Total 12.00W
-  /// (12.00, 12.00)` (the whole system); from step 1 without the averages and maxima, from step 2
-  /// without the fans. The fans and Total only when their sensors exist.
-  fn power_summary(&self, step: usize) -> Parts {
+  /// Power summary of the original UI for the bottom border of the metrics box in `detail`:
+  /// `Power: 6.60W (avg 6.60W, max 6.60W)` (CPU + GPU + ANE), the fans (`Fan 1200 RPM`) and
+  /// `Total 12.00W (12.00, 12.00)` (the whole system). The fans and Total only when their sensors
+  /// exist.
+  fn power_summary(&self, detail: PowerDetail) -> Summary {
+    let stats = detail == PowerDetail::Full;
     let all = &self.all_power;
     let mut power = vec![text(format!("Power: {:.2}W", all.top_value))];
-    if step == 0 {
+    if stats {
       power.push(dim(format!(" (avg {:.2}W, max {:.2}W)", all.avg_value, all.max_value)));
     }
-    let mut parts = vec![power];
+    let mut summary = Summary::default().text(power);
 
     let fans = self.fans.label();
-    if !fans.is_empty() && step < 2 {
-      parts.push(vec![text(fans)]);
+    if !fans.is_empty() && detail != PowerDetail::NoFans {
+      summary = summary.text(vec![text(fans)]);
     }
 
     let sys = &self.sys_power;
     if sys.top_value > 0.0 {
       let mut total = vec![text(format!("Total {:.2}W", sys.top_value))];
-      if step == 0 {
+      if stats {
         total.push(dim(format!(" ({:.2}, {:.2})", sys.avg_value, sys.max_value)));
       }
-      parts.push(total);
+      summary = summary.text(total);
     }
 
-    parts
+    summary
   }
 
   /// Titles and history of `metric`; its cluster comes from the same list the layout counts.
@@ -580,49 +695,58 @@ impl App {
   /// RAM part), then `RAM 70%`, `70%` and no title, so no number is ever cut.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
-    let gb = |bytes: u64| bytes as f64 / GB;
-    let ram = (gb(mem.ram_usage), ratio(gb(mem.ram_usage), gb(mem.ram_total)));
+    let gib = |bytes: u64| bytes as f64 / GIB;
+    let ram = (gib(mem.ram_usage), ratio(gib(mem.ram_usage), gib(mem.ram_total)));
     let mut titles: Vec<Vec<Span>> = if mem.swap_total > 0 {
-      let swap = (gb(mem.swap_usage), gb(mem.swap_total));
+      let swap = (gib(mem.swap_usage), gib(mem.swap_total));
       let load = ratio(swap.0, swap.1);
-      (0..5)
-        .map(|step| [self.ram_part(step, ram), self.swap_part(step, swap, load)].concat())
-        .collect()
+      let step = |&(detail, name): &(MemDetail, SwapName)| {
+        [self.ram_part(detail, ram), self.swap_part(detail, name, swap, load)].concat()
+      };
+      SWAP_STEPS.iter().map(step).collect()
     } else {
-      (0..2).map(|step| self.ram_part(step, ram)).collect()
+      [MemDetail::Full, MemDetail::Short].map(|detail| self.ram_part(detail, ram)).into()
     };
-    titles.extend([self.ram_part(2, ram), vec![self.percent(ram.1, 0)]]);
+    titles.extend([self.ram_part(MemDetail::Percent, ram), vec![self.percent(ram.1, 0)]]);
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
 
     MetricBox { titles, data: &mem.items, scale: Scale::Load { max: mem.ram_total, load: ram.1 } }
   }
 
-  /// RAM part of the RAM box title at `step` for `(used GB, load)`: `RAM 16.81 GB (70.0%)`, `RAM
-  /// 16.8G 70%`, then `RAM 70%`.
-  fn ram_part(&self, step: usize, (used, load): (f64, f64)) -> Vec<Span<'static>> {
+  /// RAM part of the RAM box title in `detail` for `(used GB, load)`: `RAM 16.81 GB (70.0%)`,
+  /// `RAM 16.8G 70%` or `RAM 70%`.
+  fn ram_part(&self, detail: MemDetail, (used, load): (f64, f64)) -> Vec<Span<'static>> {
     let mut spans = vec![heading("RAM")];
-    match step {
-      0 => spans.extend([text(format!(" {used:.2} GB (")), self.percent(load, 1), text(")")]),
-      1 => spans.extend([text(format!(" {used:.1}G ")), self.percent(load, 0)]),
-      _ => spans.extend([text(" "), self.percent(load, 0)]),
+    match detail {
+      MemDetail::Full => {
+        spans.extend([text(format!(" {used:.2} GB (")), self.percent(load, 1), text(")")])
+      }
+      MemDetail::Short => spans.extend([text(format!(" {used:.1}G ")), self.percent(load, 0)]),
+      MemDetail::Percent => spans.extend([text(" "), self.percent(load, 0)]),
     }
     spans
   }
 
-  /// Swap part of the RAM box title at `step` for `(used GB, total GB)` and `load`, after the
-  /// RAM part: ` · SWAP 2.37 / 3.0 GB`, ` · SWAP 2.4G 79%`, ` · SWAP 79%`, ` SWAP 79%`, then
-  /// ` SW 79%`.
-  fn swap_part(&self, step: usize, (used, total): (f64, f64), load: f64) -> Vec<Span<'static>> {
-    let mut spans = match step {
-      0..=2 => vec![dim(" · "), heading("SWAP")],
-      3 => vec![text(" "), heading("SWAP")],
-      _ => vec![text(" "), heading("SW")],
+  /// Swap part of the RAM box title, after the RAM part, in `detail` and starting with `name`,
+  /// for `(used GB, total GB)` and `load`: ` · SWAP 2.37 / 3.0 GB`, ` · SWAP 2.4G 79%`,
+  /// ` · SWAP 79%`, ` SWAP 79%` or ` SW 79%`.
+  fn swap_part(
+    &self,
+    detail: MemDetail,
+    name: SwapName,
+    (used, total): (f64, f64),
+    load: f64,
+  ) -> Vec<Span<'static>> {
+    let mut spans = match name {
+      SwapName::Dotted => vec![dim(" · "), heading("SWAP")],
+      SwapName::Plain => vec![text(" "), heading("SWAP")],
+      SwapName::Short => vec![text(" "), heading("SW")],
     };
-    match step {
-      0 => spans.push(text(format!(" {used:.2} / {total:.1} GB"))),
-      1 => spans.extend([text(format!(" {used:.1}G ")), self.percent(load, 0)]),
-      _ => spans.extend([text(" "), self.percent(load, 0)]),
+    match detail {
+      MemDetail::Full => spans.push(text(format!(" {used:.2} / {total:.1} GB"))),
+      MemDetail::Short => spans.extend([text(format!(" {used:.1}G ")), self.percent(load, 0)]),
+      MemDetail::Percent => spans.extend([text(" "), self.percent(load, 0)]),
     }
     spans
   }
@@ -660,9 +784,12 @@ mod tests {
   use ratatui::layout::{Position, Rect};
   use ratatui::style::Style;
 
+  use ratatui::text::Line;
+
   use super::{
     BorderFit, Hint, KeyTarget, TitleSlots, Titles, fit_bottom, fit_joined, fit_titles,
-    joined_width, place_titles, share_border, spans_width, summary_room, temp_ratio, text_room,
+    joined_cells, joined_width, place_titles, share_border, summary_room, temp_ratio, text_room,
+    title_text_room,
   };
 
   #[test]
@@ -757,6 +884,24 @@ mod tests {
   }
 
   #[test]
+  fn title_room_is_what_place_titles_leaves() {
+    // `╭─ proc 3 ─ ` then the room for the next title's text before ` ─╮`
+    let count = [Line::from("proc 3")];
+    assert_eq!(title_text_room(40, &count), 40 - 2 - 8 - 1 - 2 - 2);
+    assert_eq!(title_text_room(40, &[]), 40 - 6);
+    // a title of exactly that width fits whole; one more cell doesn't
+    for width in [15, 20, 40] {
+      let room = usize::from(title_text_room(width, &count));
+      let fits = |text: usize| Titles::new("proc 3").left("x".repeat(text)).fits(width);
+      assert!(fits(room) && !fits(room + 1), "width {width}: room {room}");
+    }
+    // no room, or the first title cut
+    assert_eq!(title_text_room(15, &count), 0);
+    assert_eq!(title_text_room(8, &count), 0);
+    assert_eq!(title_text_room(3, &[]), 0);
+  }
+
+  #[test]
   fn tiny_borders_place_nothing() {
     for width in 0..=4 {
       let slots = place_titles(width, &[5], Some(3));
@@ -812,12 +957,20 @@ mod tests {
     assert_eq!(joined_width(&[6]), 8);
     assert_eq!(joined_width(&[]), 0);
     assert_eq!(joined_width(&[u16::MAX, u16::MAX]), u16::MAX);
+
+    // ` a | bb ` drawn at 10: `a` at 11, `bb` at 15
+    let cells = joined_cells(10, 3, &[1, 2]);
+    assert_eq!(cells, [Rect::new(11, 3, 1, 1), Rect::new(15, 3, 2, 1)]);
+    assert!(joined_cells(10, 3, &[]).is_empty());
   }
 
   /// Widths of the power summary parts (`Power: …`, `Fan 1200 RPM`, `Total …`) of the test
   /// metrics and of five key hints (`q quit`, `p procs`, `v graph`, `r scaled`, `-/+ 1000ms`).
   const SUMMARY: [u16; 3] = [35, 12, 27];
   const HINTS: [u16; 5] = [6, 7, 7, 8, 10];
+  /// Widths of the six global key hints of the footer, 61 cells joined: `q quit`, `? help`,
+  /// `p procs`, `v graph`, `r scaled`, `-/+ 1000ms`.
+  const FOOTER: [u16; 6] = [6, 6, 7, 7, 8, 10];
 
   fn fit(summary: usize, summary_width: u16, hints: usize) -> BorderFit {
     BorderFit { summary, summary_width, hints }
@@ -896,8 +1049,8 @@ mod tests {
 
   #[test]
   fn text_room_keeps_the_hints_while_it_can() {
-    // 6 hints, 61 cells: the room next to them, without the blank cells around the text
-    let hints = [6, 6, 7, 7, 8, 10];
+    // the room next to the footer, without the blank cells around the text
+    let hints = FOOTER;
     assert_eq!(text_room(200, &hints), 200 - 4 - 61 - 1 - 2);
     assert_eq!(text_room(120, &hints), 52);
     // at least half the room next to `q quit`
@@ -912,9 +1065,9 @@ mod tests {
 
   #[test]
   fn bottom_border_drops_summary_details_before_hints() {
-    // the power summary, without the averages and maxima, without the fans; 6 hints, 61 cells
+    // the power summary, without the averages and maxima, without the fans; the footer
     let variants = [vec![35, 12, 27], vec![12, 12, 12], vec![12, 12]];
-    let hints = [6, 6, 7, 7, 8, 10];
+    let hints = FOOTER;
     let fit = |width| {
       let (variant, fit) = fit_bottom(width, &variants, &hints);
       (variant, fit.summary, fit.hints)
@@ -945,18 +1098,15 @@ mod tests {
 
   #[test]
   fn key_targets_press_the_key_clicked_or_nearest() {
-    use KeyCode::{Char, Down, Enter, Esc, Left, Right, Up};
+    use KeyCode::{Char, Down, Enter, Esc, Up};
     // the target of `hint` drawn at `x`, `y`
-    let target = |hint: &Hint, x, y| {
-      let area = Rect::new(x, y, spans_width(&hint.spans()), 1);
-      KeyTarget { area, keys: hint.key_cells() }
-    };
+    let target = |hint: &Hint, x, y| hint.target(Rect::new(x, y, hint.width(), 1));
     // the key each cell of `target` presses, one char per cell
     let keys = |target: &KeyTarget| {
       let name = |code| match code {
         Char(c) => c,
-        Up | Left => '<',
-        Down | Right => '>',
+        Up => '<',
+        Down => '>',
         Enter => 'E',
         Esc => 'X',
         _ => '?',
@@ -967,7 +1117,7 @@ mod tests {
     };
 
     // one key: the whole hint, nothing around it
-    let quit = target(&Hint::new("q", "quit", Char('q')), 10, 5);
+    let quit = target(&Hint::new(("q", Char('q')), "quit"), 10, 5);
     assert_eq!(quit.area.width, 6);
     assert_eq!(keys(&quit), "qqqqqq");
     for (x, y) in [(9, 5), (16, 5), (12, 4), (12, 6)] {
@@ -985,10 +1135,6 @@ mod tests {
     // symbols wider than a cell: each owns its cells, the joiner goes to the left one on a tie
     let wide = Hint::pair(("Enter", Enter), "/", ("Esc", Esc), "x");
     assert_eq!(keys(&target(&wide, 0, 0)), "EEEEEEXXXXX");
-
-    // `← sort →` on the process box border: arrows at both ends, so each takes half
-    let sort = KeyTarget { area: Rect::new(4, 0, 8, 1), keys: vec![(0..1, Left), (7..8, Right)] };
-    assert_eq!(keys(&sort), "<<<<>>>>");
   }
 
   #[test]

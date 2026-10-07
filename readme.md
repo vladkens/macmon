@@ -91,9 +91,7 @@ Controls:
   - / + - change update interval
 
 Process list:
-  ↑ ↓   - select process; PgUp / PgDn / Home / End move the selection, or scroll
-          without one
-  ← →   - sort by the column on the left / right
+  ↑ ↓   - select process
   s     - sort by the next column: CPU, MEM, POWER, GPU, PID, NAME, USER
   S     - reverse sort order
   /     - filter by name or PID (Enter - keep, Esc - clear); while typing, every key
@@ -104,13 +102,13 @@ Mouse (process list):
   click a column header - sort by it, click again to reverse
   click "/ filter"      - filter by name or PID
   click a process       - select it, click it again to clear the selection
-  click a key hint      - same as the key ("← sort →" and the bottom border)
+  click a key hint      - same as the key ("s sort" and the bottom border)
   wheel                 - scroll by 3 rows, with the selection when there is one
 ```
 
 A column chosen for sorting starts with the largest numbers (CPU, MEM, POWER, GPU) or from the start (PID, NAME, USER); the sorted column stays on screen in narrow windows. The bottom border of the process list shows the PID and full path of the selected process.
 
-Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`; an interval given with `-i` is used for that run only. The process list hides itself when the window is too small.
+Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`; an interval given with `-i` is used for that run only. The process list hides itself when the window is too small; `p` does nothing then.
 
 Colors come from your terminal's palette: borders and text in its own colors, loads from its green through yellow to red. The gradient is smooth on truecolor terminals (`COLORTERM=truecolor` or `24bit`) that answer the palette query (OSC 4); otherwise, and over SSH, where the query is skipped, it steps through the three colors.
 

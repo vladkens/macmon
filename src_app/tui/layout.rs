@@ -8,18 +8,18 @@
 use ratatui::layout::{Margin, Rect};
 
 /// Share of the screen height for the metrics box over the process list, in percent.
-pub const METRICS_HEIGHT_PCT: u32 = 40;
+const METRICS_HEIGHT_PCT: u32 = 40;
 /// Lowest metrics box over the process list: two rows of boxes with one graph row each, plus the
 /// borders.
-pub const METRICS_MIN_HEIGHT: u16 = 8;
+const METRICS_MIN_HEIGHT: u16 = 8;
 /// Fewest process rows worth showing; with less room the process list is auto-hidden.
-pub const PROC_MIN_ROWS: u16 = 3;
+const PROC_MIN_ROWS: u16 = 3;
 /// Rows of the process box besides the process rows: borders and the table header.
 const PROC_CHROME: u16 = 3;
 
 /// One box of the metrics box: a title over a history graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Metric {
+pub(super) enum Metric {
   /// CPU cluster, by index into the cluster list.
   Cluster(usize),
   Gpu,
@@ -31,14 +31,14 @@ pub enum Metric {
 
 /// Rectangles for one frame. Hidden parts are `None` / left out; every rect is non-empty.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct LayoutPlan {
+pub(super) struct LayoutPlan {
   /// Metrics box, borders included.
-  pub top: Option<Rect>,
+  pub(super) top: Option<Rect>,
   /// Metric boxes inside the metrics box, borders included: the top row left to right, then the
   /// bottom row.
-  pub boxes: Vec<(Metric, Rect)>,
+  pub(super) boxes: Vec<(Metric, Rect)>,
   /// Process box, borders included.
-  pub proc: Option<Rect>,
+  pub(super) proc: Option<Rect>,
 }
 
 /// Boxes of the top row: CPU clusters, GPU, RAM.
@@ -70,23 +70,27 @@ fn split_row(row: Rect, count: usize) -> impl Iterator<Item = Rect> {
     .filter(|r| !r.is_empty())
 }
 
+/// Whether `area` has room for the process list under the metrics box: at least `PROC_MIN_ROWS`
+/// process rows. The process list setting doesn't matter.
+pub(super) fn procs_fit(area: Rect) -> bool {
+  !area.is_empty() && area.height - metrics_height(area.height) >= PROC_MIN_ROWS + PROC_CHROME
+}
+
 /// Splits `area` into the metrics box and the process box below it.
 ///
 /// With the process list on (`procs`), the metrics box takes `METRICS_HEIGHT_PCT` of the height
 /// and the process box the rest; left with fewer than `PROC_MIN_ROWS` process rows, the process
 /// list is auto-hidden. Without it, the metrics box takes the whole screen.
-pub fn compute_layout(area: Rect, procs: bool, clusters: usize) -> LayoutPlan {
+pub(super) fn compute_layout(area: Rect, procs: bool, clusters: usize) -> LayoutPlan {
   let mut plan = LayoutPlan::default();
   if area.is_empty() {
     return plan;
   }
 
   let mut top = area;
-  let height = metrics_height(area.height);
-  let rest = area.height - height;
-  if procs && rest >= PROC_MIN_ROWS + PROC_CHROME {
-    top.height = height;
-    plan.proc = Some(Rect { y: top.bottom(), height: rest, ..area });
+  if procs && procs_fit(area) {
+    top.height = metrics_height(area.height);
+    plan.proc = Some(Rect { y: top.bottom(), height: area.height - top.height, ..area });
   }
   plan.top = Some(top);
 
@@ -112,7 +116,8 @@ mod tests {
   use ratatui::layout::{Margin, Rect};
 
   use super::{
-    LayoutPlan, METRICS_MIN_HEIGHT, Metric, PROC_MIN_ROWS, compute_layout, metrics_height,
+    LayoutPlan, METRICS_MIN_HEIGHT, Metric, PROC_CHROME, PROC_MIN_ROWS, compute_layout,
+    metrics_height, procs_fit,
   };
 
   fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
@@ -212,12 +217,18 @@ mod tests {
   #[test]
   fn small_screen_auto_hides_procs_by_height() {
     // 100x13: an 8 rows metrics box would leave 5 rows, one short of the smallest process box
-    let min = PROC_MIN_ROWS + 3;
-    let plan = layout(rect(0, 0, 100, METRICS_MIN_HEIGHT + min - 1), true);
+    let min = PROC_MIN_ROWS + PROC_CHROME;
+    let small = rect(0, 0, 100, METRICS_MIN_HEIGHT + min - 1);
+    let plan = layout(small, true);
     assert_eq!(plan.proc, None);
     assert_eq!(plan.top, Some(rect(0, 0, 100, 13)), "the metrics take the whole screen");
-    let plan = layout(rect(0, 0, 100, METRICS_MIN_HEIGHT + min), true);
+    let fits = rect(0, 0, 100, METRICS_MIN_HEIGHT + min);
+    let plan = layout(fits, true);
     assert_eq!(plan.proc, Some(rect(0, 8, 100, min)));
+
+    // whether the list fits doesn't depend on the setting
+    assert!(!procs_fit(small) && procs_fit(fits));
+    assert!(!procs_fit(rect(0, 0, 0, 0)));
 
     // width doesn't matter, only the rows left for the processes
     assert!(layout(rect(0, 0, 20, 40), true).proc.is_some());
@@ -246,10 +257,11 @@ mod tests {
                 proc,
                 Rect { y: top.bottom(), height: area.bottom() - top.bottom(), ..area }
               );
-              assert!(proc.height >= PROC_MIN_ROWS + 3, "{ctx}");
+              assert!(proc.height >= PROC_MIN_ROWS + PROC_CHROME, "{ctx}");
             }
             None => assert_eq!(top, area, "{ctx}: metrics take the full height"),
           }
+          assert_eq!(plan.proc.is_some(), procs && procs_fit(area), "{ctx}");
 
           // boxes sit inside the borders of the metrics box and never overlap
           let inner = top.inner(Margin::new(1, 1));

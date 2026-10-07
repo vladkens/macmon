@@ -9,14 +9,14 @@ use ratatui::text::Span;
 use super::palette::{Palette, Rgb};
 
 /// Borders: bright black (ANSI 8).
-pub const BORDER: Color = Color::DarkGray;
+pub(super) const BORDER: Color = Color::DarkGray;
 /// Secondary text (separators, units, zeros): bright black (ANSI 8).
-pub const DIM: Color = Color::DarkGray;
+pub(super) const DIM: Color = Color::DarkGray;
 /// Titles and text: the terminal's default foreground.
-pub const TEXT: Color = Color::Reset;
+pub(super) const TEXT: Color = Color::Reset;
 /// Selected process row: reverse video over the default colors, so the row reads as one bar
 /// instead of reversing each load color in it.
-pub const SELECTED: Style = Style::new().fg(TEXT).add_modifier(Modifier::REVERSED);
+pub(super) const SELECTED: Style = Style::new().fg(TEXT).add_modifier(Modifier::REVERSED);
 
 /// Steps of the gradient without a smooth palette: green up to `GREEN_MAX`, yellow up to
 /// `YELLOW_MAX`, red above.
@@ -24,45 +24,50 @@ const GREEN_MAX: f64 = 1.0 / 3.0;
 const YELLOW_MAX: f64 = 2.0 / 3.0;
 
 /// Box or metric name: bold, in the default color.
-pub fn heading<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+pub(super) fn heading<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, Style::new().fg(TEXT).add_modifier(Modifier::BOLD))
 }
 
 /// Text in the default color. The color is set, not left out, so text drawn over a border doesn't
 /// take the border's color.
-pub fn text<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+pub(super) fn text<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, TEXT)
 }
 
-pub fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+pub(super) fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, DIM)
 }
 
 /// What depends on the terminal: the load gradient and the bar glyphs. The UI colors above are
 /// the same everywhere.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct Theme {
+pub(super) struct Theme {
   /// RGB gradient stops (green, yellow, red) from the palette query; `None` steps through the
   /// ANSI colors instead.
   smooth: Option<[Rgb; 3]>,
   /// Graph bars in three levels (blank, `▄`, `█`) instead of eighths: Apple Terminal draws gaps
   /// between the eighth blocks.
-  pub three_level_bars: bool,
+  three_level_bars: bool,
 }
 
 impl Theme {
   /// Theme for a terminal that answered the palette query with `palette` (asked only on truecolor
   /// terminals); without one the gradient steps through the ANSI colors.
-  pub fn new(palette: Option<Palette>) -> Self {
+  pub(super) fn new(palette: Option<Palette>) -> Self {
     Self { smooth: palette.map(|p| [p.green, p.yellow, p.red]), three_level_bars: false }
   }
 
-  pub fn with_three_level_bars(self, three_level_bars: bool) -> Self {
+  pub(super) fn with_three_level_bars(self, three_level_bars: bool) -> Self {
     Self { three_level_bars, ..self }
   }
 
+  /// Whether graph bars come in three levels (see `with_three_level_bars`).
+  pub(super) fn three_level_bars(&self) -> bool {
+    self.three_level_bars
+  }
+
   /// Load color for `t` in `0.0..=1.0` (green → yellow → red), clamped outside the range.
-  pub fn gradient(&self, t: f64) -> Color {
+  pub(super) fn gradient(&self, t: f64) -> Color {
     let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
     match self.smooth {
       Some([low, mid, _]) if t <= 0.5 => lerp(low, mid, t * 2.0),
@@ -80,7 +85,7 @@ fn lerp((r1, g1, b1): Rgb, (r2, g2, b2): Rgb, t: f64) -> Color {
 }
 
 /// True when `COLORTERM` advertises 24-bit color support.
-pub fn detect_truecolor() -> bool {
+pub(super) fn detect_truecolor() -> bool {
   supports_truecolor(std::env::var("COLORTERM").ok().as_deref())
 }
 
@@ -89,7 +94,7 @@ fn supports_truecolor(colorterm: Option<&str>) -> bool {
 }
 
 /// True in Apple Terminal, which needs three-level bars (`TERM_PROGRAM`).
-pub fn detect_three_level_bars() -> bool {
+pub(super) fn detect_three_level_bars() -> bool {
   is_apple_terminal(std::env::var("TERM_PROGRAM").ok().as_deref())
 }
 

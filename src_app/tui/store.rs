@@ -5,9 +5,9 @@ use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
 /// Samples kept for the history graphs, newest first: one per column, enough to fill the widest
 /// box (CPU power, a third of the width) of a terminal about 3000 columns wide.
-pub(super) const HISTORY_LEN: usize = 1024;
+const HISTORY_LEN: usize = 1024;
 /// Latest samples behind the power average and maximum.
-pub(super) const STATS_LEN: usize = 128;
+const STATS_LEN: usize = 128;
 const MAX_TEMPS: usize = 8;
 
 #[derive(Debug, Default, Clone)]
@@ -231,13 +231,18 @@ fn avg2<T: num_traits::Float>(a: T, b: T) -> T {
   if a == T::zero() { b } else { (a + b) / T::from(2.0).unwrap() }
 }
 
+/// Share of `value` in `total`; 0 for a zero total (no sample yet).
+pub(super) fn ratio(value: f64, total: f64) -> f64 {
+  if total == 0.0 { 0.0 } else { value / total }
+}
+
 #[cfg(test)]
 mod tests {
   use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
 
   use super::{CpuClusters, FanStore, FreqSample, FreqStore};
   use super::{HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN, TempStore};
-  use super::{avg2, cluster_samples};
+  use super::{avg2, cluster_samples, ratio};
   use crate::config::RatioMode;
 
   fn assert_close(actual: f64, expected: f64) {
@@ -248,6 +253,12 @@ mod tests {
   fn avg2_skips_zero_previous_value() {
     assert_eq!(avg2(0.0, 4.0), 4.0);
     assert_eq!(avg2(2.0, 4.0), 3.0);
+  }
+
+  #[test]
+  fn ratio_of_zero_total_is_zero() {
+    assert_eq!(ratio(3.0, 4.0), 0.75);
+    assert_eq!(ratio(3.0, 0.0), 0.0);
   }
 
   #[test]

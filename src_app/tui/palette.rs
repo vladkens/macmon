@@ -13,7 +13,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-pub type Rgb = (u8, u8, u8);
+pub(super) type Rgb = (u8, u8, u8);
 
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
@@ -33,10 +33,10 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Terminal colors of the load gradient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Palette {
-  pub green: Rgb,
-  pub yellow: Rgb,
-  pub red: Rgb,
+pub(super) struct Palette {
+  pub(super) green: Rgb,
+  pub(super) yellow: Rgb,
+  pub(super) red: Rgb,
 }
 
 impl Palette {
@@ -190,7 +190,7 @@ const SSH_VARS: [&str; 2] = ["SSH_TTY", "SSH_CONNECTION"];
 /// Whether asking the terminal for its palette is worth it. Only a smooth (truecolor) gradient
 /// uses the palette, and over SSH the replies can come back after the drain window and turn into
 /// key presses, so remote sessions keep the ANSI steps.
-pub fn should_query(truecolor: bool) -> bool {
+pub(super) fn should_query(truecolor: bool) -> bool {
   wants_query(truecolor, |name| std::env::var_os(name))
 }
 
@@ -202,7 +202,7 @@ fn wants_query(truecolor: bool, env: impl Fn(&str) -> Option<OsString>) -> bool 
 
 /// Asks the terminal for its palette. Needs raw mode and must run before anything else reads the
 /// terminal. `None` when the terminal doesn't answer in time or can't be opened.
-pub fn query_terminal() -> Option<Palette> {
+pub(super) fn query_terminal() -> Option<Palette> {
   let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
   query(&mut tty, QUERY_TIMEOUT, DRAIN_TIMEOUT).ok().flatten()
 }

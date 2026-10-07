@@ -4,7 +4,7 @@
 //! from the setuid `/bin/ps`, which has CPU time and RSS but no energy counter. GPU time of every
 //! process comes from the GPU's user clients in the IORegistry.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem;
 use std::process::{Command, Stdio};
@@ -30,59 +30,59 @@ const PS_CPU_INTERVALS: usize = 3;
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 #[allow(dead_code)] // FFI layout, most fields are unused
-pub struct rusage_info_v6 {
-  pub ri_uuid: [u8; 16],
-  pub ri_user_time: u64,
-  pub ri_system_time: u64,
-  pub ri_pkg_idle_wkups: u64,
-  pub ri_interrupt_wkups: u64,
-  pub ri_pageins: u64,
-  pub ri_wired_size: u64,
-  pub ri_resident_size: u64,
-  pub ri_phys_footprint: u64,
-  pub ri_proc_start_abstime: u64,
-  pub ri_proc_exit_abstime: u64,
-  pub ri_child_user_time: u64,
-  pub ri_child_system_time: u64,
-  pub ri_child_pkg_idle_wkups: u64,
-  pub ri_child_interrupt_wkups: u64,
-  pub ri_child_pageins: u64,
-  pub ri_child_elapsed_abstime: u64,
-  pub ri_diskio_bytesread: u64,
-  pub ri_diskio_byteswritten: u64,
-  pub ri_cpu_time_qos_default: u64,
-  pub ri_cpu_time_qos_maintenance: u64,
-  pub ri_cpu_time_qos_background: u64,
-  pub ri_cpu_time_qos_utility: u64,
-  pub ri_cpu_time_qos_legacy: u64,
-  pub ri_cpu_time_qos_user_initiated: u64,
-  pub ri_cpu_time_qos_user_interactive: u64,
-  pub ri_billed_system_time: u64,
-  pub ri_serviced_system_time: u64,
-  pub ri_logical_writes: u64,
-  pub ri_lifetime_max_phys_footprint: u64,
-  pub ri_instructions: u64,
-  pub ri_cycles: u64,
-  pub ri_billed_energy: u64,
-  pub ri_serviced_energy: u64,
-  pub ri_interval_max_phys_footprint: u64,
-  pub ri_runnable_time: u64,
-  pub ri_flags: u64,
-  pub ri_user_ptime: u64,
-  pub ri_system_ptime: u64,
-  pub ri_pinstructions: u64,
-  pub ri_pcycles: u64,
-  pub ri_energy_nj: u64,
-  pub ri_penergy_nj: u64,
-  pub ri_secure_time_in_system: u64,
-  pub ri_secure_ptime_in_system: u64,
-  pub ri_neural_footprint: u64,
-  pub ri_lifetime_max_neural_footprint: u64,
-  pub ri_interval_max_neural_footprint: u64,
-  pub ri_conclave_footprint: u64,
-  pub ri_page_wait_time_mach: u64,
-  pub ri_page_cache_hits: u64,
-  pub ri_reserved: [u64; 6],
+struct rusage_info_v6 {
+  ri_uuid: [u8; 16],
+  ri_user_time: u64,
+  ri_system_time: u64,
+  ri_pkg_idle_wkups: u64,
+  ri_interrupt_wkups: u64,
+  ri_pageins: u64,
+  ri_wired_size: u64,
+  ri_resident_size: u64,
+  ri_phys_footprint: u64,
+  ri_proc_start_abstime: u64,
+  ri_proc_exit_abstime: u64,
+  ri_child_user_time: u64,
+  ri_child_system_time: u64,
+  ri_child_pkg_idle_wkups: u64,
+  ri_child_interrupt_wkups: u64,
+  ri_child_pageins: u64,
+  ri_child_elapsed_abstime: u64,
+  ri_diskio_bytesread: u64,
+  ri_diskio_byteswritten: u64,
+  ri_cpu_time_qos_default: u64,
+  ri_cpu_time_qos_maintenance: u64,
+  ri_cpu_time_qos_background: u64,
+  ri_cpu_time_qos_utility: u64,
+  ri_cpu_time_qos_legacy: u64,
+  ri_cpu_time_qos_user_initiated: u64,
+  ri_cpu_time_qos_user_interactive: u64,
+  ri_billed_system_time: u64,
+  ri_serviced_system_time: u64,
+  ri_logical_writes: u64,
+  ri_lifetime_max_phys_footprint: u64,
+  ri_instructions: u64,
+  ri_cycles: u64,
+  ri_billed_energy: u64,
+  ri_serviced_energy: u64,
+  ri_interval_max_phys_footprint: u64,
+  ri_runnable_time: u64,
+  ri_flags: u64,
+  ri_user_ptime: u64,
+  ri_system_ptime: u64,
+  ri_pinstructions: u64,
+  ri_pcycles: u64,
+  ri_energy_nj: u64,
+  ri_penergy_nj: u64,
+  ri_secure_time_in_system: u64,
+  ri_secure_ptime_in_system: u64,
+  ri_neural_footprint: u64,
+  ri_lifetime_max_neural_footprint: u64,
+  ri_interval_max_neural_footprint: u64,
+  ri_conclave_footprint: u64,
+  ri_page_wait_time_mach: u64,
+  ri_page_cache_hits: u64,
+  ri_reserved: [u64; 6],
 }
 
 #[repr(C)]
@@ -133,10 +133,14 @@ pub struct ProcInfo {
 /// Cumulative counters of one process; rates come from two snapshots.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Counters {
-  start: u64,             // Process start time, tells a reused pid apart.
-  cpu_ns: u64,            // User + system CPU time.
-  energy_nj: Option<u64>, // Lifetime energy, None when unavailable.
-  gpu_ns: Option<u64>,    // GPU time of the process' GPU clients, None without clients.
+  /// Process start time, tells a reused pid apart.
+  start: u64,
+  /// User + system CPU time.
+  cpu_ns: u64,
+  /// Lifetime energy, None when unavailable.
+  energy_nj: Option<u64>,
+  /// GPU time of the process' GPU clients, None without clients.
+  gpu_ns: Option<u64>,
 }
 
 /// Process state read from libproc or `ps`, before rates are computed.
@@ -146,10 +150,15 @@ struct Raw {
   uid: u32,
   mem_bytes: u64,
   counters: Counters,
-  comm: String,     // Changes on exec; with the start time tells a reused pid apart.
-  fallback: String, // Name shown when the executable path isn't readable.
-  ps: bool,         // Read from `ps`: CPU time in 10 ms steps.
+  /// Changes on exec; with the start time tells a reused pid apart.
+  comm: String,
+  /// Name shown when the executable path isn't readable.
+  fallback: String,
+  /// Read from `ps`: CPU time in 10 ms steps.
+  ps: bool,
 }
+
+// MARK: Rates
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Usage {
@@ -193,6 +202,8 @@ fn usage(prev: Option<&Counters>, cur: &Counters, elapsed_ns: u64) -> Usage {
     gpu_pct,
   }
 }
+
+// MARK: libproc
 
 /// Converts mach absolute time units to nanoseconds.
 fn ticks_to_ns(ticks: u64, numer: u32, denom: u32) -> u64 {
@@ -272,6 +283,8 @@ fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<R
     ps: false,
   })
 }
+
+// MARK: ps
 
 /// Number made of ASCII digits only (`str::parse` also accepts a leading `+`).
 fn digits(s: &str) -> Option<u64> {
@@ -355,6 +368,8 @@ fn merge(mut rows: Vec<Raw>, ps: Vec<Raw>) -> Vec<Raw> {
   rows.extend(ps.into_iter().filter(|raw| !seen.contains(&raw.pid)));
   rows
 }
+
+// MARK: Users
 
 /// User name of a uid, or the uid itself when it has no passwd entry.
 fn user_name(uid: u32) -> String {
@@ -526,6 +541,8 @@ fn gpu_times() -> HashMap<i32, u64> {
   read_gpu_clients().map(sum_gpu_times).unwrap_or_default()
 }
 
+// MARK: Sampler
+
 /// CPU % of a `ps` row from its CPU time `cpu_ns` at `now_ns` and its earlier `(time, CPU time)`
 /// snapshots, oldest first: the average since the oldest one. Zero without a snapshot, and over
 /// the short warm-up of a new sampler (from its first sample, at time 0, to the next), which is
@@ -543,18 +560,20 @@ fn averaged_cpu_pct(history: &[(u64, u64)], now_ns: u64, cpu_ns: u64) -> f32 {
 /// A process seen on the previous tick.
 struct Known {
   counters: Counters,
-  comm: String, // Changes on exec, invalidates the cached `name` and `path`.
+  /// Changes on exec, invalidates the cached `name` and `path`.
+  comm: String,
   name: String,
   path: String,
   /// `ps` rows: `(time, CPU time)` of the last `PS_CPU_INTERVALS` ticks, oldest first.
-  cpu_history: Vec<(u64, u64)>,
+  cpu_history: VecDeque<(u64, u64)>,
 }
 
 /// Samples every process: libproc for those it can read, `ps` for the rest.
 pub struct ProcSampler {
   timebase: (u32, u32),
   flavor: c_int,
-  use_ps: bool, // As root libproc reads every process.
+  /// Not as root: libproc reads every process then.
+  use_ps: bool,
   pids: Vec<i32>,
   known: HashMap<i32, Known>,
   users: HashMap<u32, String>,
@@ -632,15 +651,15 @@ impl ProcSampler {
         None => {
           let path = exe_path(raw.pid);
           let name = path.as_deref().and_then(basename).map(str::to_string);
-          (name.unwrap_or(raw.fallback), path.unwrap_or_default(), vec![])
+          (name.unwrap_or(raw.fallback), path.unwrap_or_default(), VecDeque::new())
         }
       };
       if raw.ps {
         let cpu_ns = raw.counters.cpu_ns;
-        usage.cpu_pct = averaged_cpu_pct(&cpu_history, self.clock_ns, cpu_ns);
-        cpu_history.push((self.clock_ns, cpu_ns));
+        usage.cpu_pct = averaged_cpu_pct(cpu_history.make_contiguous(), self.clock_ns, cpu_ns);
+        cpu_history.push_back((self.clock_ns, cpu_ns));
         if cpu_history.len() > PS_CPU_INTERVALS {
-          cpu_history.remove(0);
+          cpu_history.pop_front();
         }
       }
       let user = self.users.entry(raw.uid).or_insert_with(|| user_name(raw.uid)).clone();
@@ -671,6 +690,9 @@ mod tests {
   use std::time::Duration;
 
   const SEC: u64 = 1_000_000_000;
+  /// Pids of made-up processes.
+  const A: i32 = 1_000_001;
+  const B: i32 = 1_000_002;
 
   fn counters(cpu_ns: u64, energy_nj: Option<u64>) -> Counters {
     Counters { start: 42, cpu_ns, energy_nj, gpu_ns: None }
@@ -920,8 +942,6 @@ mod tests {
   #[test]
   fn update_rates_names_and_users() {
     // pids above the macOS limit (99999) don't exist, so names come from the fallback.
-    const A: i32 = 1_000_001;
-    const B: i32 = 1_000_002;
     let mut sampler = ProcSampler::new();
 
     let first = sampler.update(vec![row(A, SEC, None, "a"), row(B, 0, Some(0), "b")], 0);
@@ -947,8 +967,6 @@ mod tests {
   #[test]
   fn ps_rows_average_cpu_over_three_intervals() {
     // pids above the macOS limit (99999) don't exist, so names come from the fallback.
-    const A: i32 = 1_000_001;
-    const B: i32 = 1_000_002;
     let mut sampler = ProcSampler::new();
     // (elapsed, CPU time of A from ps, CPU time of B from libproc), all in 10 ms
     let ticks = [(0, 0, 0), (25, 1, 1), (100, 1, 2), (100, 2, 4), (100, 2, 6), (100, 6, 8)];
@@ -1147,7 +1165,6 @@ mod tests {
 
   #[test]
   fn update_gpu_rates() {
-    const A: i32 = 1_000_001;
     let gpu_row = |gpu_ns: Option<u64>, comm: &str| {
       let mut raw = row(A, 0, None, comm);
       raw.counters.gpu_ns = gpu_ns;
