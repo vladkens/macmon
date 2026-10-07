@@ -10,8 +10,7 @@ homepage = "https://github.com/vladkens/macmon"
 documentation = "https://docs.rs/macmon"
 readme = "readme.md"
 include = [
-  "src_app/**",
-  "src_lib/**",
+  "src/**",
   "Cargo.toml",
   "Cargo.lock",
   "LICENSE",
@@ -24,13 +23,9 @@ categories = ["command-line-utilities", "hardware-support", "visualization"]
 no-default-features = true
 targets = ["aarch64-apple-darwin"]
 
-[lib]
-name = "macmon"
-path = "src_lib/lib.rs"
-
 [[bin]]
 name = "macmon"
-path = "src_app/main.rs"
+path = "src/app/main.rs"
 required-features = ["app"]
 
 [features]
