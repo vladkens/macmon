@@ -35,6 +35,11 @@ pub(super) fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, DIM)
 }
 
+/// Link text: underlined blue (ANSI 4).
+pub(super) fn link<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED))
+}
+
 /// Load color for `t` in `0.0..=1.0`: the terminal's green, yellow or red, in steps of a third.
 /// Values below the range (and NaN) are green, above it red.
 pub(super) fn gradient(t: f64) -> Color {

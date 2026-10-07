@@ -1,6 +1,6 @@
 [package]
 name = "macmon"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2024"
 description = "Apple Silicon system monitor & Rust library — CPU/GPU power, temperature, RAM. No sudo. TUI, JSON pipe, Prometheus exporter."
 authors = ["vladkens"]
@@ -9,13 +9,7 @@ repository = "https://github.com/vladkens/macmon"
 homepage = "https://github.com/vladkens/macmon"
 documentation = "https://docs.rs/macmon"
 readme = "readme.md"
-include = [
-  "/src/**",
-  "/Cargo.toml",
-  "/Cargo.lock",
-  "/LICENSE",
-  "/readme.md",
-]
+include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/readme.md"]
 keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
 categories = ["command-line-utilities", "hardware-support", "visualization"]
 

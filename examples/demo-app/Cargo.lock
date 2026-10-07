@@ -40,7 +40,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "macmon"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "core-foundation",
  "libc",

@@ -1,3 +1,25 @@
+## v0.9.0 – 2026-10-07
+
+### Features
+
+- Restored power readings on supported Macs running macOS 27 without requiring sudo
+- Redesigned the TUI and added a sortable, filterable process list with CPU, GPU, memory, and power usage
+- Added `stress ane` for Neural Engine load testing and included ANE workloads in `stress all`
+- Added `stress all --pulse [SECONDS]` to alternate all workloads between busy and idle periods
+- Added `find-clpc` to diagnose CPU, GPU, and ANE power counters, with optional comparison against Apple's `powermetrics`
+
+### Fixes
+
+- Fixed CPU and GPU frequency detection on M6 Macs (#79, by @johntdavies)
+
+### Breaking Changes
+
+- Changed `cpu_temp_avg` and `gpu_temp_avg` in `TempMetrics` from `f32` to `Option<f32>`; unavailable temperatures now appear as `null` in JSON instead of `0.0`. Unavailable temperature metrics are omitted from Prometheus output (#81, by @omar16100)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.2...v0.9.0
+
+---
+
 ## v0.8.2 – 2026-08-04
 
 ### Fixes
@@ -268,5 +290,3 @@ Internal maintenance release — no user-facing changes.
 Initial release.
 
 **Full Changelog**: https://github.com/vladkens/macmon/commits/v0.1.0
-
----
