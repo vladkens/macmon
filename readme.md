@@ -12,7 +12,7 @@
 `macmon` is a sudoless performance monitor for Apple Silicon Macs. It reads real-time CPU / GPU / ANE power usage, temperatures, and memory stats through a private macOS API — the same data `powermetrics` exposes — without requiring root access.
 
 <div align="center">
-  <img src="https://github.com/vladkens/macmon/blob/assets/macmon.png?raw=true" alt="preview" />
+  <img src="https://github.com/vladkens/macmon/blob/assets/macmon-v0.9.png?raw=true" alt="preview" />
 </div>
 
 ## 🌟 Features
@@ -354,8 +354,6 @@ Creating `Sampler` inside the worker keeps its low-level macOS handles on that t
 ## 🤝 Contributing
 
 All contributions are welcome! Feel free to open an issue or submit a pull request.
-
-For offline CLPC CPU/GPU/ANE key extraction from macOS firmware, see [docs/clpc-discovery.md](docs/clpc-discovery.md). The extractor is [scripts/clpc.py](scripts/clpc.py).
 
 ## 📝 License
 

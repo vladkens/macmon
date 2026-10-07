@@ -98,7 +98,7 @@ def format_stats(values):
 
 def main():
     if len(sys.argv) not in {2, 3}:
-        print("usage: summarize.py <trace.log> [powermetrics.pliststream]", file=sys.stderr)
+        print("usage: powermetrics-summarize.py <trace.log> [powermetrics.pliststream]", file=sys.stderr)
         return 2
 
     trace_path = Path(sys.argv[1])

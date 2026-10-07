@@ -61,9 +61,9 @@ jobs:
           git push -f origin refs/tags/dev
           if gh release view dev >/dev/null 2>&1; then
             gh release upload dev macmon-dev.tar.gz --clobber
-            gh release edit dev --notes "$NOTES"
+            gh release edit dev --title "Dev build" --notes "$NOTES"
           else
-            gh release create dev macmon-dev.tar.gz --prerelease --title "Development build" --notes "$NOTES"
+            gh release create dev macmon-dev.tar.gz --prerelease --title "Dev build" --notes "$NOTES"
           fi
 
   release:

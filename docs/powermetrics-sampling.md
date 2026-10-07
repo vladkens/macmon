@@ -1,7 +1,8 @@
 # powermetrics IOReport sampling research
 
-This directory contains a reproducible Frida trace for the private IOReport
-calls used by `powermetrics --samplers cpu_power`.
+[scripts/powermetrics-trace.sh](../scripts/powermetrics-trace.sh) is a
+reproducible Frida trace for the private IOReport calls used by
+`powermetrics --samplers cpu_power`.
 
 The trace answers two questions:
 
@@ -48,20 +49,22 @@ Re-enable SIP from Recovery with `csrutil enable`.
 
 ## Run
 
-Default: 30 reports at a requested 1000 ms interval.
+Default: 30 reports at a requested 1000 ms interval. Run from the repository
+root.
 
 ```sh
-sudo ./research/powermetrics/trace.sh
+sudo ./scripts/powermetrics-trace.sh
 ```
 
 The two interval experiments from this research are:
 
 ```sh
-sudo ./research/powermetrics/trace.sh 250 20
-sudo ./research/powermetrics/trace.sh 100 30
+sudo ./scripts/powermetrics-trace.sh 250 20
+sudo ./scripts/powermetrics-trace.sh 100 30
 ```
 
-Each run creates an ignored directory under `out/` containing:
+Each run creates `out/powermetrics-<date>-<interval>ms/` in the ignored `out/`
+at the repository root, containing:
 
 ```text
 environment.txt
