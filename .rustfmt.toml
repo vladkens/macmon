@@ -1,5 +1,12 @@
 # https://rust-lang.github.io/rustfmt/
 edition = "2024"
 max_width = 100
-use_small_heuristics = "Max"
 tab_spaces = 2
+use_field_init_shorthand = true
+use_small_heuristics = "Max"
+
+unstable_features = true
+comment_width = 100
+group_imports = "StdExternalCrate"
+imports_granularity = "Module"
+wrap_comments = true
