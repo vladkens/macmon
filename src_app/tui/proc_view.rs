@@ -13,11 +13,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::boxes::{
-  Hint, Summary, Titles, draw_box, render_bottom_border, summary_text_room, title_text_room,
-};
+use super::boxes::{Titles, draw_box, hint, render_bottom_border, title_text_room};
 use super::store::ratio;
-use super::theme::{self, dim, heading, text};
+use super::theme::{self, dim, gradient, heading, text};
 use crate::config::{Config, ProcSort};
 use crate::procs::ProcInfo;
 
@@ -30,7 +28,7 @@ const POWER_HOT_W: f64 = 10.0;
 /// Cursor shown after the filter text while typing it.
 const FILTER_CURSOR: &str = "█";
 /// Stands for the cut part of a text too long for its cells.
-const ELLIPSIS: &str = "…";
+pub(super) const ELLIPSIS: &str = "…";
 /// Cells of the shortest filter title worth showing next to the count: `/…x█`.
 const FILTER_MIN_WIDTH: u16 = 4;
 /// Rows one wheel step moves the selection and scrolls the table.
@@ -235,7 +233,7 @@ fn cut_start(text: &str, max: usize) -> String {
 }
 
 /// The longest start of `text` (whole characters) at most `max` cells wide.
-fn head(text: &str, max: usize) -> &str {
+pub(super) fn head(text: &str, max: usize) -> &str {
   let mut end = 0;
   for (i, c) in text.char_indices() {
     let next = i + c.len_utf8();
@@ -274,23 +272,10 @@ struct Selection {
 struct Targets {
   /// The whole box, borders included: the wheel works anywhere over it.
   area: Rect,
-  /// `/ filter` (or the filter text) on the top border. It isn't a key target of the app: while
-  /// a filter is typed, `/` would type a slash. The `s sort` hint after it is one.
-  filter: Option<Rect>,
   /// Header cells of each column on screen.
   headers: Vec<(ProcSort, Rect)>,
   /// Table rows below the header, the first one showing row `offset`.
   body: Rect,
-}
-
-/// `/ filter` on the top border, until there is a filter.
-fn filter_hint() -> Hint {
-  Hint::new(("/", KeyCode::Char('/')), "filter")
-}
-
-/// `s sort` on the top border after the filter, except while a filter is typed (`s` is text then).
-fn sort_hint() -> Hint {
-  Hint::new(("s", KeyCode::Char('s')), "sort")
 }
 
 /// State of the process panel.
@@ -522,9 +507,9 @@ impl ProcView {
   }
 
   /// Applies a mouse event to the cells of the last render: a click on a column header sorts by
-  /// it (again: reverses), on the filter label starts filter input, on a process selects it (on
-  /// the selected one clears the selection); the wheel over the box moves the selection
-  /// `WHEEL_ROWS` rows, or scrolls without one. Anything else is ignored.
+  /// it (again: reverses), on a process selects it (on the selected one clears the selection);
+  /// the wheel over the box moves the selection `WHEEL_ROWS` rows, or scrolls without one.
+  /// Anything else is ignored.
   pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
     let at = Position::new(mouse.column, mouse.row);
     let over_box = self.targets.area.contains(at);
@@ -540,8 +525,6 @@ impl ProcView {
     let targets = &self.targets;
     if let Some(&(column, _)) = targets.headers.iter().find(|(_, cells)| cells.contains(at)) {
       self.sort_by(column);
-    } else if targets.filter.is_some_and(|label| label.contains(at)) {
-      self.typing = true;
     } else if targets.body.contains(at) {
       // blank rows below the last process select nothing
       let index = self.offset + usize::from(at.y - targets.body.y);
@@ -592,10 +575,10 @@ impl ProcView {
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
   /// `/ filter`, or the filter once there is one or it is being typed, then `s sort` (not while
-  /// typing). A filter too long for the border shows its end (`/…ari█`) and leaves out the sort
-  /// hint; with no room for that next to the count, the filter takes the count's place. Returns
-  /// the titles and the index of the filter title; the sort hint comes right after it.
-  fn titles(&self, width: u16) -> (Titles<'static>, usize) {
+  /// typing: `s` is text then). A filter too long for the border shows its end (`/…ari█`) and
+  /// leaves out the sort hint; with no room for that next to the count, the filter takes the
+  /// count's place.
+  fn titles(&self, width: u16) -> Titles<'static> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
       let count = if self.filter.is_empty() {
@@ -606,21 +589,21 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let sort = (!self.typing).then(|| sort_hint().spans());
+    let sort = (!self.typing).then(|| hint("s", "sort"));
     let with_sort = |titles: Titles<'static>| match sort {
       Some(sort) => titles.left(sort),
       None => titles,
     };
     if !self.typing && self.filter.is_empty() {
-      return (with_sort(Titles::new(name).left(filter_hint().spans())), 1);
+      return with_sort(Titles::new(name).left(hint("/", "filter")));
     }
 
     // the filter's text after the count, or alone on the border
     let beside = title_text_room(width, &[Line::from(name.clone())]);
     if beside >= FILTER_MIN_WIDTH {
-      (with_sort(Titles::new(name).left(self.filter_title(beside))), 1)
+      with_sort(Titles::new(name).left(self.filter_title(beside)))
     } else {
-      (with_sort(Titles::new(self.filter_title(title_text_room(width, &[])))), 0)
+      with_sort(Titles::new(self.filter_title(title_text_room(width, &[]))))
     }
   }
 
@@ -643,30 +626,22 @@ impl ProcView {
     spans
   }
 
-  /// Left side of the bottom border of the process box, as variants for `render_bottom_border`:
-  /// the selected process (`631 /System/…/WindowServer`, its path cut from the left to `room`
-  /// cells; the name when the path isn't readable) with the hint `Esc clear` (not while typing a
-  /// filter: Esc clears the filter then), which gives way to the key hints. Without a selection,
-  /// a dim note that POWER is known for own processes only, while the POWER column shows
-  /// processes without it next to some with it (all have it as root).
-  fn summaries(&self, room: u16, power_shown: bool) -> Vec<Summary> {
+  /// Left side of the bottom border of the process box in `room` cells: the selected process
+  /// (`631 /System/…/WindowServer`, its path cut from the left; the name when the path isn't
+  /// readable). Without a selection, a dim note that POWER is known for own processes only, while
+  /// the POWER column shows processes without it next to some with it (all have it as root).
+  fn border_text(&self, room: usize, power_shown: bool) -> Vec<Span<'static>> {
     if let Some(proc) = self.selected() {
       let pid = proc.pid.to_string();
       let path = if proc.path.is_empty() { &proc.name } else { &proc.path };
-      let path = cut_start(path, usize::from(room).saturating_sub(pid.len() + 1));
-      let selected = Summary::default().text(vec![heading(pid), text(" "), text(path)]);
-      if self.typing {
-        return vec![selected];
-      }
-      let clear = Hint::new(("Esc", KeyCode::Esc), "clear");
-      return vec![selected.clone().hint(clear), selected];
+      let path = cut_start(path, room.saturating_sub(pid.len() + 1));
+      return vec![heading(pid), text(" "), text(path)];
     }
 
     let procs = self.procs().unwrap_or_default();
     let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
     if power_shown && power(true) && power(false) {
-      let note = Summary::default().text(vec![dim("POWER: own processes only")]);
-      vec![note, Summary::default()]
+      vec![dim("POWER: own processes only")]
     } else {
       vec![]
     }
@@ -678,21 +653,15 @@ impl ProcView {
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
   /// the process rows, and the selected process and the key hints on the bottom border. Keeps the
-  /// cells that react to the mouse for `ProcView::handle_mouse`, and adds the click targets of
-  /// the hints to the app's.
+  /// cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
-    let (titles, filter) = self.proc_view.titles(area.width);
-    let (inner, titles) = draw_box(f, area, titles);
+    let inner = draw_box(f, area, self.proc_view.titles(area.width));
     let (headers, body) = self.render_proc_table(f, inner);
     let power_shown = headers.iter().any(|&(column, _)| column == ProcSort::Power);
-    // the sort hint after the filter title, when it fits
-    let sort = titles.get(filter + 1).map(|&cells| sort_hint().target(cells));
-    self.proc_view.targets = Targets { area, filter: titles.get(filter).copied(), headers, body };
+    self.proc_view.targets = Targets { area, headers, body };
 
-    let hints = self.footer_hints();
-    let summaries = self.proc_view.summaries(summary_text_room(area.width, &hints), power_shown);
-    let targets = render_bottom_border(f, area, summaries, hints);
-    self.key_targets.extend(targets.into_iter().chain(sort));
+    let view = &self.proc_view;
+    render_bottom_border(f, area, self.footer_hints(), |room| view.border_text(room, power_shown));
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the
@@ -748,7 +717,7 @@ impl App {
   /// values show as a dim `-`.
   fn proc_cell(&self, column: ProcSort, proc: &ProcInfo) -> Span<'static> {
     let load = |value: f64, ratio: f64, text: String| {
-      if value > 0.0 { Span::styled(text, self.theme.gradient(ratio)) } else { dim(text) }
+      if value > 0.0 { Span::styled(text, gradient(ratio)) } else { dim(text) }
     };
 
     match column {
@@ -1321,14 +1290,13 @@ mod tests {
     MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
   }
 
-  /// `view()` as if rendered in a box at (0, 0), 40x6: the filter label on the top border, the
-  /// header on row 1 and 3 process rows below it.
+  /// `view()` as if rendered in a box at (0, 0), 40x6: the header on row 1 and 3 process rows
+  /// below it.
   fn rendered_view() -> ProcView {
     let mut view = view(); // [4410, 631, 2301, 1, 77]
     view.fit(3);
     view.targets = Targets {
       area: Rect::new(0, 0, 40, 6),
-      filter: Some(Rect::new(12, 0, 8, 1)),
       headers: column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36, ProcSort::Cpu)),
       body: Rect::new(1, 2, 38, 3),
     };
@@ -1354,11 +1322,9 @@ mod tests {
     view.handle_mouse(mouse(left, 7, 1));
     assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
 
-    // filter label
-    view.handle_mouse(mouse(left, 11, 0));
-    assert!(!view.typing());
+    // the top border (`/ filter`) is no click target
     view.handle_mouse(mouse(left, 19, 0));
-    assert!(view.typing());
+    assert!(!view.typing());
 
     // rows, the padding cells at the borders too
     let mut view = rendered_view();

@@ -10,20 +10,20 @@
 - Redesigned the TUI with the metric boxes in the top 40% of the window and a process list below
 - Added a process list with CPU, memory, power and GPU usage per process (power of your own processes only, on macOS 13+)
 - Added process sorting (`s` / `S`), filtering by name or PID (`/`) and selection (`↑` / `↓`)
-- Added mouse support in the process list: click a header to sort, a process to select it, a key hint to press it, scroll with the wheel
+- Added mouse support in the process list: click a header to sort, a process to select it, scroll with the wheel
 - Added `p` to show / hide the process list
 - Added a help overlay (`?`)
 - Added the PID and path of the selected process on the process list border
-- Added a green → yellow → red load gradient in the terminal's own colors (smooth on truecolor terminals that answer the palette query, stepped otherwise and over SSH)
+- Added load colors in the terminal's own green, yellow and red
 
 ### Improvements
 
 - Improved history charts to fill their box at any window size, colored by load
 - Improved gauges (`v`) to take the load color; power boxes always show charts
-- Improved box titles to get shorter step by step instead of being cut
+- Improved box titles to switch to a short form in narrow boxes instead of being cut
 - Moved the power summary (`Power`, fans, `Total`) to the bottom border of the metrics box
 - Changed the RAM box title to show used RAM and swap; the total RAM is in the chip title
-- Changed the footer to show the state of the toggles (`v graph`, `r scaled`, `-/+ 1000ms`), with clickable hints
+- Changed the footer to show the state of the toggles (`v graph`, `r scaled`, `-/+ 1000ms`)
 - Made the process list hide itself in small windows and pause its sampling meanwhile
 - Made a bad value in `~/.config/macmon.json` reset only that setting
 

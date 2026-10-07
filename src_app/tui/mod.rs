@@ -3,7 +3,6 @@
 mod boxes;
 mod help;
 mod layout;
-mod palette;
 mod proc_view;
 mod store;
 mod theme;
@@ -24,18 +23,14 @@ use ratatui::crossterm::{
   },
   terminal,
 };
-use ratatui::layout::Position;
 use ratatui::prelude::*;
 
 use crate::config::{Config, TUI_MIN_MS};
 use crate::procs::{ProcInfo, ProcSampler};
-use boxes::KeyTarget;
 use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
-use palette::Palette;
 use proc_view::ProcView;
 use store::{CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
-use theme::Theme;
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -54,8 +49,9 @@ impl Drop for TermGuard {
   }
 }
 
-/// Raw mode and the alternate screen; `run_loop` turns mouse capture on after the palette query.
-/// Whatever happens next, the terminal is restored by the guard, the panic hook or `leave_term`.
+/// Raw mode and the alternate screen; `run_loop` turns mouse capture on while the process list is
+/// shown. Whatever happens next, the terminal is restored by the guard, the panic hook or
+/// `leave_term`.
 fn enter_term() -> WithError<(Terminal<CrosstermBackend<Stdout>>, TermGuard)> {
   std::panic::set_hook(Box::new(|info| {
     leave_term();
@@ -104,21 +100,6 @@ fn set_mouse_capture(out: &mut impl Write, on: bool, want: bool) -> io::Result<b
     (true, false) => out.execute(DisableMouseCapture).map(|_| false),
     _ => Ok(on),
   }
-}
-
-/// Starts reading input once the terminal is in raw mode: `query` asks for the palette first,
-/// while nothing else reads the terminal (so its replies can't turn into key presses), then mouse
-/// capture goes on (so mouse reports can't mix with the replies), then `start` runs the input
-/// thread. Returns the palette.
-fn start_input(
-  out: &mut impl Write,
-  query: impl FnOnce() -> Option<Palette>,
-  start: impl FnOnce(),
-) -> io::Result<Option<Palette>> {
-  let palette = query();
-  out.execute(EnableMouseCapture)?;
-  start();
-  Ok(palette)
 }
 
 // MARK: Threads
@@ -293,9 +274,9 @@ fn run_procs_thread<S: FnMut() -> Vec<ProcInfo>>(
 #[derive(Debug, Default)]
 pub struct App {
   cfg: Config,
-  /// Gradient and bar glyphs of the terminal; the gradient steps through ANSI colors until
-  /// `run_loop` queries the palette.
-  theme: Theme,
+  /// Graph bars in three levels (blank, `▄`, `█`): Apple Terminal draws gaps between the eighth
+  /// blocks.
+  three_level_bars: bool,
 
   soc: SocInfo,
   mem: MemoryStore,
@@ -322,8 +303,6 @@ pub struct App {
   /// `p` works only then (no room before the first frame).
   procs_fit: bool,
 
-  /// Key hints of the last frame, which press their keys when clicked.
-  key_targets: Vec<KeyTarget>,
   /// The help overlay (`?`) with its first line on screen, while it is open.
   help: Option<usize>,
 }
@@ -382,12 +361,15 @@ impl App {
     }
   }
 
-  /// Applies one event. Returns `Break` when the app should quit. Keys and clicks on key hints
-  /// can change the interval, which `msec` hands on to the sampling threads.
+  /// Applies one event. Returns `Break` when the app should quit. Keys can change the interval,
+  /// which `msec` hands on to the sampling threads.
   fn handle_event(&mut self, event: Event, msec: &RwLock<u32>) -> ControlFlow<()> {
     let flow = match event {
       Event::Key(key) => self.handle_key(key),
-      Event::Mouse(mouse) => self.handle_mouse(mouse),
+      Event::Mouse(mouse) => {
+        self.handle_mouse(mouse);
+        return ControlFlow::Continue(());
+      }
       Event::Update(data) => {
         self.update_metrics(*data);
         return ControlFlow::Continue(());
@@ -443,34 +425,23 @@ impl App {
   }
 
   /// Applies a mouse event at the cells of the last frame, only while the process list is on
-  /// screen (mouse capture is off otherwise): a click on a key hint presses its key, other events
-  /// go to the process list. With the help open, a click closes it and the wheel scrolls it.
-  /// Returns `Break` when a click on `q quit` quits.
-  fn handle_mouse(&mut self, mouse: MouseEvent) -> ControlFlow<()> {
+  /// screen (mouse capture is off otherwise): it goes to the process list. With the help open, a
+  /// click closes it and the wheel scrolls it.
+  fn handle_mouse(&mut self, mouse: MouseEvent) {
     if !self.procs_visible() {
-      return ControlFlow::Continue(());
+      return;
     }
 
-    let at = Position::new(mouse.column, mouse.row);
-    let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
-    if let Some(scroll) = self.help {
-      self.help = match mouse.kind {
-        _ if click => None,
-        MouseEventKind::ScrollUp => Some(scroll.saturating_sub(3)),
-        MouseEventKind::ScrollDown => Some(scroll + 3),
-        _ => Some(scroll),
-      };
-      return ControlFlow::Continue(());
-    }
-
-    let key = self.key_targets.iter().find_map(|target| target.key_at(at));
-    match key {
-      Some(code) if click => self.handle_key(KeyEvent::new(code, KeyModifiers::NONE)),
-      _ => {
-        self.update_proc_view(|view| view.handle_mouse(mouse));
-        ControlFlow::Continue(())
-      }
-    }
+    let Some(scroll) = self.help else {
+      self.update_proc_view(|view| view.handle_mouse(mouse));
+      return;
+    };
+    self.help = match mouse.kind {
+      MouseEventKind::Down(MouseButton::Left) => None,
+      MouseEventKind::ScrollUp => Some(scroll.saturating_sub(3)),
+      MouseEventKind::ScrollDown => Some(scroll + 3),
+      _ => Some(scroll),
+    };
   }
 
   /// Runs `f` on the process panel state and saves a changed sort order.
@@ -501,7 +472,7 @@ impl App {
     let plan = self.layout_frame(f.area());
 
     // the key hints go on the lowest box: the process box, or the metrics box without it
-    self.key_targets = self.render_metrics_box(f, &plan);
+    self.render_metrics_box(f, &plan);
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
     }
@@ -523,15 +494,10 @@ impl App {
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
+    run_inputs_thread(tx.clone(), 250);
+    self.three_level_bars = theme::detect_three_level_bars();
 
-    // the palette only matters for a smooth (truecolor) gradient, and SSH sessions skip the query
-    // (late replies)
-    let truecolor = theme::detect_truecolor();
-    let query = || if palette::should_query(truecolor) { palette::query_terminal() } else { None };
-    let palette = start_input(&mut stdout(), query, || run_inputs_thread(tx.clone(), 250))?;
-    self.theme = Theme::new(palette).with_three_level_bars(theme::detect_three_level_bars());
-
-    let mut mouse = true;
+    let mut mouse = false;
     loop {
       term.draw(|f| self.render(f))?;
       mouse = set_mouse_capture(&mut stdout(), mouse, self.procs_visible())?;
@@ -546,10 +512,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-  use std::cell::RefCell;
   use std::io::{self, Write};
   use std::ops::ControlFlow;
-  use std::rc::Rc;
   use std::sync::atomic::{AtomicBool, Ordering};
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::thread;
@@ -568,12 +532,11 @@ mod tests {
   use ratatui::style::{Color, Modifier};
 
   use super::layout::Metric;
-  use super::palette::{Palette, Rgb};
   use super::store::{CpuClusters, FreqSample};
-  use super::theme::{self, Theme};
+  use super::theme::{self, gradient};
   use super::{
     App, Event, PROCS_WARMUP, ProcsShown, input_event, proc_sampler, restore_term_once,
-    run_procs_thread, set_mouse_capture, start_input,
+    run_procs_thread, set_mouse_capture,
   };
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
@@ -586,7 +549,7 @@ mod tests {
     MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
   }
 
-  fn click(app: &mut App, x: u16, y: u16) -> ControlFlow<()> {
+  fn click(app: &mut App, x: u16, y: u16) {
     app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y))
   }
 
@@ -697,52 +660,6 @@ mod tests {
   }
 
   #[test]
-  fn input_starts_after_the_palette_query_and_mouse_capture() {
-    // one log for the query, the terminal output and the input thread
-    #[derive(Clone, Default)]
-    struct Log(Rc<RefCell<Vec<String>>>);
-    impl Write for Log {
-      fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.borrow_mut().push(String::from_utf8_lossy(buf).into_owned());
-        Ok(buf.len())
-      }
-      fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-      }
-    }
-
-    let log = Log::default();
-    let mut out = log.clone();
-    let query = || {
-      log.0.borrow_mut().push("query".into());
-      Some(PALETTE)
-    };
-    let palette = start_input(&mut out, query, || log.0.borrow_mut().push("input".into()));
-    assert_eq!(palette.unwrap(), Some(PALETTE));
-
-    let mut capture = vec![];
-    capture.execute(EnableMouseCapture).unwrap();
-    let steps = log.0.borrow().clone();
-    assert_eq!(steps.first().map(String::as_str), Some("query"), "{steps:?}");
-    assert_eq!(steps.last().map(String::as_str), Some("input"), "{steps:?}");
-    assert_eq!(steps[1..steps.len() - 1].concat().into_bytes(), capture, "{steps:?}");
-
-    // no mouse capture: no input thread either
-    struct Closed;
-    impl Write for Closed {
-      fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-        Err(io::Error::other("closed"))
-      }
-      fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-      }
-    }
-    let mut started = false;
-    assert!(start_input(&mut Closed, || None, || started = true).is_err());
-    assert!(!started);
-  }
-
-  #[test]
   fn events_reach_their_handlers() {
     let file = TempConfig::new("events_reach_their_handlers");
     let mut app = saving_app(&file);
@@ -764,20 +681,16 @@ mod tests {
     assert_eq!(*msec.read().unwrap(), 1250);
     assert_eq!(file.saved()["interval"], 1250);
 
-    // the mouse: a click on the MEM header sorts by it, one on `+` of the interval hint hands
-    // the new interval on
+    // the mouse: a click on the MEM header sorts by it
     let buf = render_buffer(&mut app, 200, 50);
     let left = MouseEventKind::Down(MouseButton::Left);
     let at = mouse(left, x_of(&proc_row(&buf, 1), "MEM"), PROC_Y + 1);
     assert!(handle(&mut app, Event::Mouse(at)).is_continue());
     assert_eq!(app.proc_view.sort, ProcSort::Mem);
-    let at = mouse(left, x_of(&row(&buf, 49), "-/+ 1250ms") + 2, 49);
-    assert!(handle(&mut app, Event::Mouse(at)).is_continue());
-    assert_eq!(*msec.read().unwrap(), 1500);
     assert!(handle(&mut app, Event::Key(key('-'))).is_continue());
 
     assert!(handle(&mut app, Event::Key(key('q'))).is_break());
-    assert_eq!(*msec.read().unwrap(), 1250);
+    assert_eq!(*msec.read().unwrap(), 1000);
   }
 
   fn test_soc() -> SocInfo {
@@ -848,11 +761,6 @@ mod tests {
       app.update_metrics(test_metrics());
     }
     app
-  }
-
-  /// Theme with a smooth gradient between the colors of `PALETTE`, so close loads differ in color.
-  fn smooth() -> Theme {
-    Theme::new(Some(PALETTE))
   }
 
   fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -1011,14 +919,9 @@ mod tests {
     assert!(render_to_string(&mut app, 200, 50).contains(" proc "));
   }
 
-  /// Solarized-like terminal palette, as a terminal would answer the palette query.
-  const PALETTE: Palette =
-    Palette { green: (0x85, 0x99, 0x00), yellow: (0xb5, 0x89, 0x00), red: (0xdc, 0x32, 0x2f) };
-
   /// App with every kind of colored cell on screen: metric boxes, processes with a selected row.
-  fn colorful_app(theme: Theme) -> App {
+  fn colorful_app() -> App {
     let mut app = app_with_procs(varied_procs());
-    app.theme = theme;
     assert!(press(&mut app, KeyCode::Down).is_continue());
     app
   }
@@ -1028,16 +931,15 @@ mod tests {
   }
 
   #[test]
-  fn renders_terminal_colors_without_smooth_palette() {
-    // no palette (not asked without truecolor, or not answered): ANSI colors only, with either
-    // bar set
-    let themes = [Theme::new(None), Theme::default().with_three_level_bars(true)];
+  fn renders_terminal_colors_only() {
+    // ANSI colors only, with either bar set
     let ansi = [Color::Reset, Color::DarkGray, Color::Green, Color::Yellow, Color::Red];
-    for theme in themes {
-      let mut app = colorful_app(theme);
+    for three_levels in [false, true] {
+      let mut app = colorful_app();
+      app.three_level_bars = three_levels;
       for (width, height) in [(200, 50), (80, 24), (60, 15)] {
         let buf = render_buffer(&mut app, width, height);
-        let ctx = format!("{theme:?} at {width}x{height}");
+        let ctx = format!("three levels {three_levels} at {width}x{height}");
         assert_eq!((buf[(0, 0)].symbol(), buf[(0, 0)].fg), ("╭", Color::DarkGray), "{ctx}");
         for color in frame_colors(&buf) {
           assert!(ansi.contains(&color), "{color:?} in {ctx}");
@@ -1047,41 +949,9 @@ mod tests {
       // all load levels show up: GPU 23%, E-CPU 42%, P-CPU 77%
       let buf = render_buffer(&mut app, 200, 50);
       for color in [Color::Green, Color::Yellow, Color::Red] {
-        assert!(frame_colors(&buf).any(|c| c == color), "no {color:?} in {theme:?}");
+        assert!(frame_colors(&buf).any(|c| c == color), "no {color:?}");
       }
     }
-  }
-
-  #[test]
-  fn smooth_gradient_blends_queried_colors() {
-    let theme = smooth();
-    let mut app = colorful_app(theme);
-    let buf = render_buffer(&mut app, 200, 50);
-
-    // every RGB color lies between the terminal's green and yellow or its yellow and red
-    let between = |c: Rgb, a: Rgb, b: Rgb| {
-      let within = |x: u8, y: u8, z: u8| x.min(y) <= z && z <= x.max(y);
-      within(a.0, b.0, c.0) && within(a.1, b.1, c.1) && within(a.2, b.2, c.2)
-    };
-    let mut rgb = vec![];
-    for color in frame_colors(&buf) {
-      match color {
-        Color::Rgb(r, g, b) => rgb.push((r, g, b)),
-        // the rest of the UI stays in terminal colors
-        color => assert!([Color::Reset, Color::DarkGray].contains(&color), "{color:?}"),
-      }
-    }
-    assert!(rgb.len() > 50, "{} RGB colors", rgb.len());
-    let Palette { green, yellow, red } = PALETTE;
-    for color in &rgb {
-      assert!(between(*color, green, yellow) || between(*color, yellow, red), "{color:?}");
-    }
-
-    // percent values sit exactly on the gradient
-    let line = row(&buf, 1);
-    let x = x_of(&line, " 42% ") + 1;
-    assert_eq!(buf[(x, 1)].fg, theme.gradient(test_metrics().ecpu_scaled_ratio.into()));
-    assert_eq!(buf[(0, 0)].fg, Color::DarkGray, "borders stay terminal colors");
   }
 
   /// Full box titles of `test_metrics`: the original format without the RAM total and without
@@ -1096,10 +966,9 @@ mod tests {
     "ANE 0.10W (0.10, 0.10)",
   ];
 
-  /// Power summary of `test_metrics` in the original format, with its blank cells, on the bottom
-  /// border of the metrics box.
-  const SUMMARY: &str =
-    " Power: 6.60W (avg 6.60W, max 6.60W) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ";
+  /// Power summary of `test_metrics`, with its blank cells, on the bottom border of the metrics
+  /// box.
+  const SUMMARY: &str = " Power 6.60W (6.60, 6.60) | Fan 1200 RPM | Total 12.00W (12.00, 12.00) ";
 
   /// Global key hints, in the order of the original UI, with `? help`.
   const HINTS: [&str; 6] = ["q quit", "? help", "p procs", "v graph", "r scaled", "-/+ 1000ms"];
@@ -1133,7 +1002,7 @@ mod tests {
 
   /// Top border of a box `width` cells wide (at least 5) with the first of `variants` (`(left,
   /// right)` titles, longest first, `right` empty for none, both empty for no title) that fits
-  /// uncut, or else the last one cut to the border.
+  /// uncut, or else the last one without its right title, the left one cut to the border.
   fn fitted_top(width: usize, variants: &[(&str, &str)]) -> String {
     let len = |s: &str| s.chars().count();
     // the left title and its blanks start 2 cells in; one cell between titles, 2 at the end
@@ -1147,6 +1016,9 @@ mod tests {
       Some((left, right)) => top_border(width, left, right),
       None => {
         let (left, _) = variants.last().unwrap();
+        if fits((left, "")) {
+          return top_border(width, left, "");
+        }
         let cut: String = format!(" {left}").chars().take(width - 4).collect();
         format!("╭─{cut}─╮")
       }
@@ -1220,10 +1092,12 @@ mod tests {
         assert!(top.starts_with(&format!("╭─ {name}")), "{metric:?} ({ctx}): {top}");
       }
 
-      for label in ["╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ", "─ Power: 6.60W", "q quit"] {
+      for label in ["╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ", "q quit"] {
         assert!(screen.contains(label), "missing {label:?} ({ctx})");
       }
       assert_eq!(screen.contains(" proc "), proc, "{ctx}");
+      // the hints come first: next to them at 60 columns there is no room for the power summary
+      assert_eq!(screen.contains("─ Power 6.60W"), proc, "{ctx}");
     }
   }
 
@@ -1345,8 +1219,7 @@ mod tests {
 
   #[test]
   fn power_boxes_show_current_avg_max_and_temperature() {
-    // smooth, so the temperature's color tells 45 °C apart from the graph's low color
-    let mut app = App { theme: smooth(), ..varied_power_app() };
+    let mut app = varied_power_app();
     let buf = render_buffer(&mut app, 200, 50);
 
     // 66 cells: current, average and maximum left, the temperature right
@@ -1372,21 +1245,18 @@ mod tests {
     assert_eq!((cell(13).symbol(), cell(13).fg), ("(", theme::DIM));
     assert_eq!((cell(14).symbol(), cell(14).fg), ("4", theme::DIM));
     let top = box_top(&app, &buf, Metric::CpuPower);
-    let temp = app.theme.gradient((45.0 - 30.0) / 70.0);
-    assert_eq!(cell(x_of(&top, "45°C")).fg, temp);
-    assert_ne!(temp, app.theme.gradient(0.0));
+    assert_eq!(cell(x_of(&top, "45°C")).fg, gradient((45.0 - 30.0) / 70.0));
     let gpu = box_top(&app, &buf, Metric::GpuPower);
     let gpu_x = app.layout(buf.area).boxes[5].1.x + x_of(&gpu, "40°C");
-    assert_eq!(buf[(gpu_x, cpu.y)].fg, app.theme.gradient((40.0 - 30.0) / 70.0));
+    assert_eq!(buf[(gpu_x, cpu.y)].fg, gradient((40.0 - 30.0) / 70.0));
 
     // the summary: Power (avg / max), the fan, Total (avg / max)
-    let summary =
-      " Power: 9.50W (avg 8.00W, max 12.00W) | Fan 1200 RPM | Total 16.00W (14.00, 20.00) ";
+    let summary = " Power 9.50W (8.00, 12.00) | Fan 1200 RPM | Total 16.00W (14.00, 20.00) ";
     let bottom = row(&buf, PROC_Y - 1);
     assert_eq!(bottom, border(200, summary, ""));
     let fg = |text: &str| buf[(x_of(&bottom, text), PROC_Y - 1)].fg;
-    assert_eq!(fg("Power:"), theme::TEXT);
-    assert_eq!(fg("(avg"), theme::DIM);
+    assert_eq!(fg("Power"), theme::TEXT);
+    assert_eq!(fg("(8.00"), theme::DIM);
     assert_eq!(fg("| Fan"), theme::DIM);
     assert_eq!(fg("Fan"), theme::TEXT);
     assert_eq!(fg("Total"), theme::TEXT);
@@ -1419,68 +1289,46 @@ mod tests {
     top
   }
 
-  /// RAM box title steps with swap, longest first; none at the end.
-  const RAM_SWAP_STEPS: [&str; 8] = [
-    "RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB",
-    "RAM 16.8G 70% · SWAP 2.4G 79%",
-    "RAM 70% · SWAP 79%",
-    "RAM 70% SWAP 79%",
-    "RAM 70% SW 79%",
-    "RAM 70%",
-    "70%",
-    "",
-  ];
+  /// RAM box titles with swap, longest first; none at the end.
+  const RAM_SWAP_STEPS: [&str; 4] =
+    ["RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB", "RAM 70% · SWAP 79%", "RAM 70%", ""];
 
-  /// RAM box title steps without swap, longest first; none at the end.
-  const RAM_STEPS: [&str; 5] = ["RAM 16.81 GB (70.0%)", "RAM 16.8G 70%", "RAM 70%", "70%", ""];
+  /// RAM box titles without swap, longest first; none at the end.
+  const RAM_STEPS: [&str; 3] = ["RAM 16.81 GB (70.0%)", "RAM 70%", ""];
 
   #[test]
   fn ram_title_steps_down_with_swap() {
     let mut app = ram_app(true);
-    // (box width, title): each step from the width where it fits whole (its text + 6 cells)
+    // (box width, title): each from the width where it fits whole (its text + 6 cells)
     let cases = [
       (60, RAM_SWAP_STEPS[0]),
       (47, RAM_SWAP_STEPS[0]),
       (46, RAM_SWAP_STEPS[1]),
-      (35, RAM_SWAP_STEPS[1]),
-      (34, RAM_SWAP_STEPS[2]),
-      (24, RAM_SWAP_STEPS[2]),
-      (23, RAM_SWAP_STEPS[3]),
-      (22, RAM_SWAP_STEPS[3]),
-      (21, RAM_SWAP_STEPS[4]),
-      (20, RAM_SWAP_STEPS[4]),
-      (19, RAM_SWAP_STEPS[5]),
-      (13, RAM_SWAP_STEPS[5]),
-      (12, RAM_SWAP_STEPS[6]),
-      (9, RAM_SWAP_STEPS[6]),
+      (24, RAM_SWAP_STEPS[1]),
+      (23, RAM_SWAP_STEPS[2]),
+      (13, RAM_SWAP_STEPS[2]),
     ];
     for (width, title) in cases {
       let top = sized_box_top(&mut app, Metric::Ram, width);
       assert_eq!(top, top_border(width.into(), title, ""), "{width}");
     }
 
-    // no number is ever cut: no title when even the percent doesn't fit
-    assert_eq!(sized_box_top(&mut app, Metric::Ram, 8), "╭──────╮");
+    // no number is ever cut: the swap part drops whole, then the title
+    for width in [12, 8] {
+      let top = sized_box_top(&mut app, Metric::Ram, width);
+      assert_eq!(top, format!("╭{}╮", "─".repeat(usize::from(width) - 2)));
+    }
   }
 
   #[test]
   fn ram_title_steps_down_without_swap() {
     let mut app = ram_app(false);
-    let cases = [
-      (60, RAM_STEPS[0]),
-      (26, RAM_STEPS[0]),
-      (25, RAM_STEPS[1]),
-      (19, RAM_STEPS[1]),
-      (18, RAM_STEPS[2]),
-      (13, RAM_STEPS[2]),
-      (12, RAM_STEPS[3]),
-      (9, RAM_STEPS[3]),
-    ];
+    let cases = [(60, RAM_STEPS[0]), (26, RAM_STEPS[0]), (25, RAM_STEPS[1]), (13, RAM_STEPS[1])];
     for (width, title) in cases {
       let top = sized_box_top(&mut app, Metric::Ram, width);
       assert_eq!(top, top_border(width.into(), title, ""), "{width}");
     }
-    assert_eq!(sized_box_top(&mut app, Metric::Ram, 8), "╭──────╮");
+    assert_eq!(sized_box_top(&mut app, Metric::Ram, 12), format!("╭{}╮", "─".repeat(10)));
 
     let screen = render_to_string(&mut app, 240, 60);
     assert!(!screen.contains("SWAP") && !screen.contains("SW "));
@@ -1488,9 +1336,7 @@ mod tests {
 
   #[test]
   fn ram_title_styles() {
-    // smooth, so 70 % and 79 % get colors of their own
-    let mut app = App { theme: smooth(), ..ram_app(true) };
-    assert_ne!(app.theme.gradient(16.81 / 24.0), app.theme.gradient(2.37 / 3.0));
+    let mut app = ram_app(true);
     let buf = render_buffer(&mut app, 60 * 4 + 2, 50);
     let ram = app.layout(buf.area).boxes[3].1;
     let top = box_top(&app, &buf, Metric::Ram);
@@ -1500,17 +1346,17 @@ mod tests {
     assert!(cell("RAM").modifier.contains(Modifier::BOLD));
     assert!(cell("SWAP").modifier.contains(Modifier::BOLD));
     assert_eq!(cell("·").fg, theme::DIM);
-    assert_eq!(cell("70.0%").fg, app.theme.gradient(16.81 / 24.0));
+    assert_eq!(cell("70.0%").fg, gradient(16.81 / 24.0));
     assert_eq!(cell("16.81").fg, theme::TEXT);
 
-    // shorter steps: both percents on the gradient
+    // the short title: both percents on the gradient
     let buf = render_buffer(&mut app, 30 * 4 + 2, 50);
     let ram = app.layout(buf.area).boxes[3].1;
     let top = box_top(&app, &buf, Metric::Ram);
-    assert_eq!(top, top_border(30, RAM_SWAP_STEPS[2], ""));
+    assert_eq!(top, top_border(30, RAM_SWAP_STEPS[1], ""));
     let fg = |text: &str| buf[(ram.x + x_of(&top, text), ram.y)].fg;
-    assert_eq!(fg("70%"), app.theme.gradient(16.81 / 24.0));
-    assert_eq!(fg("79%"), app.theme.gradient(2.37 / 3.0));
+    assert_eq!(fg("70%"), gradient(16.81 / 24.0));
+    assert_eq!(fg("79%"), gradient(2.37 / 3.0));
   }
 
   #[test]
@@ -1534,15 +1380,9 @@ mod tests {
       assert_eq!(sized_box_top(&mut dry, Metric::Ram, width), fitted_top(width.into(), &steps));
     }
 
-    // power: the temperature goes first, then average and maximum with the temperature back,
-    // then the temperature again; the current power stays
+    // power: average and maximum go first, then the temperature; the current power stays
     let mut app = test_app();
-    let cpu = [
-      ("CPU 4.50W (4.50, 4.50)", "45°C"),
-      ("CPU 4.50W (4.50, 4.50)", ""),
-      ("CPU 4.50W", "45°C"),
-      ("CPU 4.50W", ""),
-    ];
+    let cpu = [("CPU 4.50W (4.50, 4.50)", "45°C"), ("CPU 4.50W", "45°C")];
     let ane = [("ANE 0.10W (0.10, 0.10)", ""), ("ANE 0.10W", "")];
     for width in 6..=60 {
       let fitted = |steps: &[(&str, &str)]| fitted_top(width.into(), steps);
@@ -1557,9 +1397,8 @@ mod tests {
     let dashes = |n: usize| "─".repeat(n);
     let cpu = |app: &mut App, width| sized_box_top(app, Metric::CpuPower, width);
     assert_eq!(cpu(&mut app, 35), "╭─ CPU 4.50W (4.50, 4.50) ─ 45°C ─╮");
-    assert_eq!(cpu(&mut app, 34), format!("╭─ CPU 4.50W (4.50, 4.50) {}╮", dashes(7)));
-    assert_eq!(cpu(&mut app, 28), "╭─ CPU 4.50W (4.50, 4.50) ─╮");
-    // the temperature stays at 80 columns (26-cell boxes)
+    // average and maximum go before the temperature, which stays at 80 columns (26-cell boxes)
+    assert_eq!(cpu(&mut app, 34), format!("╭─ CPU 4.50W {} 45°C ─╮", dashes(13)));
     assert_eq!(cpu(&mut app, 27), format!("╭─ CPU 4.50W {} 45°C ─╮", dashes(6)));
     assert_eq!(cpu(&mut app, 22), "╭─ CPU 4.50W ─ 45°C ─╮");
     assert_eq!(cpu(&mut app, 21), format!("╭─ CPU 4.50W {}╮", dashes(7)));
@@ -1575,7 +1414,7 @@ mod tests {
 
   #[test]
   fn power_summary_follows_sensors() {
-    let power = " Power: 6.60W (avg 6.60W, max 6.60W)";
+    let power = " Power 6.60W (6.60, 6.60)";
     let total = "Total 12.00W (12.00, 12.00)";
     let summary = |edit: fn(&mut Metrics)| {
       let mut app = test_app_with(edit);
@@ -1671,47 +1510,39 @@ mod tests {
 
   #[test]
   fn footer_and_power_summary_share_the_border() {
-    let full = SUMMARY;
-    let short = " Power: 6.60W | Fan 1200 RPM | Total 12.00W ";
-    let shortest = " Power: 6.60W | Total 12.00W ";
-    // (width, summary shown, hints shown): the averages and maxima, then the fans give way to
-    // the hints; then `q quit` first, the shortest summary, then the other hints
+    let text = SUMMARY.trim();
+    // the summary cut to `room` cells, with its blank cells
+    let cut = |room: usize| format!(" {}… ", &text[..room - 1]);
+    // (width, summary shown, hints shown): the hints first, the summary in the room they leave
+    // (cut, or left out with fewer than 8 cells), then the hints drop from the end
     let cases = [
-      (200, full, 6),
-      (148, full, 6),
-      (147, short, 6),
-      (110, short, 6),
-      (109, shortest, 6),
-      (95, shortest, 6),
-      (94, shortest, 5),
-      (71, shortest, 4),
-      (61, shortest, 3),
-      (51, shortest, 2),
-      (50, shortest, 1),
-      (42, shortest, 1),
-      (41, " Power: 6.60W ", 2),
-      (27, " Power: 6.60W ", 1),
-      // the Power part is cut next to `q quit`
-      (26, " Power: 6.60W", 1),
-      (15, " P", 1),
-      (12, "", 1),
-      // no room for `q quit`
-      (11, " Power:", 0),
+      (200, SUMMARY.to_string(), 6),
+      (137, SUMMARY.to_string(), 6),
+      (136, cut(68), 6),
+      (80, cut(12), 6),
+      (76, cut(8), 6),
+      (75, String::new(), 6),
+      (65, String::new(), 6),
+      (64, cut(9), 5),
+      (53, String::new(), 5),
+      (20, String::new(), 1),
+      (12, String::new(), 1),
+      (11, String::new(), 0),
     ];
     for (width, left, count) in cases {
       let mut app = test_app();
       app.cfg.show_procs = false;
       let buf = render_buffer(&mut app, width, 30);
-      assert_eq!(row(&buf, 29), border(width.into(), left, &hints(count)), "{width}");
+      assert_eq!(row(&buf, 29), border(width.into(), &left, &hints(count)), "{width}");
     }
 
     // with the process list: the summary alone on the metrics box, the hints on the process box
     let mut app = test_app();
     let buf = render_buffer(&mut app, 80, 24);
-    assert_eq!(row(&buf, 9), border(80, short, ""));
+    assert_eq!(row(&buf, 9), border(80, SUMMARY, ""));
     assert_eq!(row(&buf, 23), hints_border(80, 6));
-    let buf = render_buffer(&mut app, 86, 24);
-    assert_eq!(row(&buf, 9), border(86, full, ""));
+    let buf = render_buffer(&mut app, 60, 24);
+    assert_eq!(row(&buf, 9), border(60, &cut(54), ""));
   }
 
   /// App with synthetic CPU clusters of `(label, cores, load)`.
@@ -1869,7 +1700,7 @@ mod tests {
     }
 
     for three_levels in [false, true] {
-      app.theme = Theme::default().with_three_level_bars(three_levels);
+      app.three_level_bars = three_levels;
       for (width, height) in [(200, 50), (120, 40), (60, 15)] {
         let buf = render_buffer(&mut app, width, height);
         let screen = screen_text(&buf);
@@ -1895,8 +1726,8 @@ mod tests {
   fn graph_columns_follow_their_own_load_power_graphs_stay_low() {
     // E-CPU load cycles through 10%, 50%, 90%, the newest is 90%
     let loads = [0.1, 0.5, 0.9];
-    for theme in [Theme::default(), smooth()] {
-      let mut app = App { theme, ..App::from_parts(test_soc(), Config::default()) };
+    {
+      let mut app = App::from_parts(test_soc(), Config::default());
       for i in 0..60 {
         app.update_metrics(Metrics { ecpu_scaled_ratio: loads[i % 3], ..test_metrics() });
       }
@@ -1918,15 +1749,13 @@ mod tests {
         for y in graph.top()..graph.bottom() {
           let cell = &buf[(x, y)];
           if cell.symbol() != " " {
-            assert_eq!(cell.fg, theme.gradient(load), "{x}, {y}: {rows:#?}");
+            assert_eq!(cell.fg, gradient(load), "{x}, {y}: {rows:#?}");
           }
         }
       }
-      // the terminal's own green / yellow / red without a smooth palette
-      if theme == Theme::default() {
-        let colors = (graph.right() - 3..graph.right()).map(|x| buf[(x, graph.bottom() - 1)].fg);
-        assert_eq!(colors.collect::<Vec<_>>(), [Color::Green, Color::Yellow, Color::Red]);
-      }
+      // the terminal's own green / yellow / red
+      let colors = (graph.right() - 3..graph.right()).map(|x| buf[(x, graph.bottom() - 1)].fg);
+      assert_eq!(colors.collect::<Vec<_>>(), [Color::Green, Color::Yellow, Color::Red]);
 
       // power graphs in the low load color, whatever their height
       for metric in [Metric::CpuPower, Metric::GpuPower, Metric::AnePower] {
@@ -1939,7 +1768,7 @@ mod tests {
         assert!(!cells.is_empty(), "{metric:?}");
         for cell in cells {
           assert!(cell.symbol().chars().all(is_bar), "{:?}", cell.symbol());
-          assert_eq!(cell.fg, theme.gradient(0.0), "{metric:?}");
+          assert_eq!(cell.fg, gradient(0.0), "{metric:?}");
         }
       }
     }
@@ -2065,7 +1894,7 @@ mod tests {
       let gauge = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(area.width) - filled));
       for y in area.top()..area.bottom() {
         assert_eq!(text(&buf, Rect { y, height: 1, ..area }), gauge, "{metric:?} row {y}");
-        assert_eq!(buf[(area.x, y)].fg, app.theme.gradient(load), "{metric:?} row {y}");
+        assert_eq!(buf[(area.x, y)].fg, gradient(load), "{metric:?} row {y}");
       }
     }
     // titles stay; the power boxes keep their graphs
@@ -2108,7 +1937,7 @@ mod tests {
   fn renders_without_metrics() {
     let mut app = App::default();
     let screen = render_to_string(&mut app, 120, 40);
-    assert!(screen.contains("Power: 0.00W") && screen.contains("RAM 0.00 GB (0.0%)"));
+    assert!(screen.contains("Power 0.00W") && screen.contains("RAM 0.00 GB (0.0%)"));
     assert!(screen.contains("╭─ macmon ─"), "title without chip info");
     assert!(!screen.contains("°C") && !screen.contains("Total") && !screen.contains("Fan"));
   }
@@ -2262,9 +2091,7 @@ mod tests {
 
   #[test]
   fn proc_table_renders_rows() {
-    // smooth, so every value has a color of its own
     let mut app = app_with_procs(varied_procs());
-    app.theme = smooth();
     let buf = render_buffer(&mut app, 200, 50);
 
     // title: count and the filter label, nothing on the right
@@ -2297,14 +2124,13 @@ mod tests {
 
     // gradient colors for load values, dim zeros and missing power
     let cell = |y: u16, row: &str, text: &str| buf[(x_of(row, text), PROC_Y + y)].fg;
-    assert_eq!(cell(2, &rows[0], "25.0"), app.theme.gradient(0.25));
-    assert_eq!(cell(2, &rows[0], "40.0"), app.theme.gradient(0.4));
+    assert_eq!(cell(2, &rows[0], "25.0"), gradient(0.25));
+    assert_eq!(cell(2, &rows[0], "40.0"), gradient(0.4));
     // MEM by its share of the RAM (36 GB), POWER against 10 W
-    assert_eq!(cell(2, &rows[0], "300M"), app.theme.gradient(300.0 / (36.0 * 1024.0)));
-    assert_eq!(cell(3, &rows[1], "1.5G"), app.theme.gradient(1.5 / 36.0));
-    assert_eq!(cell(2, &rows[0], "1.50W"), app.theme.gradient(0.15));
-    assert_eq!(cell(3, &rows[1], "0.80W"), app.theme.gradient(0.08));
-    assert_ne!(app.theme.gradient(0.15), app.theme.gradient(0.08));
+    assert_eq!(cell(2, &rows[0], "300M"), gradient(300.0 / (36.0 * 1024.0)));
+    assert_eq!(cell(3, &rows[1], "1.5G"), gradient(1.5 / 36.0));
+    assert_eq!(cell(2, &rows[0], "1.50W"), gradient(0.15));
+    assert_eq!(cell(3, &rows[1], "0.80W"), gradient(0.08));
     assert_eq!(cell(4, &rows[2], "-"), theme::DIM);
     assert_eq!(cell(4, &rows[2], "0.0"), theme::DIM);
     assert_eq!(cell(4, &rows[2], "launchd"), theme::TEXT);
@@ -2519,7 +2345,7 @@ mod tests {
     let arrow = |desc: bool| if desc { "↓" } else { "↑" };
     for (header, sort, desc, first, reversed) in cases {
       let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
-      assert!(click(&mut app, x_of(&line, header), PROC_Y + 1).is_continue());
+      click(&mut app, x_of(&line, header), PROC_Y + 1);
       assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, desc), "{header}");
       assert_eq!(shown_pids(&app), first, "{header}");
       let line = proc_row(&render_buffer(&mut app, 200, 50), 1);
@@ -2527,7 +2353,7 @@ mod tests {
 
       // again, on the arrow this time: the whole header cell counts
       let at = x_of(&line, &format!("{header} {}", arrow(desc))) + header.len() as u16 + 1;
-      assert!(click(&mut app, at, PROC_Y + 1).is_continue());
+      click(&mut app, at, PROC_Y + 1);
       assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, !desc), "{header}");
       // saved like `s` / `S`
       assert_eq!(file.saved()["proc_sort"], format!("{sort:?}"), "{header}");
@@ -2537,42 +2363,12 @@ mod tests {
       assert!(line.contains(&format!("{header} {}", arrow(!desc))), "{line}");
 
       // and back
-      assert!(click(&mut app, x_of(&line, header), PROC_Y + 1).is_continue());
+      click(&mut app, x_of(&line, header), PROC_Y + 1);
       assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, desc), "{header}");
     }
 
     assert_eq!(file.saved()["proc_sort"], "Cpu");
     assert_eq!(file.saved()["proc_sort_desc"], true);
-  }
-
-  #[test]
-  fn click_on_filter_label_starts_typing() {
-    let mut app = app_with_procs(varied_procs());
-    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
-    let x = x_of(&title, "/ filter");
-
-    // the blank cells around the label and the count title don't count
-    for x in [x - 1, x + 8, x_of(&title, "proc 3")] {
-      assert!(click(&mut app, x, PROC_Y).is_continue());
-      assert!(!app.proc_view.typing(), "x {x}: {title}");
-    }
-    assert!(click(&mut app, x + 7, PROC_Y).is_continue());
-    assert!(app.proc_view.typing());
-
-    // keys go to the filter, which replaces the label
-    for c in "saf".chars() {
-      assert!(app.handle_key(key(c)).is_continue());
-    }
-    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
-    assert!(title.starts_with("╭─ proc 1/3 ─ /saf█ ─"), "{title}");
-
-    // a kept filter: a click on its text edits it again
-    assert!(press(&mut app, KeyCode::Enter).is_continue());
-    let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
-    assert!(title.starts_with("╭─ proc 1/3 ─ /saf ─"), "{title}");
-    assert!(click(&mut app, x_of(&title, "/saf") + 2, PROC_Y).is_continue());
-    assert!(app.proc_view.typing());
-    assert_eq!(app.proc_view.filter(), "saf");
   }
 
   #[test]
@@ -2587,11 +2383,11 @@ mod tests {
     let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
     assert_eq!(title, format!("╭─ proc 0/3 ─ /…{}█ ─╮", &filter[70..]));
 
-    // kept: one more character instead of the cursor, and a click on it edits it again
+    // kept: one more character instead of the cursor; `/` edits it again
     assert!(press(&mut app, KeyCode::Enter).is_continue());
     let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
     assert_eq!(title, format!("╭─ proc 0/3 ─ /…{} ─╮", &filter[69..]));
-    assert!(click(&mut app, 190, PROC_Y).is_continue());
+    assert!(app.handle_key(key('/')).is_continue());
     assert!(app.proc_view.typing());
 
     // no room next to the count: the filter takes its place
@@ -2601,23 +2397,17 @@ mod tests {
     assert!(press(&mut app, KeyCode::Enter).is_continue());
     let buf = render_buffer(&mut app, 20, 50);
     assert_eq!(proc_row(&buf, 0), format!("╭─ /…{} ─╮", &filter[238..]));
-    assert!(click(&mut app, 5, PROC_Y).is_continue());
-    assert!(app.proc_view.typing());
   }
 
   #[test]
-  fn narrow_process_box_drops_the_filter_label_and_its_click() {
+  fn narrow_process_box_drops_the_filter_label() {
     let mut app = app_with_procs(varied_procs());
     let buf = render_buffer(&mut app, 23, 50);
     assert_eq!(proc_row(&buf, 0), "╭─ proc 3 ─ / filter ─╮");
 
-    // one cell less: no label, and nothing on the border starts typing
+    // one cell less: no label
     let buf = render_buffer(&mut app, 22, 50);
     assert_eq!(proc_row(&buf, 0), format!("╭─ proc 3 {}╮", "─".repeat(11)));
-    for x in 0..22 {
-      assert!(click(&mut app, x, PROC_Y).is_continue());
-      assert!(!app.proc_view.typing(), "x {x}");
-    }
 
     // `/` still does, and the filter shows up
     assert!(app.handle_key(key('/')).is_continue());
@@ -2643,18 +2433,18 @@ mod tests {
 
     // anywhere across the row, the blank cells at the borders too
     for (x, row, pid) in [(100, 1, 2301), (1, 2, 1), (198, 0, 631)] {
-      assert!(click(&mut app, x, PROC_Y + 2 + row).is_continue());
+      click(&mut app, x, PROC_Y + 2 + row);
       assert_eq!(app.proc_view.selected_pid(), Some(pid), "x {x}, row {row}");
     }
     let buf = render_buffer(&mut app, 200, 50);
     assert!(buf[(100, PROC_Y + 2)].modifier.contains(Modifier::REVERSED));
 
     // blank rows below the last process keep the selection
-    assert!(click(&mut app, 100, PROC_Y + 10).is_continue());
+    click(&mut app, 100, PROC_Y + 10);
     assert_eq!(app.proc_view.selected_pid(), Some(631));
 
     // the selected row again: no selection
-    assert!(click(&mut app, 30, PROC_Y + 2).is_continue());
+    click(&mut app, 30, PROC_Y + 2);
     assert_eq!(app.proc_view.selected_pid(), None);
     let buf = render_buffer(&mut app, 200, 50);
     assert!(!buf[(100, PROC_Y + 2)].modifier.contains(Modifier::REVERSED));
@@ -2666,7 +2456,7 @@ mod tests {
     assert_eq!(app.proc_view.selected_pid(), None);
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc73 "));
-    assert!(click(&mut app, 50, PROC_Y + 2).is_continue());
+    click(&mut app, 50, PROC_Y + 2);
     assert_eq!(app.proc_view.selected_pid(), Some(1073));
     let buf = render_buffer(&mut app, 200, 50);
     assert!(proc_row(&buf, 2).contains("proc73 "), "the table doesn't move");
@@ -2676,7 +2466,7 @@ mod tests {
   fn wheel_moves_selection_and_scrolls() {
     let mut app = hundred_procs_app();
     let wheel = |app: &mut App, kind| {
-      assert!(app.handle_mouse(mouse(kind, 100, PROC_Y + 10)).is_continue());
+      app.handle_mouse(mouse(kind, 100, PROC_Y + 10));
     };
     // (screen row of the selection, its process)
     let selected = |app: &mut App| {
@@ -2724,7 +2514,7 @@ mod tests {
 
     // the wheel over the metrics box doesn't move the list
     wheel(&mut app, ScrollUp);
-    assert!(app.handle_mouse(mouse(ScrollUp, 100, 3)).is_continue());
+    app.handle_mouse(mouse(ScrollUp, 100, 3));
     assert_eq!(selected(&mut app), (26, 96));
   }
 
@@ -2766,7 +2556,7 @@ mod tests {
       (100, 3),
     ];
     for (x, y) in cells {
-      assert!(click(&mut app, x, y).is_continue());
+      click(&mut app, x, y);
       assert_eq!(state(&app), before, "click at {x}, {y}");
     }
 
@@ -2782,7 +2572,7 @@ mod tests {
     ];
     for kind in kinds {
       for (x, y) in targets.into_iter().chain([(100, PROC_Y + 2)]) {
-        assert!(app.handle_mouse(mouse(kind, x, y)).is_continue());
+        app.handle_mouse(mouse(kind, x, y));
         assert_eq!(state(&app), before, "{kind:?} at {x}, {y}");
       }
     }
@@ -2798,8 +2588,8 @@ mod tests {
     let row = (100, PROC_Y + 2);
     let try_all = |app: &mut App| {
       for (x, y) in [mem, filter, row] {
-        assert!(click(app, x, y).is_continue());
-        assert!(app.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y)).is_continue());
+        click(app, x, y);
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
       }
       assert_eq!((app.cfg.proc_sort, app.proc_view.typing()), (ProcSort::Cpu, false));
       assert_eq!(app.proc_view.selected_pid(), None);
@@ -2821,7 +2611,7 @@ mod tests {
     render_buffer(&mut app, 200, 50);
     put_procs(&mut app, varied_procs());
     render_buffer(&mut app, 200, 50);
-    assert!(click(&mut app, mem.0, mem.1).is_continue());
+    click(&mut app, mem.0, mem.1);
     assert_eq!(app.cfg.proc_sort, ProcSort::Mem);
   }
 
@@ -2852,7 +2642,7 @@ mod tests {
     for x in [1, 100, cpu, 198] {
       assert!(selected(&buf, x, 3), "x {x}");
     }
-    assert_eq!(buf[(cpu, PROC_Y + 2)].fg, app.theme.gradient(0.125));
+    assert_eq!(buf[(cpu, PROC_Y + 2)].fg, gradient(0.125));
     assert!(!selected(&buf, 1, 2));
     assert!(!selected(&buf, 0, 3), "border not highlighted");
     assert_eq!(buf.content.iter().filter(|cell| reversed(cell)).count(), 198);
@@ -2879,52 +2669,50 @@ mod tests {
     assert_eq!(row(&buf, 49), border(200, NOTE, &hints(6)));
     assert_eq!(buf[(3, 49)].fg, theme::DIM);
 
-    // the PID and the full path, with `Esc clear`
+    // the PID and the full path
     assert!(press(&mut app, KeyCode::Down).is_continue());
-    let selected = format!(" 631 {WINDOW_SERVER} | Esc clear ");
+    let selected = format!(" 631 {WINDOW_SERVER} ");
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
     assert_eq!(bottom, border(200, &selected, &hints(6)));
     let buf = render_buffer(&mut app, 200, 50);
     assert!(buf[(3, 49)].modifier.contains(Modifier::BOLD), "the PID");
     assert_eq!(buf[(7, 49)].fg, theme::TEXT);
 
-    // narrower: `Esc clear` gives way to the hints, then the path is cut from the left to the
-    // room the hints leave; once that is less than half the border, the hints drop instead
-    let left = format!(" 631 {WINDOW_SERVER} ");
-    let cut = |from: usize| format!(" 631 …{} ", &WINDOW_SERVER[from..]);
+    // narrower: the path is cut from the left to the room the hints leave, and left out with
+    // fewer than 8 cells; then the hints drop
+    let cut = |keep: usize| format!(" 631 …{} ", &WINDOW_SERVER[WINDOW_SERVER.len() - keep..]);
     let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
-    assert_eq!(bottom(&mut app, 170), border(170, &selected, &hints(6)));
-    assert_eq!(bottom(&mut app, 169), border(169, &left, &hints(6)));
-    assert_eq!(bottom(&mut app, 120), border(120, &cut(39), &hints(6)));
-    assert_eq!(bottom(&mut app, 100), border(100, &cut(50), &hints(5)));
-    assert_eq!(bottom(&mut app, 40), border(40, &cut(80), &hints(2)));
+    assert_eq!(bottom(&mut app, 158), border(158, &selected, &hints(6)));
+    assert_eq!(bottom(&mut app, 157), border(157, &cut(84), &hints(6)));
+    assert_eq!(bottom(&mut app, 120), border(120, &cut(47), &hints(6)));
+    assert_eq!(bottom(&mut app, 76), border(76, &cut(3), &hints(6)));
+    assert_eq!(bottom(&mut app, 75), hints_border(75, 6));
+    assert_eq!(bottom(&mut app, 40), hints_border(40, 3));
 
     // another process; no path: the name
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
-    assert!(bottom.starts_with("╰─ 2301 /Applications/Safari.app/Contents/MacOS/Safari | Esc"));
+    assert!(bottom.starts_with("╰─ 2301 /Applications/Safari.app/Contents/MacOS/Safari ─"));
     let mut app = app_with_procs(test_procs());
     assert!(press(&mut app, KeyCode::Down).is_continue());
-    let buf = render_buffer(&mut app, 200, 50);
-    let bottom = row(&buf, 49);
-    assert_eq!(bottom, border(200, " 1 launchd | Esc clear ", &hints(6)));
-    // `Esc clear` is a hint like those on the right: bold key, and a click presses it
-    let x = x_of(&bottom, "Esc clear");
-    assert!(buf[(x, 49)].modifier.contains(Modifier::BOLD));
-    assert!(!buf[(x + 4, 49)].modifier.contains(Modifier::BOLD));
-    assert!(click(&mut app, x + 6, 49).is_continue());
-    assert_eq!(app.proc_view.selected_pid(), None);
+    let bottom = row(&render_buffer(&mut app, 200, 50), 49);
+    assert_eq!(bottom, border(200, " 1 launchd ", &hints(6)));
 
     // cleared: every process has power here, so no note either
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
     assert_eq!(row(&render_buffer(&mut app, 200, 50), 49), hints_border(200, 6));
   }
 
   #[test]
   fn power_note_gives_way_and_follows_the_power_column() {
     let mut app = app_with_procs(varied_procs());
-    // the note drops before the hints do: 4 corner cells, the note, a gap and 61 cells of hints
+    // the note gets the room the hints leave: 4 corner cells, the note, a gap and 61 cells of
+    // hints; it is cut when shorter, and left out with fewer than 8 cells
     assert_eq!(row(&render_buffer(&mut app, 93, 50), 49), border(93, NOTE, &hints(6)));
-    assert_eq!(row(&render_buffer(&mut app, 92, 50), 49), hints_border(92, 6));
+    let cut = " POWER: own processes on… ";
+    assert_eq!(row(&render_buffer(&mut app, 92, 50), 49), border(92, cut, &hints(6)));
+    assert_eq!(row(&render_buffer(&mut app, 76, 50), 49), border(76, " POWER:… ", &hints(6)));
+    assert_eq!(row(&render_buffer(&mut app, 75, 50), 49), hints_border(75, 6));
 
     // no POWER column on screen, no note
     let buf = render_buffer(&mut app, 46, 50);
@@ -2940,9 +2728,9 @@ mod tests {
   }
 
   #[test]
-  fn sort_hint_presses_s_and_arrows_do_nothing() {
+  fn sort_hint_shows_and_arrows_do_nothing() {
     use ProcSort::*;
-    let file = TempConfig::new("sort_hint_presses_s_and_arrows_do_nothing");
+    let file = TempConfig::new("sort_hint_shows_and_arrows_do_nothing");
     let mut app = with_procs(saving_app(&file), varied_procs());
     let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
     assert!(title.starts_with("╭─ proc 3 ─ / filter ─ s sort ─"), "{title}");
@@ -2956,16 +2744,9 @@ mod tests {
     }
     assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (Cpu, true));
     assert!(!file.path().exists(), "nothing saved");
-
-    // a click anywhere on it sorts by the next column, as `s` does, and saves it
-    for (dx, sort) in [(0, Mem), (5, Power), (2, Gpu)] {
-      render_buffer(&mut app, 200, 50);
-      assert!(click(&mut app, x + dx, PROC_Y).is_continue());
-      assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (sort, true), "+{dx}");
-    }
-    assert_eq!(file.saved()["proc_sort"], "Gpu");
-    let header = proc_row(&render_buffer(&mut app, 200, 50), 1);
-    assert!(header.contains(" GPU% ↓ "), "{header}");
+    // a click on it does nothing
+    click(&mut app, x, PROC_Y);
+    assert_eq!((app.cfg.proc_sort, app.cfg.proc_sort_desc), (Cpu, true));
 
     // gone while a filter is typed (`s` is text then), back after the kept filter
     assert!(app.handle_key(key('/')).is_continue());
@@ -2977,42 +2758,6 @@ mod tests {
     assert!(press(&mut app, KeyCode::Enter).is_continue());
     let title = proc_row(&render_buffer(&mut app, 200, 50), 0);
     assert!(title.starts_with("╭─ proc 1/3 ─ /saf ─ s sort ─"), "{title}");
-    assert!(click(&mut app, x_of(&title, "s sort"), PROC_Y).is_continue());
-    assert_eq!(app.cfg.proc_sort, Pid);
-  }
-
-  #[test]
-  fn footer_hints_press_their_keys() {
-    let file = TempConfig::new("footer_hints_press_their_keys");
-    let mut app = with_procs(saving_app(&file), varied_procs());
-    let msec = RwLock::new(1000);
-    // clicks `text` (plus `dx` cells) on the footer of a fresh frame
-    let click_hint = |app: &mut App, text: &str, dx: u16| {
-      let footer = row(&render_buffer(app, 200, 50), 49);
-      let at = mouse(MouseEventKind::Down(MouseButton::Left), x_of(&footer, text) + dx, 49);
-      app.handle_event(Event::Mouse(at), &msec)
-    };
-
-    assert!(click_hint(&mut app, "v graph", 6).is_continue());
-    assert_eq!(file.saved()["view_type"], "Gauge");
-    assert!(click_hint(&mut app, "r scaled", 0).is_continue());
-    assert_eq!(file.saved()["ratio_mode"], "Active");
-    // `-/+ 1000ms`: its `-` presses `-`, its `+` presses `+`
-    assert!(click_hint(&mut app, "-/+ 1000ms", 0).is_continue());
-    assert_eq!((file.saved()["interval"].clone(), *msec.read().unwrap()), (750.into(), 750));
-    assert!(click_hint(&mut app, "-/+ 750ms", 2).is_continue());
-    assert_eq!((file.saved()["interval"].clone(), *msec.read().unwrap()), (1000.into(), 1000));
-    assert!(click_hint(&mut app, "? help", 0).is_continue());
-    assert!(app.help.is_some());
-    assert!(press(&mut app, KeyCode::Esc).is_continue());
-    assert!(click_hint(&mut app, "p procs", 6).is_continue());
-    assert_eq!(file.saved()["show_procs"], false);
-
-    // the metrics box has no hints to click while the list is on screen
-    let mut app = app_with_procs(varied_procs());
-    let buf = render_buffer(&mut app, 200, 50);
-    assert!(!row(&buf, PROC_Y - 1).contains("q quit"));
-    assert!(click(&mut app, x_of(&row(&buf, 49), "q quit"), 49).is_break(), "q quit quits");
   }
 
   #[test]
@@ -3023,20 +2768,16 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     assert_eq!(row(&buf, 49), border(200, NOTE, typing));
 
-    // its hints are clickable too: `↓` and `↑` of `↑↓ select` move the selection
-    let click_footer = |app: &mut App, text: &str| {
-      let footer = row(&render_buffer(app, 200, 50), 49);
-      click(app, x_of(&footer, text), 49)
-    };
-    assert!(click_footer(&mut app, "↓").is_continue());
+    // ↑↓ select while typing
+    assert!(press(&mut app, KeyCode::Down).is_continue());
     let first = app.proc_view.selected_pid().expect("↓ selects the top row");
-    assert!(click_footer(&mut app, "↓").is_continue());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
     let second = app.proc_view.selected_pid();
     assert!(second.is_some() && second != Some(first), "↓ moves down");
-    assert!(click_footer(&mut app, "↑").is_continue());
+    assert!(press(&mut app, KeyCode::Up).is_continue());
     assert_eq!(app.proc_view.selected_pid(), Some(first));
     assert!(app.proc_view.typing());
-    // the selected process on the left, without `Esc clear`: Esc clears the filter while typing
+    // the selected process on the left
     let bottom = row(&render_buffer(&mut app, 200, 50), 49);
     assert_eq!(bottom, border(200, &format!(" 631 {WINDOW_SERVER} "), typing));
 
@@ -3049,7 +2790,7 @@ mod tests {
     let middle = (PROC_Y + 2..49).find(|&y| row(&buf, y).contains(message)).expect(message);
     assert_eq!(middle, PROC_Y + 2 + 13, "centered in the 27 table rows");
     assert_eq!(buf[(x_of(&row(&buf, middle), "no"), middle)].fg, theme::DIM);
-    assert!(click(&mut app, x_of(&row(&buf, 49), "Enter"), 49).is_continue());
+    assert!(press(&mut app, KeyCode::Enter).is_continue());
     assert!(!app.proc_view.typing());
     assert_eq!(app.proc_view.filter(), "zz");
 
@@ -3091,7 +2832,7 @@ mod tests {
       "s / S",
       "↑ ↓",
       " Mouse ",
-      "a column header to sort, a row to select, a hint to press it",
+      "a column header to sort, a row to select",
       " Notes ",
       "100% is one fully busy core",
       "POWER -",
@@ -3123,7 +2864,7 @@ mod tests {
     // a click closes it; Ctrl-C still quits
     assert!(app.handle_key(key('?')).is_continue());
     render_buffer(&mut app, 200, 50);
-    assert!(click(&mut app, 100, 25).is_continue());
+    click(&mut app, 100, 25);
     assert!(app.help.is_none() && app.proc_view.selected_pid() == Some(631));
     assert!(app.handle_key(key('?')).is_continue());
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -3161,7 +2902,7 @@ mod tests {
     assert!(press(&mut app, KeyCode::Up).is_continue());
     assert!(!lines(&mut app, 80, 14).contains("select text"), "one line back up");
     for _ in 0..20 {
-      assert!(app.handle_mouse(mouse(MouseEventKind::ScrollUp, 40, 7)).is_continue());
+      app.handle_mouse(mouse(MouseEventKind::ScrollUp, 40, 7));
     }
     assert!(lines(&mut app, 80, 14).contains(" Keys "));
 

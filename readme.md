@@ -79,7 +79,7 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI: the metric boxes of the original layout (one per CPU cluster, GPU and RAM, then CPU / GPU / ANE power) in the top 40% of the window and the process list below it; with the process list hidden, the boxes take the whole window. Each box shows its history as a chart filling the box; `v` switches the CPU, GPU and RAM boxes to gauges of the current load. The RAM box shows used RAM and swap (the total RAM is in the chip title). Box titles get shorter step by step to fit narrow boxes. The bottom border of the metrics box shows `Power` (CPU + GPU + ANE), the fans and `Total`, the power of the whole system (when the Mac reports it).
+Run `macmon` without a subcommand to open the terminal UI: the metric boxes of the original layout (one per CPU cluster, GPU and RAM, then CPU / GPU / ANE power) in the top 40% of the window and the process list below it; with the process list hidden, the boxes take the whole window. Each box shows its history as a chart filling the box; `v` switches the CPU, GPU and RAM boxes to gauges of the current load. The RAM box shows used RAM and swap (the total RAM is in the chip title). Narrow boxes show short titles (`E-CPU 42%`, `CPU 3.44W`, `RAM 70% · SWAP 79%`). The bottom border of the metrics box shows `Power` (CPU + GPU + ANE), the fans and `Total`, the power of the whole system (when the Mac reports it).
 
 ```text
 Controls:
@@ -100,9 +100,7 @@ Process list:
 
 Mouse (process list):
   click a column header - sort by it, click again to reverse
-  click "/ filter"      - filter by name or PID
   click a process       - select it, click it again to clear the selection
-  click a key hint      - same as the key ("s sort" and the bottom border)
   wheel                 - scroll by 3 rows, with the selection when there is one
 ```
 
@@ -110,7 +108,7 @@ A column chosen for sorting starts with the largest numbers (CPU, MEM, POWER, GP
 
 Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`; an interval given with `-i` is used for that run only. The process list hides itself when the window is too small; `p` does nothing then.
 
-Colors come from your terminal's palette: borders and text in its own colors, loads from its green through yellow to red. The gradient is smooth on truecolor terminals (`COLORTERM=truecolor` or `24bit`) that answer the palette query (OSC 4); otherwise, and over SSH, where the query is skipped, it steps through the three colors.
+Colors come from your terminal's palette: borders and text in its own colors, loads in its green, yellow and red, a step per third of the load.
 
 While the process list is shown, the terminal sends mouse input to macmon, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
 

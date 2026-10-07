@@ -10,7 +10,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::Widget;
 
-use super::theme::Theme;
+use super::theme::gradient;
 
 /// Bar heights in one row: `▁` (1/8) up to `█` (8/8).
 const BAR_LEVELS: u64 = 8;
@@ -23,25 +23,23 @@ const HALF: char = '▄';
 
 /// Gauge view of the original macmon: a bar across its whole area, filled from the left to `ratio`
 /// (rounded to whole cells) in the load color of `ratio`; the rest stays blank.
-pub(super) struct Gauge<'a> {
+pub(super) struct Gauge {
   ratio: f64,
-  theme: &'a Theme,
 }
 
-impl<'a> Gauge<'a> {
+impl Gauge {
   /// Gauge for `ratio` in `0.0..=1.0`, clamped outside the range.
-  pub(super) fn new(ratio: f64, theme: &'a Theme) -> Self {
-    let ratio = if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) };
-    Self { ratio, theme }
+  pub(super) fn new(ratio: f64) -> Self {
+    Self { ratio: if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) } }
   }
 }
 
-impl Widget for Gauge<'_> {
+impl Widget for Gauge {
   fn render(self, area: Rect, buf: &mut Buffer) {
     let area = area.intersection(buf.area);
     // at most `area.width`, as the ratio is at most 1
     let filled = (f64::from(area.width) * self.ratio).round() as u16;
-    let color = self.theme.gradient(self.ratio);
+    let color = gradient(self.ratio);
     for y in area.top()..area.bottom() {
       for x in area.left()..area.left() + filled {
         buf[(x, y)].set_char(FULL).set_fg(color);
@@ -52,19 +50,26 @@ impl Widget for Gauge<'_> {
 
 /// History graph for newest-first samples over its whole area, right-aligned (newest sample on
 /// the right): one solid bar per column, growing from the bottom row up in eighths of a row
-/// (`▁`…`█`; blank / `▄` / `█` with `Theme::three_level_bars`), each colored by its own value on
-/// the load gradient, or all in one color. Zero values leave the column blank.
+/// (`▁`…`█`; blank / `▄` / `█` with `three_levels`), each colored by its own value on the load
+/// gradient, or all in one color. Zero values leave the column blank.
 pub(super) struct Graph<'a> {
   data: &'a [u64],
   max: Option<u64>,
   color: Option<Color>,
-  theme: &'a Theme,
+  three_levels: bool,
 }
 
 impl<'a> Graph<'a> {
   /// Graph scaled to its largest visible sample, each bar in its load color.
-  pub(super) fn new(data: &'a [u64], theme: &'a Theme) -> Self {
-    Self { data, max: None, color: None, theme }
+  pub(super) fn new(data: &'a [u64]) -> Self {
+    Self { data, max: None, color: None, three_levels: false }
+  }
+
+  /// Bars in three levels (blank, `▄`, `█`) instead of eighths, for Apple Terminal, which draws
+  /// gaps between the eighth blocks.
+  pub(super) fn three_levels(mut self, three_levels: bool) -> Self {
+    self.three_levels = three_levels;
+    self
   }
 
   /// Value drawn at full height.
@@ -92,14 +97,14 @@ impl Widget for Graph<'_> {
     let levels = u64::from(area.height) * BAR_LEVELS;
     for (x, &value) in (area.left()..area.right()).rev().zip(visible) {
       let mut level = bar_level(value, max, levels);
-      let color = self.color.unwrap_or_else(|| self.theme.gradient(value as f64 / max as f64));
+      let color = self.color.unwrap_or_else(|| gradient(value as f64 / max as f64));
       for y in (area.top()..area.bottom()).rev() {
         if level == 0 {
           break;
         }
 
         let eighths = level.min(BAR_LEVELS);
-        let symbol = bar_symbol(eighths, self.theme.three_level_bars());
+        let symbol = bar_symbol(eighths, self.three_levels);
         if symbol != ' ' {
           buf[(x, y)].set_char(symbol).set_fg(color);
         }
@@ -140,14 +145,7 @@ mod tests {
   use ratatui::widgets::Widget;
 
   use super::{Gauge, Graph, bar_level, bar_symbol};
-  use crate::tui::palette::Palette;
-  use crate::tui::theme::Theme;
-
-  /// Theme with a smooth gradient, so every load level has its own color.
-  fn smooth() -> Theme {
-    let palette = Palette { green: (0, 255, 0), yellow: (255, 255, 0), red: (255, 0, 0) };
-    Theme::new(Some(palette))
-  }
+  use crate::tui::theme::gradient;
 
   fn draw(widget: impl Widget, width: u16, height: u16) -> Buffer {
     let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
@@ -165,8 +163,7 @@ mod tests {
 
   /// Graph of `data` (newest first) scaled to `max`, `height` rows tall.
   fn graph(data: &[u64], max: u64, width: u16, height: u16) -> Vec<String> {
-    let theme = Theme::default();
-    rows(&draw(Graph::new(data, &theme).max(max), width, height))
+    rows(&draw(Graph::new(data).max(max), width, height))
   }
 
   /// One-row graph of `data` scaled to `max`.
@@ -227,14 +224,13 @@ mod tests {
     assert_eq!(symbols, "▁▂▃▄▅▆▇█");
 
     // every level of a two-row bar: full cells below, the top cell in three levels, in its color
-    let theme = smooth().with_three_level_bars(true);
     let levels: Vec<u64> = (1..=16).rev().collect();
-    let buf = draw(Graph::new(&levels, &theme).max(16), 16, 2);
+    let buf = draw(Graph::new(&levels).max(16).three_levels(true), 16, 2);
     assert_eq!(rows(&buf), ["         ▄▄▄▄▄██", " ▄▄▄▄▄██████████"]);
     for x in 0..16 {
       for y in 0..2 {
         let cell = &buf[(x, y)];
-        let color = theme.gradient(f64::from(x + 1) / 16.0);
+        let color = gradient(f64::from(x + 1) / 16.0);
         assert_eq!(cell.fg, if cell.symbol() == " " { Color::Reset } else { color }, "{x}, {y}");
       }
     }
@@ -252,42 +248,37 @@ mod tests {
 
   #[test]
   fn graph_scales_to_visible_samples() {
-    let theme = Theme::default();
     // the older 100 doesn't fit, so 20 is the full height
-    let buf = draw(Graph::new(&[10, 20, 100], &theme), 2, 2);
+    let buf = draw(Graph::new(&[10, 20, 100]), 2, 2);
     assert_eq!(rows(&buf), ["█ ", "██"]);
     // with all three on screen, 100 is
-    let buf = draw(Graph::new(&[10, 20, 100], &theme), 3, 2);
+    let buf = draw(Graph::new(&[10, 20, 100]), 3, 2);
     assert_eq!(rows(&buf), ["█  ", "█▄▂"]);
   }
 
   #[test]
   fn graph_colors_each_column_by_its_value() {
-    for theme in [smooth(), Theme::default()] {
-      let buf = draw(Graph::new(&[90, 50, 10], &theme).max(100), 3, 4);
-      // every cell of a bar in the bar's color
-      for (x, t) in [(0, 0.1), (1, 0.5), (2, 0.9)] {
-        for y in 0..4 {
-          if buf[(x, y)].symbol() != " " {
-            assert_eq!(buf[(x, y)].fg, theme.gradient(t), "{x}, {y}");
-          }
+    let buf = draw(Graph::new(&[90, 50, 10]).max(100), 3, 4);
+    // every cell of a bar in the bar's color
+    for (x, t) in [(0, 0.1), (1, 0.5), (2, 0.9)] {
+      for y in 0..4 {
+        if buf[(x, y)].symbol() != " " {
+          assert_eq!(buf[(x, y)].fg, gradient(t), "{x}, {y}");
         }
       }
-      assert_eq!(rows(&buf), ["  ▅", "  █", " ██", "▄██"]);
     }
+    assert_eq!(rows(&buf), ["  ▅", "  █", " ██", "▄██"]);
 
-    // the terminal's green / yellow / red without a palette, no RGB
-    let theme = Theme::default();
-    let buf = draw(Graph::new(&[90, 50, 10], &theme).max(100), 3, 1);
+    // the terminal's green / yellow / red
+    let buf = draw(Graph::new(&[90, 50, 10]).max(100), 3, 1);
     let colors: Vec<Color> = (0..3).map(|x| buf[(x, 0)].fg).collect();
     assert_eq!(colors, [Color::Green, Color::Yellow, Color::Red]);
   }
 
   #[test]
   fn graph_in_one_color() {
-    let theme = smooth();
-    let low = theme.gradient(0.0);
-    let buf = draw(Graph::new(&[4000, 2000, 0, 200], &theme).color(low), 4, 2);
+    let low = gradient(0.0);
+    let buf = draw(Graph::new(&[4000, 2000, 0, 200]).color(low), 4, 2);
     assert_eq!(rows(&buf), ["   █", "▁ ██"]);
     for (x, y) in [(0, 1), (2, 1), (3, 1), (3, 0)] {
       assert_eq!(buf[(x, y)].fg, low, "{x}, {y}");
@@ -296,74 +287,68 @@ mod tests {
 
   #[test]
   fn graph_zero_size_area_does_not_panic() {
-    let theme = Theme::default();
     for (w, h) in [(0, 0), (0, 3), (3, 0)] {
-      let buf = draw(Graph::new(&[100; 8], &theme), w, h);
+      let buf = draw(Graph::new(&[100; 8]), w, h);
       assert!(buf.content.is_empty());
     }
   }
 
   #[test]
   fn graph_stays_inside_its_area() {
-    let theme = Theme::default();
     let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
-    Graph::new(&[100; 10], &theme).max(100).render(Rect::new(2, 1, 3, 2), &mut buf);
+    Graph::new(&[100; 10]).max(100).render(Rect::new(2, 1, 3, 2), &mut buf);
     assert_eq!(rows(&buf), ["      ", "  ███ ", "  ███ ", "      "]);
   }
 
   #[test]
   fn gauge_fills_its_ratio_of_every_row() {
-    for theme in [smooth(), Theme::default()] {
-      // (ratio, width, height, filled cells per row)
-      let cases = [
-        (0.0, 10, 3, 0),
-        (0.5, 10, 3, 5),
-        (1.0, 10, 3, 10),
-        (0.0, 48, 7, 0),
-        (0.5, 48, 7, 24),
-        (1.0, 48, 7, 48),
-        (0.5, 1, 1, 1), // half a cell rounds up
-        (0.556, 48, 1, 27),
-        (0.44, 25, 2, 11),
-        (0.04, 10, 1, 0), // less than half a cell stays blank
-      ];
-      for (ratio, width, height, filled) in cases {
-        let buf = draw(Gauge::new(ratio, &theme), width, height);
-        let ctx = format!("{ratio} in {width}x{height}");
-        let row = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(width) - filled));
-        assert_eq!(rows(&buf), vec![row; usize::from(height)], "{ctx}");
+    // (ratio, width, height, filled cells per row)
+    let cases = [
+      (0.0, 10, 3, 0),
+      (0.5, 10, 3, 5),
+      (1.0, 10, 3, 10),
+      (0.0, 48, 7, 0),
+      (0.5, 48, 7, 24),
+      (1.0, 48, 7, 48),
+      (0.5, 1, 1, 1), // half a cell rounds up
+      (0.556, 48, 1, 27),
+      (0.44, 25, 2, 11),
+      (0.04, 10, 1, 0), // less than half a cell stays blank
+    ];
+    for (ratio, width, height, filled) in cases {
+      let buf = draw(Gauge::new(ratio), width, height);
+      let ctx = format!("{ratio} in {width}x{height}");
+      let row = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(width) - filled));
+      assert_eq!(rows(&buf), vec![row; usize::from(height)], "{ctx}");
 
-        // filled cells in the load color of the ratio
-        for (x, y) in (0..filled as u16).flat_map(|x| (0..height).map(move |y| (x, y))) {
-          assert_eq!(buf[(x, y)].fg, theme.gradient(ratio), "{ctx}: {x}, {y}");
-        }
+      // filled cells in the load color of the ratio
+      for (x, y) in (0..filled as u16).flat_map(|x| (0..height).map(move |y| (x, y))) {
+        assert_eq!(buf[(x, y)].fg, gradient(ratio), "{ctx}: {x}, {y}");
       }
     }
 
-    // the terminal's green / yellow / red without a palette
-    let theme = Theme::default();
-    let colors = [0.0, 0.5, 1.0].map(|ratio| draw(Gauge::new(ratio, &theme), 4, 1)[(0, 0)].fg);
+    // the terminal's green / yellow / red
+    let colors = [0.0, 0.5, 1.0].map(|ratio| draw(Gauge::new(ratio), 4, 1)[(0, 0)].fg);
     assert_eq!(colors, [Color::Reset, Color::Yellow, Color::Red], "nothing to color at 0");
-    assert_eq!(draw(Gauge::new(0.2, &theme), 4, 1)[(0, 0)].fg, Color::Green);
+    assert_eq!(draw(Gauge::new(0.2), 4, 1)[(0, 0)].fg, Color::Green);
   }
 
   #[test]
   fn gauge_clamps_ratio_and_stays_inside_its_area() {
-    let theme = Theme::default();
-    assert_eq!(rows(&draw(Gauge::new(1.5, &theme), 4, 1)), ["████"]);
-    assert_eq!(rows(&draw(Gauge::new(-1.0, &theme), 4, 1)), ["    "]);
-    assert_eq!(rows(&draw(Gauge::new(f64::NAN, &theme), 4, 1)), ["    "]);
+    assert_eq!(rows(&draw(Gauge::new(1.5), 4, 1)), ["████"]);
+    assert_eq!(rows(&draw(Gauge::new(-1.0), 4, 1)), ["    "]);
+    assert_eq!(rows(&draw(Gauge::new(f64::NAN), 4, 1)), ["    "]);
 
     let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
-    Gauge::new(1.0, &theme).render(Rect::new(2, 1, 3, 2), &mut buf);
+    Gauge::new(1.0).render(Rect::new(2, 1, 3, 2), &mut buf);
     assert_eq!(rows(&buf), ["      ", "  ███ ", "  ███ ", "      "]);
     // an area reaching past the buffer is clipped to it
     let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
-    Gauge::new(1.0, &theme).render(Rect::new(2, 1, 10, 5), &mut buf);
+    Gauge::new(1.0).render(Rect::new(2, 1, 10, 5), &mut buf);
     assert_eq!(rows(&buf), ["    ", "  ██"]);
 
     for (w, h) in [(0, 0), (0, 3), (3, 0)] {
-      assert!(draw(Gauge::new(0.5, &theme), w, h).content.is_empty());
+      assert!(draw(Gauge::new(0.5), w, h).content.is_empty());
     }
   }
 }

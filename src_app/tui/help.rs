@@ -1,12 +1,11 @@
 //! Help overlay (`?`): the keys, the mouse, and what the less obvious values mean.
 
 use ratatui::Frame;
-use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 
-use super::boxes::{Hint, Titles, cells, draw_box};
+use super::boxes::{Titles, cells, draw_box, hint};
 use super::theme::{heading, text};
 use Row::{Key, Section};
 
@@ -30,7 +29,7 @@ const HELP: &[Row] = &[
   Key("Esc", "clear the selection and the filter"),
   Key("?", "show / hide this help"),
   Section("Mouse"),
-  Key("click", "a column header to sort, a row to select, a hint to press it"),
+  Key("click", "a column header to sort, a row to select"),
   Section("Notes"),
   Key("CPU%", "100% is one fully busy core"),
   Key("scaled", "usage weighted by frequency; active: share of time busy"),
@@ -69,11 +68,10 @@ pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
   let shown = usize::from(height.saturating_sub(2));
   let scroll = scroll.min(lines.len().saturating_sub(shown));
   // any click closes the help, as Esc does
-  let close = Hint::new(("Esc", KeyCode::Esc), "close");
-  let titles = Titles::new(heading("help")).right(Line::from(close.spans()));
+  let titles = Titles::new(heading("help")).right(hint("Esc", "close"));
 
   f.render_widget(Clear, rect);
-  let (inner, _) = draw_box(f, rect, titles);
+  let inner = draw_box(f, rect, titles);
   let buf = f.buffer_mut();
   for (y, line) in (inner.y..).zip(lines.iter().skip(scroll).take(shown)) {
     buf.set_line(inner.x + 1, y, line, inner.width.saturating_sub(2));
