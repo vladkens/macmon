@@ -64,6 +64,9 @@ pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
   let x = area.x + (area.width - width) / 2;
   let y = area.y + (area.height - height) / 2;
   let rect = Rect::new(x, y, width, height);
+  if rect.is_empty() {
+    return scroll; // nothing to draw on (a window resized to zero rows or columns)
+  }
 
   let shown = usize::from(height.saturating_sub(2));
   let scroll = scroll.min(lines.len().saturating_sub(shown));

@@ -858,6 +858,16 @@ mod tests {
   }
 
   #[test]
+  fn help_draws_in_any_window_even_without_rows_or_columns() {
+    for (width, height) in [(5, 0), (0, 5), (0, 0), (1, 1), (3, 2), (80, 1), (1, 24)] {
+      let mut app = with_procs(test_app(), varied_procs());
+      assert!(app.handle_key(key('?')).is_continue());
+      render_buffer(&mut app, width, height); // must not panic
+      assert!(app.help.is_some(), "{width}x{height}");
+    }
+  }
+
+  #[test]
   fn typing_filter_ignores_global_keys() {
     let mut app = app_with_procs(varied_procs());
     assert!(app.handle_key(key('/')).is_continue());
@@ -985,7 +995,8 @@ mod tests {
   fn renders_every_box_at_any_size() {
     use Metric::*;
     let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, AnePower];
-    let sizes = [(400, 120), (200, 50), (80, 24), (60, 15), (60, 12), (30, 8), (5, 3), (1, 1)];
+    let sizes =
+      [(400, 120), (200, 50), (80, 24), (60, 15), (60, 12), (30, 8), (5, 3), (1, 1), (5, 0), (0, 5)];
     for (width, height) in sizes {
       let bare = test_app_with(|m| {
         m.memory.swap_total = 0;
