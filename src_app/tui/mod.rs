@@ -1290,8 +1290,13 @@ mod tests {
   }
 
   /// RAM box titles with swap, longest first; none at the end.
-  const RAM_SWAP_STEPS: [&str; 4] =
-    ["RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB", "RAM 70% · SWAP 79%", "RAM 70%", ""];
+  const RAM_SWAP_STEPS: [&str; 5] = [
+    "RAM 16.81 GB (70.0%) · SWAP 2.37 / 3.0 GB",
+    "RAM 70% · SWAP 79%",
+    "RAM 70% SW 79%",
+    "RAM 70%",
+    "",
+  ];
 
   /// RAM box titles without swap, longest first; none at the end.
   const RAM_STEPS: [&str; 3] = ["RAM 16.81 GB (70.0%)", "RAM 70%", ""];
@@ -1306,7 +1311,9 @@ mod tests {
       (46, RAM_SWAP_STEPS[1]),
       (24, RAM_SWAP_STEPS[1]),
       (23, RAM_SWAP_STEPS[2]),
-      (13, RAM_SWAP_STEPS[2]),
+      (20, RAM_SWAP_STEPS[2]),
+      (19, RAM_SWAP_STEPS[3]),
+      (13, RAM_SWAP_STEPS[3]),
     ];
     for (width, title) in cases {
       let top = sized_box_top(&mut app, Metric::Ram, width);

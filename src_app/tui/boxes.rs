@@ -425,9 +425,9 @@ impl App {
 
   /// RAM and swap usage over the RAM usage history scaled to the total RAM, or a gauge. The total
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
-  /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` when that doesn't fit (without swap only
-  /// the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the title, so no number
-  /// is ever cut.
+  /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
+  /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
+  /// title, so no number is ever cut.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
@@ -443,6 +443,7 @@ impl App {
       let short_swap = [text(" "), self.percent(ratio(used, total), 0)];
       titles.push([&full[..], &swap, &full_swap].concat());
       titles.push([&short[..], &swap, &short_swap].concat());
+      titles.push([&short[..], &[text(" "), heading("SW")], &short_swap].concat());
     } else {
       titles.push(full.into());
     }
