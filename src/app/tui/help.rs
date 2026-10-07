@@ -1,5 +1,6 @@
 //! Help overlay (`?`): the keys, the mouse, and what the less obvious values mean.
 
+use Row::{Key, Section};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -7,7 +8,6 @@ use ratatui::widgets::Clear;
 
 use super::boxes::{Titles, cells, draw_box, hint};
 use super::theme::{heading, text};
-use Row::{Key, Section};
 
 /// One line of the help.
 enum Row {

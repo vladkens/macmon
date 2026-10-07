@@ -16,5 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup update --no-self-update stable && rustup default stable
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
       - run: make test

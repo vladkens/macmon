@@ -22,6 +22,7 @@ jobs:
             ~/.cargo/git/db/
 
       - run: rustup update --no-self-update stable && rustup default stable
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
       - run: make test
 

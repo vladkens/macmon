@@ -5,6 +5,7 @@
     "rust": "cargo run -r #$fileName"
   },
   "editor.formatOnSave": true,
+  "rust-analyzer.rustfmt.extraArgs": ["+nightly"],
   "files.exclude": {
     "Cargo.lock": true,
     "LICENSE": true,

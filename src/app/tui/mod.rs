@@ -15,22 +15,19 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::{
-  ExecutableCommand, cursor,
-  event::{
-    self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-    MouseEvent, MouseEventKind,
-  },
-  terminal,
-};
-use ratatui::prelude::*;
-
-use crate::config::{Config, TUI_MIN_MS};
-use crate::procs::{ProcInfo, ProcSampler};
 use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
 use proc_view::ProcView;
+use ratatui::crossterm::event::{
+  self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
+  MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::{ExecutableCommand, cursor, terminal};
+use ratatui::prelude::*;
 use store::{CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
+
+use crate::config::{Config, TUI_MIN_MS};
+use crate::procs::{ProcInfo, ProcSampler};
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 

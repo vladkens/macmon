@@ -1,22 +1,19 @@
-use core_foundation::{
-  base::{CFType, CFTypeRef, TCFType},
-  data::CFData,
-  dictionary::CFDictionary,
-  number::CFNumber,
-  propertylist::create_with_data,
-  string::{CFString, CFStringRef},
-};
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Component, Path};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use core_foundation::base::{CFType, CFTypeRef, TCFType};
+use core_foundation::data::CFData;
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::number::CFNumber;
+use core_foundation::propertylist::create_with_data;
+use core_foundation::string::{CFString, CFStringRef};
 use macmon::sources::{
   IOReport, IOServiceIterator, WithError, cfdict_get_val, cfio_integer_value, cfio_watts,
-};
-use std::{
-  collections::BTreeMap,
-  io::{BufRead, BufReader, Read},
-  path::{Component, Path},
-  process::{Child, Command, Stdio},
-  sync::mpsc,
-  thread,
-  time::{Duration, Instant},
 };
 
 // MARK: Find CLPC power counters
