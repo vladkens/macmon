@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 mod config;
 mod find_clpc;
+mod procs;
 mod serve;
 mod stress;
 mod tui;

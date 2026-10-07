@@ -23,7 +23,8 @@
 - 💾 RAM / Swap usage
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
-- 🎨 Switchable color themes (6 variants)
+- 📋 Process list with per-process CPU, memory, power and GPU usage
+- 🎨 Follows your terminal's color scheme
 - 🪟 Can be displayed in a small window
 - 🦀 Written in Rust
 
@@ -78,16 +79,7 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI.
-
-```text
-Controls:
-  c - change color
-  v - switch charts view: gauge / sparkline
-  d - toggle detailed CPU/RAM view
-  r - switch ratio mode: scaled / active
-  q - quit
-```
+Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
 ### JSON output
 

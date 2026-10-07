@@ -2,11 +2,17 @@
 
 Rootless Apple Silicon monitor and Rust library. Shared sampling and metric types live in `src_lib/metrics.rs`, macOS API access in `src_lib/sources.rs`, and CLI commands in `src_app/`.
 
+The TUI is in `src_app/tui/`. Per-process usage (`src_app/procs.rs`) comes from libproc for the user's own processes, the setuid `/bin/ps` for other users' processes, and GPU time from the IORegistry (`IOAccelerator` children).
+
 ## Development
 
 - Keep CLI-only code and dependencies behind the `app` feature; preserve library builds with `--no-default-features`.
 - Keep normal metric collection rootless and preserve fallbacks for older systems.
 - For Rust changes, run `make check` and focused tests for the changed behavior. `make prepare` applies formatting and fixes; do not use it as a read-only check.
+- TUI colors only through `tui/theme.rs` (terminal ANSI colors, no RGB), so macmon follows the terminal's theme.
+- Keep `~/.config/macmon.json` compatible with released versions: same field names and values (`view_type` is `"Sparkline"` / `"Gauge"`).
+- Release builds abort on panic: every terminal mode the TUI enables must be undone in `restore_term_once`.
+- The TUI saves settings on key presses: for manual runs set `HOME` to a temporary directory.
 
 ## Metric sources
 
