@@ -133,7 +133,7 @@ This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that a
 
 #### Prometheus and Grafana
 
-The `/metrics` endpoint exposes metrics in Prometheus format. Temperature gauges are omitted while no sensor has a valid reading. See [`examples/grafana`](examples/grafana) for a local demo stack with Prometheus and Grafana.
+The `/metrics` endpoint exposes metrics in Prometheus format. See [`examples/grafana`](examples/grafana) for a local demo stack with Prometheus and Grafana.
 
 <details>
 <summary>Prometheus output example</summary>
