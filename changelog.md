@@ -1,11 +1,3 @@
-## Unreleased
-
-### Breaking Changes
-
-- Temperatures are now `Option<f32>` in Rust and `null` in JSON instead of `0.0` when no sensor has a valid reading; the Prometheus temperature gauges are omitted in that case (#81, by @omar16100)
-
----
-
 ## v0.8.2 – 2026-08-04
 
 ### Fixes
