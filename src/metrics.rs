@@ -1,9 +1,10 @@
 //! Metrics model and hardware sampler.
 
-use core_foundation::dictionary::CFDictionaryRef;
+use std::collections::HashMap;
+use std::time::Duration;
 
+use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
-use std::{collections::HashMap, time::Duration};
 
 use crate::shared::{
   ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, zero_div,
@@ -649,13 +650,12 @@ impl Sampler {
 mod tests {
   use std::collections::{HashMap, HashSet};
 
-  use crate::sources::SocInfo;
-
   use super::{
     CpuCoreKind, CpuCoreMetrics, Metrics, PowerSources, aggregate_ioreport_metrics,
     calc_freq_from_residencies, collect_cpu_core_metrics, parse_cpu_core_channel,
     smc_numeric_value,
   };
+  use crate::sources::SocInfo;
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {

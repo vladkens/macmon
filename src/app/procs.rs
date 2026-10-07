@@ -691,9 +691,10 @@ impl ProcSampler {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
   use std::hint::black_box;
   use std::time::Duration;
+
+  use super::*;
 
   const SEC: u64 = 1_000_000_000;
   /// Pids of made-up processes.

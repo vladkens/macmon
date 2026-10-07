@@ -1,7 +1,8 @@
 //! Diagnostic report used by the `macmon debug` command.
 
-use core_foundation::base::{CFRelease, CFShow};
 use std::time::Duration;
+
+use core_foundation::base::{CFRelease, CFShow};
 
 use crate::shared::{ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel};
 use crate::sources::{

@@ -1,7 +1,8 @@
 //! Metric history stores used by the terminal UI.
 
-use crate::config::RatioMode;
 use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
+
+use crate::config::RatioMode;
 
 /// Samples kept for the history graphs, newest first: one per column, enough to fill the widest
 /// box (CPU power, a third of the width) of a terminal about 3000 columns wide.
@@ -108,8 +109,8 @@ impl CpuClusters {
   }
 }
 
-/// Samples of the two CPU clusters of a metrics sample, lowest tier first, as `CpuClusters::from_soc`
-/// orders them.
+/// Samples of the two CPU clusters of a metrics sample, lowest tier first, as
+/// `CpuClusters::from_soc` orders them.
 pub(super) fn cluster_samples(data: &Metrics) -> [FreqSample; 2] {
   [
     FreqSample::new(data.ecpu_freq_mhz, data.ecpu_scaled_ratio, data.ecpu_active_ratio),
@@ -240,8 +241,9 @@ pub(super) fn ratio(value: f64, total: f64) -> f64 {
 mod tests {
   use macmon::MemMetrics;
 
-  use super::TempStore;
-  use super::{FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN};
+  use super::{
+    FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN, TempStore,
+  };
   use crate::config::RatioMode;
 
   fn assert_close(actual: f64, expected: f64) {

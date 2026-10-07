@@ -1,11 +1,13 @@
 //! The macmon command-line application.
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum, parser::ValueSource};
 use std::error::Error;
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use clap::parser::ValueSource;
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod config;
 mod find_clpc;
@@ -14,7 +16,8 @@ mod serve;
 mod stress;
 mod tui;
 
-use macmon::{Metrics, Sampler, diagnostics::print_debug};
+use macmon::diagnostics::print_debug;
+use macmon::{Metrics, Sampler};
 use tui::App;
 
 // JSON output keeps the v0.7 field names as deprecated aliases.

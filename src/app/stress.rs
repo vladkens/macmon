@@ -5,13 +5,10 @@ use std::error::Error;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::hash::Hasher;
 use std::hint::black_box;
-use std::ptr;
-use std::sync::{
-  Arc,
-  atomic::{AtomicBool, Ordering},
-};
-use std::thread;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{ptr, thread};
 
 use core_foundation::attributed_string::CFMutableAttributedString;
 use core_foundation::base::{CFRange, CFType, CFTypeRef, TCFType};

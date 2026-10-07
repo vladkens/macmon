@@ -14,40 +14,35 @@
 
 #![allow(dead_code)]
 
-use std::{
-  collections::HashMap,
-  ffi::CString,
-  marker::{PhantomData, PhantomPinned},
-  mem::{MaybeUninit, size_of},
-  os::raw::c_void,
-  ptr::{null, null_mut},
-  sync::OnceLock,
-  time::Duration,
-};
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::marker::{PhantomData, PhantomPinned};
+use std::mem::{MaybeUninit, size_of};
+use std::os::raw::c_void;
+use std::ptr::{null, null_mut};
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use core_foundation::{
-  array::{
-    CFArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex,
-    CFArrayRef, CFMutableArrayRef, kCFTypeArrayCallBacks,
-  },
-  base::{
-    CFAllocatorRef, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
-    kCFAllocatorNull,
-  },
-  data::{CFDataGetBytes, CFDataGetLength, CFDataRef},
-  dictionary::{
-    CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
-    CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
-    CFMutableDictionary, CFMutableDictionaryRef, kCFTypeDictionaryKeyCallBacks,
-    kCFTypeDictionaryValueCallBacks,
-  },
-  number::{
-    CFNumber, CFNumberCreate, CFNumberGetValue, CFNumberRef, kCFNumberSInt32Type,
-    kCFNumberSInt64Type,
-  },
-  string::{
-    CFString, CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8,
-  },
+use core_foundation::array::{
+  CFArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex,
+  CFArrayRef, CFMutableArrayRef, kCFTypeArrayCallBacks,
+};
+use core_foundation::base::{
+  CFAllocatorRef, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
+  kCFAllocatorNull,
+};
+use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataRef};
+use core_foundation::dictionary::{
+  CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
+  CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
+  CFMutableDictionary, CFMutableDictionaryRef, kCFTypeDictionaryKeyCallBacks,
+  kCFTypeDictionaryValueCallBacks,
+};
+use core_foundation::number::{
+  CFNumber, CFNumberCreate, CFNumberGetValue, CFNumberRef, kCFNumberSInt32Type, kCFNumberSInt64Type,
+};
+use core_foundation::string::{
+  CFString, CFStringCreateWithBytesNoCopy, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8,
 };
 use serde::Serialize;
 
@@ -775,9 +770,10 @@ fn load_soc_info() -> WithError<SocInfo> {
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if is_pmgr_node(&name) {
       let item = cfio_get_props(entry, name)?;
-      // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys
-      //    but their values are zero, so sram used here; it looks valid.
-      // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep "Cluster"
+      // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys but their
+      //    values are zero, so sram used here; it looks valid.
+      // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep
+      //    "Cluster"
       // First node with a table wins, so a stub node can't clobber real values.
       if info.ecpu_freqs.is_empty()
         && let Some(f) = cpu_freqs(item, "voltage-states1-sram", true, cpu_scale)

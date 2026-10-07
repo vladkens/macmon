@@ -3,12 +3,12 @@
 CARGO_FLAGS := --release --locked
 
 prepare:
-	cargo fmt
+	cargo +nightly fmt
 	cargo clippy $(CARGO_FLAGS) --fix --all-targets --allow-dirty -- -D warnings
 	cargo check $(CARGO_FLAGS)
 
 check:
-	cargo fmt --check
+	cargo +nightly fmt --check
 	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
 	cargo check $(CARGO_FLAGS) --bin macmon
 	cargo check $(CARGO_FLAGS) --lib --no-default-features
@@ -31,6 +31,6 @@ bench: # compare startup time
 
 remote:
 	@test -n "$(host)" || (echo "Usage: make remote host=user@host" >&2; exit 1)
-	@rsync -az Cargo.toml Cargo.lock Makefile src_app src_lib "$(host):macmon/"
+	@rsync -az Cargo.toml Cargo.lock Makefile src "$(host):macmon/"
 	@ssh "$(host)" 'cd ~/macmon && cargo build $(CARGO_FLAGS) && ./target/release/macmon debug'
 	@ssh "$(host)" 'cd ~/macmon && ./target/release/macmon pipe -s 1 -i 100 > /dev/null'

@@ -1,6 +1,6 @@
 # CLPC energy counters from macOS firmware
 
-Maintainer tool: [scripts/clpc.py](../scripts/clpc.py) downloads Apple restore-image components, discovers CPU/GPU/ANE report IDs for every included CLPC driver, and prints Rust constants ready to paste into [src_lib/clpc.rs](../src_lib/clpc.rs). [scripts/clpc_binary.py](../scripts/clpc_binary.py) parses Mach-O tables and traces the recognized ARM64 producers. Neither script connects to another Mac or needs root.
+Maintainer tool: [scripts/clpc.py](../scripts/clpc.py) downloads Apple restore-image components, discovers CPU/GPU/ANE report IDs for every included CLPC driver, and prints Rust constants ready to paste into [src/clpc.rs](../src/clpc.rs). [scripts/clpc_binary.py](../scripts/clpc_binary.py) parses Mach-O tables and traces the recognized ARM64 producers. Neither script connects to another Mac or needs root.
 
 ## Run
 
@@ -20,7 +20,7 @@ uv run scripts/clpc.py compare \
 
 Latest releases come from [Apple’s IPSW catalog](https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml); historical URLs come from the [IPSW.me API](https://api.ipsw.me/), combining all Mac models. Downloads always come from Apple’s HTTPS CDN. HTTP ranges fetch only `BuildManifest.plist` and its referenced kernelcaches, which are LZFSE-decompressed locally.
 
-`scan` prints `INDICES_<major>` and `CLPC_KEYS` directly to stdout; copy these constants into [src_lib/clpc.rs](../src_lib/clpc.rs). Progress and the discovery summary go to stderr. Rust output requires a complete scan and uniform table indices across the drivers. The script creates no `.rs` file and never edits Rust sources.
+`scan` prints `INDICES_<major>` and `CLPC_KEYS` directly to stdout; copy these constants into [src/clpc.rs](../src/clpc.rs). Progress and the discovery summary go to stderr. Rust output requires a complete scan and uniform table indices across the drivers. The script creates no `.rs` file and never edits Rust sources.
 
 All downloads, full report tables, producer traces, JSON catalogs and TSV summaries go to the ignored `out/clpc-static/` at the repository root. The manifest version/build, image hashes, driver UUIDs and code/data hashes identify the exact analyzed inputs.
 

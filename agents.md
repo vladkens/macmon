@@ -1,8 +1,8 @@
 # macmon
 
-Rootless Apple Silicon monitor and Rust library. Shared sampling and metric types live in `src_lib/metrics.rs`, macOS API access in `src_lib/sources.rs`, and CLI commands in `src_app/`.
+Rootless Apple Silicon monitor and Rust library. Shared sampling and metric types live in `src/metrics.rs`, macOS API access in `src/sources.rs`, and CLI commands in `src/app/`.
 
-The TUI is in `src_app/tui/`. Per-process usage (`src_app/procs.rs`) comes from libproc for the user's own processes, the setuid `/bin/ps` for other users' processes, and GPU time from the IORegistry (`IOAccelerator` children).
+The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from libproc for the user's own processes, the setuid `/bin/ps` for other users' processes, and GPU time from the IORegistry (`IOAccelerator` children).
 
 ## Development
 
