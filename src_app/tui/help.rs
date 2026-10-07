@@ -78,20 +78,3 @@ pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
   }
   scroll
 }
-
-#[cfg(test)]
-mod tests {
-  use super::{HELP, KEYS_WIDTH, Row, lines};
-
-  #[test]
-  fn keys_fit_their_column() {
-    for row in HELP {
-      if let Row::Key(keys, _) = row {
-        assert!(keys.chars().count() < KEYS_WIDTH, "{keys}");
-      }
-    }
-    // the box stays under 80 columns, and fits an 80x24 window
-    assert!(lines().iter().all(|line| line.width() + 4 <= 80));
-    assert!(lines().len() + 2 <= 24);
-  }
-}

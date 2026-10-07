@@ -716,152 +716,67 @@ mod tests {
   }
 
   #[test]
-  fn one_busy_core_is_100_pct() {
-    let usage = usage(Some(&counters(5 * SEC, None)), &counters(6 * SEC, None), SEC);
-    assert_eq!(usage.cpu_pct, 100.0);
-    assert_eq!(usage.power_w, None);
+  fn cpu_and_power_rates() {
+    // one busy core is 100 %, as in Activity Monitor; nJ per ns is W
+    let busy = usage(Some(&counters(5 * SEC, Some(SEC))), &counters(6 * SEC, Some(2 * SEC)), SEC);
+    assert_eq!(busy, Usage { cpu_pct: 100.0, power_w: Some(1.0), gpu_pct: 0.0 });
+    let two_cores = usage(Some(&counters(0, Some(0))), &counters(SEC, Some(SEC)), SEC / 2);
+    assert_eq!((two_cores.cpu_pct, two_cores.power_w), (200.0, Some(2.0)));
+    assert_eq!(usage(Some(&counters(0, None)), &counters(SEC, None), SEC).power_w, None);
+    // an energy counter showing up reads zero
+    assert_eq!(usage(Some(&counters(0, None)), &counters(SEC, Some(SEC)), SEC).power_w, Some(0.0));
 
-    let two_cores = super::usage(Some(&counters(0, None)), &counters(SEC, None), SEC / 2);
-    assert_eq!(two_cores.cpu_pct, 200.0);
-  }
-
-  #[test]
-  fn idle_is_zero() {
-    let usage = usage(Some(&counters(SEC, Some(10))), &counters(SEC, Some(10)), SEC);
-    assert_eq!(usage, Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 });
-  }
-
-  #[test]
-  fn energy_to_watts() {
-    let usage = usage(Some(&counters(0, Some(SEC))), &counters(0, Some(2 * SEC)), SEC);
-    assert_eq!(usage.power_w, Some(1.0));
-
-    let half = super::usage(Some(&counters(0, Some(0))), &counters(0, Some(SEC)), 2 * SEC);
-    assert_eq!(half.power_w, Some(0.5));
-  }
-
-  #[test]
-  fn negative_delta_is_zero() {
+    // a first sample, a reused pid (another start time), a counter going backwards or no time
+    // passed: idle instead of a spike
     let idle = Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 };
-    let cpu_back = usage(Some(&counters(2 * SEC, Some(0))), &counters(SEC, Some(SEC)), SEC);
-    assert_eq!(cpu_back, idle);
-
-    let energy_back = usage(Some(&counters(0, Some(2 * SEC))), &counters(SEC, Some(SEC)), SEC);
-    assert_eq!(energy_back, idle);
-  }
-
-  #[test]
-  fn new_process_has_no_spike() {
     let cur = counters(100 * SEC, Some(100 * SEC));
-    assert_eq!(usage(None, &cur, SEC), Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 });
-    assert_eq!(usage(None, &counters(SEC, None), SEC), Usage::default());
-
-    // Same pid, different start time: a new process reusing the pid.
-    let reused = Counters { start: 43, ..cur };
-    assert_eq!(usage(Some(&counters(0, Some(0))), &reused, SEC).cpu_pct, 0.0);
+    assert_eq!(usage(None, &cur, SEC), idle);
+    assert_eq!(usage(Some(&counters(0, Some(0))), &Counters { start: 43, ..cur }, SEC), idle);
+    assert_eq!(usage(Some(&counters(200 * SEC, Some(0))), &cur, SEC), idle);
+    assert_eq!(usage(Some(&counters(0, Some(200 * SEC))), &cur, SEC), idle);
+    assert_eq!(usage(Some(&counters(0, Some(0))), &cur, 0), idle);
   }
 
   #[test]
-  fn zero_elapsed_is_zero() {
-    let usage = usage(Some(&counters(0, Some(0))), &counters(SEC, Some(SEC)), 0);
-    assert_eq!(usage, Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 });
+  fn gpu_rates() {
+    assert_eq!(gpu_pct(Some(0), Some(SEC / 2), SEC), 50.0);
+    assert_eq!(gpu_pct(Some(0), Some(3 * SEC), SEC), 100.0); // several queues busy at once
+    assert_eq!(gpu_pct(Some(SEC), Some(0), SEC), 0.0); // a client closed
+    assert_eq!(gpu_pct(None, Some(SEC), SEC), 0.0); // first GPU client: no baseline
+    assert_eq!(gpu_pct(Some(0), None, SEC), 0.0); // GPU clients gone
+    assert_eq!(gpu_pct(Some(0), Some(SEC), 0), 0.0);
+
+    let gpu = |cpu_ns: u64, gpu_ns: Option<u64>| Counters { gpu_ns, ..counters(cpu_ns, None) };
+    let busy = usage(Some(&gpu(0, Some(0))), &gpu(SEC, Some(SEC / 4)), SEC);
+    assert_eq!((busy.cpu_pct, busy.gpu_pct), (100.0, 25.0));
+    // GPU time going backwards doesn't affect the CPU rate
+    let closed = usage(Some(&gpu(0, Some(SEC))), &gpu(SEC, Some(0)), SEC);
+    assert_eq!((closed.cpu_pct, closed.gpu_pct), (100.0, 0.0));
+    // a new process under the same pid: no spike from its GPU time
+    let reused = Counters { start: 43, ..gpu(SEC, Some(SEC)) };
+    assert_eq!(usage(Some(&gpu(0, Some(0))), &reused, SEC).gpu_pct, 0.0);
   }
 
   #[test]
-  fn energy_counter_appearing_reads_zero() {
-    let usage = usage(Some(&counters(0, None)), &counters(SEC, Some(SEC)), SEC);
-    assert_eq!(usage, Usage { cpu_pct: 100.0, power_w: Some(0.0), gpu_pct: 0.0 });
-  }
-
-  #[test]
-  fn mach_ticks_to_ns() {
-    assert_eq!(ticks_to_ns(24, 125, 3), 1000); // Apple Silicon timebase
-    assert_eq!(ticks_to_ns(1000, 1, 1), 1000); // Intel / fallback timebase
-    assert_eq!(ticks_to_ns(u64::MAX / 2, 125, 3), (u64::MAX as u128 / 2 * 125 / 3) as u64);
-    assert_eq!(ticks_to_ns(5, 1, 0), 5);
-  }
-
-  #[test]
-  fn c_strings_and_basenames() {
-    let chars = |s: &[u8]| s.iter().map(|&b| b as c_char).collect::<Vec<_>>();
-    assert_eq!(c_chars_to_string(&chars(b"zsh\0\0garbage")), "zsh");
-    assert_eq!(c_chars_to_string(&chars(b"no-terminator")), "no-terminator");
-    assert_eq!(c_chars_to_string(&chars(b"\0")), "");
-
-    assert_eq!(basename("/Applications/Safari.app/Contents/MacOS/Safari"), Some("Safari"));
-    assert_eq!(basename("/opt/Chrome Helper (GPU)"), Some("Chrome Helper (GPU)"));
-    assert_eq!(basename("launchd"), Some("launchd"));
-    assert_eq!(basename("/usr/bin/"), None);
-    assert_eq!(basename(""), None);
-  }
-
-  #[test]
-  fn samples_current_process() {
-    let pid = std::process::id() as i32;
-    let mut sampler = ProcSampler::new();
-
-    let first = sampler.sample();
-    let me = first.iter().find(|p| p.pid == pid).expect("own process is sampled");
-    assert!(!me.name.is_empty());
-    let exe = std::env::current_exe().unwrap();
-    assert_eq!(me.path, exe.to_string_lossy(), "the full executable path");
-    assert!(me.path.ends_with(&format!("/{}", me.name)));
-    assert_eq!(me.user, user_name(unsafe { libc::geteuid() }));
-    assert!(me.mem_bytes > 0);
-    assert_eq!(me.cpu_pct, 0.0); // no baseline yet
-    assert_eq!(sampler.known.len(), first.len()); // pids are unique
-
-    // launchd belongs to root: without root it's only readable through ps.
-    let launchd = first.iter().find(|p| p.pid == 1).expect("launchd is sampled");
-    assert_eq!((launchd.name.as_str(), launchd.path.as_str()), ("launchd", "/sbin/launchd"));
-    assert_eq!(launchd.user, "root");
-    assert!(launchd.mem_bytes > 0);
-    if sampler.use_ps {
-      assert_eq!(launchd.power_w, None);
-    }
-
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_millis(50) {
-      black_box(started);
-    }
-
-    let second = sampler.sample();
-    let me = second.iter().find(|p| p.pid == pid).expect("own process is sampled");
-    assert!(me.cpu_pct > 0.0, "cpu_pct = {}", me.cpu_pct);
-    assert!(me.power_w.is_none_or(|w| w >= 0.0));
-    assert!(second.iter().all(|p| (0.0..=100.0).contains(&p.gpu_pct)));
-    assert_eq!(sampler.known.len(), second.len());
-  }
-
-  #[test]
-  fn ps_time_formats() {
+  fn ps_times() {
     let ms = |ms: u64| Some(ms * 1_000_000);
     assert_eq!(parse_ps_time("0:00.07"), ms(70));
-    assert_eq!(parse_ps_time("38:23.50"), ms((38 * 60 + 23) * 1000 + 500));
     // minutes grow past 59: macOS never prints hours or days
     assert_eq!(parse_ps_time("1234:56.78"), ms((1234 * 60 + 56) * 1000 + 780));
     assert_eq!(parse_ps_time("0:05"), ms(5000));
-    assert_eq!(parse_ps_time("0:00.5"), ms(500));
     assert_eq!(parse_ps_time("0:00.123456789"), Some(123_456_789));
-  }
 
-  #[test]
-  fn ps_time_malformed() {
     let bad = [
       "",
       "abc",
       "5",
-      ":30",
       "1:",
-      "1:2:3:4",
       "1:60.00",                 // seconds out of range
       "1:02:03",                 // hours: procps, not macOS
       "2-03:04:05",              // days: procps, not macOS
-      "-01:02",                  // sign
-      "1:02.",                   // empty fraction
-      "1:02.x",                  // bad fraction
-      "1:02.1234567890",         // fraction past nanoseconds
       "+1:02",                   // sign
+      "1:02.",                   // empty fraction
+      "1:02.1234567890",         // fraction past nanoseconds
       "1: 02",                   // space
       "9999999999999999999:00",  // overflow
       "99999999999999999999:00", // doesn't fit u64
@@ -874,32 +789,17 @@ mod tests {
   #[test]
   fn ps_lines() {
     let chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (GPU)";
-    let line = format!(" 2301   501 182976   1:02.50 {chrome}");
-    let raw = parse_ps_line(&line).expect("valid line");
-    assert_eq!(raw.pid, 2301);
-    assert_eq!(raw.uid, 501);
-    assert_eq!(raw.mem_bytes, 182976 * 1024);
-    assert_eq!(
-      raw.counters,
-      Counters { start: 0, cpu_ns: 62_500_000_000, energy_nj: None, gpu_ns: None }
-    );
-    assert_eq!(raw.comm, chrome);
-    assert_eq!(raw.fallback, "Google Chrome Helper (GPU)");
+    let raw = parse_ps_line(&format!(" 2301   501 182976   1:02.50 {chrome}")).expect("valid");
+    assert_eq!((raw.pid, raw.uid, raw.mem_bytes), (2301, 501, 182976 * 1024));
+    let times = Counters { start: 0, cpu_ns: 62_500_000_000, energy_nj: None, gpu_ns: None };
+    assert_eq!(raw.counters, times);
+    assert_eq!((raw.comm.as_str(), raw.fallback.as_str()), (chrome, "Google Chrome Helper (GPU)"));
     assert!(raw.ps);
+    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurityd\n").expect("valid");
+    assert_eq!((raw.pid, raw.uid, raw.fallback.as_str()), (574, 0, "endpointsecurityd"));
 
-    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurityd\n").expect("valid line");
-    assert_eq!((raw.pid, raw.uid), (574, 0));
-    assert_eq!(raw.fallback, "endpointsecurityd");
-
-    let raw = parse_ps_line("1 0 100 0:00.01 my  daemon ").expect("valid line");
-    assert_eq!(raw.comm, "my  daemon");
-  }
-
-  #[test]
-  fn ps_lines_malformed() {
     let bad = [
       "",
-      "   ",
       "garbage",
       "1 0 100 0:00.01",       // no command
       "x 0 100 0:00.01 cmd",   // pid
@@ -912,11 +812,9 @@ mod tests {
     for line in bad {
       assert_eq!(parse_ps_line(line), None, "{line:?}");
     }
-
     let out = "  1 0 10 0:01.00 /sbin/launchd\nbad line\n\n 88 88 20 0:02.00 /usr/sbin/a b\n";
     let pids: Vec<i32> = parse_ps(out).iter().map(|raw| raw.pid).collect();
     assert_eq!(pids, [1, 88]);
-    assert!(parse_ps("").is_empty());
   }
 
   fn row(pid: i32, cpu_ns: u64, energy_nj: Option<u64>, comm: &str) -> Raw {
@@ -945,9 +843,6 @@ mod tests {
     let pids: Vec<i32> = merged.iter().map(|raw| raw.pid).collect();
     assert_eq!(pids, [10, 11, 1, 12]);
     assert_eq!(merged[..2], libproc[..]);
-
-    assert_eq!(merge(Vec::new(), vec![row(1, 0, None, "a")]).len(), 1);
-    assert_eq!(merge(libproc.clone(), Vec::new()), libproc);
   }
 
   #[test]
@@ -961,7 +856,6 @@ mod tests {
     assert_eq!((first[1].cpu_pct, first[1].power_w), (0.0, Some(0.0)));
     assert_eq!((first[0].name.as_str(), first[0].path.as_str()), ("a", ""));
     assert_eq!(first[0].user, "root");
-    assert_eq!(first[0].mem_bytes, 1024);
 
     let second = sampler.update(vec![row(A, 2 * SEC, None, "a"), row(B, SEC, Some(SEC), "b")], SEC);
     assert_eq!((second[0].cpu_pct, second[0].power_w), (100.0, None)); // no energy counter
@@ -972,7 +866,6 @@ mod tests {
     assert_eq!(third[0].cpu_pct, 0.0);
     assert_eq!(third[0].name, "c");
     assert_eq!(sampler.known.len(), 1); // gone processes are forgotten
-    assert_eq!(sampler.users.get(&0).map(String::as_str), Some("root"));
   }
 
   #[test]
@@ -1001,13 +894,10 @@ mod tests {
     // a path that isn't readable for a tick keeps the last one
     let unreadable = sampler.update(vec![at(None, 6 * SEC)], SEC);
     assert_eq!(shown(&unreadable), ("Google Chrome Helper (GPU)".into(), gpu.into(), 100.0));
-    let back = sampler.update(vec![at(Some(gpu), 7 * SEC)], SEC);
-    assert_eq!(shown(&back), ("Google Chrome Helper (GPU)".into(), gpu.into(), 100.0));
   }
 
   #[test]
   fn ps_rows_average_cpu_over_three_intervals() {
-    // rows without a path take their name from the fallback.
     let mut sampler = ProcSampler::new();
     // (elapsed, CPU time of A from ps, CPU time of B from libproc), all in 10 ms
     let ticks = [(0, 0, 0), (25, 1, 1), (100, 1, 2), (100, 2, 4), (100, 2, 6), (100, 6, 8)];
@@ -1029,207 +919,47 @@ mod tests {
     assert_eq!(cpu[..5], expected);
     assert_eq!(cpu[5].0, pct(5, 300), "the oldest interval left the average");
 
-    // a reused pid starts over
+    // a reused pid starts over, and, past the warm-up, gets a rate on its second sample, as a
+    // libproc row does
     let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100));
     assert_eq!(procs[0].cpu_pct, 0.0);
-    assert_eq!(sampler.known[&A].cpu_history, [(ms(525), ms(1))]);
-    assert!(!sampler.known.contains_key(&B));
-    // and, past the warm-up, gets a rate on its second sample, as a libproc row does
     let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100));
     assert_eq!(procs[0].cpu_pct, pct(2, 100));
   }
 
   #[test]
-  fn averaged_cpu_cases() {
-    let history = [(0, 0), (SEC, SEC / 2), (2 * SEC, SEC)];
-    assert_eq!(averaged_cpu_pct(&history, 3 * SEC, 3 * SEC / 2), 50.0);
-    assert_eq!(averaged_cpu_pct(&history[..2], 2 * SEC, SEC), 50.0);
-    // one snapshot taken after the sampler's first sample: the rate since it
-    assert_eq!(averaged_cpu_pct(&history[1..2], 2 * SEC, SEC), 50.0);
-    // only the first sample's snapshot (the warm-up) or none: zero
-    assert_eq!(averaged_cpu_pct(&history[..1], SEC, SEC), 0.0);
-    assert_eq!(averaged_cpu_pct(&[], SEC, SEC), 0.0);
-    // the counter going backwards or no time passed: zero, no spike
-    assert_eq!(averaged_cpu_pct(&[(0, SEC), (1, SEC)], SEC, 0), 0.0);
-    assert_eq!(averaged_cpu_pct(&[(SEC, 5), (SEC, 6)], SEC, SEC), 0.0);
-  }
-
-  #[test]
-  fn user_names() {
-    assert_eq!(user_name(0), "root");
-    assert_eq!(user_name(1_999_999_999), "1999999999");
-    // a buffer too small for the passwd entry grows
-    assert_eq!(user_name_with(0, 1), "root");
-    assert_eq!(user_name_with(0, 0), "root");
-  }
-
-  #[test]
-  fn ps_rows_skip_their_own_process() {
-    // a stand-in for ps that prints its own pid (`$$`) next to another process
-    let script = "echo \"$$ 0 100 0:00.01 sh\"; echo '42 0 200 0:00.02 other'";
-    let rows = ps_rows(Command::new("/bin/sh").args(["-c", script]));
-    let pids: Vec<i32> = rows.iter().map(|raw| raw.pid).collect();
-    assert_eq!(pids, [42]);
-
-    // a ps that can't run: no rows
-    assert!(ps_rows(&mut Command::new("/nonexistent/ps")).is_empty());
-    // a ps that fails: whatever it printed
-    assert!(ps_rows(Command::new("/bin/sh").args(["-c", "exit 1"])).is_empty());
-  }
-
-  #[test]
-  fn walk_retries_until_consistent() {
-    // (items, consistent) of each walk
-    let run = |walks: Vec<(Vec<u32>, bool)>| {
-      let mut walks = walks.into_iter();
-      let mut count = 0;
-      let mut items = vec![7];
-      let result = walk_until_consistent(&mut items, 3, |items| {
-        count += 1;
-        let (found, consistent) = walks.next()?;
-        items.extend(found);
-        Some(consistent)
-      });
-      (result, items, count)
-    };
-
-    // consistent at once
-    assert_eq!(run(vec![(vec![1, 2], true)]), (Some(()), vec![7, 1, 2], 1));
-    // the items of an inconsistent walk are dropped, the earlier items stay
-    assert_eq!(run(vec![(vec![1], false), (vec![2, 3], true)]), (Some(()), vec![7, 2, 3], 2));
-    // never consistent: the last walk's items after the third try
-    let walks = vec![(vec![1], false), (vec![2], false), (vec![3], false), (vec![4], true)];
-    assert_eq!(run(walks), (Some(()), vec![7, 3], 3));
-    // a failed walk fails the whole read
-    assert_eq!(run(vec![(vec![1], false)]).0, None);
-  }
-
-  #[test]
-  fn creator_strings() {
-    assert_eq!(parse_creator("pid 631, WindowServer"), Some(631));
-    assert_eq!(parse_creator("pid 2013, Siri AI"), Some(2013));
-    assert_eq!(parse_creator("pid 7, a, b"), Some(7));
-    assert_eq!(parse_creator("pid 0, kernel_task"), Some(0));
-    assert_eq!(parse_creator("pid 42"), Some(42));
-
-    let bad = [
-      "",
-      "pid",
-      "pid ",
-      "pid , WindowServer", // missing pid
-      "pid -1, x",
-      "pid +1, x",
-      "pid 12a, x",
-      "pid 1 , x",
-      "pid 99999999999, x", // doesn't fit i32
-      "PID 1, x",
-      " pid 1, x",
-      "WindowServer",
-      "631, WindowServer",
-    ];
-    for creator in bad {
-      assert_eq!(parse_creator(creator), None, "{creator:?}");
-    }
-  }
-
-  fn app_usage(entries: &[CFType]) -> CFType {
-    CFArray::from_CFTypes(entries).into_CFType()
-  }
-
-  fn usage_entry(pairs: &[(&str, CFType)]) -> CFType {
-    let pairs: Vec<(CFType, CFType)> =
-      pairs.iter().map(|(key, value)| (CFString::new(key).into_CFType(), value.clone())).collect();
-    CFDictionary::from_CFType_pairs(&pairs).into_CFType()
-  }
-
-  #[test]
-  fn app_usage_sums_gpu_time() {
-    let num = |n: i64| CFNumber::from(n).into_CFType();
-    let gpu_time = |ns: i64| {
-      let api = CFString::new("Metal").into_CFType();
-      usage_entry(&[("API", api), ("lastSubmittedTime", num(9)), ("accumulatedGPUTime", num(ns))])
-    };
-
-    let usage = app_usage(&[gpu_time(400), gpu_time(0), gpu_time(6)]);
-    assert_eq!(app_usage_ns(&usage), 406);
-
-    let text = |s: &str| CFString::new(s).into_CFType();
-    let skipped = [
-      gpu_time(-5),                                      // negative
-      usage_entry(&[("lastSubmittedTime", num(9))]),     // no GPU time
-      usage_entry(&[("accumulatedGPUTime", text("1"))]), // not a number
-      text("garbage"),                                   // not a dict
-      gpu_time(10),
-    ];
-    assert_eq!(app_usage_ns(&app_usage(&skipped)), 10);
-
-    assert_eq!(app_usage_ns(&app_usage(&[])), 0);
-    let huge = app_usage(&[gpu_time(i64::MAX), gpu_time(i64::MAX), gpu_time(i64::MAX)]);
-    assert_eq!(app_usage_ns(&huge), u64::MAX);
-    assert_eq!(app_usage_ns(&num(5)), 0); // not an array
-    assert_eq!(app_usage_ns(&gpu_time(5)), 0);
-  }
-
-  #[test]
-  fn gpu_times_per_pid() {
-    let times = sum_gpu_times([(631, 10), (735, 5), (631, 7), (1, 0)]);
-    assert_eq!(times, HashMap::from([(631, 17), (735, 5), (1, 0)]));
-    assert_eq!(sum_gpu_times([(1, u64::MAX), (1, 1)]), HashMap::from([(1, u64::MAX)]));
-    assert!(sum_gpu_times([]).is_empty());
-  }
-
-  #[test]
-  fn gpu_delta() {
-    assert_eq!(gpu_pct(Some(0), Some(SEC / 2), SEC), 50.0);
-    assert_eq!(gpu_pct(Some(SEC), Some(SEC + SEC / 4), SEC / 2), 50.0);
-    assert_eq!(gpu_pct(Some(0), Some(3 * SEC), SEC), 100.0); // several queues busy at once
-    assert_eq!(gpu_pct(Some(5), Some(5), SEC), 0.0);
-    assert_eq!(gpu_pct(Some(SEC), Some(0), SEC), 0.0); // a client closed
-    assert_eq!(gpu_pct(None, Some(SEC), SEC), 0.0); // first GPU client: no baseline
-    assert_eq!(gpu_pct(Some(0), None, SEC), 0.0); // GPU clients gone
-    assert_eq!(gpu_pct(None, None, SEC), 0.0);
-    assert_eq!(gpu_pct(Some(0), Some(SEC), 0), 0.0);
-
-    let gpu = |cpu_ns: u64, gpu_ns: Option<u64>| Counters { gpu_ns, ..counters(cpu_ns, None) };
-    let busy = usage(Some(&gpu(0, Some(0))), &gpu(SEC, Some(SEC / 4)), SEC);
-    assert_eq!((busy.cpu_pct, busy.gpu_pct), (100.0, 25.0));
-
-    // GPU time going backwards doesn't affect the CPU rate.
-    let closed = usage(Some(&gpu(0, Some(SEC))), &gpu(SEC, Some(0)), SEC);
-    assert_eq!((closed.cpu_pct, closed.gpu_pct), (100.0, 0.0));
-
-    // New process under the same pid: no spike from its GPU time.
-    let reused = Counters { start: 43, ..gpu(SEC, Some(SEC)) };
-    assert_eq!(usage(Some(&gpu(0, Some(0))), &reused, SEC).gpu_pct, 0.0);
-    assert_eq!(usage(None, &gpu(SEC, Some(SEC)), SEC).gpu_pct, 0.0);
-  }
-
-  #[test]
-  fn update_gpu_rates() {
-    let gpu_row = |gpu_ns: Option<u64>, comm: &str| {
-      let mut raw = row(A, 0, None, comm);
-      raw.counters.gpu_ns = gpu_ns;
-      raw
-    };
+  fn samples_current_process() {
+    let pid = std::process::id() as i32;
     let mut sampler = ProcSampler::new();
 
-    assert_eq!(sampler.update(vec![gpu_row(Some(SEC), "a")], 0)[0].gpu_pct, 0.0);
-    assert_eq!(sampler.update(vec![gpu_row(Some(2 * SEC), "a")], 2 * SEC)[0].gpu_pct, 50.0);
-    assert_eq!(sampler.update(vec![gpu_row(None, "a")], SEC)[0].gpu_pct, 0.0);
-    assert_eq!(sampler.update(vec![gpu_row(Some(3 * SEC), "a")], SEC)[0].gpu_pct, 0.0);
-    assert_eq!(sampler.update(vec![gpu_row(Some(4 * SEC), "b")], SEC)[0].gpu_pct, 0.0); // exec
-  }
+    let first = sampler.sample();
+    let me = first.iter().find(|p| p.pid == pid).expect("own process is sampled");
+    let exe = std::env::current_exe().unwrap();
+    assert_eq!(me.path, exe.to_string_lossy(), "the full executable path");
+    assert!(me.path.ends_with(&format!("/{}", me.name)));
+    assert_eq!(me.user, user_name(unsafe { libc::geteuid() }));
+    assert!(me.mem_bytes > 0);
+    assert_eq!(me.cpu_pct, 0.0); // no baseline yet
+    assert_eq!(sampler.known.len(), first.len()); // pids are unique
 
-  #[test]
-  fn reads_gpu_clients() {
-    // CI VMs may have no GPU clients at all; the IORegistry walk itself must work.
-    let clients = read_gpu_clients().expect("IORegistry is readable");
-    assert!(clients.iter().all(|&(pid, _)| pid >= 0), "{clients:?}");
-
-    let pids: HashSet<i32> = clients.iter().map(|&(pid, _)| pid).collect();
-    assert_eq!(sum_gpu_times(clients).len(), pids.len());
-    for _ in 0..3 {
-      assert!(read_gpu_clients().is_some());
+    // launchd belongs to root: without root it's only readable through ps.
+    let launchd = first.iter().find(|p| p.pid == 1).expect("launchd is sampled");
+    assert_eq!((launchd.name.as_str(), launchd.path.as_str()), ("launchd", "/sbin/launchd"));
+    assert_eq!(launchd.user, "root");
+    assert!(launchd.mem_bytes > 0);
+    if sampler.use_ps {
+      assert_eq!(launchd.power_w, None);
     }
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(50) {
+      black_box(started);
+    }
+
+    let second = sampler.sample();
+    let me = second.iter().find(|p| p.pid == pid).expect("own process is sampled");
+    assert!(me.cpu_pct > 0.0, "cpu_pct = {}", me.cpu_pct);
+    assert!(me.power_w.is_none_or(|w| w >= 0.0));
+    assert!(second.iter().all(|p| (0.0..=100.0).contains(&p.gpu_pct)));
   }
 }

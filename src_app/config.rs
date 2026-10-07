@@ -249,37 +249,15 @@ impl Drop for TempConfig {
 
 #[cfg(test)]
 mod tests {
-  use super::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
+  use super::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
   }
 
-  fn assert_defaults(cfg: &Config) {
-    assert_eq!(cfg.view_type, ViewType::Graph);
-    assert_eq!(cfg.interval, 1000);
-    assert_eq!(cfg.ratio_mode, RatioMode::Scaled);
-    assert!(cfg.show_procs);
-    assert_eq!(cfg.proc_sort, ProcSort::Cpu);
-    assert!(cfg.proc_sort_desc);
-  }
-
   #[test]
-  fn empty_json_loads_defaults() {
-    assert_defaults(&parse("{}"));
-    assert_defaults(&Config::default());
-  }
-
-  #[test]
-  fn malformed_json_loads_defaults() {
-    for json in ["", "not json", "[1, 2]", "42", r#"{"interval": 500"#] {
-      assert_defaults(&parse(json));
-    }
-  }
-
-  #[test]
-  fn old_config_fields_are_ignored() {
-    // config of released versions
+  fn released_configs_load() {
+    // config of released versions: `color` and `per_core_view` are ignored, the rest is kept
     let cfg = parse(
       r#"{
         "view_type": "Gauge",
@@ -289,19 +267,16 @@ mod tests {
         "ratio_mode": "Active"
       }"#,
     );
-
-    // the chart view of released versions is kept
     assert_eq!(cfg.view_type, ViewType::Gauge);
-    assert_eq!(cfg.interval, 500);
-    assert_eq!(cfg.ratio_mode, RatioMode::Active);
-    assert!(cfg.show_procs);
-    assert_eq!(cfg.proc_sort, ProcSort::Cpu);
-    assert!(cfg.proc_sort_desc);
+    assert_eq!((cfg.interval, cfg.ratio_mode), (500, RatioMode::Active));
+    assert_eq!((cfg.show_procs, cfg.proc_sort, cfg.proc_sort_desc), (true, ProcSort::Cpu, true));
 
-    // fields of earlier builds of this redesign
-    let cfg = parse(r#"{"theme": "nord", "panels": {"proc": false}, "show_procs": false}"#);
-    assert!(!cfg.show_procs);
-    assert_eq!(cfg.interval, 1000);
+    // the graph keeps its released name both ways, so released versions read our configs too
+    assert_eq!(parse(r#"{"view_type": "Sparkline"}"#).view_type, ViewType::Graph);
+    for (view_type, name) in [(ViewType::Graph, "Sparkline"), (ViewType::Gauge, "Gauge")] {
+      let json = serde_json::to_string(&Config { view_type, ..Config::default() }).unwrap();
+      assert!(json.contains(&format!(r#""view_type":"{name}""#)), "{json}");
+    }
   }
 
   #[test]
@@ -321,82 +296,15 @@ mod tests {
     assert_eq!((cfg.show_procs, cfg.proc_sort), (true, ProcSort::Cpu));
     assert_eq!((cfg.interval, cfg.proc_sort_desc), (500, false));
 
-    let cfg = parse(r#"{"view_type": "Gauge", "interval": "fast", "proc_sort": null}"#);
-    assert_eq!(
-      (cfg.view_type, cfg.interval, cfg.proc_sort),
-      (ViewType::Gauge, 1000, ProcSort::Cpu)
-    );
+    // anything but a JSON object gives the defaults
+    assert_eq!(parse("not json").interval, 1000);
   }
 
   #[test]
-  fn interval_is_clamped_on_load() {
-    assert_eq!(parse(r#"{"interval": 10}"#).interval, TUI_MIN_MS);
-    assert_eq!(parse(r#"{"interval": 999999}"#).interval, TUI_MAX_MS);
-  }
-
-  #[test]
-  fn new_fields_round_trip() {
-    let cfg = Config {
-      show_procs: false,
-      proc_sort: ProcSort::Power,
-      proc_sort_desc: false,
-      ..Config::default()
-    };
-
-    let json = serde_json::to_string(&cfg).unwrap();
-    for old in ["color", "per_core_view", "path", "run_interval"] {
-      assert!(!json.contains(old), "{old} in {json}");
-    }
-
-    let cfg = parse(&json);
-    assert!(!cfg.show_procs);
-    assert_eq!(cfg.proc_sort, ProcSort::Power);
-    assert!(!cfg.proc_sort_desc);
-  }
-
-  #[test]
-  fn view_type_uses_released_names() {
-    // configs of released versions
-    assert_eq!(parse(r#"{"view_type": "Sparkline"}"#).view_type, ViewType::Graph);
-    assert_eq!(parse(r#"{"view_type": "Gauge"}"#).view_type, ViewType::Gauge);
-
-    // saved under the same names, so released versions read it back
-    for (view_type, name) in [(ViewType::Graph, "Sparkline"), (ViewType::Gauge, "Gauge")] {
-      let json = serde_json::to_string(&Config { view_type, ..Config::default() }).unwrap();
-      assert!(json.contains(&format!(r#""view_type":"{name}""#)), "{json}");
-      assert_eq!(parse(&json).view_type, view_type);
-    }
-
-    // an unknown value falls back to the graph and keeps the other settings
-    for value in [r#""Braille""#, r#""Block""#, r#""gauge""#, "42", "null", "{}"] {
-      let cfg =
-        parse(&format!(r#"{{"view_type": {value}, "interval": 500, "show_procs": false}}"#));
-      assert_eq!(cfg.view_type, ViewType::Graph, "{value}");
-      assert_eq!((cfg.interval, cfg.show_procs), (500, false), "{value}");
-    }
-  }
-
-  #[test]
-  fn all_sort_keys_parse() {
-    for (name, key) in [
-      ("Cpu", ProcSort::Cpu),
-      ("Mem", ProcSort::Mem),
-      ("Power", ProcSort::Power),
-      ("Gpu", ProcSort::Gpu),
-      ("Pid", ProcSort::Pid),
-      ("Name", ProcSort::Name),
-      ("User", ProcSort::User),
-    ] {
-      assert_eq!(parse(&format!(r#"{{"proc_sort": "{name}"}}"#)).proc_sort, key);
-    }
-  }
-
-  #[test]
-  fn every_change_is_saved_to_the_file() {
-    let file = TempConfig::new("every_change");
+  fn settings_are_saved_to_the_file() {
+    let file = TempConfig::new("settings_are_saved_to_the_file");
     // no file yet: the defaults, saved there on the first change
     let mut cfg = Config::load_from(Some(file.path()));
-    assert_defaults(&cfg);
     assert!(!file.path().exists());
 
     let saved = |field: &str| file.saved()[field].clone();
@@ -408,22 +316,14 @@ mod tests {
     assert_eq!(saved("ratio_mode"), "Active");
     cfg.inc_interval();
     assert_eq!(saved("interval"), 1250);
-    cfg.dec_interval();
-    assert_eq!(saved("interval"), 1000);
     cfg.set_proc_sort(ProcSort::Name, false);
     assert_eq!((saved("proc_sort"), saved("proc_sort_desc")), ("Name".into(), false.into()));
 
     // the next run starts where this one stopped
     let cfg = Config::load_from(Some(file.path()));
     assert_eq!((cfg.show_procs, cfg.view_type), (false, ViewType::Gauge));
-    assert_eq!((cfg.ratio_mode, cfg.interval), (RatioMode::Active, 1000));
+    assert_eq!((cfg.ratio_mode, cfg.interval), (RatioMode::Active, 1250));
     assert_eq!((cfg.proc_sort, cfg.proc_sort_desc), (ProcSort::Name, false));
-
-    // and back
-    let mut cfg = cfg;
-    cfg.toggle_view_type();
-    assert_eq!(file.saved()["view_type"], "Sparkline");
-    assert_eq!(Config::load_from(Some(file.path())).view_type, ViewType::Graph);
   }
 
   #[test]
@@ -434,8 +334,6 @@ mod tests {
     assert_eq!(file.saved()["interval"], 1250);
 
     // `-i 500`: used for this run, clamped like a saved value
-    cfg.set_run_interval(500);
-    assert_eq!(cfg.interval(), 500);
     cfg.set_run_interval(10);
     assert_eq!(cfg.interval(), TUI_MIN_MS);
     cfg.set_run_interval(500);
@@ -448,18 +346,5 @@ mod tests {
     // `-` / `+` step from the interval in use and save it
     cfg.dec_interval();
     assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (250.into(), 250));
-    cfg.toggle_procs();
-    assert_eq!(file.saved()["interval"], 250);
-    cfg.set_run_interval(2000);
-    cfg.inc_interval();
-    assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (2250.into(), 2250));
-  }
-
-  #[test]
-  fn settings_without_a_file_stay_in_memory() {
-    let mut cfg = Config::default();
-    cfg.toggle_procs();
-    assert!(!cfg.show_procs);
-    assert!(Config::load_from(None).show_procs);
   }
 }

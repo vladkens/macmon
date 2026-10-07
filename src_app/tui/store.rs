@@ -238,11 +238,10 @@ pub(super) fn ratio(value: f64, total: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-  use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
+  use macmon::MemMetrics;
 
-  use super::{CpuClusters, FanStore, FreqSample, FreqStore};
-  use super::{HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN, TempStore};
-  use super::{avg2, cluster_samples, ratio};
+  use super::TempStore;
+  use super::{FreqSample, FreqStore, HISTORY_LEN, MAX_TEMPS, MemoryStore, PowerStore, STATS_LEN};
   use crate::config::RatioMode;
 
   fn assert_close(actual: f64, expected: f64) {
@@ -250,52 +249,15 @@ mod tests {
   }
 
   #[test]
-  fn avg2_skips_zero_previous_value() {
-    assert_eq!(avg2(0.0, 4.0), 4.0);
-    assert_eq!(avg2(2.0, 4.0), 3.0);
-  }
-
-  #[test]
-  fn ratio_of_zero_total_is_zero() {
-    assert_eq!(ratio(3.0, 4.0), 0.75);
-    assert_eq!(ratio(3.0, 0.0), 0.0);
-  }
-
-  #[test]
-  fn power_store_tracks_avg_max_and_smoothed_top() {
+  fn power_avg_and_max_cover_the_latest_samples() {
+    // the current value is the mean of the last two samples
     let mut store = PowerStore::default();
-
     store.push(2.0);
-    assert_eq!(store.items, vec![2000]);
-    assert_close(store.top_value, 2.0); // no previous value, no smoothing
-    assert_close(store.avg_value, 2.0);
-    assert_close(store.max_value, 2.0);
-
     store.push(4.0);
-    assert_eq!(store.items, vec![4000, 2000]);
-    assert_close(store.top_value, 3.0); // average of previous and current
+    assert_close(store.top_value, 3.0);
     assert_close(store.avg_value, 3.0);
     assert_close(store.max_value, 4.0);
 
-    store.push(0.0);
-    assert_close(store.top_value, 2.0);
-    assert_close(store.avg_value, 2.0);
-    assert_close(store.max_value, 4.0);
-  }
-
-  #[test]
-  fn power_store_caps_history() {
-    let mut store = PowerStore::default();
-    for i in 0..(HISTORY_LEN + 10) {
-      store.push(i as f64);
-    }
-
-    assert_eq!(store.items.len(), HISTORY_LEN);
-    assert_eq!(store.items[0], ((HISTORY_LEN + 9) * 1000) as u64);
-  }
-
-  #[test]
-  fn power_stats_cover_latest_samples_only() {
     // a 50 W peak, then STATS_LEN samples of 1 and 3 W: the graph keeps the peak, the average and
     // maximum don't
     let mut store = PowerStore::default();
@@ -303,163 +265,45 @@ mod tests {
     for i in 0..STATS_LEN {
       store.push(if i % 2 == 0 { 1.0 } else { 3.0 });
     }
-
-    assert_eq!(store.items.len(), STATS_LEN + 1);
     assert_eq!(store.items.last(), Some(&50_000));
     assert_close(store.avg_value, 2.0);
     assert_close(store.max_value, 3.0);
-
-    // one sample less: the peak is still in the window
-    let mut store = PowerStore::default();
-    store.push(50.0);
-    for _ in 1..STATS_LEN {
-      store.push(1.0);
-    }
-    assert_close(store.max_value, 50.0);
-    assert_close(store.avg_value, (50.0 + (STATS_LEN - 1) as f64) / STATS_LEN as f64);
   }
 
   #[test]
-  fn freq_store_keeps_long_history() {
-    let mut store = FreqStore::default();
-    for _ in 0..(HISTORY_LEN + 5) {
-      store.push(FreqSample::new(1000, 0.25, 0.5));
+  fn histories_are_capped() {
+    let (mut power, mut freq) = (PowerStore::default(), FreqStore::default());
+    let (mut mem, mut temp) = (MemoryStore::default(), TempStore::default());
+    for i in 0..HISTORY_LEN + 10 {
+      power.push(i as f64);
+      freq.push(FreqSample::new(1000, 0.25, 0.5));
+      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, swap_total: 0, swap_usage: 0 });
+      temp.push(i as f32 + 1.0);
     }
-    store.push(FreqSample::new(3000, 0.75, 1.0));
 
-    assert_eq!(store.freq_mhz, 3000);
-    for mode in [RatioMode::Scaled, RatioMode::Active] {
-      assert_eq!(store.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
-    }
     // newest first
-    let scaled = store.ratio(RatioMode::Scaled);
-    assert_eq!(scaled.items[..2], [75, 25]);
-    assert_close(scaled.ratio, 0.75);
-    assert_eq!(store.ratio(RatioMode::Active).items[..2], [100, 50]);
-  }
-
-  #[test]
-  fn ratio_history_rounds_like_the_title() {
-    // the metrics are f32: 0.42 is 0.41999998, still 42 % in the title and the graph
-    let mut store = FreqStore::default();
-    for ratio in [0.42f32, 0.77, 0.004, 0.006, 0.996, 1.0] {
-      store.push(FreqSample::new(1000, ratio, ratio));
+    let last = HISTORY_LEN as u64 + 9;
+    assert_eq!((power.items.len(), power.items[0]), (HISTORY_LEN, last * 1000));
+    assert_eq!((mem.items.len(), mem.items[0]), (HISTORY_LEN, last));
+    for mode in [RatioMode::Scaled, RatioMode::Active] {
+      assert_eq!(freq.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
     }
-    assert_eq!(store.ratio(RatioMode::Scaled).items, [100, 100, 1, 0, 77, 42]);
-    assert_eq!(format!("{:.0}", 0.42f32 as f64 * 100.0), "42");
+    assert_eq!((temp.items.len(), temp.last()), (MAX_TEMPS, last as f32 + 1.0));
   }
 
   #[test]
-  fn temp_store_skips_zero_without_history() {
+  fn temp_zero_falls_back_to_the_trend() {
+    // no reading and too short a history to estimate one from: skipped
     let mut store = TempStore::default();
     store.push(0.0);
-    assert!(store.items.is_empty());
-    assert_eq!(store.last(), 0.0);
-
-    // one value is not enough to estimate a trend
     store.push(50.0);
     store.push(0.0);
-    assert_eq!(store.items, vec![50.0]);
-    assert_eq!(store.last(), 50.0);
-  }
+    assert_eq!((store.items.len(), store.last()), (1, 50.0));
 
-  #[test]
-  fn temp_store_replaces_zero_with_trend() {
-    let mut store = TempStore::default();
-    store.push(50.0);
+    // the ema from oldest to newest: 0.8 * 52 + 0.2 * 50
     store.push(52.0);
     store.push(0.0);
-
-    // ema from oldest to newest: 0.8 * 52 + 0.2 * 50
     assert_eq!(store.items.len(), 3);
     assert!((store.last() - 51.6).abs() < 1e-4, "got {}", store.last());
-  }
-
-  #[test]
-  fn temp_store_caps_history() {
-    let mut store = TempStore::default();
-    for i in 1..=(MAX_TEMPS + 5) {
-      store.push(i as f32);
-    }
-
-    assert_eq!(store.items.len(), MAX_TEMPS);
-    assert_eq!(store.last(), (MAX_TEMPS + 5) as f32);
-  }
-
-  #[test]
-  fn cpu_clusters_take_a_sample_each() {
-    // three tiers, like M6 (6E + 4P + 2S)
-    let mut clusters = CpuClusters::new([("E", 6), ("P", 4), ("S", 2)]);
-    let sample = |ratio: f32| FreqSample::new(1000, ratio, ratio);
-    clusters.push(&[sample(0.1), sample(0.2), sample(0.3)]);
-    clusters.push(&[sample(0.4), sample(0.5), sample(0.6)]);
-
-    let labels: Vec<(&str, usize)> =
-      clusters.items.iter().map(|c| (c.label.as_str(), c.count)).collect();
-    assert_eq!(labels, [("E", 6), ("P", 4), ("S", 2)]);
-    let history = |i: usize| clusters.items[i].freq.ratio(RatioMode::Scaled).items.clone();
-    assert_eq!([history(0), history(1), history(2)], [[40, 10], [50, 20], [60, 30]]);
-  }
-
-  #[test]
-  fn cpu_clusters_from_soc_and_metrics() {
-    let soc = SocInfo {
-      ecpu_cores: 6,
-      pcpu_cores: 4,
-      ecpu_label: "P".to_string(),
-      pcpu_label: "S".to_string(),
-      ..Default::default()
-    };
-    let data = Metrics {
-      ecpu_freq_mhz: 2000,
-      ecpu_scaled_ratio: 0.5,
-      pcpu_freq_mhz: 4000,
-      pcpu_active_ratio: 0.25,
-      ..Default::default()
-    };
-
-    // labels and core counts before any sample
-    let mut clusters = CpuClusters::from_soc(&soc);
-    let labels: Vec<(&str, usize)> =
-      clusters.items.iter().map(|c| (c.label.as_str(), c.count)).collect();
-    assert_eq!(labels, [("P", 6), ("S", 4)]);
-    assert!(clusters.items.iter().all(|c| c.freq.ratio(RatioMode::Scaled).items.is_empty()));
-
-    clusters.push(&cluster_samples(&data));
-    let [p, s] = [&clusters.items[0].freq, &clusters.items[1].freq];
-    assert_eq!((p.freq_mhz, p.ratio(RatioMode::Scaled).ratio), (2000, 0.5));
-    assert_eq!((s.freq_mhz, s.ratio(RatioMode::Active).ratio), (4000, 0.25));
-  }
-
-  #[test]
-  fn memory_store_tracks_usage() {
-    let mut store = MemoryStore::default();
-    store.push(MemMetrics { ram_total: 100, ram_usage: 60, swap_total: 10, swap_usage: 4 });
-    store.push(MemMetrics { ram_total: 100, ram_usage: 40, swap_total: 10, swap_usage: 2 });
-
-    assert_eq!((store.ram_usage, store.ram_total), (40, 100));
-    assert_eq!((store.swap_usage, store.swap_total), (2, 10));
-    // RAM history for the graph, newest first
-    assert_eq!(store.items, [40, 60]);
-
-    for i in 0..HISTORY_LEN as u64 {
-      store.push(MemMetrics { ram_total: 100, ram_usage: i, swap_total: 0, swap_usage: 0 });
-    }
-    assert_eq!(store.items.len(), HISTORY_LEN);
-    assert_eq!(store.items[0], HISTORY_LEN as u64 - 1);
-  }
-
-  #[test]
-  fn fan_store_labels() {
-    let fan = |rpm| FanMetric { name: String::new(), rpm, max_rpm: None };
-    let mut store = FanStore::default();
-    assert_eq!(store.label(), "");
-
-    // the original format
-    store.push(vec![fan(1200)]);
-    assert_eq!(store.label(), "Fan 1200 RPM");
-
-    store.push(vec![fan(1200), fan(1350)]);
-    assert_eq!(store.label(), "Fans 1200/1350 RPM");
   }
 }

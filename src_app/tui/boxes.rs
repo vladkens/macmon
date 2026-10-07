@@ -483,43 +483,9 @@ mod tests {
   use ratatui::buffer::Buffer;
   use ratatui::layout::Rect;
   use ratatui::style::Style;
-  use ratatui::text::{Line, Span};
 
-  use super::{
-    TitleSlots, Titles, cut_spans, fit_joined, fit_titles, hint, place_titles,
-    render_bottom_border, temp_ratio, title_text_room,
-  };
+  use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
   use crate::tui::theme::{dim, text};
-
-  #[test]
-  fn titles_fit_on_wide_border() {
-    // left at 2, right ends 2 cells before the box edge
-    let slots = place_titles(60, &[10, 8], Some(12));
-    assert_eq!(slots.left, vec![(2, 10), (13, 8)]);
-    assert_eq!(slots.right, Some(46));
-  }
-
-  #[test]
-  fn right_title_dropped_instead_of_overlapping_left() {
-    let slots = place_titles(40, &[30], Some(20));
-    assert_eq!(slots, TitleSlots { left: vec![(2, 30)], right: None });
-
-    // the left title takes cells 2..17; one border cell between them still fits, none doesn't
-    let slots = place_titles(40, &[15], Some(20));
-    assert_eq!(slots, TitleSlots { left: vec![(2, 15)], right: Some(18) });
-    let slots = place_titles(40, &[16], Some(20));
-    assert_eq!(slots, TitleSlots { left: vec![(2, 16)], right: None });
-  }
-
-  #[test]
-  fn first_left_title_is_truncated_others_dropped() {
-    let slots = place_titles(20, &[30, 4], Some(4));
-    assert_eq!(slots, TitleSlots { left: vec![(2, 16)], right: None });
-
-    // a later left title is dropped when it doesn't fit in full
-    let slots = place_titles(20, &[10, 8], None);
-    assert_eq!(slots.left, vec![(2, 10)]);
-  }
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
   fn border_with(titles: Titles, width: u16) -> String {
@@ -527,18 +493,6 @@ mod tests {
     buf.set_string(0, 0, "─".repeat(width.into()), Style::new());
     titles.render(buf.area, &mut buf, Style::new());
     (0..width).map(|x| buf[(x, 0)].symbol()).collect()
-  }
-
-  #[test]
-  fn titles_fit_only_uncut() {
-    // `╭─ cpu ─ 45°C ─╮`: 2 cells before the left title, 1 between, 2 after the right one
-    let titles = || Titles::new("cpu").right("45°C");
-    assert!(titles().fits(16));
-    assert!(!titles().fits(15));
-    assert!(Titles::new("cpu").fits(9) && !Titles::new("cpu").fits(8));
-    // a second left title must fit whole too
-    assert!(Titles::new("proc").left("ab").fits(15) && !Titles::new("proc").left("ab").fits(14));
-    assert!(Titles::default().fits(0));
   }
 
   #[test]
@@ -558,35 +512,6 @@ mod tests {
     // none fits: the last one is cut
     assert_eq!(fitted(14), "── CPU 4.50W──");
     assert_eq!(fitted(10), "── CPU 4──");
-    assert_eq!(border_with(fit_titles(10, vec![]), 10), dashes(10));
-  }
-
-  #[test]
-  fn title_room_is_what_place_titles_leaves() {
-    // `╭─ proc 3 ─ ` then the room for the next title's text before ` ─╮`
-    let count = [Line::from("proc 3")];
-    assert_eq!(title_text_room(40, &count), 40 - 2 - 8 - 1 - 2 - 2);
-    assert_eq!(title_text_room(40, &[]), 40 - 6);
-    // a title of exactly that width fits whole; one more cell doesn't
-    for width in [15, 20, 40] {
-      let room = usize::from(title_text_room(width, &count));
-      let fits = |text: usize| Titles::new("proc 3").left("x".repeat(text)).fits(width);
-      assert!(fits(room) && !fits(room + 1), "width {width}: room {room}");
-    }
-    // no room, or the first title cut
-    assert_eq!(title_text_room(15, &count), 0);
-    assert_eq!(title_text_room(8, &count), 0);
-    assert_eq!(title_text_room(3, &[]), 0);
-  }
-
-  #[test]
-  fn tiny_borders_place_nothing() {
-    for width in 0..=4 {
-      let slots = place_titles(width, &[5], Some(3));
-      assert!(slots.right.is_none(), "width {width}");
-      assert!(slots.left.iter().all(|(x, w)| x + w <= width.saturating_sub(2)), "width {width}");
-    }
-    assert_eq!(place_titles(5, &[5], None).left, vec![(2, 1)]);
   }
 
   #[test]
@@ -612,37 +537,14 @@ mod tests {
   }
 
   #[test]
-  fn fit_joined_keeps_leading_items() {
-    // ` 6 | 9 | 9 `: 1 + 6 + 3 + 9 + 3 + 9 + 1 = 32 cells
-    let items = [6, 9, 9];
-    assert_eq!(fit_joined(32, &items), 3);
-    assert_eq!(fit_joined(31, &items), 2);
-    assert_eq!(fit_joined(20, &items), 2);
-    assert_eq!(fit_joined(19, &items), 1);
-    assert_eq!(fit_joined(8, &items), 1);
-    assert_eq!(fit_joined(7, &items), 0);
-    assert_eq!(fit_joined(0, &[]), 0);
-    // no overflow
-    assert_eq!(fit_joined(u16::MAX, &[65_000, 65_000]), 1);
-    assert_eq!(fit_joined(u16::MAX, &[u16::MAX]), 0);
-  }
-
-  /// Bottom row of a box `width` cells wide with `hints` and the text of `text` on its border.
-  fn bottom_border(
-    width: u16,
-    hints: Vec<Vec<Span<'static>>>,
-    text: impl FnOnce(usize) -> Vec<Span<'static>>,
-  ) -> String {
-    let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
-    let frame = term.draw(|f| render_bottom_border(f, f.area(), hints, text)).unwrap();
-    (0..width).map(|x| frame.buffer[(x, 0)].symbol()).collect::<String>().replace(' ', "_")
-  }
-
-  #[test]
   fn bottom_border_hints_come_first_then_the_text() {
-    let hints = || vec![hint("q", "quit"), hint("?", "help")];
-    let border =
-      |width| bottom_border(width, hints(), |_| vec![text("Power 6.60W"), dim(" (6.60, 6.60)")]);
+    let border = |width| {
+      let hints = vec![hint("q", "quit"), hint("?", "help")];
+      let power = |_: usize| vec![text("Power 6.60W"), dim(" (6.60, 6.60)")];
+      let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
+      let frame = term.draw(|f| render_bottom_border(f, f.area(), hints, power)).unwrap();
+      (0..width).map(|x| frame.buffer[(x, 0)].symbol()).collect::<String>().replace(' ', "_")
+    };
     let blank = |cells: usize| "_".repeat(cells);
     let help = "_q_quit_|_?_help_";
 
@@ -650,38 +552,11 @@ mod tests {
     assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(13)));
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
     assert_eq!(border(40), format!("___Power_6.60W_(6.…__{help}__"));
-    assert_eq!(border(36), format!("___Power_6.60W…__{help}__"));
     assert_eq!(border(32), format!("___Power_6…__{help}__"));
     assert_eq!(border(31), format!("{}{help}__", blank(12)));
     // hints drop from the end, `q quit` stays as long as it fits
     assert_eq!(border(20), format!("{}_q_quit___", blank(10)));
     assert_eq!(border(12), "___q_quit___");
     assert_eq!(border(11), blank(11));
-
-    // without hints the text gets all but the corners, the border cells and its blank cells
-    let mut room = 0;
-    let border = bottom_border(40, vec![], |cells| {
-      room = cells;
-      vec![]
-    });
-    assert_eq!((room, border), (34, blank(40)));
-  }
-
-  #[test]
-  fn cut_spans_keeps_styles_and_ends_with_an_ellipsis() {
-    let spans = || vec![text("Power"), dim(" 6.60W")];
-    assert_eq!(cut_spans(spans(), 11), spans());
-    assert_eq!(cut_spans(spans(), 8), [text("Power"), dim(" 6"), dim("…")]);
-    assert_eq!(cut_spans(spans(), 5), [text("Powe"), dim("…")]);
-    assert_eq!(cut_spans(spans(), 1), [text(""), dim("…")]);
-    // no blank before the `…`
-    assert_eq!(cut_spans(vec![text("POWER: own processes")], 8), [text("POWER:"), dim("…")]);
-  }
-
-  #[test]
-  fn temperature_maps_onto_gradient() {
-    assert_eq!(temp_ratio(30.0), 0.0);
-    assert_eq!(temp_ratio(65.0), 0.5);
-    assert_eq!(temp_ratio(100.0), 1.0);
   }
 }

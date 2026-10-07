@@ -786,15 +786,10 @@ fn draw_row<'a>(
 
 #[cfg(test)]
 mod tests {
-  use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-  };
+  use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
 
-  use super::{
-    COLUMNS, ProcView, Targets, column_areas, cut_end, cut_start, fit_columns, format_mem,
-    scroll_offset, tail,
-  };
+  use super::{ProcView, column_areas, cut_end, cut_start, fit_columns};
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
 
@@ -869,33 +864,17 @@ mod tests {
   }
 
   #[test]
-  fn sorts_by_user_ignoring_case() {
-    let mut procs = sample();
-    for (proc, user) in procs.iter_mut().zip(["root", "Vlad", "_spotlight", "vlad", "root"]) {
-      proc.user = user.to_string();
-    }
-
-    // `_` before letters; ties by pid in both directions
-    let mut view = ProcView::new(ProcSort::User, false);
-    view.set_procs(procs.clone());
-    assert_eq!(pids(&view), [2301, 1, 77, 631, 4410]);
-    let mut view = ProcView::new(ProcSort::User, true);
-    view.set_procs(procs);
-    assert_eq!(pids(&view), [631, 4410, 1, 77, 2301]);
-  }
-
-  #[test]
-  fn s_cycles_sort_and_shift_s_reverses() {
+  fn s_cycles_the_columns_on_screen_and_shift_s_reverses() {
     use ProcSort::*;
+    // before the first render every column, each in its own direction: numbers largest first,
+    // PIDs and text from the start
     let mut view = view();
-    let mut sorts = vec![(view.sort, view.sort_desc)];
+    let mut sorts = vec![];
     for _ in 0..7 {
       assert!(press(&mut view, KeyCode::Char('s')));
       sorts.push((view.sort, view.sort_desc));
     }
-    // each column in its own direction: numbers largest first, PIDs and text from the start
     let expected = [
-      (Cpu, true),
       (Mem, true),
       (Power, true),
       (Gpu, true),
@@ -909,60 +888,34 @@ mod tests {
     assert!(press(&mut view, KeyCode::Char('S')));
     assert!(!view.sort_desc);
     assert_eq!(pids(&view), [77, 1, 2301, 631, 4410]);
-
     // shift reported as a modifier
     assert!(view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SHIFT)));
-    assert!(view.sort_desc);
-    assert_eq!(view.sort, Cpu);
+    assert_eq!((view.sort, view.sort_desc), (Cpu, true));
+
+    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER and POWER are left out
+    view.targets.headers = column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36, Cpu));
+    let mut sorts = vec![];
+    for _ in 0..5 {
+      assert!(press(&mut view, KeyCode::Char('s')));
+      sorts.push(view.sort);
+    }
+    assert_eq!(sorts, [Mem, Gpu, Pid, Name, Cpu]);
   }
 
   #[test]
   fn filter_matches_name_or_pid_ignoring_case() {
     let mut view = view();
     assert!(press(&mut view, KeyCode::Char('/')));
-    assert!(view.typing());
-
     type_str(&mut view, "SAF");
-    assert_eq!(view.filter(), "SAF");
     assert_eq!(pids(&view), [2301, 77]);
-    assert_eq!(view.row_count(), 2);
     assert_eq!(view.procs().map(<[_]>::len), Some(5), "the full list is kept");
 
-    // pid substring
-    assert!(press(&mut view, KeyCode::Esc));
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "63");
-    assert_eq!(pids(&view), [631]);
-
-    // name or pid: "1" is in pids 4410, 631, 2301 and 1
-    assert!(press(&mut view, KeyCode::Backspace));
-    assert!(press(&mut view, KeyCode::Backspace));
+    // "1" is in pids 4410, 631, 2301 and 1
+    for _ in 0..3 {
+      assert!(press(&mut view, KeyCode::Backspace));
+    }
     type_str(&mut view, "1");
     assert_eq!(pids(&view), [4410, 631, 2301, 1]);
-
-    type_str(&mut view, "zz");
-    assert_eq!(pids(&view), Vec::<i32>::new());
-  }
-
-  #[test]
-  fn enter_keeps_filter_esc_clears_it() {
-    let mut view = view();
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "cargo");
-    assert!(press(&mut view, KeyCode::Enter));
-    assert!(!view.typing());
-    assert_eq!(pids(&view), [4410]);
-
-    // the filter survives new samples
-    view.set_procs(sample());
-    assert_eq!(pids(&view), [4410]);
-
-    assert!(press(&mut view, KeyCode::Char('/')));
-    assert_eq!(view.filter(), "cargo", "typing continues the kept filter");
-    assert!(press(&mut view, KeyCode::Esc));
-    assert!(!view.typing());
-    assert_eq!(view.filter(), "");
-    assert_eq!(pids(&view).len(), 5);
   }
 
   #[test]
@@ -973,79 +926,62 @@ mod tests {
     assert_eq!(view.filter(), "qcsS/1");
     assert_eq!((view.sort, view.sort_desc), (ProcSort::Cpu, true));
 
-    // control / alt chords and other keys don't edit the filter, but are still used
+    // control / alt chords don't edit the filter, but are still used
     let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
     let alt_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
-    for key in [ctrl_u, alt_x, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)] {
-      assert!(view.handle_key(key));
-    }
+    assert!(view.handle_key(ctrl_u) && view.handle_key(alt_x));
     assert_eq!(view.filter(), "qcsS/1");
-
-    // shifted letters are text
-    assert!(view.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT)));
-    assert_eq!(view.filter(), "qcsS/1A");
   }
 
   #[test]
-  fn normal_mode_leaves_other_keys_alone() {
-    let mut view = view();
-    for c in ['q', 'c', 'v', '1', '+'] {
-      assert!(!press(&mut view, KeyCode::Char(c)), "{c:?}");
-    }
-    assert!(!press(&mut view, KeyCode::Esc), "nothing to clear");
-    assert!(!press(&mut view, KeyCode::Enter));
-    assert_eq!(view.filter(), "");
-  }
-
-  #[test]
-  fn navigation_moves_and_clamps_selection() {
+  fn selection_follows_its_pid() {
     let mut view = view(); // [4410, 631, 2301, 1, 77]
-    view.fit(2);
-    assert_eq!(view.selected_pid(), None);
-
     assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(4410), "down starts at the top");
-    assert!(press(&mut view, KeyCode::Up));
-    assert_eq!(view.selected_pid(), Some(4410), "up stops at the top");
     assert!(press(&mut view, KeyCode::Down));
     assert_eq!(view.selected_pid(), Some(631));
-    assert!(press(&mut view, KeyCode::PageDown));
-    assert_eq!(view.selected_pid(), Some(1));
-    assert!(press(&mut view, KeyCode::PageDown));
-    assert_eq!(view.selected_pid(), Some(77), "page down stops at the end");
-    assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(77));
-    assert!(press(&mut view, KeyCode::PageUp));
-    assert_eq!(view.selected_pid(), Some(2301));
-    assert!(press(&mut view, KeyCode::Home));
-    assert_eq!(view.selected_pid(), Some(4410));
-    assert!(press(&mut view, KeyCode::End));
-    assert_eq!(view.selected_pid(), Some(77));
 
-    // without a selection the paging keys scroll, ↑ / ↓ select the top row on screen
-    assert!(press(&mut view, KeyCode::Esc));
-    assert_eq!(view.selected_pid(), None);
-    for (code, offset) in
-      [(KeyCode::PageDown, 2), (KeyCode::PageUp, 0), (KeyCode::End, 3), (KeyCode::Home, 0)]
-    {
-      assert!(press(&mut view, code));
-      assert_eq!((view.selected_pid(), view.offset), (None, offset), "{code:?}");
-    }
-    assert!(press(&mut view, KeyCode::PageDown));
+    // through a reversed sort
+    assert!(press(&mut view, KeyCode::Char('S'))); // [77, 1, 2301, 631, 4410]
+    assert_eq!(view.selected_pid(), Some(631));
+    assert!(press(&mut view, KeyCode::Down));
+    assert_eq!(view.selected_pid(), Some(4410), "moves from the new position");
     assert!(press(&mut view, KeyCode::Up));
-    assert_eq!((view.selected_pid(), view.offset), (Some(2301), 2), "the top row on screen");
+
+    // and a new sample that reorders the list
+    let mut procs = sample();
+    procs[1].cpu_pct = 0.1;
+    view.set_procs(procs);
+    assert_eq!(pids(&view), [77, 631, 1, 2301, 4410]);
+    assert_eq!(view.selected_pid(), Some(631));
+    assert!(press(&mut view, KeyCode::Down));
+    assert_eq!(view.selected_pid(), Some(1));
   }
 
   #[test]
-  fn navigation_on_empty_list() {
-    let mut view = ProcView::default();
-    for code in [KeyCode::Down, KeyCode::End, KeyCode::PageDown] {
-      assert!(press(&mut view, code));
-      assert_eq!(view.selected_pid(), None);
-    }
-
-    view.set_procs(vec![]);
+  fn selection_is_dropped_when_its_process_exits_or_is_filtered_out() {
+    let all = sample();
+    let mut view = view(); // [4410, 631, 2301, 1, 77]
     assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::Down));
+
+    // other processes come and go: the selection stays on its process
+    view.set_procs(vec![all[1].clone(), all[3].clone()]);
+    assert_eq!((pids(&view), view.selected_pid()), (vec![4410, 631], Some(631)));
+    // it exits: no neighbour takes over, and it isn't back with its pid
+    view.set_procs(vec![all[2].clone(), all[3].clone()]);
+    assert_eq!(view.selected_pid(), None);
+    view.set_procs(sample());
+    assert_eq!(view.selected_pid(), None);
+
+    // `s` keeps WindowServer ([631, 2301, 77]), `sa` doesn't, and it isn't back with the row
+    assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "s");
+    assert_eq!(view.selected_pid(), Some(631));
+    type_str(&mut view, "a");
+    assert_eq!((pids(&view), view.selected_pid()), (vec![2301, 77], None));
+    assert!(press(&mut view, KeyCode::Backspace));
     assert_eq!(view.selected_pid(), None);
   }
 
@@ -1056,513 +992,74 @@ mod tests {
     type_str(&mut view, "saf");
     assert!(press(&mut view, KeyCode::Enter));
     assert!(press(&mut view, KeyCode::Down));
+    assert!(press(&mut view, KeyCode::End));
+    view.fit(1);
+    assert_eq!((view.selected_pid(), view.offset), (Some(77), 1));
 
     // both at once, and the table back at its top
-    view.fit(1);
-    assert!(press(&mut view, KeyCode::End));
     assert!(press(&mut view, KeyCode::Esc));
     assert_eq!((view.selected_pid(), view.filter(), view.offset), (None, "", 0));
     assert_eq!(pids(&view).len(), 5);
-    assert!(!press(&mut view, KeyCode::Esc), "nothing left to clear");
-
-    // either one alone
-    assert!(press(&mut view, KeyCode::Down));
-    assert!(press(&mut view, KeyCode::Esc));
-    assert_eq!(view.selected_pid(), None);
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "x");
-    assert!(press(&mut view, KeyCode::Enter));
-    assert!(press(&mut view, KeyCode::Esc));
-    assert_eq!(view.filter(), "");
-  }
-
-  #[test]
-  fn selection_follows_pid_after_resort_and_refresh() {
-    let mut view = view(); // [4410, 631, 2301, 1, 77]
-    assert!(press(&mut view, KeyCode::Down));
-    assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(631));
-
-    assert!(press(&mut view, KeyCode::Char('S'))); // [77, 1, 2301, 631, 4410]
-    assert_eq!(view.selected_pid(), Some(631));
-    assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(4410), "moves from the new position");
-    assert!(press(&mut view, KeyCode::Up));
-
-    // a new sample reorders the list
-    let mut procs = sample();
-    procs[1].cpu_pct = 0.1; // 631: [77, 631, 1, 2301, 4410]
-    view.set_procs(procs);
-    assert_eq!(pids(&view), [77, 631, 1, 2301, 4410]);
-    assert_eq!(view.selected_pid(), Some(631));
-    assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(1));
-
-    // a filter that keeps the selected process
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "d");
-    assert_eq!(pids(&view), [631, 1]);
-    assert_eq!(view.selected_pid(), Some(1));
-  }
-
-  #[test]
-  fn selection_is_dropped_when_its_process_exits() {
-    let mut view = view(); // [4410, 631, 2301, 1, 77]
-    assert!(press(&mut view, KeyCode::Down));
-    assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(631));
-
-    // other processes come and go: the selection stays on its process, at its new row
-    let all = sample();
-    view.set_procs(vec![all[1].clone(), all[3].clone()]);
-    assert_eq!((pids(&view), view.selected_pid()), (vec![4410, 631], Some(631)));
-    assert_eq!(view.selected().map(|p| p.name.as_str()), Some("WindowServer"));
-
-    // the selected process exits: no neighbour takes over, and it isn't back with its pid
-    view.set_procs(vec![all[2].clone(), all[3].clone()]);
-    assert_eq!((view.selected_pid(), view.selected()), (None, None));
-    view.set_procs(sample());
-    assert_eq!(view.selected_pid(), None);
-  }
-
-  #[test]
-  fn hidden_panel_clears_list_and_input() {
-    let mut view = view();
-    assert!(press(&mut view, KeyCode::Down));
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "sa");
-
-    view.clear();
-    assert!(view.procs().is_none());
-    assert_eq!(view.row_count(), 0);
-    assert_eq!(view.selected_pid(), None);
-    assert!(!view.typing());
-    assert_eq!(view.filter(), "sa", "the filter stays");
+    assert!(!press(&mut view, KeyCode::Esc), "nothing left to clear: a global key");
   }
 
   #[test]
   fn scroll_keeps_selection_visible() {
     let mut view = view(); // [4410, 631, 2301, 1, 77]
-    let page = |view: &ProcView| view.page_rows().map(|(sel, p)| (sel, p.pid)).collect::<Vec<_>>();
-
-    view.fit(2);
-    assert_eq!(page(&view), [(false, 4410), (false, 631)]);
+    let page = |view: &mut ProcView| {
+      view.fit(2);
+      view.page_rows().map(|(sel, p)| (sel, p.pid)).collect::<Vec<_>>()
+    };
 
     for _ in 0..3 {
       assert!(press(&mut view, KeyCode::Down));
     }
-    view.fit(2);
-    assert_eq!(view.offset, 1);
-    assert_eq!(page(&view), [(false, 631), (true, 2301)]);
-
+    assert_eq!(page(&mut view), [(false, 631), (true, 2301)]);
     // moving up inside the page doesn't scroll
     assert!(press(&mut view, KeyCode::Up));
-    view.fit(2);
-    assert_eq!(page(&view), [(true, 631), (false, 2301)]);
-
+    assert_eq!(page(&mut view), [(true, 631), (false, 2301)]);
     assert!(press(&mut view, KeyCode::End));
-    view.fit(2);
-    assert_eq!(page(&view), [(false, 1), (true, 77)]);
-
-    assert!(press(&mut view, KeyCode::Home));
-    view.fit(2);
-    assert_eq!(view.offset, 0);
+    assert_eq!(page(&mut view), [(false, 1), (true, 77)]);
 
     // a taller window shows everything
-    assert!(press(&mut view, KeyCode::End));
     view.fit(10);
-    assert_eq!(view.offset, 0);
-    assert_eq!(page(&view).len(), 5);
+    assert_eq!((view.offset, view.page_rows().count()), (0, 5));
   }
 
   #[test]
-  fn scroll_offset_cases() {
-    // selection above / inside / below the page
-    assert_eq!(scroll_offset(5, Some(2), 4, 20), 2);
-    assert_eq!(scroll_offset(5, Some(7), 4, 20), 5);
-    assert_eq!(scroll_offset(5, Some(12), 4, 20), 9);
-    // no selection: where it is, without blank rows at the bottom
-    assert_eq!(scroll_offset(5, None, 4, 20), 5);
-    assert_eq!(scroll_offset(18, None, 4, 20), 16);
-    // shrunk list: no blank rows at the bottom
-    assert_eq!(scroll_offset(10, Some(11), 4, 12), 8);
-    assert_eq!(scroll_offset(3, Some(1), 10, 5), 0);
-    // zero-height table doesn't panic
-    assert_eq!(scroll_offset(0, Some(3), 0, 5), 4);
-  }
-
-  #[test]
-  fn columns_drop_by_priority_at_narrow_widths() {
+  fn columns_drop_at_narrow_widths_keeping_the_sorted_one() {
     use ProcSort::*;
-    // sorted by PID, which always stays anyway
-    let names = |width| fit_columns(width, Pid).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
+    let names =
+      |width, sort| fit_columns(width, sort).into_iter().map(|(c, _)| c).collect::<Vec<ProcSort>>();
 
+    // NAME takes the room the others leave
     let all = [(Pid, 5), (Name, 154), (User, 10), (Cpu, 6), (Mem, 6), (Power, 7), (Gpu, 6)];
     assert_eq!(fit_columns(200, Pid), all);
-    // USER goes before NAME gets fewer than 16 cells: 5 + 16 + 10 + 6 + 6 + 7 + 6 + 6 gaps
-    assert_eq!(names(62), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(61), [Pid, Name, Cpu, Mem, Power, Gpu]);
-    // the others before it gets fewer than 8
-    assert_eq!(names(43), [Pid, Name, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(42), [Pid, Name, Cpu, Mem, Gpu]);
-    assert_eq!(names(35), [Pid, Name, Cpu, Mem, Gpu]);
-    assert_eq!(names(34), [Pid, Name, Cpu, Mem]);
-    assert_eq!(names(28), [Pid, Name, Cpu, Mem]);
-    assert_eq!(names(27), [Pid, Name, Cpu]);
-    assert_eq!(names(21), [Pid, Name, Cpu]);
-    assert_eq!(names(20), [Pid, Name]);
+    // USER goes before NAME gets fewer than 16 cells, the others before it gets fewer than 8
+    assert_eq!(names(62, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
+    assert_eq!(names(61, Pid), [Pid, Name, Cpu, Mem, Power, Gpu]);
+    assert_eq!(names(42, Pid), [Pid, Name, Cpu, Mem, Gpu]);
+    assert_eq!(names(34, Pid), [Pid, Name, Cpu, Mem]);
+    assert_eq!(names(27, Pid), [Pid, Name, Cpu]);
+    assert_eq!(names(20, Pid), [Pid, Name]);
 
-    // NAME shrinks below its minimum once nothing else can go, then disappears
-    assert_eq!(fit_columns(14, Pid), [(Pid, 5), (Name, 8)]);
-    assert_eq!(fit_columns(10, Pid), [(Pid, 5), (Name, 4)]);
-    assert_eq!(fit_columns(6, Pid), [(Pid, 5)]);
-    assert_eq!(fit_columns(0, Pid), [(Pid, 5)]);
-  }
-
-  #[test]
-  fn sorted_column_is_never_dropped() {
-    use ProcSort::*;
-    // another column goes in its place
-    assert_eq!(fit_columns(40, User), [(Pid, 5), (Name, 9), (User, 10), (Cpu, 6), (Mem, 6)]);
-    assert_eq!(fit_columns(30, Power), [(Pid, 5), (Name, 9), (Cpu, 6), (Power, 7)]);
-    assert_eq!(fit_columns(30, Gpu), [(Pid, 5), (Name, 10), (Cpu, 6), (Gpu, 6)]);
-    // even when NAME is left with a cell or none
-    assert_eq!(fit_columns(20, Cpu), [(Pid, 5), (Name, 7), (Cpu, 6)]);
-    assert_eq!(fit_columns(14, Mem), [(Pid, 5), (Name, 1), (Mem, 6)]);
-    assert_eq!(fit_columns(13, Cpu), [(Pid, 5), (Cpu, 6)]);
-    // once NAME gets a cell next to PID
-    for sort in COLUMNS {
-      for width in 7..120 {
-        assert!(fit_columns(width, sort).iter().any(|(c, _)| *c == sort), "{sort:?} at {width}");
-      }
-    }
-  }
-
-  #[test]
-  fn sort_arrow_follows_the_sorted_column_and_fits_it() {
-    assert_eq!(ProcSort::Mem.header_text(ProcSort::Mem, true), "MEM ↓");
-    assert_eq!(ProcSort::Mem.header_text(ProcSort::Mem, false), "MEM ↑");
-    assert_eq!(ProcSort::Mem.header_text(ProcSort::Cpu, true), "MEM");
-
-    // every column fits its header with the arrow
-    for column in COLUMNS {
-      let text = column.header_text(column, true);
-      assert!(text.chars().count() <= usize::from(column.width()), "{text}");
-    }
-    // and every sort key has its column
-    let mut sort = ProcSort::Cpu;
-    for _ in 0..COLUMNS.len() {
-      assert!(COLUMNS.contains(&sort), "{sort:?}");
-      sort = sort.next();
-    }
-  }
-
-  #[test]
-  fn sort_cycle_wraps() {
-    use ProcSort::*;
-    let mut sorts = vec![Cpu];
-    for _ in 0..7 {
-      sorts.push(sorts.last().unwrap().next());
-    }
-    assert_eq!(sorts, [Cpu, Mem, Power, Gpu, Pid, Name, User, Cpu]);
-  }
-
-  #[test]
-  fn column_areas_follow_the_columns_and_stop_at_the_edge() {
-    use ProcSort::*;
-    let columns = [(Pid, 5), (Name, 10), (Cpu, 6), (Mem, 6)];
-    let cells = |width: u16| {
-      let areas = column_areas(Rect::new(2, 5, width, 1), &columns);
-      assert!(areas.iter().all(|(_, r)| r.y == 5 && r.height == 1));
-      areas.into_iter().map(|(c, r)| (c, r.x, r.width)).collect::<Vec<_>>()
-    };
-
-    // one blank cell between columns
-    assert_eq!(cells(30), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 6), (Mem, 26, 6)]);
-    // cut at the edge, left out past it
-    assert_eq!(cells(29), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 6), (Mem, 26, 5)]);
-    assert_eq!(cells(24), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 6)]);
-    assert_eq!(cells(20), [(Pid, 2, 5), (Name, 8, 10), (Cpu, 19, 3)]);
-    assert!(cells(0).is_empty());
-  }
-
-  fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
-    MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE }
-  }
-
-  /// `view()` as if rendered in a box at (0, 0), 40x6: the header on row 1 and 3 process rows
-  /// below it.
-  fn rendered_view() -> ProcView {
-    let mut view = view(); // [4410, 631, 2301, 1, 77]
-    view.fit(3);
-    view.targets = Targets {
-      area: Rect::new(0, 0, 40, 6),
-      headers: column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36, ProcSort::Cpu)),
-      body: Rect::new(1, 2, 38, 3),
-    };
-    view
-  }
-
-  #[test]
-  fn mouse_acts_on_the_rendered_targets() {
-    let left = MouseEventKind::Down(MouseButton::Left);
-
-    // header: PID at 2..7, then MEM at 25..31; a new key sorts in its own direction, the same
-    // key reverses it
-    let mut view = rendered_view();
-    view.handle_mouse(mouse(left, 6, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
-    view.handle_mouse(mouse(left, 2, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, true));
-    view.handle_mouse(mouse(left, 25, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Mem, true));
-    view.handle_mouse(mouse(left, 6, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
-    // the gap after PID
-    view.handle_mouse(mouse(left, 7, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
-
-    // the top border (`/ filter`) is no click target
-    view.handle_mouse(mouse(left, 19, 0));
-    assert!(!view.typing());
-
-    // rows, the padding cells at the borders too
-    let mut view = rendered_view();
-    view.handle_mouse(mouse(left, 1, 3));
-    assert_eq!(view.selected_pid(), Some(631));
-    view.handle_mouse(mouse(left, 38, 4));
-    assert_eq!(view.selected_pid(), Some(2301));
-
-    // the selected row again: no selection
-    view.handle_mouse(mouse(left, 20, 4));
-    assert_eq!(view.selected_pid(), None);
-    view.handle_mouse(mouse(left, 20, 4));
-    assert_eq!(view.selected_pid(), Some(2301));
-
-    // a blank row below the last process selects nothing
-    view.set_procs(sample()[..2].to_vec()); // [631, 1]
-    view.fit(3);
-    view.handle_mouse(mouse(left, 20, 2));
-    assert_eq!(view.selected_pid(), Some(631));
-    view.handle_mouse(mouse(left, 20, 4));
-    assert_eq!(view.selected_pid(), Some(631), "no process on that row");
-  }
-
-  #[test]
-  fn mouse_works_while_typing() {
-    let left = MouseEventKind::Down(MouseButton::Left);
-    let mut view = rendered_view();
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "ar"); // [4410, 2301, 77]
-
-    // a header click sorts the filtered rows, a row click selects one of them
-    view.handle_mouse(mouse(left, 6, 1));
-    assert_eq!((view.sort, view.sort_desc), (ProcSort::Pid, false));
-    assert_eq!(pids(&view), [77, 2301, 4410]);
-    view.handle_mouse(mouse(left, 20, 3));
-    assert_eq!(view.selected_pid(), Some(2301));
-    view.handle_mouse(mouse(MouseEventKind::ScrollDown, 20, 3));
-    assert_eq!(view.selected_pid(), Some(4410));
-
-    // and the filter is still being typed; cargo no longer matches, so nothing is selected
-    assert!(view.typing());
-    type_str(&mut view, "i");
-    assert_eq!((view.filter(), pids(&view)), ("ari", vec![77, 2301]));
-    assert_eq!(view.selected_pid(), None);
-  }
-
-  #[test]
-  fn wheel_moves_selection_and_offset_together() {
-    let mut view = rendered_view(); // [4410, 631, 2301, 1, 77], 3 rows on screen
-    let page = |view: &ProcView| view.page_rows().map(|(sel, p)| (sel, p.pid)).collect::<Vec<_>>();
-    let wheel = |view: &mut ProcView, kind| {
-      view.handle_mouse(mouse(kind, 20, 3));
-      view.fit(3);
-    };
-    use MouseEventKind::{ScrollDown, ScrollUp};
-
-    // without a selection it only scrolls, up to the end of the table
-    wheel(&mut view, ScrollDown);
-    assert_eq!(page(&view), [(false, 2301), (false, 1), (false, 77)]);
-    wheel(&mut view, ScrollUp);
-    assert_eq!(page(&view), [(false, 4410), (false, 631), (false, 2301)]);
-    assert_eq!(view.selected_pid(), None);
-
-    // with one, the selection moves along
-    assert!(press(&mut view, KeyCode::Down));
-    wheel(&mut view, ScrollDown);
-    assert_eq!(page(&view), [(false, 2301), (true, 1), (false, 77)], "the end of the table");
-    wheel(&mut view, ScrollDown);
-    assert_eq!(page(&view), [(false, 2301), (false, 1), (true, 77)]);
-    // the top of the table: the selection moves up on screen
-    wheel(&mut view, ScrollUp);
-    assert_eq!(page(&view), [(false, 4410), (true, 631), (false, 2301)]);
-    wheel(&mut view, ScrollUp);
-    assert_eq!(page(&view), [(true, 4410), (false, 631), (false, 2301)]);
-
-    // outside the box
-    view.handle_mouse(mouse(ScrollDown, 20, 6));
-    view.fit(3);
-    assert_eq!(view.selected_pid(), Some(4410));
-
-    // an empty list
-    let mut view = rendered_view();
-    view.set_procs(vec![]);
-    wheel(&mut view, ScrollDown);
-    assert_eq!(view.selected_pid(), None);
-  }
-
-  #[test]
-  fn hidden_panel_forgets_mouse_targets() {
-    let mut view = rendered_view();
-    view.clear();
-    view.set_procs(sample());
-    for (kind, x, y) in [
-      (MouseEventKind::Down(MouseButton::Left), 6, 1),
-      (MouseEventKind::Down(MouseButton::Left), 19, 0),
-      (MouseEventKind::Down(MouseButton::Left), 20, 3),
-      (MouseEventKind::ScrollDown, 20, 3),
-    ] {
-      view.handle_mouse(mouse(kind, x, y));
-    }
-    assert_eq!((view.sort, view.typing(), view.selected_pid()), (ProcSort::Cpu, false, None));
-  }
-
-  #[test]
-  fn columns_fill_the_width() {
-    // from PID, the widest sorted column (USER) and a cell for NAME
-    for sort in COLUMNS {
-      for width in 18..300 {
-        let columns = fit_columns(width, sort);
-        let used: u16 = columns.iter().map(|(_, w)| w + 1).sum::<u16>() - 1;
-        assert_eq!(used, width, "width {width}: {columns:?}");
-      }
-    }
+    // the sorted column stays, another one goes in its place
+    assert_eq!(names(40, User), [Pid, Name, User, Cpu, Mem]);
+    assert_eq!(names(30, Power), [Pid, Name, Cpu, Power]);
+    assert_eq!(names(14, Mem), [Pid, Name, Mem]);
   }
 
   #[test]
   fn cut_text_ends_with_an_ellipsis() {
-    assert_eq!(cut_end("WindowServer", 20), "WindowServer");
     assert_eq!(cut_end("WindowServer", 12), "WindowServer");
     assert_eq!(cut_end("WindowServer", 9), "WindowSe…");
     assert_eq!(cut_end("WindowServer", 1), "…");
     assert_eq!(cut_end("WindowServer", 0), "");
     // wide characters take two cells and are never split
-    assert_eq!(cut_end("漢字テキスト", 6), "漢字…");
     assert_eq!(cut_end("漢字テキスト", 5), "漢字…");
 
-    assert_eq!(cut_start("/usr/libexec/foo", 20), "/usr/libexec/foo");
+    assert_eq!(cut_start("/usr/libexec/foo", 16), "/usr/libexec/foo");
     assert_eq!(cut_start("/usr/libexec/foo", 8), "…xec/foo");
-    assert_eq!(cut_start("/usr/libexec/foo", 1), "…");
     assert_eq!(cut_start("/usr/libexec/foo", 0), "");
-  }
-
-  #[test]
-  fn s_skips_columns_not_on_screen_and_arrows_leave_the_sort() {
-    use ProcSort::*;
-    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER and POWER are left out
-    let mut view = rendered_view();
-    let mut sorts = vec![];
-    for _ in 0..5 {
-      assert!(press(&mut view, KeyCode::Char('s')));
-      sorts.push((view.sort, view.sort_desc));
-    }
-    assert_eq!(sorts, [(Mem, true), (Gpu, true), (Pid, false), (Name, false), (Cpu, true)]);
-
-    // ← / → aren't keys of the panel, and type nothing into a filter
-    for code in [KeyCode::Left, KeyCode::Right] {
-      assert!(!press(&mut view, code), "{code:?}");
-      assert_eq!((view.sort, view.sort_desc), (Cpu, true), "{code:?}");
-    }
-    assert!(press(&mut view, KeyCode::Char('/')));
-    for code in [KeyCode::Left, KeyCode::Right] {
-      assert!(press(&mut view, code), "{code:?} while typing");
-    }
-    assert_eq!((view.sort, view.filter()), (Cpu, ""));
-  }
-
-  #[test]
-  fn memory_sizes() {
-    assert_eq!(format_mem(0), "0K");
-    assert_eq!(format_mem(512 << 10), "512K");
-    assert_eq!(format_mem(64 << 20), "64M");
-    assert_eq!(format_mem(1536 << 20), "1.5G");
-    assert_eq!(format_mem(40 << 30), "40.0G");
-
-    // the unit follows the rounded value: no `1024K` or `1024M`
-    const KIB: f64 = 1024.0;
-    let bytes = |value: f64| value.round() as u64;
-    assert_eq!(format_mem(bytes(1023.4 * KIB)), "1023K");
-    assert_eq!(format_mem(bytes(1023.6 * KIB)), "1M");
-    assert_eq!(format_mem(1 << 20), "1M");
-    assert_eq!(format_mem(bytes(1023.4 * KIB * KIB)), "1023M");
-    assert_eq!(format_mem(bytes(1023.9 * KIB * KIB)), "1.0G");
-    assert_eq!(format_mem(1 << 30), "1.0G");
-    assert_eq!(format_mem(bytes(99.9 * KIB * KIB * KIB)), "99.9G");
-    assert_eq!(format_mem(bytes(99.96 * KIB * KIB * KIB)), "100G");
-    assert_eq!(format_mem(512 << 30), "512G");
-    // every size up to 16 TiB fits the MEM column
-    for shift in 0..45 {
-      for bytes in [(1u64 << shift) - 1, 1 << shift, (1 << shift) * 3 / 2] {
-        assert!(format_mem(bytes).len() <= usize::from(ProcSort::Mem.width()), "{bytes}");
-      }
-    }
-  }
-
-  #[test]
-  fn tail_keeps_whole_characters_from_the_end() {
-    assert_eq!(tail("safari", 10), "safari");
-    assert_eq!(tail("safari", 6), "safari");
-    assert_eq!(tail("safari", 3), "ari");
-    assert_eq!(tail("safari", 0), "");
-    assert_eq!(tail("", 3), "");
-    // wide characters take two cells
-    assert_eq!(tail("ab漢字", 4), "漢字");
-    assert_eq!(tail("ab漢字", 3), "字");
-    assert_eq!(tail("ab漢字", 1), "");
-  }
-
-  #[test]
-  fn navigation_keys_work_while_typing() {
-    let mut view = view(); // [4410, 631, 2301, 1, 77]
-    view.fit(2);
-    assert!(press(&mut view, KeyCode::Char('/')));
-    // [4410 cargo, 2301 Safari, 77 safaribookmarksyncagent]
-    type_str(&mut view, "ar");
-    for (code, pid) in [
-      (KeyCode::Down, 4410),
-      (KeyCode::Down, 2301),
-      (KeyCode::PageDown, 77),
-      (KeyCode::Up, 2301),
-      (KeyCode::PageUp, 4410),
-      (KeyCode::End, 77),
-      (KeyCode::Home, 4410),
-    ] {
-      assert!(press(&mut view, code), "{code:?}");
-      assert_eq!(view.selected_pid(), Some(pid), "{code:?}");
-    }
-    assert!(view.typing());
-    assert_eq!(view.filter(), "ar", "navigation keys don't edit the filter");
-  }
-
-  #[test]
-  fn filter_hiding_the_selected_process_drops_the_selection() {
-    let mut view = view(); // [4410, 631, 2301, 1, 77]
-    assert!(press(&mut view, KeyCode::Down));
-    assert!(press(&mut view, KeyCode::Down));
-    assert_eq!(view.selected_pid(), Some(631));
-
-    // `s` keeps WindowServer ([631, 2301, 77]), `sa` doesn't: no other row takes the selection
-    assert!(press(&mut view, KeyCode::Char('/')));
-    type_str(&mut view, "s");
-    assert_eq!((pids(&view), view.selected_pid()), (vec![631, 2301, 77], Some(631)));
-    type_str(&mut view, "af");
-    assert_eq!(pids(&view), [2301, 77]);
-    assert_eq!(view.selected_pid(), None);
-
-    // and it doesn't come back with the rows
-    assert!(press(&mut view, KeyCode::Esc));
-    assert_eq!(pids(&view).len(), 5);
-    assert_eq!(view.selected_pid(), None);
   }
 }

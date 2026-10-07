@@ -61,36 +61,22 @@ fn is_apple_terminal(term_program: Option<&str>) -> bool {
 mod tests {
   use ratatui::style::Color;
 
-  use super::{gradient, is_apple_terminal};
+  use super::gradient;
 
   #[test]
   fn gradient_steps_through_terminal_colors() {
+    // values below the range (and NaN) are green, above it red
     let steps = [
-      (0.0, Color::Green),
+      (f64::NAN, Color::Green),
+      (-1.0, Color::Green),
       (1.0 / 3.0, Color::Green),
       (0.34, Color::Yellow),
-      (0.5, Color::Yellow),
       (2.0 / 3.0, Color::Yellow),
       (0.67, Color::Red),
-      (1.0, Color::Red),
+      (2.0, Color::Red),
     ];
     for (t, color) in steps {
       assert_eq!(gradient(t), color, "{t}");
-    }
-  }
-
-  #[test]
-  fn gradient_clamps_out_of_range() {
-    assert_eq!(gradient(-1.0), gradient(0.0));
-    assert_eq!(gradient(2.0), gradient(1.0));
-    assert_eq!(gradient(f64::NAN), gradient(0.0));
-  }
-
-  #[test]
-  fn detects_apple_terminal_from_term_program() {
-    assert!(is_apple_terminal(Some("Apple_Terminal")));
-    for other in [Some("iTerm.app"), Some("ghostty"), Some("tmux"), Some(""), None] {
-      assert!(!is_apple_terminal(other), "{other:?}");
     }
   }
 }

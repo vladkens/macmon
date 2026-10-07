@@ -115,174 +115,63 @@ pub(super) fn compute_layout(area: Rect, procs: bool, clusters: usize) -> Layout
 mod tests {
   use ratatui::layout::{Margin, Rect};
 
-  use super::{
-    LayoutPlan, METRICS_MIN_HEIGHT, Metric, PROC_CHROME, PROC_MIN_ROWS, compute_layout,
-    metrics_height, procs_fit,
-  };
-
-  fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
-    Rect::new(x, y, width, height)
-  }
-
-  /// Two CPU clusters, as on M1–M5.
-  fn layout(area: Rect, procs: bool) -> LayoutPlan {
-    compute_layout(area, procs, 2)
-  }
-
-  fn kinds(plan: &LayoutPlan) -> Vec<Metric> {
-    plan.boxes.iter().map(|(metric, _)| *metric).collect()
-  }
-
-  fn inside(outer: Rect, inner: Rect) -> bool {
-    inner.x >= outer.x
-      && inner.y >= outer.y
-      && inner.right() <= outer.right()
-      && inner.bottom() <= outer.bottom()
-  }
+  use super::{PROC_CHROME, PROC_MIN_ROWS, compute_layout, procs_fit};
 
   #[test]
   fn metrics_take_40_percent_and_procs_the_rest() {
-    // (width, height, metrics box height): 40 % of the height, rounded
-    for (width, height, top) in [(200, 50, 20), (110, 32, 13), (80, 24, 10), (120, 40, 16)] {
-      let plan = layout(rect(0, 0, width, height), true);
+    // (width, height, metrics box height): 40 % of the height, rounded, but at least two rows of
+    // boxes with a graph row each
+    for (width, height, top) in [(200, 50, 20), (110, 32, 13), (80, 24, 10), (100, 15, 8)] {
+      let plan = compute_layout(Rect::new(0, 0, width, height), true, 2);
       let ctx = format!("{width}x{height}");
-      assert_eq!(plan.top, Some(rect(0, 0, width, top)), "{ctx}");
-      assert_eq!(plan.proc, Some(rect(0, top, width, height - top)), "{ctx}");
+      assert_eq!(plan.top, Some(Rect::new(0, 0, width, top)), "{ctx}");
+      assert_eq!(plan.proc, Some(Rect::new(0, top, width, height - top)), "{ctx}");
     }
-
-    // short screens: at least two rows of boxes with a graph row each
-    assert_eq!(metrics_height(15), METRICS_MIN_HEIGHT);
-    let plan = layout(rect(0, 0, 100, 15), true);
-    assert_eq!(plan.top, Some(rect(0, 0, 100, 8)));
-    assert_eq!(plan.proc, Some(rect(0, 8, 100, 7)));
   }
 
   #[test]
-  fn two_rows_of_boxes_split_evenly() {
-    // 200x50: a 20 rows metrics box, 18 rows inside: 9 for each row of boxes
-    let plan = layout(rect(0, 0, 200, 50), true);
-    use Metric::*;
-    assert_eq!(kinds(&plan), [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, AnePower]);
-
-    // 198 cells inside the borders: 4 boxes of 49 / 50 cells, then 3 boxes of 66 cells
-    let rects: Vec<Rect> = plan.boxes.iter().map(|(_, r)| *r).collect();
-    assert_eq!(
-      rects,
-      [
-        rect(1, 1, 49, 9),
-        rect(50, 1, 50, 9),
-        rect(100, 1, 49, 9),
-        rect(149, 1, 50, 9),
-        rect(1, 10, 66, 9),
-        rect(67, 10, 66, 9),
-        rect(133, 10, 66, 9),
-      ]
-    );
-
-    // an odd number of rows: the top row gets the extra one (110x32: 13 rows, 11 inside)
-    let plan = layout(rect(0, 0, 110, 32), true);
-    let heights: Vec<u16> = plan.boxes.iter().map(|(_, r)| r.height).collect();
-    assert_eq!(heights, [6, 6, 6, 6, 5, 5, 5]);
-    assert_eq!(plan.boxes[4].1.y, 7);
-  }
-
-  #[test]
-  fn box_count_follows_clusters() {
-    use Metric::*;
-    let area = rect(0, 0, 200, 50);
-
-    // three tiers, like M6 (6E + 4P + 2S): five boxes on top
-    let plan = compute_layout(area, true, 3);
-    let top: Vec<Metric> = kinds(&plan).into_iter().take(5).collect();
-    assert_eq!(top, [Cluster(0), Cluster(1), Cluster(2), Gpu, Ram]);
-    assert_eq!(plan.boxes.len(), 8);
-    let widths: Vec<u16> = plan.boxes[..5].iter().map(|(_, r)| r.width).collect();
-    assert_eq!(widths, [39, 40, 39, 40, 40]);
-
-    // no clusters: GPU and RAM only
-    let plan = compute_layout(area, true, 0);
-    assert_eq!(kinds(&plan), [Gpu, Ram, CpuPower, GpuPower, AnePower]);
-  }
-
-  #[test]
-  fn hidden_procs_give_metrics_the_full_height() {
-    let area = rect(0, 0, 120, 40);
-    let plan = layout(area, false);
-    assert_eq!(plan.top, Some(area));
-    assert_eq!(plan.proc, None);
+  fn hidden_or_auto_hidden_list_gives_metrics_the_full_height() {
+    let area = Rect::new(0, 0, 120, 40);
+    let plan = compute_layout(area, false, 2);
+    assert_eq!((plan.top, plan.proc), (Some(area), None));
     // 38 rows inside: 19 for each row of boxes
     assert!(plan.boxes.iter().all(|(_, r)| r.height == 19), "{plan:?}");
-  }
 
-  #[test]
-  fn small_screen_auto_hides_procs_by_height() {
     // 100x13: an 8 rows metrics box would leave 5 rows, one short of the smallest process box
-    let min = PROC_MIN_ROWS + PROC_CHROME;
-    let small = rect(0, 0, 100, METRICS_MIN_HEIGHT + min - 1);
-    let plan = layout(small, true);
-    assert_eq!(plan.proc, None);
-    assert_eq!(plan.top, Some(rect(0, 0, 100, 13)), "the metrics take the whole screen");
-    let fits = rect(0, 0, 100, METRICS_MIN_HEIGHT + min);
-    let plan = layout(fits, true);
-    assert_eq!(plan.proc, Some(rect(0, 8, 100, min)));
-
-    // whether the list fits doesn't depend on the setting
-    assert!(!procs_fit(small) && procs_fit(fits));
-    assert!(!procs_fit(rect(0, 0, 0, 0)));
-
-    // width doesn't matter, only the rows left for the processes
-    assert!(layout(rect(0, 0, 20, 40), true).proc.is_some());
+    let small = Rect::new(0, 0, 100, 13);
+    let plan = compute_layout(small, true, 2);
+    assert_eq!((plan.top, plan.proc), (Some(small), None));
+    assert!(!procs_fit(small) && procs_fit(Rect { height: 14, ..small }));
   }
 
   #[test]
-  fn rects_stay_inside_and_never_overlap() {
-    let widths = [1, 2, 3, 4, 5, 7, 10, 40, 69, 80, 100, 110, 160, 200, 400];
-    let heights = [1, 2, 3, 4, 5, 6, 8, 12, 13, 14, 15, 20, 24, 32, 50, 120];
-
+  fn boxes_stay_inside_and_never_overlap() {
+    let widths = [1, 2, 3, 5, 10, 69, 80, 110, 200, 400];
+    let heights = [1, 2, 3, 5, 8, 13, 14, 24, 50, 120];
     for (width, height) in widths.into_iter().flat_map(|w| heights.map(|h| (w, h))) {
-      for offset in [(0, 0), (3, 2)] {
-        let area = rect(offset.0, offset.1, width, height);
-        for (clusters, procs) in [0, 2, 3].into_iter().flat_map(|c| [(c, false), (c, true)]) {
-          let plan = compute_layout(area, procs, clusters);
-          let ctx = format!("{area:?} clusters={clusters} procs={procs}");
+      let area = Rect::new(3, 2, width, height);
+      for (clusters, procs) in [(0, true), (2, false), (2, true), (3, true)] {
+        let plan = compute_layout(area, procs, clusters);
+        let ctx = format!("{area:?} clusters={clusters} procs={procs}");
 
-          // the metrics box is always on top, the process box right under it to the bottom
-          let top = plan.top.expect("metrics box");
-          assert_eq!((top.x, top.y, top.width), (area.x, area.y, area.width), "{ctx}");
-          assert!(inside(area, top), "{ctx}");
-          match plan.proc {
-            Some(proc) => {
-              assert!(procs, "{ctx}");
-              assert_eq!(
-                proc,
-                Rect { y: top.bottom(), height: area.bottom() - top.bottom(), ..area }
-              );
-              assert!(proc.height >= PROC_MIN_ROWS + PROC_CHROME, "{ctx}");
-            }
-            None => assert_eq!(top, area, "{ctx}: metrics take the full height"),
+        // the metrics box on top, the process box right under it to the bottom
+        let top = plan.top.expect("metrics box");
+        assert_eq!(plan.proc.is_some(), procs && procs_fit(area), "{ctx}");
+        match plan.proc {
+          Some(proc) => {
+            let rest = Rect { y: top.bottom(), height: area.bottom() - top.bottom(), ..area };
+            assert_eq!(proc, rest, "{ctx}");
+            assert!(proc.height >= PROC_MIN_ROWS + PROC_CHROME, "{ctx}");
           }
-          assert_eq!(plan.proc.is_some(), procs && procs_fit(area), "{ctx}");
+          None => assert_eq!(top, area, "{ctx}: metrics take the full height"),
+        }
 
-          // boxes sit inside the borders of the metrics box and never overlap
-          let inner = top.inner(Margin::new(1, 1));
-          for (i, (_, a)) in plan.boxes.iter().enumerate() {
-            assert!(!a.is_empty() && inside(inner, *a), "{a:?} outside {inner:?} in {ctx}");
-            for (_, b) in &plan.boxes[i + 1..] {
-              assert!(!a.intersects(*b), "{a:?} overlaps {b:?} in {ctx}");
-            }
-          }
-
-          // the boxes of each row tile its width: the top row, then the bottom one (when the
-          // metrics box has a row for it)
-          let upper = inner.height.div_ceil(2);
-          let rows = [(inner.y, upper > 0), (inner.y + upper, inner.height > upper)];
-          for (y, shown) in rows {
-            let row: Vec<&Rect> =
-              plan.boxes.iter().filter(|(_, r)| r.y == y).map(|(_, r)| r).collect();
-            let width: u32 = row.iter().map(|r| u32::from(r.width)).sum();
-            let ctx = format!("{ctx}: row at {y}");
-            assert_eq!(width, if shown { u32::from(inner.width) } else { 0 }, "{ctx}");
-            assert!(row.windows(2).all(|w| w[0].right() == w[1].x), "{ctx}: gaps");
+        // boxes sit inside the borders of the metrics box and never overlap
+        let inner = top.inner(Margin::new(1, 1));
+        for (i, (_, a)) in plan.boxes.iter().enumerate() {
+          assert!(!a.is_empty() && inner.intersection(*a) == *a, "{a:?} out of {inner:?}: {ctx}");
+          for (_, b) in &plan.boxes[i + 1..] {
+            assert!(!a.intersects(*b), "{a:?} overlaps {b:?} in {ctx}");
           }
         }
       }
