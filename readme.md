@@ -133,7 +133,7 @@ This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that a
 
 #### Prometheus and Grafana
 
-The `/metrics` endpoint exposes metrics in Prometheus format. See [`examples/grafana`](examples/grafana) for a local demo stack with Prometheus and Grafana.
+The `/metrics` endpoint exposes metrics in Prometheus format. Temperature gauges are omitted while no sensor has a valid reading. See [`examples/grafana`](examples/grafana) for a local demo stack with Prometheus and Grafana.
 
 <details>
 <summary>Prometheus output example</summary>
@@ -210,8 +210,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
 {
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
   "temp": {
-    "cpu_temp_avg": 43.73614, // Celsius
-    "gpu_temp_avg": 36.95167, // Celsius
+    "cpu_temp_avg": 43.73614, // Celsius, null when no sensor has a valid reading
+    "gpu_temp_avg": 36.95167, // Celsius, null when no sensor has a valid reading
   },
   "memory": {
     "ram_total": 25769803776, // Bytes
@@ -253,12 +253,6 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
 ```
 
 </details>
-
-Temperature fields contain a number in Celsius or `null` when no valid sensor value exists.
-The terminal preserves its historical estimate during a sensor outage and marks it with `~`.
-The terminal shows `N/A` if no previous temperature exists.
-The Prometheus endpoint omits its temperature gauge until a valid value returns.
-The Rust fields use `Option<f32>`, so library clients must handle `None`.
 
 ### Active and scaled ratios
 

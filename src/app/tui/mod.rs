@@ -567,7 +567,7 @@ mod tests {
 
   fn test_metrics() -> Metrics {
     Metrics {
-      temp: TempMetrics { cpu_temp_avg: 45.0, gpu_temp_avg: 40.0 },
+      temp: TempMetrics { cpu_temp_avg: Some(45.0), gpu_temp_avg: Some(40.0) },
       memory: MemMetrics {
         ram_total: 36 << 30,
         ram_usage: 20 << 30,

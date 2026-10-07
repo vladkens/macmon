@@ -64,11 +64,6 @@ pub struct TempMetrics {
   pub gpu_temp_avg: Option<f32>,
 }
 
-fn temperature_average(values: impl Iterator<Item = f32>) -> Option<f32> {
-  let values: Vec<_> = values.filter(|v| is_valid_temp(*v)).collect();
-  if values.is_empty() { None } else { Some(values.iter().sum::<f32>() / values.len() as f32) }
-}
-
 /// Memory and swap usage.
 #[derive(Debug, Default, Serialize)]
 pub struct MemMetrics {
@@ -186,6 +181,12 @@ pub struct Metrics {
 
 fn is_valid_temp(val: f32) -> bool {
   val > 0.0 && val <= 150.0
+}
+
+/// Average of the valid sensor readings, or None when no sensor has one.
+fn temperature_average(values: &[f32]) -> Option<f32> {
+  let valid: Vec<f32> = values.iter().copied().filter(|&val| is_valid_temp(val)).collect();
+  (!valid.is_empty()).then(|| valid.iter().sum::<f32>() / valid.len() as f32)
 }
 
 fn is_valid_fan_rpm(val: f32) -> bool {
@@ -438,22 +439,16 @@ impl Sampler {
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = self.smc.read_float_val(sensor)?;
-      if is_valid_temp(val) {
-        cpu_metrics.push(val);
-      }
+      cpu_metrics.push(self.smc.read_float_val(sensor)?);
     }
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = self.smc.read_float_val(sensor)?;
-      if is_valid_temp(val) {
-        gpu_metrics.push(val);
-      }
+      gpu_metrics.push(self.smc.read_float_val(sensor)?);
     }
 
-    let cpu_temp_avg = temperature_average(cpu_metrics.into_iter());
-    let gpu_temp_avg = temperature_average(gpu_metrics.into_iter());
+    let cpu_temp_avg = temperature_average(&cpu_metrics);
+    let gpu_temp_avg = temperature_average(&gpu_metrics);
 
     Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
   }
@@ -467,23 +462,19 @@ impl Sampler {
     for (name, value) in &metrics {
       if name.starts_with("pACC MTR Temp Sensor") || name.starts_with("eACC MTR Temp Sensor") {
         // println!("{}: {}", name, value);
-        if is_valid_temp(*value) {
-          cpu_values.push(*value);
-        }
+        cpu_values.push(*value);
         continue;
       }
 
       if name.starts_with("GPU MTR Temp Sensor") {
         // println!("{}: {}", name, value);
-        if is_valid_temp(*value) {
-          gpu_values.push(*value);
-        }
+        gpu_values.push(*value);
         continue;
       }
     }
 
-    let cpu_temp_avg = temperature_average(cpu_values.into_iter());
-    let gpu_temp_avg = temperature_average(gpu_values.into_iter());
+    let cpu_temp_avg = temperature_average(&cpu_values);
+    let gpu_temp_avg = temperature_average(&gpu_values);
 
     Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
   }
@@ -712,9 +703,9 @@ mod tests {
 
   #[test]
   fn temperature_average_rejects_missing_and_invalid_values() {
-    assert_eq!(temperature_average([].into_iter()), None);
-    assert_eq!(temperature_average([0.0, -1.0, 151.0, f32::NAN, f32::INFINITY].into_iter()), None);
-    assert_eq!(temperature_average([0.0, 40.0, f32::NAN, 60.0].into_iter()), Some(50.0));
+    assert_eq!(temperature_average(&[]), None);
+    assert_eq!(temperature_average(&[0.0, -1.0, 151.0, f32::NAN, f32::INFINITY]), None);
+    assert_eq!(temperature_average(&[0.0, 40.0, f32::NAN, 60.0]), Some(50.0));
   }
 
   #[test]

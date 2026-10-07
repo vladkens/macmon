@@ -170,26 +170,25 @@ pub(super) struct TempStore {
 }
 
 impl TempStore {
-  pub(super) fn last(&self) -> f32 {
-    *self.items.first().unwrap_or(&0.0)
+  pub(super) fn last(&self) -> Option<f32> {
+    self.items.first().copied()
   }
 
-  pub(super) fn push(&mut self, value: f32) {
+  pub(super) fn push(&mut self, value: Option<f32>) {
     // https://www.tunabellysoftware.com/blog/files/tg-pro-apple-silicon-m3-series-support.html
     // https://github.com/vladkens/macmon/issues/12
-    let value = if value == 0.0 { self.trend_ema(0.8) } else { value };
-    if value == 0.0 {
+    let Some(value) = value.or_else(|| self.trend_ema(0.8)) else {
       return; // skip if not sensor available
-    }
+    };
 
     self.items.insert(0, value);
     self.items.truncate(MAX_TEMPS);
   }
 
   // https://en.wikipedia.org/wiki/Exponential_smoothing
-  fn trend_ema(&self, alpha: f32) -> f32 {
+  fn trend_ema(&self, alpha: f32) -> Option<f32> {
     if self.items.len() < 2 {
-      return 0.0;
+      return None;
     }
 
     // starts from most recent value, so need to be reversed
@@ -200,7 +199,7 @@ impl TempStore {
       ema = alpha * item + (1.0 - alpha) * ema;
     }
 
-    ema
+    Some(ema)
   }
 }
 
@@ -280,7 +279,7 @@ mod tests {
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
       mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, swap_total: 0, swap_usage: 0 });
-      temp.push(i as f32 + 1.0);
+      temp.push(Some(i as f32 + 1.0));
     }
 
     // newest first
@@ -290,22 +289,24 @@ mod tests {
     for mode in [RatioMode::Scaled, RatioMode::Active] {
       assert_eq!(freq.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
     }
-    assert_eq!((temp.items.len(), temp.last()), (MAX_TEMPS, last as f32 + 1.0));
+    assert_eq!((temp.items.len(), temp.last()), (MAX_TEMPS, Some(last as f32 + 1.0)));
   }
 
   #[test]
-  fn temp_zero_falls_back_to_the_trend() {
+  fn missing_temp_falls_back_to_the_trend() {
     // no reading and too short a history to estimate one from: skipped
     let mut store = TempStore::default();
-    store.push(0.0);
-    store.push(50.0);
-    store.push(0.0);
-    assert_eq!((store.items.len(), store.last()), (1, 50.0));
+    store.push(None);
+    assert_eq!(store.last(), None);
+    store.push(Some(50.0));
+    store.push(None);
+    assert_eq!((store.items.len(), store.last()), (1, Some(50.0)));
 
     // the ema from oldest to newest: 0.8 * 52 + 0.2 * 50
-    store.push(52.0);
-    store.push(0.0);
+    store.push(Some(52.0));
+    store.push(None);
     assert_eq!(store.items.len(), 3);
-    assert!((store.last() - 51.6).abs() < 1e-4, "got {}", store.last());
+    let last = store.last().unwrap();
+    assert!((last - 51.6).abs() < 1e-4, "got {last}");
   }
 }
