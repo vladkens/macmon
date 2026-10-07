@@ -629,7 +629,7 @@ impl ProcView {
   /// Left side of the bottom border of the process box in `room` cells: the selected process
   /// (`631 /System/…/WindowServer`, its path cut from the left; the name when the path isn't
   /// readable). Without a selection, a dim note that POWER is known for own processes only, while
-  /// the POWER column shows processes without it next to some with it (all have it as root).
+  /// the POWER column shows processes without it next to some with it.
   fn border_text(&self, room: usize, power_shown: bool) -> Vec<Span<'static>> {
     if let Some(proc) = self.selected() {
       let pid = proc.pid.to_string();

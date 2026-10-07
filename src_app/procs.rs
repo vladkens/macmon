@@ -1,8 +1,8 @@
-//! Per-process resource usage (CPU, memory, energy) sampled without sudo.
+//! Per-process resource usage (CPU, memory, energy).
 //!
-//! libproc reads processes of the current user (all of them as root). Other users' processes come
-//! from the setuid `/bin/ps`, which has CPU time and RSS but no energy counter. GPU time of every
-//! process comes from the GPU's user clients in the IORegistry.
+//! libproc reads the current user's processes. Other users' processes come from `/bin/ps`, which
+//! has CPU time and RSS but no energy counter. GPU time of every process comes from the GPU's user
+//! clients in the IORegistry.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -118,13 +118,12 @@ pub struct ProcInfo {
   pub user: String,
   /// 100% = one fully busy core, as in Activity Monitor.
   pub cpu_pct: f32,
-  /// Physical footprint (Activity Monitor's "Memory") of the processes libproc reads: the current
-  /// user's, every process as root. Other users' processes come from `ps`, which has only the
-  /// resident size: it counts shared pages and leaves out compressed memory, so the two compare
-  /// only roughly.
+  /// Physical footprint (Activity Monitor's "Memory") of the current user's processes. Other
+  /// users' processes come from `ps`, which has only the resident size: it counts shared pages and
+  /// leaves out compressed memory, so the two compare only roughly.
   pub mem_bytes: u64,
-  /// `None` when the energy counter isn't readable: other users' processes without root, and
-  /// every process before macOS 13 (no `rusage_info_v6`).
+  /// `None` when the energy counter isn't readable: other users' processes, and every process
+  /// before macOS 13 (no `rusage_info_v6`).
   pub power_w: Option<f32>,
   /// Share of the interval the GPU spent on the process, 0..=100.
   pub gpu_pct: f32,
@@ -264,7 +263,7 @@ fn exe_path(pid: i32) -> Option<String> {
   Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
 }
 
-/// Reads a process through libproc; fails for other users' processes unless running as root.
+/// Reads a process through libproc; fails for other users' processes.
 fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<Raw> {
   let info = bsd_info(pid)?;
   let ru = rusage(pid, flavor)?;
@@ -350,7 +349,7 @@ fn parse_ps(out: &str) -> Vec<Raw> {
   out.lines().filter_map(parse_ps_line).collect()
 }
 
-/// Processes of all users from `/bin/ps` (setuid root), without the `ps` process itself.
+/// Processes of all users from `/bin/ps`, without the `ps` process itself.
 fn run_ps() -> Vec<Raw> {
   ps_rows(Command::new("/bin/ps").args(["-A", "-o", PS_COLUMNS]))
 }
@@ -578,8 +577,6 @@ struct Known {
 pub struct ProcSampler {
   timebase: (u32, u32),
   flavor: c_int,
-  /// Not as root: libproc reads every process then.
-  use_ps: bool,
   pids: Vec<i32>,
   known: HashMap<i32, Known>,
   users: HashMap<u32, String>,
@@ -604,7 +601,6 @@ impl ProcSampler {
     Self {
       timebase,
       flavor,
-      use_ps: unsafe { libc::geteuid() } != 0,
       pids: Vec::new(),
       known: HashMap::new(),
       users: HashMap::new(),
@@ -630,7 +626,7 @@ impl ProcSampler {
       }
     }
 
-    if unreadable && self.use_ps {
+    if unreadable {
       rows = merge(rows, run_ps());
     }
     for raw in &mut rows {
@@ -942,14 +938,12 @@ mod tests {
     assert_eq!(me.cpu_pct, 0.0); // no baseline yet
     assert_eq!(sampler.known.len(), first.len()); // pids are unique
 
-    // launchd belongs to root: without root it's only readable through ps.
+    // launchd belongs to another user, so it's only readable through ps.
     let launchd = first.iter().find(|p| p.pid == 1).expect("launchd is sampled");
     assert_eq!((launchd.name.as_str(), launchd.path.as_str()), ("launchd", "/sbin/launchd"));
     assert_eq!(launchd.user, "root");
     assert!(launchd.mem_bytes > 0);
-    if sampler.use_ps {
-      assert_eq!(launchd.power_w, None);
-    }
+    assert_eq!(launchd.power_w, None);
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_millis(50) {
