@@ -42,8 +42,12 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   }
 
   let mut out = String::new();
-  gauge!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", m.temp.cpu_temp_avg);
-  gauge!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", m.temp.gpu_temp_avg);
+  if let Some(value) = m.temp.cpu_temp_avg {
+    gauge!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
+  }
+  if let Some(value) = m.temp.gpu_temp_avg {
+    gauge!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", value);
+  }
   gauge!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
   gauge!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
@@ -256,7 +260,17 @@ pub fn run(
 mod tests {
   use macmon::{Metrics, SocInfo};
 
-  use super::{escape_label_value, escape_xml, serve_url, to_json};
+  use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
+
+  #[test]
+  fn unavailable_temperature_has_no_prometheus_gauge() {
+    let mut metrics = Metrics::default();
+    metrics.temp.cpu_temp_avg = Some(45.0);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_cpu_temp_celsius{chip=\"\"} 45"));
+    assert!(!output.contains("macmon_gpu_temp_celsius"));
+    assert!(output.contains("macmon_gpu_freq_mhz"));
+  }
 
   #[test]
   fn formats_serving_urls() {

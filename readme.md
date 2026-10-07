@@ -210,8 +210,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
 {
   "timestamp": "2025-02-24T20:38:15.427569+00:00",
   "temp": {
-    "cpu_temp_avg": 43.73614, // Celsius
-    "gpu_temp_avg": 36.95167, // Celsius
+    "cpu_temp_avg": 43.73614, // Celsius, null when no sensor has a valid reading
+    "gpu_temp_avg": 36.95167, // Celsius, null when no sensor has a valid reading
   },
   "memory": {
     "ram_total": 25769803776, // Bytes
@@ -309,7 +309,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("CPU power:  {:.2} W", metrics.cpu_power);
     println!("GPU power:  {:.2} W", metrics.gpu_power);
-    println!("CPU temp:   {:.1} °C", metrics.temp.cpu_temp_avg);
+    match metrics.temp.cpu_temp_avg {
+        Some(value) => println!("CPU temp:   {value:.1} °C"),
+        None => println!("CPU temp:   N/A"),
+    }
     println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
     println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio * 100.0);
     println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio * 100.0);

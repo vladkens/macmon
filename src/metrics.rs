@@ -58,10 +58,10 @@ impl PowerSources {
 /// Average hardware temperatures.
 #[derive(Debug, Default, Serialize)]
 pub struct TempMetrics {
-  /// Average CPU temperature in Celsius.
-  pub cpu_temp_avg: f32,
-  /// Average GPU temperature in Celsius.
-  pub gpu_temp_avg: f32,
+  /// Average CPU temperature in Celsius, or None when unavailable.
+  pub cpu_temp_avg: Option<f32>,
+  /// Average GPU temperature in Celsius, or None when unavailable.
+  pub gpu_temp_avg: Option<f32>,
 }
 
 /// Memory and swap usage.
@@ -181,6 +181,12 @@ pub struct Metrics {
 
 fn is_valid_temp(val: f32) -> bool {
   val > 0.0 && val <= 150.0
+}
+
+/// Average of the valid sensor readings, or None when no sensor has one.
+fn temperature_average(values: &[f32]) -> Option<f32> {
+  let valid: Vec<f32> = values.iter().copied().filter(|&val| is_valid_temp(val)).collect();
+  (!valid.is_empty()).then(|| valid.iter().sum::<f32>() / valid.len() as f32)
 }
 
 fn is_valid_fan_rpm(val: f32) -> bool {
@@ -433,22 +439,16 @@ impl Sampler {
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      let val = self.smc.read_float_val(sensor)?;
-      if is_valid_temp(val) {
-        cpu_metrics.push(val);
-      }
+      cpu_metrics.push(self.smc.read_float_val(sensor)?);
     }
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      let val = self.smc.read_float_val(sensor)?;
-      if is_valid_temp(val) {
-        gpu_metrics.push(val);
-      }
+      gpu_metrics.push(self.smc.read_float_val(sensor)?);
     }
 
-    let cpu_temp_avg = zero_div(cpu_metrics.iter().sum::<f32>(), cpu_metrics.len() as f32);
-    let gpu_temp_avg = zero_div(gpu_metrics.iter().sum::<f32>(), gpu_metrics.len() as f32);
+    let cpu_temp_avg = temperature_average(&cpu_metrics);
+    let gpu_temp_avg = temperature_average(&gpu_metrics);
 
     Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
   }
@@ -462,23 +462,19 @@ impl Sampler {
     for (name, value) in &metrics {
       if name.starts_with("pACC MTR Temp Sensor") || name.starts_with("eACC MTR Temp Sensor") {
         // println!("{}: {}", name, value);
-        if is_valid_temp(*value) {
-          cpu_values.push(*value);
-        }
+        cpu_values.push(*value);
         continue;
       }
 
       if name.starts_with("GPU MTR Temp Sensor") {
         // println!("{}: {}", name, value);
-        if is_valid_temp(*value) {
-          gpu_values.push(*value);
-        }
+        gpu_values.push(*value);
         continue;
       }
     }
 
-    let cpu_temp_avg = zero_div(cpu_values.iter().sum(), cpu_values.len() as f32);
-    let gpu_temp_avg = zero_div(gpu_values.iter().sum(), gpu_values.len() as f32);
+    let cpu_temp_avg = temperature_average(&cpu_values);
+    let gpu_temp_avg = temperature_average(&gpu_values);
 
     Ok(TempMetrics { cpu_temp_avg, gpu_temp_avg })
   }
@@ -651,9 +647,9 @@ mod tests {
   use std::collections::{HashMap, HashSet};
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, Metrics, PowerSources, aggregate_ioreport_metrics,
+    CpuCoreKind, CpuCoreMetrics, Metrics, PowerSources, TempMetrics, aggregate_ioreport_metrics,
     calc_freq_from_residencies, collect_cpu_core_metrics, parse_cpu_core_channel,
-    smc_numeric_value,
+    smc_numeric_value, temperature_average,
   };
   use crate::sources::SocInfo;
 
@@ -703,6 +699,21 @@ mod tests {
       }
       assert_eq!(power.watts(true), watts.filter(|x| x.is_finite() && *x >= 0.0));
     }
+  }
+
+  #[test]
+  fn temperature_average_rejects_missing_and_invalid_values() {
+    assert_eq!(temperature_average(&[]), None);
+    assert_eq!(temperature_average(&[0.0, -1.0, 151.0, f32::NAN, f32::INFINITY]), None);
+    assert_eq!(temperature_average(&[0.0, 40.0, f32::NAN, 60.0]), Some(50.0));
+  }
+
+  #[test]
+  fn unavailable_temperature_is_json_null() {
+    let metrics = TempMetrics { cpu_temp_avg: Some(45.0), gpu_temp_avg: None };
+    let value = serde_json::to_value(metrics).unwrap();
+    assert_eq!(value["cpu_temp_avg"], 45.0);
+    assert!(value["gpu_temp_avg"].is_null());
   }
 
   fn core(

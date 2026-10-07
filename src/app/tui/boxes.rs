@@ -404,7 +404,7 @@ impl App {
       Metric::Ram => self.ram_box(),
       Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
       Metric::GpuPower => self.power_box("GPU", &self.gpu_power, self.gpu_temp.last()),
-      Metric::AnePower => self.power_box("ANE", &self.ane_power, 0.0),
+      Metric::AnePower => self.power_box("ANE", &self.ane_power, None),
     }
   }
 
@@ -458,17 +458,23 @@ impl App {
   /// that doesn't fit, with the temperature (`45°C`) on the right when the sensor exists, over the
   /// power history in the low load color, scaled to its largest visible sample. Always a graph,
   /// as in the original.
-  fn power_box<'a>(&self, label: &'static str, store: &'a PowerStore, temp: f32) -> MetricBox<'a> {
+  fn power_box<'a>(
+    &self,
+    label: &'static str,
+    store: &'a PowerStore,
+    temp: Option<f32>,
+  ) -> MetricBox<'a> {
     let short = vec![heading(label), text(format!(" {:.2}W", store.top_value))];
     let mut full = short.clone();
     full.push(dim(format!(" ({:.2}, {:.2})", store.avg_value, store.max_value)));
 
     let titles = [full, short].map(|left| {
       let titles = Titles::new(left);
-      if temp > 0.0 {
-        titles.right(Span::styled(format!("{temp:.0}°C"), gradient(temp_ratio(temp))))
-      } else {
-        titles
+      match temp {
+        Some(temp) => {
+          titles.right(Span::styled(format!("{temp:.0}°C"), gradient(temp_ratio(temp))))
+        }
+        None => titles,
       }
     });
 
