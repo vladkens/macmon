@@ -995,8 +995,18 @@ mod tests {
   fn renders_every_box_at_any_size() {
     use Metric::*;
     let every_box = [Cluster(0), Cluster(1), Gpu, Ram, CpuPower, GpuPower, AnePower];
-    let sizes =
-      [(400, 120), (200, 50), (80, 24), (60, 15), (60, 12), (30, 8), (5, 3), (1, 1), (5, 0), (0, 5)];
+    let sizes = [
+      (400, 120),
+      (200, 50),
+      (80, 24),
+      (60, 15),
+      (60, 12),
+      (30, 8),
+      (5, 3),
+      (1, 1),
+      (5, 0),
+      (0, 5),
+    ];
     for (width, height) in sizes {
       let bare = test_app_with(|m| {
         m.memory.swap_total = 0;
