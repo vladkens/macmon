@@ -25,7 +25,7 @@
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
 - 🎨 Follows your terminal's color scheme
-- 🪟 Layout that scales with the window
+- 🪟 Can be displayed in a small window
 - 🦀 Written in Rust
 
 ## 📥 Installation
@@ -79,44 +79,7 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal UI: the metric boxes of the original layout (one per CPU cluster, GPU and RAM, then CPU / GPU / ANE power) in the top 40% of the window and the process list below it; with the process list hidden, the boxes take the whole window. Each box shows its history as a chart filling the box; `v` switches the CPU, GPU and RAM boxes to gauges of the current load. The RAM box shows used RAM and swap (the total RAM is in the chip title). Narrow boxes show short titles (`E-CPU 42%`, `CPU 3.44W`, `RAM 70% · SWAP 79%`). The bottom border of the metrics box shows `Power` (CPU + GPU + ANE), the fans and `Total`, the power of the whole system (when the Mac reports it).
-
-```text
-Controls:
-  q     - quit (also Ctrl-C)
-  ?     - show / hide help
-  p     - show / hide the process list
-  v     - switch chart view: graph / gauge
-  r     - switch ratio mode: scaled / active
-  - / + - change update interval
-
-Process list:
-  ↑ ↓   - select process
-  s     - sort by the next column: CPU, MEM, POWER, GPU, PID, NAME, USER
-  S     - reverse sort order
-  /     - filter by name or PID (Enter - keep, Esc - clear); while typing, every key
-          (q, p, v, r, -, + too) goes to the filter, only Ctrl-C quits
-  Esc   - clear selection and filter
-
-Mouse (process list):
-  click a column header - sort by it, click again to reverse
-  click a process       - select it, click it again to clear the selection
-  wheel                 - scroll by 3 rows, with the selection when there is one
-```
-
-A column chosen for sorting starts with the largest numbers (CPU, MEM, POWER, GPU) or from the start (PID, NAME, USER); the sorted column stays on screen in narrow windows. The bottom border of the process list shows the PID and full path of the selected process.
-
-Settings (interval, ratio mode, chart view, process list, sort) are saved to `~/.config/macmon.json`; an interval given with `-i` is used for that run only. The process list hides itself when the window is too small; `p` does nothing then.
-
-Colors come from your terminal's palette: borders and text in its own colors, loads in its green, yellow and red, a step per third of the load.
-
-While the process list is shown, the terminal sends mouse input to macmon, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
-
-#### Process data
-
-CPU %, memory and GPU % are shown for every process. Power (W) is shown for your own processes; macOS doesn't expose the energy counter of other users' processes, so those show `-` and the bottom border of the list notes `POWER: own processes only`. Per-process power needs macOS 13 or later. CPU % follows Activity Monitor: 100% is one fully busy core; for other users' processes it comes from `ps` in 10 ms steps and is averaged over the last 3 intervals. `kernel_task` isn't listed.
-
-Memory is the physical footprint (Activity Monitor's "Memory") for your own processes and the resident size for other users' processes. The two measure differently (resident size counts shared pages and leaves out compressed memory), so sorting by MEM compares them only roughly.
+Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
 ### JSON output
 

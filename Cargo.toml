@@ -2,7 +2,7 @@
 name = "macmon"
 version = "0.8.2"
 edition = "2024"
-description = "Apple Silicon system monitor & Rust library — CPU/GPU power, temperature, RAM, per-process usage. No sudo. TUI, JSON pipe, Prometheus exporter."
+description = "Apple Silicon system monitor & Rust library — CPU/GPU power, temperature, RAM. No sudo. TUI, JSON pipe, Prometheus exporter."
 authors = ["vladkens"]
 license = "MIT"
 repository = "https://github.com/vladkens/macmon"
