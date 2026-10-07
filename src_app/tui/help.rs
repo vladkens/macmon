@@ -34,7 +34,7 @@ const HELP: &[Row] = &[
   Section("Notes"),
   Key("CPU%", "100% is one fully busy core"),
   Key("scaled", "usage weighted by frequency; active: share of time busy"),
-  Key("POWER -", "another user's process (run with sudo for all)"),
+  Key("POWER -", "not available for other users' processes"),
   Key("select text", "hold Option (iTerm2) or Shift (most terminals)"),
 ];
 

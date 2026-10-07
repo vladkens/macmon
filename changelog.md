@@ -8,7 +8,7 @@
 ### Features
 
 - Redesigned the TUI with the metric boxes in the top 40% of the window and a process list below
-- Added a process list with CPU, memory, power and GPU usage per process, without sudo (power of your own processes only, on macOS 13+)
+- Added a process list with CPU, memory, power and GPU usage per process (power of your own processes only, on macOS 13+)
 - Added process sorting (`s` / `S`), filtering by name or PID (`/`) and selection (`↑` / `↓`)
 - Added mouse support in the process list: click a header to sort, a process to select it, a key hint to press it, scroll with the wheel
 - Added `p` to show / hide the process list
@@ -30,7 +30,6 @@
 ### Fixes
 
 - Fixed the terminal staying in raw mode on the alternate screen after an error or crash
-- Fixed `sudo` runs creating a root-owned `~/.config/macmon.json` that later runs couldn't update
 - Fixed an interval given with `-i` being saved to the config
 
 **Full Changelog**: https://github.com/vladkens/macmon/compare/v0.8.2...main

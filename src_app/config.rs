@@ -1,7 +1,6 @@
 //! Persistent terminal UI settings.
 
-use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 
@@ -101,15 +100,6 @@ impl Default for Config {
   }
 }
 
-/// Whether macmon runs as root through `sudo`.
-fn under_sudo() -> bool {
-  sudo_root(unsafe { libc::geteuid() }, std::env::var_os("SUDO_UID"))
-}
-
-fn sudo_root(euid: u32, sudo_uid: Option<OsString>) -> bool {
-  euid == 0 && sudo_uid.is_some_and(|uid| !uid.is_empty())
-}
-
 impl Config {
   fn normalize(mut self) -> Self {
     self.interval = self.interval.clamp(TUI_MIN_MS, TUI_MAX_MS);
@@ -156,25 +146,14 @@ impl Config {
     Self { path, ..cfg }
   }
 
-  /// Saves the settings. Under `sudo` (which keeps `HOME`) only an existing file is rewritten: a
-  /// new file or directory would belong to root, and the user's own runs couldn't save any more.
+  /// Writes the settings to their file.
   pub fn save(&self) {
-    self.write(under_sudo());
-  }
-
-  /// Writes the settings to their file; with `existing_only`, only to a file that exists.
-  fn write(&self, existing_only: bool) {
     let Some(path) = &self.path else { return };
-    let file = if existing_only {
-      OpenOptions::new().write(true).truncate(true).open(path)
-    } else {
-      if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-      }
-      File::create(path)
-    };
+    if let Some(dir) = path.parent() {
+      let _ = fs::create_dir_all(dir);
+    }
 
-    if let Ok(file) = file {
+    if let Ok(file) = File::create(path) {
       let _ = serde_json::to_writer_pretty(BufWriter::new(file), self);
     }
   }
@@ -270,12 +249,7 @@ impl Drop for TempConfig {
 
 #[cfg(test)]
 mod tests {
-  use std::ffi::OsString;
-  use std::fs;
-
-  use super::{
-    Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType, sudo_root,
-  };
+  use super::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
 
   fn parse(json: &str) -> Config {
     Config::from_reader(json.as_bytes())
@@ -487,31 +461,5 @@ mod tests {
     cfg.toggle_procs();
     assert!(!cfg.show_procs);
     assert!(Config::load_from(None).show_procs);
-  }
-
-  #[test]
-  fn under_sudo_only_an_existing_file_is_rewritten() {
-    let file = TempConfig::new("under_sudo");
-    let mut cfg = Config::load_from(Some(file.path()));
-    cfg.show_procs = false;
-
-    // no file, no directory: nothing is created that root would own
-    cfg.write(true);
-    assert!(!file.path().exists());
-
-    // a file the user's own runs created is rewritten in place
-    cfg.write(false);
-    cfg.show_procs = true;
-    cfg.write(true);
-    assert_eq!(file.saved()["show_procs"], true);
-    assert!(fs::read_to_string(file.path()).unwrap().contains("\"interval\": 1000"));
-
-    // root through sudo; root logged in, a user, an empty SUDO_UID aren't
-    let uid = |uid: &str| Some(OsString::from(uid));
-    assert!(sudo_root(0, uid("501")));
-    assert!(!sudo_root(0, None));
-    assert!(!sudo_root(0, uid("")));
-    assert!(!sudo_root(501, uid("501")));
-    assert!(!sudo_root(501, None));
   }
 }

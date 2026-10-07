@@ -3095,7 +3095,7 @@ mod tests {
       " Notes ",
       "100% is one fully busy core",
       "POWER -",
-      "(run with sudo for all)",
+      "not available for other users' processes",
       "Option (iTerm2)",
     ] {
       assert!(text.contains(line), "missing {line:?}");

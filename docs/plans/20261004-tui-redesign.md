@@ -132,7 +132,7 @@ Current design: Tasks 19–20 (summary in "Current design" under Technical Detai
 - New: ~~`panels` (5 bools, default all on)~~ (dropped in Task 16), `proc_sort` (default `Cpu`), `proc_sort_desc` (default `true`).
 - ➕ Task 16: `panels` and `per_core_view` dropped (ignored on load); new `show_procs` (default `true`, key `p`).
 - ➕ Task 20: `view_type` back with the released values (`"Sparkline"` = graph, `"Gauge"`); unknown values fall back to the graph.
-- ➕ Review 1: every field falls back on its own: a bad value (wrong type, unknown name) gets that field's default, the others keep theirs (released versions reset the whole file). Under `sudo` (which keeps `HOME`) only an existing file is rewritten, so no root-owned file or directory is created. The file path is a field of `Config`, so tests save to a temp file.
+- ➕ Review 1: every field falls back on its own: a bad value (wrong type, unknown name) gets that field's default, the others keep theirs (released versions reset the whole file). ~~Under `sudo` (which keeps `HOME`) only an existing file is rewritten, so no root-owned file or directory is created.~~ ➕ PR review (user): macmon is sudoless — the `sudo` handling and every `sudo` hint in the UI, readme and changelog were removed. The file path is a field of `Config`, so tests save to a temp file.
 
 ### Process sampling (`src_app/procs.rs`)
 - `ProcInfo { pid, ~~ppid,~~ name, user, cpu_pct, mem_bytes, power_w: Option<f32>, gpu_pct }` (➕ Review 1: `ppid` dropped until the process tree of Phase 2 needs it).

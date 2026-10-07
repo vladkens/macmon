@@ -114,13 +114,11 @@ Colors come from your terminal's palette: borders and text in its own colors, lo
 
 While the process list is shown, the terminal sends mouse input to macmon, so dragging doesn't select text. Hold Option (iTerm2) or Shift (Ghostty and most other terminals) while dragging to select text.
 
-#### Process data without sudo
+#### Process data
 
-CPU %, memory and GPU % are shown for every process. Power (W) is shown only for processes of the current user — macOS doesn't expose the energy counter of other users' processes without root, so those show `-` and the bottom border of the list notes `POWER: own processes only` (run with `sudo` to see it for every process). Per-process power needs macOS 13 or later. CPU % follows Activity Monitor: 100% is one fully busy core; for other users' processes it comes from `ps` in 10 ms steps and is averaged over the last 3 intervals. `kernel_task` is listed only with `sudo`.
+CPU %, memory and GPU % are shown for every process. Power (W) is shown for your own processes; macOS doesn't expose the energy counter of other users' processes, so those show `-` and the bottom border of the list notes `POWER: own processes only`. Per-process power needs macOS 13 or later. CPU % follows Activity Monitor: 100% is one fully busy core; for other users' processes it comes from `ps` in 10 ms steps and is averaged over the last 3 intervals. `kernel_task` isn't listed.
 
-Memory is the physical footprint (Activity Monitor's "Memory") for the current user's processes, and the resident size for other users' processes, which is all macOS gives without root. The two measure differently (resident size counts shared pages and leaves out compressed memory), so sorting by MEM compares them only roughly. With `sudo` every process shows its footprint.
-
-Under `sudo`, settings are saved only to an existing `~/.config/macmon.json`, so the file never ends up owned by root.
+Memory is the physical footprint (Activity Monitor's "Memory") for your own processes and the resident size for other users' processes. The two measure differently (resident size counts shared pages and leaves out compressed memory), so sorting by MEM compares them only roughly.
 
 ### JSON output
 
