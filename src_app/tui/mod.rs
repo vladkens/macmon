@@ -125,7 +125,11 @@ fn start_input(
 
 enum Event {
   Update(Box<Metrics>),
-  Procs(Vec<ProcInfo>),
+  /// A process sample with the number of the panel showing it was started in.
+  Procs {
+    showing: u64,
+    procs: Vec<ProcInfo>,
+  },
   Key(KeyEvent),
   Mouse(MouseEvent),
   /// Redraw: the periodic tick, and a resize, so the mouse targets follow the new layout at once.
@@ -215,8 +219,10 @@ struct Showing {
 }
 
 impl ProcsShown {
-  fn get(&self) -> bool {
-    self.state.lock().unwrap().on
+  /// The number of the current showing while the panel is on screen.
+  fn showing(&self) -> Option<u64> {
+    let state = self.state.lock().unwrap();
+    state.on.then_some(state.count)
   }
 
   fn set(&self, on: bool) {
@@ -243,14 +249,22 @@ impl ProcsShown {
   }
 }
 
+/// Sampler of a showing in `run_procs_thread`: samples processes with a new `ProcSampler`.
+fn proc_sampler() -> impl FnMut() -> Vec<ProcInfo> {
+  let mut sampler = ProcSampler::new();
+  move || sampler.sample()
+}
+
 /// Sends `Event::Procs` every `msec` while the process panel is `shown` and blocks otherwise.
-/// Each showing gets a new sampler, so rates after a hide don't average over the hidden time; a
-/// hide ends the wait for the next sample at once, also during a long interval. Exits when the
-/// receiver is gone.
-fn run_procs_thread(
+/// Each showing gets a new sampler from `new_sampler`, so rates after a hide don't average over
+/// the hidden time; a hide ends the wait for the next sample at once, also during a long
+/// interval. Every sample carries the showing it was started in, so the app can drop one that
+/// a hide (and maybe a show) overtook while it ran. Exits when the receiver is gone.
+fn run_procs_thread<S: FnMut() -> Vec<ProcInfo>>(
   tx: mpsc::Sender<Event>,
   msec: Arc<RwLock<u32>>,
   shown: Arc<ProcsShown>,
+  new_sampler: impl Fn() -> S + Send + 'static,
 ) -> JoinHandle<()> {
   thread::spawn(move || {
     loop {
@@ -258,13 +272,13 @@ fn run_procs_thread(
 
       // the first sample only sets the baseline: its CPU and power rates are zero
       let started = Instant::now();
-      let mut sampler = ProcSampler::new();
-      sampler.sample();
+      let mut sample = new_sampler();
+      sample();
       let mut wait = PROCS_WARMUP.saturating_sub(started.elapsed());
 
       while shown.wait_while_shown(showing, wait) {
         let started = Instant::now();
-        if tx.send(Event::Procs(sampler.sample())).is_err() {
+        if tx.send(Event::Procs { showing, procs: sample() }).is_err() {
           return;
         }
         let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
@@ -346,7 +360,7 @@ impl App {
   }
 
   fn procs_visible(&self) -> bool {
-    self.procs_shown.get()
+    self.procs_shown.showing().is_some()
   }
 
   /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
@@ -359,9 +373,11 @@ impl App {
     }
   }
 
-  /// Stores a process sample; one still in flight when the panel got hidden is dropped.
-  fn update_procs(&mut self, procs: Vec<ProcInfo>) {
-    if self.procs_visible() {
+  /// Stores a process sample started in the panel's `showing`. Only one of the current showing
+  /// gets in: one still in flight when the panel got hidden is dropped, also when the panel is
+  /// back by now, so a re-shown panel reads "collecting…" until its own first sample.
+  fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
+    if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
     }
   }
@@ -376,8 +392,8 @@ impl App {
         self.update_metrics(*data);
         return ControlFlow::Continue(());
       }
-      Event::Procs(procs) => {
-        self.update_procs(procs);
+      Event::Procs { showing, procs } => {
+        self.update_procs(showing, procs);
         return ControlFlow::Continue(());
       }
       Event::Tick => return ControlFlow::Continue(()),
@@ -503,7 +519,7 @@ impl App {
 
     let (tx, rx) = mpsc::channel::<Event>();
     run_sampler_thread(tx.clone(), msec.clone());
-    run_procs_thread(tx.clone(), msec.clone(), self.procs_shown.clone());
+    run_procs_thread(tx.clone(), msec.clone(), self.procs_shown.clone(), proc_sampler);
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
@@ -535,7 +551,7 @@ mod tests {
   use std::ops::ControlFlow;
   use std::rc::Rc;
   use std::sync::atomic::{AtomicBool, Ordering};
-  use std::sync::{Arc, RwLock, mpsc};
+  use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::thread;
   use std::time::{Duration, Instant};
 
@@ -556,8 +572,8 @@ mod tests {
   use super::store::{CpuClusters, FreqSample};
   use super::theme::{self, Theme};
   use super::{
-    App, Event, PROCS_WARMUP, ProcsShown, input_event, restore_term_once, run_procs_thread,
-    set_mouse_capture, start_input,
+    App, Event, PROCS_WARMUP, ProcsShown, input_event, proc_sampler, restore_term_once,
+    run_procs_thread, set_mouse_capture, start_input,
   };
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
@@ -738,7 +754,8 @@ mod tests {
     assert!(handle(&mut app, Event::Update(Box::new(metrics))).is_continue());
     assert_eq!(app.igpu_freq.freq_mhz, 777);
     render_buffer(&mut app, 200, 50);
-    assert!(handle(&mut app, Event::Procs(varied_procs())).is_continue());
+    let showing = app.procs_shown.showing().unwrap();
+    assert!(handle(&mut app, Event::Procs { showing, procs: varied_procs() }).is_continue());
     assert_eq!(app.proc_view.row_count(), 3);
     assert!(handle(&mut app, Event::Tick).is_continue());
 
@@ -1256,7 +1273,7 @@ mod tests {
     // M3 Pro, enough history to fill the graphs
     let mut app = app_with_samples(60, |_| {});
     render_buffer(&mut app, 110, 32);
-    app.update_procs(varied_procs());
+    put_procs(&mut app, varied_procs());
     let buf = render_buffer(&mut app, 110, 32);
     let rows: Vec<String> = (0..32).map(|y| row(&buf, y)).collect();
 
@@ -2112,7 +2129,14 @@ mod tests {
   }
 
   fn procs_active(app: &App) -> bool {
-    app.procs_shown.get()
+    app.procs_visible()
+  }
+
+  /// Hands `procs` to `app` as a sample of the panel's latest showing: the one on screen, or the
+  /// last one while the panel is hidden (a sample still in flight).
+  fn put_procs(app: &mut App, procs: Vec<ProcInfo>) {
+    let showing = app.procs_shown.state.lock().unwrap().count;
+    app.update_procs(showing, procs);
   }
 
   #[test]
@@ -2146,13 +2170,13 @@ mod tests {
     let screen = render_to_string(&mut app, 200, 50);
     assert!(screen.contains(" proc ") && screen.contains("collecting…"));
 
-    app.update_procs(test_procs());
+    put_procs(&mut app, test_procs());
     assert_eq!(app.proc_view.procs(), Some(test_procs().as_slice()));
     let screen = render_to_string(&mut app, 200, 50);
     assert!(screen.contains(" proc 3 ") && screen.contains("WindowServer"));
     assert!(!screen.contains("collecting"));
 
-    app.update_procs(vec![]);
+    put_procs(&mut app, vec![]);
     let screen = render_to_string(&mut app, 200, 50);
     assert!(screen.contains(" proc 0 ") && !screen.contains("WindowServer"));
   }
@@ -2161,29 +2185,36 @@ mod tests {
   fn hidden_proc_panel_drops_samples() {
     let mut app = test_app();
     // samples arriving before the first frame are dropped
-    app.update_procs(test_procs());
+    put_procs(&mut app, test_procs());
     assert_eq!(app.proc_view.procs(), None);
 
     render_buffer(&mut app, 200, 50);
-    app.update_procs(test_procs());
+    let first = app.procs_shown.showing().unwrap();
+    app.update_procs(first, test_procs());
     assert!(app.proc_view.procs().is_some());
 
     // hiding drops the list and a sample still in flight
     render_buffer(&mut app, 60, 12);
     assert_eq!(app.proc_view.procs(), None);
-    app.update_procs(test_procs());
+    app.update_procs(first, test_procs());
     assert_eq!(app.proc_view.procs(), None);
 
-    // shown again: collecting until the next sample instead of stale rows
+    // shown again: collecting until the next sample instead of stale rows, also when a sample
+    // started before the hide arrives only now
     assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
-    app.update_procs(test_procs());
+    app.update_procs(first, test_procs());
+    assert_eq!(app.proc_view.procs(), None);
+    assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
+    let second = app.procs_shown.showing().unwrap();
+    assert_ne!(second, first);
+    app.update_procs(second, test_procs());
     assert!(render_to_string(&mut app, 200, 50).contains(" proc 3 "));
   }
 
   /// `app` with the process panel on screen at 200x50 and `procs` in it.
   fn with_procs(mut app: App, procs: Vec<ProcInfo>) -> App {
     render_buffer(&mut app, 200, 50);
-    app.update_procs(procs);
+    put_procs(&mut app, procs);
     app
   }
 
@@ -2292,7 +2323,7 @@ mod tests {
     assert!(line.ends_with("   0.0    20M   0.00W    0.0 │"), "{line}");
     assert_eq!(buf[(x_of(&line, "0.00W"), PROC_Y + 4)].fg, theme::DIM);
 
-    app.update_procs(varied_procs());
+    put_procs(&mut app, varied_procs());
     let line = proc_row(&render_buffer(&mut app, 200, 50), 4);
     assert!(line.ends_with("   0.0    20M       -    0.0 │"), "{line}");
   }
@@ -2301,7 +2332,7 @@ mod tests {
   fn narrow_proc_panel_drops_columns() {
     let mut app = test_app();
     render_buffer(&mut app, 40, 20);
-    app.update_procs(varied_procs());
+    put_procs(&mut app, varied_procs());
 
     // the process box under the smallest metrics box, 8 rows
     let buf = render_buffer(&mut app, 40, 20);
@@ -2781,14 +2812,14 @@ mod tests {
 
     assert!(app.handle_key(key('p')).is_continue());
     render_buffer(&mut app, 200, 50);
-    app.update_procs(varied_procs());
+    put_procs(&mut app, varied_procs());
     render_buffer(&mut app, 200, 50);
     render_buffer(&mut app, 60, 12);
     try_all(&mut app);
 
     // back on screen, the same clicks work again
     render_buffer(&mut app, 200, 50);
-    app.update_procs(varied_procs());
+    put_procs(&mut app, varied_procs());
     render_buffer(&mut app, 200, 50);
     assert!(click(&mut app, mem.0, mem.1).is_continue());
     assert_eq!(app.cfg.proc_sort, ProcSort::Mem);
@@ -2903,7 +2934,7 @@ mod tests {
     // every process with a reading (root), or none: no note
     for power in [Some(0.5), None] {
       let procs = varied_procs().into_iter().map(|p| ProcInfo { power_w: power, ..p }).collect();
-      app.update_procs(procs);
+      put_procs(&mut app, procs);
       assert_eq!(row(&render_buffer(&mut app, 200, 50), 49), hints_border(200, 6));
     }
   }
@@ -3148,9 +3179,10 @@ mod tests {
   #[test]
   fn a_hide_ends_the_showing_even_when_the_panel_is_back_at_once() {
     let shown = Arc::new(ProcsShown::default());
-    assert!(!shown.get());
+    assert_eq!(shown.showing(), None);
     shown.set(true);
     let first = shown.wait_shown();
+    assert_eq!(shown.showing(), Some(first));
     // setting the same state again changes nothing
     shown.set(true);
     assert!(shown.wait_while_shown(first, Duration::from_millis(10)), "the showing goes on");
@@ -3163,7 +3195,7 @@ mod tests {
     assert!(started.elapsed() < Duration::from_secs(1), "no wait for the old showing");
     let second = shown.wait_shown();
     assert_ne!(second, first);
-    assert!(shown.get());
+    assert_eq!(shown.showing(), Some(second));
 
     // a hide wakes a waiting thread at once
     let waiter = {
@@ -3182,15 +3214,17 @@ mod tests {
     let (tx, rx) = mpsc::channel();
     let shown = Arc::new(ProcsShown::default());
     let msec = Arc::new(RwLock::new(TUI_MIN_MS));
-    let sampler = run_procs_thread(tx, msec.clone(), shown.clone());
+    let sampler = run_procs_thread(tx, msec.clone(), shown.clone(), proc_sampler);
 
-    // Shows the panel; returns how long the first sample took and the sample.
+    // Shows the panel; returns how long the first sample took and the sample, which belongs to
+    // this showing.
     let show = |shown: &ProcsShown| {
       let started = Instant::now();
       shown.set(true);
-      let Ok(Event::Procs(procs)) = rx.recv_timeout(Duration::from_secs(5)) else {
+      let Ok(Event::Procs { showing, procs }) = rx.recv_timeout(Duration::from_secs(5)) else {
         panic!("no process sample");
       };
+      assert_eq!(Some(showing), shown.showing());
       (started.elapsed(), procs)
     };
 
@@ -3240,5 +3274,56 @@ mod tests {
       thread::sleep(Duration::from_millis(10));
     }
     sampler.join().expect("process thread exits cleanly");
+  }
+
+  #[test]
+  fn a_sample_started_before_a_hide_and_show_never_reaches_the_list() {
+    let mut app = test_app();
+    render_buffer(&mut app, 200, 50);
+
+    // a sampler that reports each sample as it starts and finishes it only when released
+    let (started_tx, started) = mpsc::channel();
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = Arc::new(Mutex::new(gate));
+    let new_sampler = move || {
+      let (started_tx, gate) = (started_tx.clone(), gate.clone());
+      move || {
+        let _ = started_tx.send(());
+        let _ = gate.lock().unwrap().recv();
+        test_procs()
+      }
+    };
+    let (tx, rx) = mpsc::channel();
+    let msec = Arc::new(RwLock::new(TUI_MIN_MS));
+    run_procs_thread(tx, msec.clone(), app.procs_shown.clone(), new_sampler);
+
+    let timeout = Duration::from_secs(5);
+    // Lets the next sample of the process thread run to its end.
+    let finish_sample = || {
+      started.recv_timeout(timeout).expect("no sample started");
+      release.send(()).unwrap();
+    };
+    // Hands the next event of the process thread to the app.
+    let take_event = |app: &mut App| {
+      let event = rx.recv_timeout(timeout).expect("no process sample");
+      assert!(app.handle_event(event, &msec).is_continue());
+    };
+
+    // the baseline, then a sample that runs while the panel is hidden and shown again
+    finish_sample();
+    started.recv_timeout(timeout).expect("no sample started");
+    render_buffer(&mut app, 60, 12);
+    render_buffer(&mut app, 200, 50);
+    assert!(procs_active(&app));
+    release.send(()).unwrap();
+    take_event(&mut app);
+    assert_eq!(app.proc_view.procs(), None, "a stale sample reached the list");
+    assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
+
+    // the new showing: its own baseline, then its first sample fills the list
+    finish_sample();
+    finish_sample();
+    take_event(&mut app);
+    assert_eq!(app.proc_view.procs(), Some(test_procs().as_slice()));
   }
 }
