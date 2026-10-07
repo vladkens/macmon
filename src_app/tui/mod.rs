@@ -12,7 +12,7 @@ mod widgets;
 use std::io::{self, Stdout, Write, stdout};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -152,9 +152,6 @@ fn input_event(event: event::Event) -> Option<Event> {
   }
 }
 
-/// How often the paused process thread checks whether the panel is back, and the sleeping one
-/// whether it is still on screen.
-const PROCS_PAUSE_POLL: Duration = Duration::from_millis(100);
 /// Window of the first process sample after the panel shows up, so the list fills in quickly.
 const PROCS_WARMUP: Duration = Duration::from_millis(TUI_MIN_MS as u64);
 
@@ -200,53 +197,79 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   });
 }
 
-/// Sleeps `duration` in `PROCS_PAUSE_POLL` steps, and stops early once `active` is cleared.
-fn sleep_while(active: &AtomicBool, duration: Duration) {
-  let deadline = Instant::now() + duration;
-  while active.load(Ordering::Relaxed) {
-    let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-      return;
+/// Whether the process panel is on screen, shared with the process thread, which samples only
+/// while it is. Every change wakes the thread, and every show starts a new showing, so the thread
+/// also notices a hide when the panel is back before it gets to look.
+#[derive(Debug, Default)]
+struct ProcsShown {
+  state: Mutex<Showing>,
+  changed: Condvar,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct Showing {
+  /// The panel is on screen.
+  on: bool,
+  /// Times the panel was shown: the number of the current showing while `on`.
+  count: u64,
+}
+
+impl ProcsShown {
+  fn get(&self) -> bool {
+    self.state.lock().unwrap().on
+  }
+
+  fn set(&self, on: bool) {
+    let mut state = self.state.lock().unwrap();
+    if state.on != on {
+      *state = Showing { on, count: state.count + u64::from(on) };
+      self.changed.notify_all();
     }
-    thread::sleep(left.min(PROCS_PAUSE_POLL));
+  }
+
+  /// Blocks until the panel is on screen; returns the number of that showing.
+  fn wait_shown(&self) -> u64 {
+    let state = self.changed.wait_while(self.state.lock().unwrap(), |state| !state.on);
+    state.unwrap().count
+  }
+
+  /// Waits `timeout`, or less once the showing `count` ends (a hide, also with a show right
+  /// after it); returns whether it goes on.
+  fn wait_while_shown(&self, count: u64, timeout: Duration) -> bool {
+    let same = |state: &mut Showing| *state == Showing { on: true, count };
+    let state = self.state.lock().unwrap();
+    let (mut state, _) = self.changed.wait_timeout_while(state, timeout, same).unwrap();
+    same(&mut state)
   }
 }
 
-/// Sends `Event::Procs` every `msec` while `active` is set (the process panel is on screen) and
-/// sleeps otherwise. A pause drops the sampler, so rates after it don't average over the hidden
-/// time; it is noticed within `PROCS_PAUSE_POLL`, also during a long interval. Exits when the
+/// Sends `Event::Procs` every `msec` while the process panel is `shown` and blocks otherwise.
+/// Each showing gets a new sampler, so rates after a hide don't average over the hidden time; a
+/// hide ends the wait for the next sample at once, also during a long interval. Exits when the
 /// receiver is gone.
 fn run_procs_thread(
   tx: mpsc::Sender<Event>,
   msec: Arc<RwLock<u32>>,
-  active: Arc<AtomicBool>,
+  shown: Arc<ProcsShown>,
 ) -> JoinHandle<()> {
   thread::spawn(move || {
-    let mut sampler: Option<ProcSampler> = None;
-
     loop {
-      if !active.load(Ordering::Relaxed) {
-        sampler = None;
-        thread::sleep(PROCS_PAUSE_POLL);
-        continue;
-      }
+      let showing = shown.wait_shown();
 
+      // the first sample only sets the baseline: its CPU and power rates are zero
       let started = Instant::now();
-      let delay = match sampler.as_mut() {
-        Some(sampler) => {
-          if tx.send(Event::Procs(sampler.sample())).is_err() {
-            return;
-          }
-          Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into())
+      let mut sampler = ProcSampler::new();
+      sampler.sample();
+      let mut wait = PROCS_WARMUP.saturating_sub(started.elapsed());
+
+      while shown.wait_while_shown(showing, wait) {
+        let started = Instant::now();
+        if tx.send(Event::Procs(sampler.sample())).is_err() {
+          return;
         }
-        // the first sample only sets the baseline: its CPU and power rates are zero
-        None => {
-          sampler.insert(ProcSampler::new()).sample();
-          PROCS_WARMUP
-        }
-      };
-      // a pause during the wait goes back to the top, which drops the sampler
-      sleep_while(&active, delay.saturating_sub(started.elapsed()));
+        let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
+        wait = interval.saturating_sub(started.elapsed());
+      }
     }
   })
 }
@@ -279,8 +302,8 @@ pub struct App {
 
   /// Process panel state with the latest process list (none until the first sample with rates).
   proc_view: ProcView,
-  /// Set while the process panel is on screen; the process thread samples only then.
-  procs_active: Arc<AtomicBool>,
+  /// Whether the process panel is on screen; the process thread samples only then.
+  procs_shown: Arc<ProcsShown>,
   /// The window of the last frame has room for the process list, whether it is shown or not;
   /// `p` works only then (no room before the first frame).
   procs_fit: bool,
@@ -323,14 +346,14 @@ impl App {
   }
 
   fn procs_visible(&self) -> bool {
-    self.procs_active.load(Ordering::Relaxed)
+    self.procs_shown.get()
   }
 
   /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
   /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
   /// filter input, so keys don't go to a filter that isn't on screen.
   fn set_procs_visible(&mut self, visible: bool) {
-    self.procs_active.store(visible, Ordering::Relaxed);
+    self.procs_shown.set(visible);
     if !visible {
       self.proc_view.clear();
     }
@@ -480,7 +503,7 @@ impl App {
 
     let (tx, rx) = mpsc::channel::<Event>();
     run_sampler_thread(tx.clone(), msec.clone());
-    run_procs_thread(tx.clone(), msec.clone(), self.procs_active.clone());
+    run_procs_thread(tx.clone(), msec.clone(), self.procs_shown.clone());
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
@@ -533,7 +556,7 @@ mod tests {
   use super::store::{CpuClusters, FreqSample};
   use super::theme::{self, Theme};
   use super::{
-    App, Event, PROCS_PAUSE_POLL, PROCS_WARMUP, input_event, restore_term_once, run_procs_thread,
+    App, Event, PROCS_WARMUP, ProcsShown, input_event, restore_term_once, run_procs_thread,
     set_mouse_capture, start_input,
   };
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
@@ -2089,7 +2112,7 @@ mod tests {
   }
 
   fn procs_active(app: &App) -> bool {
-    app.procs_active.load(Ordering::Relaxed)
+    app.procs_shown.get()
   }
 
   #[test]
@@ -3123,34 +3146,66 @@ mod tests {
   }
 
   #[test]
-  fn procs_thread_samples_only_while_active() {
+  fn a_hide_ends_the_showing_even_when_the_panel_is_back_at_once() {
+    let shown = Arc::new(ProcsShown::default());
+    assert!(!shown.get());
+    shown.set(true);
+    let first = shown.wait_shown();
+    // setting the same state again changes nothing
+    shown.set(true);
+    assert!(shown.wait_while_shown(first, Duration::from_millis(10)), "the showing goes on");
+
+    // hidden and shown again before the process thread looks: a new showing all the same
+    shown.set(false);
+    shown.set(true);
+    let started = Instant::now();
+    assert!(!shown.wait_while_shown(first, Duration::from_secs(10)));
+    assert!(started.elapsed() < Duration::from_secs(1), "no wait for the old showing");
+    let second = shown.wait_shown();
+    assert_ne!(second, first);
+    assert!(shown.get());
+
+    // a hide wakes a waiting thread at once
+    let waiter = {
+      let shown = shown.clone();
+      thread::spawn(move || shown.wait_while_shown(second, Duration::from_secs(10)))
+    };
+    thread::sleep(Duration::from_millis(50));
+    let hidden = Instant::now();
+    shown.set(false);
+    assert!(!waiter.join().unwrap());
+    assert!(hidden.elapsed() < Duration::from_secs(1), "{:?}", hidden.elapsed());
+  }
+
+  #[test]
+  fn procs_thread_samples_only_while_shown() {
     let (tx, rx) = mpsc::channel();
-    let active = Arc::new(AtomicBool::new(false));
+    let shown = Arc::new(ProcsShown::default());
     let msec = Arc::new(RwLock::new(TUI_MIN_MS));
-    let sampler = run_procs_thread(tx, msec.clone(), active.clone());
+    let sampler = run_procs_thread(tx, msec.clone(), shown.clone());
 
     // Shows the panel; returns how long the first sample took and the sample.
-    let show = |active: &AtomicBool| {
-      let shown = Instant::now();
-      active.store(true, Ordering::Relaxed);
+    let show = |shown: &ProcsShown| {
+      let started = Instant::now();
+      shown.set(true);
       let Ok(Event::Procs(procs)) = rx.recv_timeout(Duration::from_secs(5)) else {
         panic!("no process sample");
       };
-      (shown.elapsed(), procs)
+      (started.elapsed(), procs)
     };
 
-    // paused: nothing
-    assert!(rx.recv_timeout(Duration::from_millis(600)).is_err(), "sampled while paused");
+    // hidden: nothing
+    assert!(rx.recv_timeout(Duration::from_millis(600)).is_err(), "sampled while hidden");
 
     // shown: the baseline sample stays silent, the first message comes after the warm-up with
     // the own process in it
-    let (waited, procs) = show(&active);
+    let (waited, procs) = show(&shown);
     assert!(waited >= PROCS_WARMUP, "{waited:?}: the baseline sample was sent");
     let pid = std::process::id() as i32;
     assert!(procs.iter().any(|p| p.pid == pid && !p.name.is_empty()));
 
-    // paused again: a sample already in progress may still arrive, but no more
-    active.store(false, Ordering::Relaxed);
+    // hidden again: a sample already in progress may still arrive, but no more
+    shown.set(false);
     let deadline = Instant::now() + Duration::from_millis(1200);
     let mut late = 0;
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -3158,25 +3213,27 @@ mod tests {
         late += 1;
       }
     }
-    assert!(late <= 1, "{late} samples after pausing");
+    assert!(late <= 1, "{late} samples after hiding");
 
-    // the pause dropped the sampler: a new baseline and warm-up, then the long interval
+    // the hide dropped the sampler: a new baseline and warm-up, then the long interval
     *msec.write().unwrap() = TUI_MAX_MS;
-    let (waited, _) = show(&active);
-    assert!(waited >= PROCS_WARMUP, "{waited:?}: no new baseline after the pause");
+    let (waited, _) = show(&shown);
+    assert!(waited >= PROCS_WARMUP, "{waited:?}: no new baseline after the hide");
 
-    // hidden and shown again well within the 10 s interval: noticed during the wait, so the list
-    // fills in after a new warm-up, not after the rest of the interval
-    active.store(false, Ordering::Relaxed);
-    thread::sleep(PROCS_PAUSE_POLL * 5);
-    let (waited, _) = show(&active);
+    // hidden and shown again within the 10 s interval (`show` waits 5 s at most), after a while
+    // and at once: either way a new baseline and warm-up, not the rest of the interval
+    shown.set(false);
+    thread::sleep(Duration::from_millis(300));
+    let (waited, _) = show(&shown);
+    assert!(waited >= PROCS_WARMUP, "{waited:?}");
+    shown.set(false);
+    let (waited, _) = show(&shown);
     assert!(waited >= PROCS_WARMUP, "{waited:?}");
 
-    // exits once the receiver is gone (at its next send, after a pause cuts the wait short)
+    // exits once the receiver is gone (at its next send, after a hide cuts the wait short)
     drop(rx);
-    active.store(false, Ordering::Relaxed);
-    thread::sleep(PROCS_PAUSE_POLL * 5);
-    active.store(true, Ordering::Relaxed);
+    shown.set(false);
+    shown.set(true);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !sampler.is_finished() {
       assert!(Instant::now() < deadline, "the process thread doesn't exit");

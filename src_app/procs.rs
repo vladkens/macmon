@@ -150,8 +150,11 @@ struct Raw {
   uid: u32,
   mem_bytes: u64,
   counters: Counters,
-  /// Changes on exec; with the start time tells a reused pid apart.
+  /// Changes on exec; with the start time tells a reused pid apart. libproc cuts it to 15 bytes,
+  /// so an exec between executables named alike keeps it, as it keeps the start time.
   comm: String,
+  /// Executable path, `None` when it isn't readable; changes on exec, also where `comm` doesn't.
+  path: Option<String>,
   /// Name shown when the executable path isn't readable.
   fallback: String,
   /// Read from `ps`: CPU time in 10 ms steps.
@@ -280,6 +283,7 @@ fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<R
     },
     fallback: if name.is_empty() { comm.clone() } else { name },
     comm,
+    path: None,
     ps: false,
   })
 }
@@ -337,6 +341,7 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
     counters: Counters { start: 0, cpu_ns, energy_nj: None, gpu_ns: None },
     fallback: basename(&comm).unwrap_or(&comm).to_string(),
     comm,
+    path: None,
     ps: true,
   })
 }
@@ -560,9 +565,10 @@ fn averaged_cpu_pct(history: &[(u64, u64)], now_ns: u64, cpu_ns: u64) -> f32 {
 /// A process seen on the previous tick.
 struct Known {
   counters: Counters,
-  /// Changes on exec, invalidates the cached `name` and `path`.
+  /// Changes on exec (unless cut to the same 15 bytes), invalidates `name` and `path`.
   comm: String,
   name: String,
+  /// Executable path, empty when it wasn't readable; a different one is a different process.
   path: String,
   /// `ps` rows: `(time, CPU time)` of the last `PS_CPU_INTERVALS` ticks, oldest first.
   cpu_history: VecDeque<(u64, u64)>,
@@ -629,29 +635,33 @@ impl ProcSampler {
     }
     for raw in &mut rows {
       raw.counters.gpu_ns = gpu.get(&raw.pid).copied();
+      // every tick, not only for new pids: the start time and `comm` can stay the same across an
+      // exec (about 1 ms for 800 processes)
+      raw.path = exe_path(raw.pid);
     }
     self.update(rows, elapsed_ns)
   }
 
   /// Rates against the previous tick (CPU of `ps` rows over the last `PS_CPU_INTERVALS` ticks);
-  /// a process is the same while its pid, start time and command stay the same.
+  /// a process is the same while its pid, start time, command and executable path stay the same.
+  /// A path that isn't readable on this tick keeps the last one.
   fn update(&mut self, rows: Vec<Raw>, elapsed_ns: u64) -> Vec<ProcInfo> {
     let mut known = HashMap::with_capacity(rows.len());
     let mut procs = Vec::with_capacity(rows.len());
     self.clock_ns += elapsed_ns;
 
     for raw in rows {
-      let prev = self
-        .known
-        .remove(&raw.pid)
-        .filter(|prev| prev.counters.start == raw.counters.start && prev.comm == raw.comm);
+      let prev = self.known.remove(&raw.pid).filter(|prev| {
+        prev.counters.start == raw.counters.start
+          && prev.comm == raw.comm
+          && raw.path.as_ref().is_none_or(|path| *path == prev.path)
+      });
       let mut usage = usage(prev.as_ref().map(|prev| &prev.counters), &raw.counters, elapsed_ns);
       let (name, path, mut cpu_history) = match prev {
         Some(prev) => (prev.name, prev.path, prev.cpu_history),
         None => {
-          let path = exe_path(raw.pid);
-          let name = path.as_deref().and_then(basename).map(str::to_string);
-          (name.unwrap_or(raw.fallback), path.unwrap_or_default(), VecDeque::new())
+          let name = raw.path.as_deref().and_then(basename).map(str::to_string);
+          (name.unwrap_or(raw.fallback), raw.path.unwrap_or_default(), VecDeque::new())
         }
       };
       if raw.ps {
@@ -916,6 +926,7 @@ mod tests {
       mem_bytes: 1024,
       counters: Counters { start: 0, cpu_ns, energy_nj, gpu_ns: None },
       comm: comm.to_string(),
+      path: None,
       fallback: comm.to_string(),
       ps: false,
     }
@@ -941,7 +952,7 @@ mod tests {
 
   #[test]
   fn update_rates_names_and_users() {
-    // pids above the macOS limit (99999) don't exist, so names come from the fallback.
+    // rows without a path take their name from the fallback.
     let mut sampler = ProcSampler::new();
 
     let first = sampler.update(vec![row(A, SEC, None, "a"), row(B, 0, Some(0), "b")], 0);
@@ -965,8 +976,38 @@ mod tests {
   }
 
   #[test]
+  fn exec_with_the_same_cut_command_changes_the_path() {
+    // libproc cuts the command to 15 bytes, and the start time stays across an exec: only the
+    // path tells the two executables apart
+    let helper = "/Apps/Google Chrome Helper";
+    let gpu = "/Apps/Google Chrome Helper (GPU)";
+    let at = |path: Option<&str>, cpu_ns: u64| Raw {
+      path: path.map(str::to_string),
+      ..row(A, cpu_ns, None, "Google Chrome H")
+    };
+    // name, path and CPU % of the one row
+    let shown = |p: &[ProcInfo]| (p[0].name.clone(), p[0].path.clone(), p[0].cpu_pct);
+    let mut sampler = ProcSampler::new();
+
+    let first = sampler.update(vec![at(Some(helper), 0)], 0);
+    assert_eq!(shown(&first), ("Google Chrome Helper".into(), helper.into(), 0.0));
+    let same = sampler.update(vec![at(Some(helper), SEC)], SEC);
+    assert_eq!(shown(&same), ("Google Chrome Helper".into(), helper.into(), 100.0));
+
+    // the other executable: its own name and path, no spike from the CPU time before the exec
+    let exec = sampler.update(vec![at(Some(gpu), 5 * SEC)], SEC);
+    assert_eq!(shown(&exec), ("Google Chrome Helper (GPU)".into(), gpu.into(), 0.0));
+
+    // a path that isn't readable for a tick keeps the last one
+    let unreadable = sampler.update(vec![at(None, 6 * SEC)], SEC);
+    assert_eq!(shown(&unreadable), ("Google Chrome Helper (GPU)".into(), gpu.into(), 100.0));
+    let back = sampler.update(vec![at(Some(gpu), 7 * SEC)], SEC);
+    assert_eq!(shown(&back), ("Google Chrome Helper (GPU)".into(), gpu.into(), 100.0));
+  }
+
+  #[test]
   fn ps_rows_average_cpu_over_three_intervals() {
-    // pids above the macOS limit (99999) don't exist, so names come from the fallback.
+    // rows without a path take their name from the fallback.
     let mut sampler = ProcSampler::new();
     // (elapsed, CPU time of A from ps, CPU time of B from libproc), all in 10 ms
     let ticks = [(0, 0, 0), (25, 1, 1), (100, 1, 2), (100, 2, 4), (100, 2, 6), (100, 6, 8)];

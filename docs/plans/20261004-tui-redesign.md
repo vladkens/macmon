@@ -64,7 +64,7 @@ Current design: Tasks 19–20 (summary in "Current design" under Technical Detai
 - Inside the metrics box the original macmon boxes: one per CPU cluster, GPU and RAM on top, CPU / GPU / ANE power below, widths split evenly. Titles step down to fit (Task 20); the chip on the outer title, the power summary on its bottom border.
 - Multi-row solid bar graphs (eighths per row, three levels in Apple Terminal), per-column load color, power graphs in the low color scaled to their visible peak; `v` switches the cluster / GPU / RAM boxes to gauges.
 - Colors from the terminal palette (see "Colors: terminal palette"); process list, keys and mouse as in "Process panel" and "Keys (final)".
-- ➕ Task 21: `?` help overlay, `←` / `→` sort, the selected process (PID + path) or a POWER note on the bottom border of the process box, clickable footer hints; mouse capture only while the process list is shown.
+- ➕ Task 21: `?` help overlay, ~~`←` / `→` sort~~ a clickable `s sort` hint (`s` / `S` and header clicks sort; ➕ Review 2), the selected process (PID + path) or a POWER note on the bottom border of the process box, clickable footer hints; mouse capture only while the process list is shown.
 
 ### Layout V3 (user decision after Task 10 — replaces Layout A below; superseded by Task 16, then by the metric boxes of Task 19)
 ```
@@ -139,9 +139,9 @@ Current design: Tasks 19–20 (summary in "Current design" under Technical Detai
 - Own processes: `proc_listallpids` → `proc_pidinfo(PROC_PIDTBSDINFO)` (uid, ppid, name) → `proc_pid_rusage(RUSAGE_INFO_V6)` (user+system time, `ri_phys_footprint`, `ri_energy_nj`). `ri_*_time` are mach absolute units → convert with `mach_timebase_info`. Name = basename of `proc_pidpath`, fallback `pbi_name`.
 - Foreign processes (libproc failed): one `ps -A -o pid=,uid=,rss=,time=,comm=` per tick; parse ~~`[[dd-]hh:]mm:ss.ss`~~ `mm:ss.ss` (➕ Review 1: macOS `ps` prints only minutes, growing past 59); memory = RSS; power = `None`. Skipped when running as root.
 - GPU: walk `IOAccelerator` children, read `IOUserClientCreator` + sum `AppUsage[].accumulatedGPUTime` per pid.
-- CPU % follows Activity Monitor convention (100% = one core). Deltas keyed by pid; negative delta, changed start time or changed command → treat as new process (no spike).
+- CPU % follows Activity Monitor convention (100% = one core). Deltas keyed by pid; negative delta, changed start time or changed command → treat as new process (no spike). ➕ Review 3: a changed executable path too — the start time and `pbi_comm` (cut to 15 bytes) both survive an `exec` between executables whose names share the first 15 bytes (checked with two copies of `bash` on macOS 27), so `proc_pidpath` is read every tick (~1 ms for 800 processes); an unreadable path keeps the last one.
 - User names via `getpwuid_r`, cached per uid.
-- Thread `run_procs_thread` uses the same interval `Arc<RwLock<u32>>`, sends `Event::Procs(Vec<ProcInfo>)`; `AtomicBool` pauses it while the proc panel is hidden or auto-hidden.
+- Thread `run_procs_thread` uses the same interval `Arc<RwLock<u32>>`, sends `Event::Procs(Vec<ProcInfo>)`; ~~`AtomicBool`~~ `ProcsShown` (➕ Review 3: a `Mutex` + `Condvar` with a showing count) pauses it while the proc panel is hidden or auto-hidden.
 
 ### Process panel
 - Columns by priority (dropped right-to-left on narrow widths): PID, NAME (flex), CPU%, MEM, GPU%, POWER, USER.
@@ -246,7 +246,7 @@ Current design: Tasks 19–20 (summary in "Current design" under Technical Detai
 - Modify: `src_app/main.rs`
 
 - [x] define `rusage_info_v6` (`#[repr(C)]`, per SDK), `ProcInfo`, `ProcSampler` (layout checked by a test: 464 bytes, `rusage_info_v4` prefix; ➕ `mod procs` is `#[allow(dead_code)]` in `main.rs` until Task 9 wires it in)
-- [x] collect pids, bsd info, rusage; mach timebase conversion; name from `proc_pidpath` basename (➕ falls back to `RUSAGE_INFO_V4` without energy → `power_w = None` on macOS < 13; name cached per pid while start time and `pbi_comm` stay the same; `user` is the numeric uid until Task 7, `gpu_pct` is 0 until Task 8; pid identity = `ri_proc_start_abstime`)
+- [x] collect pids, bsd info, rusage; mach timebase conversion; name from `proc_pidpath` basename (➕ falls back to `RUSAGE_INFO_V4` without energy → `power_w = None` on macOS < 13; name cached per pid while start time and `pbi_comm` ➕ and the path (Review 3: read every tick) stay the same; `user` is the numeric uid until Task 7, `gpu_pct` is 0 until Task 8; pid identity = `ri_proc_start_abstime`)
 - [x] pure delta function: (prev counters, cur counters, elapsed) → cpu %, power W; handle first sample, negative delta, pid reuse (`usage()`; first sample / reuse / backwards counter / zero elapsed → 0 % and 0 W)
 - [x] write tests for delta math (1 core busy = 100%, idle = 0, energy 1e9 nJ over 1 s = 1 W, negative delta → 0, new pid → no spike)
 - [x] write test that sampling the current process returns its own pid with non-empty name (runs on macOS CI) (also checks ppid, uid, memory, and CPU % > 0 after a 50 ms busy loop)
@@ -282,7 +282,7 @@ Current design: Tasks 19–20 (summary in "Current design" under Technical Detai
 - Modify: `src_app/tui/mod.rs`
 - Modify: `src_app/main.rs` (➕)
 
-- [x] `run_procs_thread(tx, msec, active: Arc<AtomicBool>)` sending `Event::Procs`; sleeps while inactive (polls the flag every 100 ms; a pause drops the `ProcSampler`, so after a resume the first sample is a silent baseline followed by a 250 ms warm-up sample, then one sample per interval; exits when the receiver is gone, returns its `JoinHandle`)
+- [x] `run_procs_thread(tx, msec, active: Arc<AtomicBool>)` sending `Event::Procs`; sleeps while inactive (polls the flag every 100 ms; a pause drops the `ProcSampler`, so after a resume the first sample is a silent baseline followed by a 250 ms warm-up sample, then one sample per interval; exits when the receiver is gone, returns its `JoinHandle`) (➕ Review 3: polling missed a hide and show between two polls, leaving the list "collecting…" for the rest of a long interval with the old sampler; now `run_procs_thread(tx, msec, shown: Arc<ProcsShown>)` blocks on a `Condvar` while hidden, every show starts a new numbered showing, and the wait for the next sample ends as soon as the showing does)
 - [x] `active` follows proc panel visibility (toggle + auto-hide) on every render (`App::set_procs_visible(plan.proc.is_some())`; false until the first frame)
 - [x] app state stores latest `Vec<ProcInfo>`; panel shows "collecting…" until the first delta sample (`App::procs: Option<Vec<ProcInfo>>`; hiding the panel drops the list and samples arriving while hidden, so a re-shown panel never shows stale rows; interim panel body is "N processes" until Task 10)
 - [x] ➕ remove `#[allow(dead_code)]` from `mod procs` in `src_app/main.rs` (`ProcSampler::sample()` returns zero CPU / power on its first call) (no narrower allow needed: the derived `PartialEq` on `ProcInfo` reads its fields)
