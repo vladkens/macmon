@@ -259,8 +259,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
   "pcpu_freq_mhz": 1800,
   "pcpu_scaled_ratio": 0.015181795,
   "pcpu_active_ratio": 0.04,
-  "ecpu_cores": [/* as cpu_tiers[0].cores */],
-  "pcpu_cores": [/* as cpu_tiers[1].cores */],
+  "ecpu_cores": [/* cores of the first tier */],
+  "pcpu_cores": [/* cores of the last tier */],
   "gpu_freq_mhz": 461, // GPU frequency
   "gpu_scaled_ratio": 0.021497859, // Frequency-scaled ratio (0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)

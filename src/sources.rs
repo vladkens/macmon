@@ -693,11 +693,11 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 
 // perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the
 // lowest (confirmed via `sysctl hw.perflevel0/1.name` -> Performance/Efficiency on
-// M1-M4). M5 drops E-cores for a new higher "Super" tier above Performance, so the
-// same two-slot ecpu/pcpu split still applies, just relabeled P/S instead of E/P.
-// An M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12 (issue #47).
-// M6 runs all three tiers at once: 3 perflevels, 2 Super + 4 Performance + 6 Efficiency cores on
-// the base chip (issue #80; IORegistry cluster-type P x2, M x4, E x6 in exelban/stats#3668).
+// M1-M4). M5 adds a "Super" tier above Performance and its chips run two tiers, labeled
+// P/S instead of E/P: an M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12
+// (issue #47). M6 runs all three tiers at once: 3 perflevels, 2 Super + 4 Performance +
+// 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2, M x4, E x6 in
+// exelban/stats#3668).
 pub(crate) fn tiers_from_perflevels(perflevel_cores: &[u32], chip_name: &str) -> Option<CpuTiers> {
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
   match *perflevel_cores {

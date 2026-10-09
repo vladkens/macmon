@@ -71,14 +71,14 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
-  gauge!(out, "ecpu_freq_mhz", "Efficiency CPU cluster frequency in MHz", m.ecpu_freq_mhz);
-  gauge!(out, "ecpu_scaled_ratio", "Efficiency CPU cluster frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
-  gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_ecpu_scaled_ratio", m.ecpu_scaled_ratio);
-  gauge!(out, "ecpu_active_ratio", "Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
-  gauge!(out, "pcpu_freq_mhz", "Performance CPU cluster frequency in MHz", m.pcpu_freq_mhz);
-  gauge!(out, "pcpu_scaled_ratio", "Performance CPU cluster frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
-  gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_pcpu_scaled_ratio", m.pcpu_scaled_ratio);
-  gauge!(out, "pcpu_active_ratio", "Performance CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
+  gauge!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
+  gauge!(out, "ecpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Lowest CPU tier frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
+  gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.ecpu_scaled_ratio);
+  gauge!(out, "ecpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Lowest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
+  gauge!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
+  gauge!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
+  gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
+  gauge!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
   tier_gauge!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
   tier_gauge!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
   tier_gauge!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
@@ -306,7 +306,7 @@ mod tests {
     assert_eq!(output.matches("# TYPE macmon_cpu_tier_active_ratio gauge").count(), 1);
 
     let output = to_prometheus(&Metrics::default(), &SocInfo::default());
-    assert!(!output.contains("macmon_cpu_tier_"));
+    assert!(!output.contains("# TYPE macmon_cpu_tier_"));
   }
 
   #[test]
