@@ -477,7 +477,7 @@ pub struct SocInfo {
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
   /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `P`, `S` on
-  /// M5, `E`, `P`, `S` on M6.
+  /// M5 Pro/Max, `E`, `P`, `S` on M6.
   pub cpu_tiers: Vec<CpuTierInfo>,
   /// Number of cores of the lowest CPU tier.
   #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
@@ -693,11 +693,11 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 
 // perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the
 // lowest (confirmed via `sysctl hw.perflevel0/1.name` -> Performance/Efficiency on
-// M1-M4). M5 adds a "Super" tier above Performance and its chips run two tiers, labeled
-// P/S instead of E/P: an M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12
-// (issue #47). M6 runs all three tiers at once: 3 perflevels, 2 Super + 4 Performance +
-// 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2, M x4, E x6 in
-// exelban/stats#3668).
+// M1-M4). M5 adds a "Super" tier and its chips run two tiers: Super + Performance on M5 Pro/Max,
+// labeled P/S (an M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12, issue #47).
+// The base M5 runs Super + Efficiency and gets the same P/S labels here, unverified. M6 runs all
+// three tiers at once: 3 perflevels, 2 Super + 4 Performance + 6 Efficiency cores on the base
+// chip (issue #80; IORegistry cluster-type P x2, M x4, E x6 in exelban/stats#3668).
 pub(crate) fn tiers_from_perflevels(perflevel_cores: &[u32], chip_name: &str) -> Option<CpuTiers> {
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
   match *perflevel_cores {
@@ -813,7 +813,9 @@ pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
 // CPU tiers with their frequency tables: the E-complex table for the lowest tier, the P-complex one
 // for the tiers above it. M6 Performance cores share the P complex and its states with the Super
 // cores: IOReport lists PACC0_PCPU0-1 and PACC0_MCPU2-5 with the same 20 states, and no other CPU
-// complex than EACC and PACC0 (issue #80, exelban/stats#3668).
+// complex than EACC and PACC0 (issue #80, exelban/stats#3668). That a Performance core also runs
+// at the P table's frequency in each state is assumed: not yet checked against powermetrics on
+// M6, and an M5 Max gives its Performance cores a table of their own (voltage-states23-sram).
 pub(crate) fn cpu_tier_infos(
   tiers: &CpuTiers,
   ecpu_freqs: &[u32],

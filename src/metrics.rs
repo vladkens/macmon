@@ -1004,7 +1004,8 @@ mod tests {
       &soc,
     );
 
-    // 6 E cores, P cores 2-5 and S cores 0-1, each in its own tier
+    // 6 E cores, P cores 2-5 and S cores 0-1, each in its own tier. The P-core frequencies follow
+    // from the assumed P-complex table (see cpu_tier_infos), not from an M6 measurement.
     let cores =
       |i: usize| rs.cpu_tiers[i].cores.iter().map(|x| (x.core_id, x.freq_mhz)).collect::<Vec<_>>();
     assert_eq!(cores(0), (0..6).map(|i| (i, 2940)).collect::<Vec<_>>());
