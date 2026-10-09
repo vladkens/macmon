@@ -321,6 +321,7 @@ fn calc_freq(item: CFDictionaryRef, freqs: &[u32]) -> FreqMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CpuCoreKind {
   E,
+  M,
   P,
 }
 
@@ -356,7 +357,9 @@ fn cpu_core_sort_key(channel: &str) -> (usize, usize, usize) {
 fn parse_cpu_core_channel(channel: &str) -> Option<(CpuCoreKind, CpuCoreKey)> {
   let kind = if channel.contains("PCPU") {
     CpuCoreKind::P
-  } else if channel.contains("ECPU") || channel.contains("MCPU") {
+  } else if channel.contains("MCPU") {
+    CpuCoreKind::M
+  } else if channel.contains("ECPU") {
     CpuCoreKind::E
   } else {
     return None;
@@ -368,12 +371,22 @@ fn parse_cpu_core_channel(channel: &str) -> Option<(CpuCoreKind, CpuCoreKey)> {
 }
 
 // Index of a core's tier among `tiers` CPU tiers, lowest first: PCPU cores are the highest tier,
-// ECPU cores and the MCPU Performance cores of M5 Pro/Max the lowest.
+// ECPU cores the lowest. MCPU Performance cores are the middle of three tiers on M6 and the lower
+// of two on M5 Pro/Max.
 fn cpu_tier_index(kind: CpuCoreKind, tiers: usize) -> Option<usize> {
   match kind {
-    CpuCoreKind::E => (tiers > 0).then_some(0),
+    CpuCoreKind::M if tiers >= 3 => Some(1),
+    CpuCoreKind::E | CpuCoreKind::M => (tiers > 0).then_some(0),
     CpuCoreKind::P => tiers.checked_sub(1),
   }
+}
+
+// Whether a frequency table fits a channel's residencies: a frequency for each state after the
+// leading IDLE / DOWN at most, as calc_freq_from_residencies expects.
+fn freqs_fit(residencies: &[(String, i64)], freqs: &[u32]) -> bool {
+  let idle = |x: &&(String, i64)| matches!(x.0.as_str(), "IDLE" | "DOWN" | "OFF");
+  let states = residencies.iter().skip_while(idle).count();
+  !freqs.is_empty() && residencies.len() > freqs.len() && states >= freqs.len()
 }
 
 /// Per-core metrics of the tiers of `SocInfo::cpu_tiers`, keyed by IOReport channel.
@@ -392,8 +405,12 @@ impl<'a> CpuTierCores<'a> {
   fn add(&mut self, channel: &str, residencies: &[(String, i64)]) -> bool {
     let Some((kind, key)) = parse_cpu_core_channel(channel) else { return false };
     let Some(i) = cpu_tier_index(kind, self.tiers.len()) else { return false };
+    // A table with more frequencies than the core has states belongs to another complex (say a
+    // future middle tier with its own); leave the core out instead of aborting on it.
     let freqs = &self.soc.cpu_tiers[i].freqs;
-    self.tiers[i].insert(key, calc_freq_from_residencies(residencies, freqs));
+    if freqs_fit(residencies, freqs) {
+      self.tiers[i].insert(key, calc_freq_from_residencies(residencies, freqs));
+    }
     true
   }
 
@@ -692,6 +709,8 @@ impl Sampler {
     //             Base:    PCPU* = Super, ECPU* = Efficiency
     //             Pro/Max: PCPU* = Super, MCPU* = Performance
     //           MCPU is a separate middle-tier design, not a renamed ECPU core.
+    //   M6:     All three tiers at once (issue #80): EACC_ECPU* = Efficiency,
+    //           PACC0_MCPU* = Performance, PACC0_PCPU* = Super.
     //   Ultra:  Any-generation Ultra chips prefix channels with "DIE_N_"
     //           and include cluster/core separators (e.g. "DIE_0_PCPU1_CPU0").
 
@@ -726,7 +745,7 @@ mod tests {
     aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
     parse_cpu_core_channel, smc_numeric_value, temperature_average,
   };
-  use crate::sources::{CpuTierInfo, SocInfo};
+  use crate::sources::{CpuTierInfo, SocInfo, cpu_tier_infos, tiers_from_perflevels};
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
@@ -890,6 +909,105 @@ mod tests {
     assert_eq!(counts, [("E", 2), ("P", 2)]);
   }
 
+  /// A core channel: (channel, states, IDLE residency, non-zero states as in `residencies`).
+  type CoreStates = (&'static str, usize, i64, &'static [(usize, i64)]);
+
+  /// Residencies of a core with `states` frequency states named like IOReport's (`V0P6` … `V6P0`
+  /// for 7 states): `idle` in IDLE and `active` as (state index, residency).
+  fn residencies(states: usize, idle: i64, active: &[(usize, i64)]) -> Vec<(String, i64)> {
+    let mut items = vec![("IDLE".to_string(), idle)];
+    for i in 0..states {
+      let residency = active.iter().find(|(state, _)| *state == i).map_or(0, |(_, x)| *x);
+      items.push((format!("V{i}P{}", states - 1 - i), residency));
+    }
+    items
+  }
+
+  /// M6 (Mac18,5) as `load_soc_info` builds it: perflevels 2 / 4 / 6 (issue #80) and the
+  /// `pmgr-child` tables voltage-states1-sram and voltage-states5-sram (exelban/stats#3668).
+  fn m6_soc() -> SocInfo {
+    let tiers = tiers_from_perflevels(&[2, 4, 6], "Apple M6").unwrap();
+    let ecpu = [972, 1152, 1584, 1980, 2304, 2640, 2940];
+    #[rustfmt::skip]
+    let pcpu = [
+      1440, 1728, 2040, 2340, 2640, 2940, 3216, 3468, 3696, 3924,
+      4092, 4272, 4416, 4476, 4512, 4536, 4584, 4644, 4692, 4788,
+    ];
+    SocInfo { cpu_tiers: cpu_tier_infos(&tiers, &ecpu, &pcpu), ..Default::default() }
+  }
+
+  #[test]
+  fn samples_the_three_cpu_tiers_of_m6() {
+    // "CPU Core Performance States" of the `macmon debug` report in issue #80:
+    // (channel, states, IDLE residency, non-zero states)
+    #[rustfmt::skip]
+    let channels: [CoreStates; 12] = [
+      ("EACC_ECPU0", 7, 260162, &[(6, 2237056)]),
+      ("EACC_ECPU1", 7, 397284, &[(6, 2099934)]),
+      ("EACC_ECPU2", 7, 655766, &[(6, 1841452)]),
+      ("EACC_ECPU3", 7, 698127, &[(6, 1799091)]),
+      ("EACC_ECPU4", 7, 1109666, &[(6, 1387552)]),
+      ("EACC_ECPU5", 7, 1196151, &[(6, 1301067)]),
+      ("PACC0_PCPU0", 20, 2211943, &[(0, 664), (17, 3101), (19, 281544)]),
+      ("PACC0_PCPU1", 20, 2100790, &[(0, 656), (17, 19819), (19, 375987)]),
+      ("PACC0_MCPU2", 20, 2491819, &[(19, 5433)]),
+      ("PACC0_MCPU3", 20, 2495721, &[(19, 1531)]),
+      ("PACC0_MCPU4", 20, 2497252, &[]),
+      ("PACC0_MCPU5", 20, 2497252, &[]),
+    ];
+    let soc = m6_soc();
+    let mut cores = CpuTierCores::new(&soc);
+    for (channel, states, idle, active) in channels {
+      assert!(cores.add(channel, &residencies(states, idle, active)), "{channel}");
+    }
+    let rs = aggregate_ioreport_metrics(
+      Metrics { cpu_tiers: cores.into_metrics(), ..Default::default() },
+      &soc,
+    );
+
+    // 6 E cores, P cores 2-5 and S cores 0-1, each in its own tier
+    let cores =
+      |i: usize| rs.cpu_tiers[i].cores.iter().map(|x| (x.core_id, x.freq_mhz)).collect::<Vec<_>>();
+    assert_eq!(cores(0), (0..6).map(|i| (i, 2940)).collect::<Vec<_>>());
+    assert_eq!(cores(1), [(2, 4788), (3, 4788), (4, 0), (5, 0)]);
+    assert_eq!(cores(2), [(0, 4778), (1, 4775)]);
+
+    // expected values computed from the log outside macmon
+    let close = |a: f32, b: f64| (a as f64 - b).abs() < 1e-6;
+    let expected = [
+      ("E", 2940, 0.711868968, 0.711868968),
+      ("P", 2394, 0.000697166, 0.000697166),
+      ("S", 4776, 0.136181424, 0.136504245),
+    ];
+    for (tier, (label, freq, scaled, active)) in rs.cpu_tiers.iter().zip(expected) {
+      assert_eq!((tier.label.as_str(), tier.freq_mhz), (label, freq));
+      assert!(close(tier.scaled_ratio, scaled) && close(tier.active_ratio, active), "{tier:?}");
+    }
+    assert!(close(rs.cpu_scaled_ratio, 0.378863777) && close(rs.cpu_active_ratio, 0.378917580));
+  }
+
+  #[test]
+  fn routes_mcpu_to_the_middle_of_three_tiers() {
+    let soc = m6_soc();
+    let mut cores = CpuTierCores::new(&soc);
+    let busy = |states| residencies(states, 50, &[(0, 50)]);
+    for (channel, states) in [("EACC_ECPU0", 7), ("PACC0_MCPU2", 20), ("PACC0_PCPU0", 20)] {
+      assert!(cores.add(channel, &busy(states)), "{channel}");
+    }
+    let tiers = cores.into_metrics();
+    let counts = tiers.iter().map(|x| (x.label.as_str(), x.cores.len())).collect::<Vec<_>>();
+    assert_eq!(counts, [("E", 1), ("P", 1), ("S", 1)]);
+  }
+
+  #[test]
+  fn skips_a_core_with_fewer_states_than_its_table() {
+    // a middle tier in its own complex with 16 states, against the 20 of the P-complex table
+    let soc = m6_soc();
+    let mut cores = CpuTierCores::new(&soc);
+    assert!(cores.add("MACC_MCPU0", &residencies(16, 50, &[(15, 50)])));
+    assert!(cores.into_metrics()[1].cores.is_empty());
+  }
+
   #[test]
   fn orders_named_core_metrics() {
     let cores = collect_cpu_core_metrics(HashMap::from([
@@ -946,7 +1064,10 @@ mod tests {
       ("DIE_1_PCPU0", Some(CpuCoreKind::P)),
       ("ECPU7", Some(CpuCoreKind::E)),
       ("PCPU12", Some(CpuCoreKind::P)),
-      ("MCPU3", Some(CpuCoreKind::E)), // M5+ performance cores map to ecpu slot
+      ("MCPU3", Some(CpuCoreKind::M)),
+      ("EACC_ECPU0", Some(CpuCoreKind::E)), // M6
+      ("PACC0_PCPU1", Some(CpuCoreKind::P)),
+      ("PACC0_MCPU2", Some(CpuCoreKind::M)),
       ("GPU0", None),
     ];
     for (channel, expected) in cases {

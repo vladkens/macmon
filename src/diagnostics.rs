@@ -43,7 +43,9 @@ fn print_hw(native: &HwInfo, profiler: Option<&HwInfo>) {
   row("Chip", |x| x.chip_name.clone());
   row("Model", |x| x.mac_model.clone());
   row("Memory", |x| format!("{} GB", x.memory_gb));
-  row("CPU", |x| format!("{}{} + {}{}", x.ecpu_cores, x.ecpu_label, x.pcpu_cores, x.pcpu_label));
+  row("CPU", |x| {
+    x.cpu_tiers.iter().map(|(n, label)| format!("{n}{label}")).collect::<Vec<_>>().join(" + ")
+  });
   row("GPU", |x| format!("{} cores", x.gpu_cores));
 }
 

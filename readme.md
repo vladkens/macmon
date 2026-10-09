@@ -230,7 +230,7 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
   ],
   "cpu_scaled_ratio": 0.036854, // Combined frequency-scaled CPU ratio (weighted by core count, 0–1)
   "cpu_active_ratio": 0.092, // Combined active residency ratio (not frequency-scaled, weighted by core count, 0–1)
-  "cpu_tiers": [ // CPU core types from the lowest to the highest: E, P on M1–M4; P, S on M5
+  "cpu_tiers": [ // CPU core types from the lowest to the highest: E, P on M1–M4; P, S on M5; E, P, S on M6
     {
       "label": "E",
       "freq_mhz": 1100, // Tier frequency

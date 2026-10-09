@@ -69,7 +69,7 @@ impl FreqStore {
 /// History of one CPU cluster.
 #[derive(Debug, Default)]
 pub(super) struct ClusterStore {
-  /// Tier label: `E` / `P` on M1–M4, `P` / `S` on M5+.
+  /// Tier label: `E` / `P` on M1–M4, `P` / `S` on M5, `E` / `P` / `S` on M6.
   pub(super) label: String,
   /// Core count, for the chip summary.
   pub(super) count: usize,

@@ -288,7 +288,7 @@ pub struct App {
   gpu_temp: TempStore,
   fans: FanStore,
 
-  /// CPU clusters, lowest tier first (E / P on M1–M4, P / S on M5+).
+  /// CPU clusters, lowest tier first (E / P on M1–M4, P / S on M5, E / P / S on M6).
   clusters: CpuClusters,
   igpu_freq: FreqStore,
 
@@ -1091,6 +1091,33 @@ mod tests {
     let boxes = app.layout(buf.area).boxes;
     let (_, area) = boxes.into_iter().find(|(m, _)| *m == metric).expect("metric box");
     (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect()
+  }
+
+  #[test]
+  fn renders_three_cpu_tiers() {
+    // M6 of issue #80: 6E + 4P + 2S
+    let tier = |label: &str, cores| CpuTierInfo { label: label.into(), cores, freqs: vec![] };
+    let soc = SocInfo {
+      chip_name: "Apple M6".to_string(),
+      memory_gb: 32,
+      cpu_tiers: vec![tier("E", 6), tier("P", 4), tier("S", 2)],
+      gpu_cores: 12,
+      ..Default::default()
+    };
+    let mut app = App::from_parts(soc, Config::default());
+    let cpu_tiers = vec![
+      cpu_tier("E", 2940, 0.71, 0.71),
+      cpu_tier("P", 2394, 0.25, 0.25),
+      cpu_tier("S", 4776, 0.5, 0.5),
+    ];
+    app.update_metrics(Metrics { cpu_tiers, ..test_metrics() });
+
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 0).starts_with("╭─ Apple M6 (6E+4P+2S+12GPU 32GB) ─"), "{}", row(&buf, 0));
+    let screen = screen_text(&buf);
+    for title in ["E-CPU 71% @ 2940 MHz", "P-CPU 25% @ 2394 MHz", "S-CPU 50% @ 4776 MHz"] {
+      assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
+    }
   }
 
   #[test]
