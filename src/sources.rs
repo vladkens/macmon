@@ -572,18 +572,17 @@ fn cpu_freqs(item: CFDictionaryRef, key: &str, is_ecpu: bool, scale: u32) -> Opt
   Some(to_mhz(freqs, scale))
 }
 
-// Parse "proc T:P:E" (macOS 15) or "proc T:P_or_S:E:M" (macOS 26+) into (ecpu, pcpu, has_mcpu).
-// macOS 26 always uses 4 fields; M5+ has M>0 (ecpu=M, pcpu=S), M1-M4 has M=0 (ecpu=E, pcpu=P).
-fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
-  let procs = s.strip_prefix("proc ").unwrap_or("");
+// Parse "proc T:P:E" (macOS 15), "proc T:P_or_S:E:M" (macOS 26) or "proc T:S:P:E" (macOS 27)
+// into (ecpu, pcpu, has_mcpu). macOS 26: M5+ has M>0 (ecpu=M, pcpu=S), M1-M4 has M=0 (ecpu=E,
+// pcpu=P). macOS 27 reorders the fields, and M1-M4 have no S cores: an M2 reads "proc 8:0:4:4".
+fn parse_cpu_cores(value: &str) -> (u64, u64, bool) {
+  let procs = value.strip_prefix("proc ").unwrap_or("");
   let parts: Vec<u64> = procs.split(':').map(|x| x.parse().unwrap_or(0)).collect();
 
-  match parts.len() {
-    4 => {
-      let (e, m) = (parts[2], parts[3]);
-      if m > 0 { (m, parts[1], true) } else { (e, parts[1], false) }
-    }
-    3 => (parts[2], parts[1], false), // macOS 15: "proc total:P:E"
+  match parts[..] {
+    [_, 0, p, e] => (e, p, false),
+    [_, s, _, m] if m > 0 => (m, s, true),
+    [_, p, e, _] | [_, p, e] => (e, p, false),
     _ => (0, 0, false),
   }
 }
@@ -1579,6 +1578,7 @@ mod tests {
   #[test]
   fn parse_cpu_core_counts() {
     for (value, expected) in [
+      ("proc 8:0:4:4", (4, 4, false)), // M2, macOS 27
       ("proc 18:6:0:12", (12, 6, true)),
       ("proc 16:12:4:0", (4, 12, false)),
       ("proc 8:4:4:0", (4, 4, false)),
