@@ -1,6 +1,6 @@
 //! Metric history stores used by the terminal UI.
 
-use macmon::{FanMetric, MemMetrics, Metrics, SocInfo};
+use macmon::{CpuTierInfo, FanMetric, MemMetrics, Metrics, SocInfo};
 
 use crate::config::RatioMode;
 
@@ -76,46 +76,30 @@ pub(super) struct ClusterStore {
   pub(super) freq: FreqStore,
 }
 
-/// Histories of the CPU clusters, lowest tier first. The library reports two tiers today; the TUI
-/// takes any number of them.
+/// Histories of the CPU clusters, one per CPU tier of the library, lowest tier first.
 #[derive(Debug, Default)]
 pub(super) struct CpuClusters {
   pub(super) items: Vec<ClusterStore>,
 }
 
 impl CpuClusters {
-  /// Clusters of `(tier label, core count)`, lowest tier first, without samples yet.
-  pub(super) fn new<'a>(tiers: impl IntoIterator<Item = (&'a str, usize)>) -> Self {
-    let cluster = |(label, count): (&str, usize)| ClusterStore {
-      label: label.to_string(),
-      count,
+  /// The CPU tiers of `soc` with their labels and core counts, without samples yet, so their boxes
+  /// and the chip summary are complete before the first metrics sample.
+  pub(super) fn from_soc(soc: &SocInfo) -> Self {
+    let cluster = |tier: &CpuTierInfo| ClusterStore {
+      label: tier.label.clone(),
+      count: usize::from(tier.cores),
       freq: FreqStore::default(),
     };
-    Self { items: tiers.into_iter().map(cluster).collect() }
+    Self { items: soc.cpu_tiers.iter().map(cluster).collect() }
   }
 
-  /// The two clusters the library reports, with the labels and core counts of `soc`, so their
-  /// boxes and the chip summary are complete before the first metrics sample.
-  pub(super) fn from_soc(soc: &SocInfo) -> Self {
-    let tiers = [(&soc.ecpu_label, soc.ecpu_cores), (&soc.pcpu_label, soc.pcpu_cores)];
-    Self::new(tiers.map(|(label, count)| (label.as_str(), usize::from(count))))
-  }
-
-  /// Adds a sample per cluster, in cluster order (see `cluster_samples`).
-  pub(super) fn push(&mut self, samples: &[FreqSample]) {
-    for (cluster, &sample) in self.items.iter_mut().zip(samples) {
-      cluster.freq.push(sample);
+  /// Adds the samples of the CPU tiers of `data`, which come in the same order as in `SocInfo`.
+  pub(super) fn push(&mut self, data: &Metrics) {
+    for (cluster, tier) in self.items.iter_mut().zip(&data.cpu_tiers) {
+      cluster.freq.push(FreqSample::new(tier.freq_mhz, tier.scaled_ratio, tier.active_ratio));
     }
   }
-}
-
-/// Samples of the two CPU clusters of a metrics sample, lowest tier first, as
-/// `CpuClusters::from_soc` orders them.
-pub(super) fn cluster_samples(data: &Metrics) -> [FreqSample; 2] {
-  [
-    FreqSample::new(data.ecpu_freq_mhz, data.ecpu_scaled_ratio, data.ecpu_active_ratio),
-    FreqSample::new(data.pcpu_freq_mhz, data.pcpu_scaled_ratio, data.pcpu_active_ratio),
-  ]
 }
 
 /// Power history (mW, newest first) with the smoothed current value, and the average and maximum

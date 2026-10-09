@@ -324,7 +324,7 @@ impl App {
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
-    self.clusters.push(&store::cluster_samples(&data));
+    self.clusters.push(&data);
     let igpu = FreqSample::new(data.gpu_freq_mhz, data.gpu_scaled_ratio, data.gpu_active_ratio);
     self.igpu_freq.push(igpu);
 
@@ -509,7 +509,7 @@ mod tests {
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::time::Duration;
 
-  use macmon::{FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
+  use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::{Buffer, CellDiffOption};
@@ -548,16 +548,20 @@ mod tests {
   }
 
   fn test_soc() -> SocInfo {
+    let tier = |label: &str| CpuTierInfo { label: label.to_string(), cores: 6, freqs: vec![] };
     SocInfo {
       chip_name: "Apple M3 Pro".to_string(),
       memory_gb: 36,
-      ecpu_cores: 6,
-      pcpu_cores: 6,
-      ecpu_label: "E".to_string(),
-      pcpu_label: "P".to_string(),
+      cpu_tiers: vec![tier("E"), tier("P")],
       gpu_cores: 18,
       ..Default::default()
     }
+  }
+
+  /// Sampled CPU tier `label` with no per-core metrics.
+  fn cpu_tier(label: &str, freq_mhz: u32, scaled_ratio: f32, active_ratio: f32) -> CpuTierMetrics {
+    let label = label.to_string();
+    CpuTierMetrics { label, freq_mhz, scaled_ratio, active_ratio, cores: vec![] }
   }
 
   fn test_metrics() -> Metrics {
@@ -570,12 +574,7 @@ mod tests {
         swap_usage: 1 << 30,
       },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
-      ecpu_freq_mhz: 1800,
-      ecpu_scaled_ratio: 0.42,
-      ecpu_active_ratio: 0.5,
-      pcpu_freq_mhz: 3200,
-      pcpu_scaled_ratio: 0.77,
-      pcpu_active_ratio: 0.8,
+      cpu_tiers: vec![cpu_tier("E", 1800, 0.42, 0.5), cpu_tier("P", 3200, 0.77, 0.8)],
       gpu_freq_mhz: 1400,
       gpu_scaled_ratio: 0.23,
       gpu_active_ratio: 0.3,

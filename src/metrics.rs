@@ -89,7 +89,7 @@ pub struct FanMetric {
 }
 
 /// Metrics for one CPU core.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuCoreMetrics {
   /// Die index reported by the IOReport channel.
   pub die_id: usize,
@@ -101,6 +101,21 @@ pub struct CpuCoreMetrics {
   pub scaled_ratio: f32,
   /// Fraction of the sampling interval spent in active frequency states.
   pub active_ratio: f32,
+}
+
+/// Metrics for one CPU tier (core type) of [`Metrics::cpu_tiers`].
+#[derive(Debug, Default, Serialize)]
+pub struct CpuTierMetrics {
+  /// Tier label: `E`, `P` or `S`, as in [`SocInfo::cpu_tiers`].
+  pub label: String,
+  /// Tier frequency in MHz.
+  pub freq_mhz: u32,
+  /// Mean frequency-weighted active residency across the tier's cores.
+  pub scaled_ratio: f32,
+  /// Mean fraction of the sampling interval spent in active frequency states.
+  pub active_ratio: f32,
+  /// Metrics for each core, ordered by die and core index.
+  pub cores: Vec<CpuCoreMetrics>,
 }
 
 struct SmcSensors {
@@ -139,21 +154,31 @@ pub struct Metrics {
   pub cpu_scaled_ratio: f32,
   /// Combined fraction of the sampling interval spent in active CPU frequency states.
   pub cpu_active_ratio: f32,
-  /// Efficiency-cluster frequency in MHz.
+  /// CPU tiers (core types) from the lowest to the highest, as in [`SocInfo::cpu_tiers`].
+  pub cpu_tiers: Vec<CpuTierMetrics>,
+  /// Frequency of the lowest CPU tier in MHz.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_freq_mhz: u32,
-  /// Mean frequency-weighted active residency across efficiency cores.
+  /// Scaled ratio of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_scaled_ratio: f32,
-  /// Mean fraction of the sampling interval spent in active efficiency-core frequency states.
+  /// Active ratio of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_active_ratio: f32,
-  /// Performance-cluster frequency in MHz.
+  /// Frequency of the highest CPU tier in MHz.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_freq_mhz: u32,
-  /// Mean frequency-weighted active residency across performance cores.
+  /// Scaled ratio of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_scaled_ratio: f32,
-  /// Mean fraction of the sampling interval spent in active performance-core frequency states.
+  /// Active ratio of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_active_ratio: f32,
-  /// Metrics for efficiency cores, ordered by die and core index.
+  /// Cores of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_cores: Vec<CpuCoreMetrics>,
-  /// Metrics for performance cores, ordered by die and core index.
+  /// Cores of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_cores: Vec<CpuCoreMetrics>,
   /// GPU frequency in MHz, averaged over active residency.
   pub gpu_freq_mhz: u32,
@@ -204,26 +229,44 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
 }
 
 fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
-  let ecpu_total_scaled: f32 = rs.ecpu_cores.iter().map(|core| core.scaled_ratio).sum();
-  let pcpu_total_scaled: f32 = rs.pcpu_cores.iter().map(|core| core.scaled_ratio).sum();
-  let ecpu_total_active: f32 = rs.ecpu_cores.iter().map(|core| core.active_ratio).sum();
-  let pcpu_total_active: f32 = rs.pcpu_cores.iter().map(|core| core.active_ratio).sum();
-  let ecores = rs.ecpu_cores.len().max(soc.ecpu_cores as usize) as f32;
-  let pcores = rs.pcpu_cores.len().max(soc.pcpu_cores as usize) as f32;
-  let tcores = ecores + pcores;
+  let (mut total_scaled, mut total_active, mut total_cores) = (0.0, 0.0, 0.0);
+  for (tier, info) in rs.cpu_tiers.iter_mut().zip(&soc.cpu_tiers) {
+    let scaled: f32 = tier.cores.iter().map(|core| core.scaled_ratio).sum();
+    let active: f32 = tier.cores.iter().map(|core| core.active_ratio).sum();
+    let cores = tier.cores.len().max(info.cores as usize) as f32;
 
-  let ecpu_min_frequency_mhz = soc.ecpu_freqs.first().copied().unwrap_or_default();
-  let pcpu_min_frequency_mhz = soc.pcpu_freqs.first().copied().unwrap_or_default();
-  rs.ecpu_freq_mhz = aggregate_frequency(&rs.ecpu_cores, ecpu_min_frequency_mhz);
-  rs.ecpu_scaled_ratio = zero_div(ecpu_total_scaled, ecores);
-  rs.ecpu_active_ratio = zero_div(ecpu_total_active, ecores);
-  rs.pcpu_freq_mhz = aggregate_frequency(&rs.pcpu_cores, pcpu_min_frequency_mhz);
-  rs.pcpu_scaled_ratio = zero_div(pcpu_total_scaled, pcores);
-  rs.pcpu_active_ratio = zero_div(pcpu_total_active, pcores);
-  rs.cpu_scaled_ratio = zero_div(ecpu_total_scaled + pcpu_total_scaled, tcores);
-  rs.cpu_active_ratio = zero_div(ecpu_total_active + pcpu_total_active, tcores);
+    let min_frequency_mhz = info.freqs.first().copied().unwrap_or_default();
+    tier.freq_mhz = aggregate_frequency(&tier.cores, min_frequency_mhz);
+    tier.scaled_ratio = zero_div(scaled, cores);
+    tier.active_ratio = zero_div(active, cores);
+    total_scaled += scaled;
+    total_active += active;
+    total_cores += cores;
+  }
+  rs.cpu_scaled_ratio = zero_div(total_scaled, total_cores);
+  rs.cpu_active_ratio = zero_div(total_active, total_cores);
   rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
-  rs
+  rs.with_deprecated_tiers()
+}
+
+impl Metrics {
+  // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
+  #[allow(deprecated)]
+  fn with_deprecated_tiers(mut self) -> Self {
+    if let Some(tier) = self.cpu_tiers.first() {
+      self.ecpu_freq_mhz = tier.freq_mhz;
+      self.ecpu_scaled_ratio = tier.scaled_ratio;
+      self.ecpu_active_ratio = tier.active_ratio;
+      self.ecpu_cores = tier.cores.clone();
+    }
+    if let Some(tier) = self.cpu_tiers.last() {
+      self.pcpu_freq_mhz = tier.freq_mhz;
+      self.pcpu_scaled_ratio = tier.scaled_ratio;
+      self.pcpu_active_ratio = tier.active_ratio;
+      self.pcpu_cores = tier.cores.clone();
+    }
+    self
+  }
 }
 
 fn smc_numeric_value(data: &[u8], unit: &str) -> Option<f32> {
@@ -322,6 +365,48 @@ fn parse_cpu_core_channel(channel: &str) -> Option<(CpuCoreKind, CpuCoreKey)> {
   // Ultra channel numbers identify a cluster and a core separately, so the complete channel name
   // is the only collision-free key shared by both regular and Ultra chips.
   Some((kind, channel.to_owned()))
+}
+
+// Index of a core's tier among `tiers` CPU tiers, lowest first: PCPU cores are the highest tier,
+// ECPU cores and the MCPU Performance cores of M5 Pro/Max the lowest.
+fn cpu_tier_index(kind: CpuCoreKind, tiers: usize) -> Option<usize> {
+  match kind {
+    CpuCoreKind::E => (tiers > 0).then_some(0),
+    CpuCoreKind::P => tiers.checked_sub(1),
+  }
+}
+
+/// Per-core metrics of the tiers of `SocInfo::cpu_tiers`, keyed by IOReport channel.
+struct CpuTierCores<'a> {
+  soc: &'a SocInfo,
+  tiers: Vec<HashMap<CpuCoreKey, FreqMetrics>>,
+}
+
+impl<'a> CpuTierCores<'a> {
+  fn new(soc: &'a SocInfo) -> Self {
+    Self { soc, tiers: vec![HashMap::new(); soc.cpu_tiers.len()] }
+  }
+
+  /// Adds the core of a "CPU Core Performance States" `channel` from its state residencies, or
+  /// returns false when the channel is not a CPU core.
+  fn add(&mut self, channel: &str, residencies: &[(String, i64)]) -> bool {
+    let Some((kind, key)) = parse_cpu_core_channel(channel) else { return false };
+    let Some(i) = cpu_tier_index(kind, self.tiers.len()) else { return false };
+    let freqs = &self.soc.cpu_tiers[i].freqs;
+    self.tiers[i].insert(key, calc_freq_from_residencies(residencies, freqs));
+    true
+  }
+
+  /// Tiers with their cores; `aggregate_ioreport_metrics` fills in the tier values.
+  fn into_metrics(self) -> Vec<CpuTierMetrics> {
+    let labels = self.soc.cpu_tiers.iter().map(|tier| tier.label.clone());
+    let tier = |(label, cores)| CpuTierMetrics {
+      label,
+      cores: collect_cpu_core_metrics(cores),
+      ..Default::default()
+    };
+    labels.zip(self.tiers).map(tier).collect()
+  }
 }
 
 fn collect_cpu_core_metrics(metrics: HashMap<CpuCoreKey, FreqMetrics>) -> Vec<CpuCoreMetrics> {
@@ -519,8 +604,7 @@ impl Sampler {
     sample: crate::sources::IOReportIterator,
     dt: Duration,
   ) -> WithError<Metrics> {
-    let mut ecpu_map: HashMap<CpuCoreKey, FreqMetrics> = HashMap::new();
-    let mut pcpu_map: HashMap<CpuCoreKey, FreqMetrics> = HashMap::new();
+    let mut cpu_cores = CpuTierCores::new(&self.soc);
     let mut rs = Metrics::default();
     let mut cpu_power = PowerSources::default();
     let mut gpu_power = PowerSources::default();
@@ -528,19 +612,11 @@ impl Sampler {
 
     // Keep this channel handling in sync with ioreport_channels_filter.
     for x in sample {
-      if x.group == "CPU Stats" && x.subgroup == CPU_FREQ_CORE_SUBG {
-        match parse_cpu_core_channel(&x.channel) {
-          Some((CpuCoreKind::P, key)) => {
-            let metrics = calc_freq(x.item, &self.soc.pcpu_freqs);
-            pcpu_map.insert(key, metrics);
-            continue;
-          }
-          Some((CpuCoreKind::E, key)) => {
-            ecpu_map.insert(key, calc_freq(x.item, &self.soc.ecpu_freqs));
-            continue;
-          }
-          None => {}
-        }
+      if x.group == "CPU Stats"
+        && x.subgroup == CPU_FREQ_CORE_SUBG
+        && cpu_cores.add(&x.channel, &cfio_get_residencies(x.item))
+      {
+        continue;
       }
 
       if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
@@ -596,8 +672,7 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    rs.ecpu_cores = collect_cpu_core_metrics(ecpu_map);
-    rs.pcpu_cores = collect_cpu_core_metrics(pcpu_map);
+    rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
   }
@@ -647,11 +722,11 @@ mod tests {
   use std::collections::{HashMap, HashSet};
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, Metrics, PowerSources, TempMetrics, aggregate_ioreport_metrics,
-    calc_freq_from_residencies, collect_cpu_core_metrics, parse_cpu_core_channel,
-    smc_numeric_value, temperature_average,
+    CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, TempMetrics,
+    aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
+    parse_cpu_core_channel, smc_numeric_value, temperature_average,
   };
-  use crate::sources::SocInfo;
+  use crate::sources::{CpuTierInfo, SocInfo};
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
@@ -726,14 +801,21 @@ mod tests {
     CpuCoreMetrics { die_id, core_id, freq_mhz, scaled_ratio, active_ratio }
   }
 
+  /// Chip with an `E` tier (800 MHz) of `ecpu_cores` and a `P` tier (1800 MHz) of `pcpu_cores`.
   fn soc_info(ecpu_cores: u8, pcpu_cores: u8) -> SocInfo {
+    let tier =
+      |label: &str, cores, freq| CpuTierInfo { label: label.into(), cores, freqs: vec![freq] };
     SocInfo {
-      ecpu_cores,
-      pcpu_cores,
-      ecpu_freqs: vec![800],
-      pcpu_freqs: vec![1800],
+      cpu_tiers: vec![tier("E", ecpu_cores, 800), tier("P", pcpu_cores, 1800)],
       ..Default::default()
     }
+  }
+
+  /// Sampled `E` and `P` tiers with their cores, before aggregation.
+  fn cpu_tiers(ecpu: Vec<CpuCoreMetrics>, pcpu: Vec<CpuCoreMetrics>) -> Vec<CpuTierMetrics> {
+    let tier =
+      |label: &str, cores| CpuTierMetrics { label: label.into(), cores, ..Default::default() };
+    vec![tier("E", ecpu), tier("P", pcpu)]
   }
 
   #[test]
@@ -745,11 +827,14 @@ mod tests {
   }
 
   #[test]
+  #[allow(deprecated)]
   fn aggregates_ioreport_metrics() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
-        ecpu_cores: vec![core(0, 0, 2000, 1.0, 1.0)],
-        pcpu_cores: vec![core(0, 0, 0, 0.0, 0.0), core(0, 1, 4000, 1.0, 1.0)],
+        cpu_tiers: cpu_tiers(
+          vec![core(0, 0, 2000, 1.0, 1.0)],
+          vec![core(0, 0, 0, 0.0, 0.0), core(0, 1, 4000, 1.0, 1.0)],
+        ),
         cpu_power: 1.5,
         gpu_power: 2.0,
         ane_power: 0.5,
@@ -758,23 +843,28 @@ mod tests {
       &soc_info(2, 1),
     );
 
-    assert_eq!(rs.ecpu_freq_mhz, 2000);
-    assert_eq!(rs.ecpu_scaled_ratio, 0.5);
-    assert_eq!(rs.ecpu_active_ratio, 0.5);
-    assert_eq!(rs.pcpu_freq_mhz, 2000);
-    assert_eq!(rs.pcpu_scaled_ratio, 0.5);
-    assert_eq!(rs.pcpu_active_ratio, 0.5);
+    let tiers =
+      rs.cpu_tiers.iter().map(|x| (x.label.as_str(), x.freq_mhz, x.scaled_ratio, x.active_ratio));
+    assert_eq!(tiers.collect::<Vec<_>>(), [("E", 2000, 0.5, 0.5), ("P", 2000, 0.5, 0.5)]);
     assert_eq!(rs.cpu_scaled_ratio, 0.5);
     assert_eq!(rs.cpu_active_ratio, 0.5);
     assert_eq!(rs.all_power, 4.0);
+
+    // deprecated fields: the lowest and the highest tier
+    assert_eq!((rs.ecpu_freq_mhz, rs.ecpu_scaled_ratio, rs.ecpu_active_ratio), (2000, 0.5, 0.5));
+    assert_eq!((rs.pcpu_freq_mhz, rs.pcpu_scaled_ratio, rs.pcpu_active_ratio), (2000, 0.5, 0.5));
+    assert_eq!((rs.ecpu_cores.len(), rs.pcpu_cores.len()), (1, 2));
   }
 
   #[test]
+  #[allow(deprecated)]
   fn frequency_uses_minimum_floor_when_cluster_is_idle() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
-        ecpu_cores: vec![core(0, 0, 0, 0.0, 0.0), core(0, 1, 0, 0.0, 0.0)],
-        pcpu_cores: vec![core(0, 0, 0, 0.0, 0.0)],
+        cpu_tiers: cpu_tiers(
+          vec![core(0, 0, 0, 0.0, 0.0), core(0, 1, 0, 0.0, 0.0)],
+          vec![core(0, 0, 0, 0.0, 0.0)],
+        ),
         ..Default::default()
       },
       &soc_info(0, 0),
@@ -782,6 +872,22 @@ mod tests {
 
     assert_eq!(rs.ecpu_freq_mhz, 800);
     assert_eq!(rs.pcpu_freq_mhz, 1800);
+  }
+
+  #[test]
+  fn routes_core_channels_to_the_lowest_and_highest_tier() {
+    let soc = soc_info(1, 1);
+    let mut cores = CpuTierCores::new(&soc);
+    let busy = [("IDLE".to_string(), 50), ("V0P0".to_string(), 50)];
+    // ECPU, and MCPU of M5 Pro/Max, go to the lowest tier; PCPU, also on Ultra, to the highest
+    for channel in ["ECPU0", "MCPU3", "PCPU0", "DIE_1_PCPU1_CPU0"] {
+      assert!(cores.add(channel, &busy), "{channel}");
+    }
+    assert!(!cores.add("GPU0", &busy));
+
+    let tiers = cores.into_metrics();
+    let counts = tiers.iter().map(|x| (x.label.as_str(), x.cores.len())).collect::<Vec<_>>();
+    assert_eq!(counts, [("E", 2), ("P", 2)]);
   }
 
   #[test]

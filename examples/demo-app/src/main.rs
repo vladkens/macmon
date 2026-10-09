@@ -6,10 +6,13 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut sampler = Sampler::new()?;
 
+  // a column per CPU tier (core type), like ECPU and PCPU on M1-M4
+  let tiers = &sampler.get_soc_info().cpu_tiers;
+  let tiers =
+    tiers.iter().map(|tier| format!("{:>6}", format!("{}CPU", tier.label)).bold().to_string());
   println!(
-    "{} {} {} {} {} {}",
-    format!("{:>6}", "ECPU").bold(),
-    format!("{:>6}", "PCPU").bold(),
+    "{} {} {} {} {}",
+    tiers.collect::<Vec<_>>().join(" "),
     format!("{:>6}", "GPU").bold(),
     format!("{:>6}", "CPU °C").bold(),
     format!("{:>6}", "GPU °C").bold(),
@@ -19,8 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   loop {
     let metrics = sampler.get_metrics(1000)?;
 
-    let ecpu = format!("{:5.1}%", metrics.ecpu_active_ratio * 100.0);
-    let pcpu = format!("{:5.1}%", metrics.pcpu_active_ratio * 100.0);
+    let cpus = metrics.cpu_tiers.iter().map(|tier| format!("{:5.1}%", tier.active_ratio * 100.0));
+    let cpus = cpus.map(|x| x.cyan().to_string()).collect::<Vec<_>>().join(" ");
     let gpu_load = format!("{:5.1}%", metrics.gpu_active_ratio * 100.0);
     let cpu_temp = metrics
       .temp
@@ -37,9 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!(
-      "{} {} {} {} {} {}",
-      ecpu.cyan(),
-      pcpu.magenta(),
+      "{} {} {} {} {}",
+      cpus,
       gpu_load.blue(),
       cpu_temp.yellow(),
       gpu_temp.cyan(),

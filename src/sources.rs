@@ -462,17 +462,26 @@ pub struct SocInfo {
   pub chip_name: String,
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
-  /// Number of efficiency-tier CPU cores.
+  /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `P`, `S` on
+  /// M5.
+  pub cpu_tiers: Vec<CpuTierInfo>,
+  /// Number of cores of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_cores: u8,
-  /// Number of performance-tier CPU cores.
+  /// Number of cores of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_cores: u8,
-  /// UI label for the lower CPU tier, for example `E` on M1-M4 or `P` on M5+.
+  /// Label of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_label: String,
-  /// UI label for the higher CPU tier, for example `P` on M1-M4 or `S` on M5+.
+  /// Label of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_label: String,
-  /// Supported lower-tier CPU frequencies in MHz.
+  /// Frequencies of the lowest CPU tier in MHz.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_freqs: Vec<u32>,
-  /// Supported higher-tier CPU frequencies in MHz.
+  /// Frequencies of the highest CPU tier in MHz.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_freqs: Vec<u32>,
   /// Number of GPU cores.
   pub gpu_cores: u8,
@@ -480,11 +489,38 @@ pub struct SocInfo {
   pub gpu_freqs: Vec<u32>,
 }
 
+/// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct CpuTierInfo {
+  /// Tier label: `E`, `P` or `S`.
+  pub label: String,
+  /// Number of cores.
+  pub cores: u8,
+  /// Supported frequencies in MHz.
+  pub freqs: Vec<u32>,
+}
+
 impl SocInfo {
   /// Load static SoC information for the current machine.
   pub fn new() -> WithError<Self> {
     // Keep this constructor for external library users; internal call sites use get_soc_info().
     get_soc_info()
+  }
+
+  // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
+  #[allow(deprecated)]
+  fn with_deprecated_tiers(mut self) -> Self {
+    if let Some(tier) = self.cpu_tiers.first() {
+      self.ecpu_cores = tier.cores;
+      self.ecpu_label = tier.label.clone();
+      self.ecpu_freqs = tier.freqs.clone();
+    }
+    if let Some(tier) = self.cpu_tiers.last() {
+      self.pcpu_cores = tier.cores;
+      self.pcpu_label = tier.label.clone();
+      self.pcpu_freqs = tier.freqs.clone();
+    }
+    self
   }
 }
 
@@ -794,20 +830,9 @@ fn load_soc_info() -> WithError<SocInfo> {
     Err(_) => hw_from_profiler()?,
   };
 
-  let mut info = SocInfo {
-    chip_name: hw.chip_name,
-    mac_model: hw.mac_model,
-    memory_gb: hw.memory_gb,
-    ecpu_cores: hw.ecpu_cores,
-    pcpu_cores: hw.pcpu_cores,
-    ecpu_label: hw.ecpu_label,
-    pcpu_label: hw.pcpu_label,
-    gpu_cores: hw.gpu_cores,
-    ..Default::default()
-  };
-
-  let cpu_scale = cpu_freq_scale(&info.chip_name);
+  let cpu_scale = cpu_freq_scale(&hw.chip_name);
   let gpu_scale: u32 = 1000 * 1000; // MHz
+  let (mut ecpu_freqs, mut pcpu_freqs, mut gpu_freqs) = (Vec::new(), Vec::new(), Vec::new());
 
   // CPU/GPU frequencies always come from IOKit directly, regardless of how the
   // rest of the hardware descriptor above was sourced.
@@ -819,31 +844,44 @@ fn load_soc_info() -> WithError<SocInfo> {
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep
       //    "Cluster"
       // First node with a table wins, so a stub node can't clobber real values.
-      if info.ecpu_freqs.is_empty()
+      if ecpu_freqs.is_empty()
         && let Some(f) = cpu_freqs(item, "voltage-states1-sram", true, cpu_scale)
       {
-        info.ecpu_freqs = f;
+        ecpu_freqs = f;
       }
-      if info.pcpu_freqs.is_empty()
+      if pcpu_freqs.is_empty()
         && let Some(f) = cpu_freqs(item, "voltage-states5-sram", false, cpu_scale)
       {
-        info.pcpu_freqs = f;
+        pcpu_freqs = f;
       }
 
-      if info.gpu_freqs.is_empty()
+      if gpu_freqs.is_empty()
         && let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states9")
       {
-        info.gpu_freqs = to_mhz(freqs, gpu_scale);
+        gpu_freqs = to_mhz(freqs, gpu_scale);
       }
       unsafe { CFRelease(item as _) }
     }
   }
 
-  if info.ecpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
+  if ecpu_freqs.is_empty() || pcpu_freqs.is_empty() {
     return Err("No CPU frequencies found".into());
   }
 
-  Ok(info)
+  let cpu_tiers = vec![
+    CpuTierInfo { label: hw.ecpu_label, cores: hw.ecpu_cores, freqs: ecpu_freqs },
+    CpuTierInfo { label: hw.pcpu_label, cores: hw.pcpu_cores, freqs: pcpu_freqs },
+  ];
+  let info = SocInfo {
+    chip_name: hw.chip_name,
+    mac_model: hw.mac_model,
+    memory_gb: hw.memory_gb,
+    cpu_tiers,
+    gpu_cores: hw.gpu_cores,
+    gpu_freqs,
+    ..Default::default()
+  };
+  Ok(info.with_deprecated_tiers())
 }
 
 /// Load cached static SoC information for the current machine.
