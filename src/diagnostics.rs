@@ -1,5 +1,6 @@
 //! Diagnostic report used by the `macmon debug` command.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use core_foundation::base::{CFRelease, CFShow};
@@ -7,8 +8,9 @@ use core_foundation::base::{CFRelease, CFShow};
 use crate::shared::{ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel};
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
-  cfio_get_residencies, cfio_integer_value, cfio_watts, get_dvfs_mhz, hw_from_profiler, hw_native,
-  is_pmgr_node, libc_ram, libc_swap, sysctl_str,
+  cfio_get_residencies, cfio_integer_value, cfio_watts, cpu_cluster_types, get_dvfs_mhz,
+  hw_from_profiler_report, hw_native, is_pmgr_node, libc_ram, libc_swap, profiler_report,
+  sysctl_str, sysctl_u32,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -32,31 +34,29 @@ fn print_divider(msg: &str) {
   println!("\n--- {} {}", msg, "-".repeat(len));
 }
 
-fn print_hw_row(name: &str, profiler: impl std::fmt::Display, native: impl std::fmt::Display) {
-  println!("{name:<8} {profiler:<20} {native}");
+// Native and Profiler side by side; `-` in the Profiler column when system_profiler failed.
+fn print_hw(native: &HwInfo, profiler: Option<&HwInfo>) {
+  println!("{:<8} {:<24} Profiler (deprecated)", "", "Native");
+  let row = |name: &str, value: fn(&HwInfo) -> String| {
+    println!("{name:<8} {:<24} {}", value(native), profiler.map_or("-".into(), value));
+  };
+  row("Chip", |x| x.chip_name.clone());
+  row("Model", |x| x.mac_model.clone());
+  row("Memory", |x| format!("{} GB", x.memory_gb));
+  row("CPU", |x| format!("{}{} + {}{}", x.ecpu_cores, x.ecpu_label, x.pcpu_cores, x.pcpu_label));
+  row("GPU", |x| format!("{} cores", x.gpu_cores));
 }
 
-fn print_hw(profiler: &HwInfo, native: &HwInfo) {
-  println!("{:<8} {:<20} Native", "", "Profiler");
-  print_hw_row("Chip", &profiler.chip_name, &native.chip_name);
-  print_hw_row("Model", &profiler.mac_model, &native.mac_model);
-  print_hw_row("Memory", format!("{} GB", profiler.memory_gb), format!("{} GB", native.memory_gb));
-  print_hw_row(
-    "CPU",
-    format!(
-      "{}{} + {}{}",
-      profiler.ecpu_cores, profiler.ecpu_label, profiler.pcpu_cores, profiler.pcpu_label
-    ),
-    format!(
-      "{}{} + {}{}",
-      native.ecpu_cores, native.ecpu_label, native.pcpu_cores, native.pcpu_label
-    ),
-  );
-  print_hw_row(
-    "GPU",
-    format!("{} cores", profiler.gpu_cores),
-    format!("{} cores", native.gpu_cores),
-  );
+// `E x6, M x4, P x2` for the cluster-type of each CPU core.
+fn cluster_type_counts(types: &[String]) -> String {
+  let mut counts = BTreeMap::<&str, usize>::new();
+  for x in types {
+    *counts.entry(x).or_default() += 1;
+  }
+  if counts.is_empty() {
+    return "-".into();
+  }
+  counts.iter().map(|(x, n)| format!("{x} x{n}")).collect::<Vec<_>>().join(", ")
 }
 
 pub fn print_debug() -> WithError<()> {
@@ -65,15 +65,35 @@ pub fn print_debug() -> WithError<()> {
   println!("macmon {} | OS: macOS {os_ver} ({os_build})", env!("CARGO_PKG_VERSION"));
 
   print_divider("Hardware");
-  let profiler = hw_from_profiler();
+  let report = profiler_report();
+  let profiler = report.as_ref().map(hw_from_profiler_report);
   let native = hw_native();
-  match (&profiler, &native) {
-    (Ok(profiler), Ok(native)) => print_hw(profiler, native),
-    _ => {
-      println!("Profiler: {profiler:?}");
-      println!("Native: {native:?}");
-    }
+  match &native {
+    Ok(native) => print_hw(native, profiler.as_ref().ok()),
+    Err(err) => println!("Native: error={err}"),
   }
+  if let Err(err) = &profiler {
+    println!("Profiler: error={err}");
+  }
+
+  // Inputs of the CPU rows (perflevels for Native, number_processors for Profiler), and the
+  // IORegistry core types as an independent reference
+  print_divider("CPU topology");
+  let nperflevels = sysctl_u32("hw.nperflevels");
+  println!("{:<18} {}", "hw.nperflevels", nperflevels.map_or("-".into(), |x| x.to_string()));
+  for i in 0..nperflevels.unwrap_or(0) {
+    let name = sysctl_str(&format!("hw.perflevel{i}.name")).unwrap_or("-".into());
+    let cores = sysctl_u32(&format!("hw.perflevel{i}.physicalcpu"));
+    let cores = cores.map_or("-".into(), |x| x.to_string());
+    println!("{:<18} {name} x{cores}", format!("hw.perflevel{i}"));
+  }
+  match cpu_cluster_types() {
+    Ok(types) => println!("{:<18} {}", "cluster-type", cluster_type_counts(&types)),
+    Err(err) => println!("{:<18} error={err}", "cluster-type"),
+  }
+  let procs =
+    report.as_ref().ok().and_then(|x| x["SPHardwareDataType"][0]["number_processors"].as_str());
+  println!("{:<18} {}", "number_processors", procs.unwrap_or("-"));
 
   print_divider("Memory");
   match libc_ram() {
@@ -192,4 +212,19 @@ pub fn print_debug() -> WithError<()> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::cluster_type_counts;
+
+  #[test]
+  fn counts_cluster_types() {
+    let types = |x: &str| x.chars().map(String::from).collect::<Vec<_>>();
+    // cpu0-7 of this M2, and cpu0-11 of an M6 (exelban/stats#3668)
+    assert_eq!(cluster_type_counts(&types("EEEEPPPP")), "E x4, P x4");
+    assert_eq!(cluster_type_counts(&types("EEEEEEPPMMMM")), "E x6, M x4, P x2");
+    assert_eq!(cluster_type_counts(&types("EE-")), "- x1, E x2");
+    assert_eq!(cluster_type_counts(&[]), "-");
+  }
 }

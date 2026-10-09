@@ -28,10 +28,10 @@ use core_foundation::array::{
   CFArrayRef, CFMutableArrayRef, kCFTypeArrayCallBacks,
 };
 use core_foundation::base::{
-  CFAllocatorRef, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
+  CFAllocatorRef, CFGetTypeID, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
   kCFAllocatorNull,
 };
-use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataRef};
+use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataGetTypeID, CFDataRef};
 use core_foundation::dictionary::{
   CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
   CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
@@ -634,7 +634,7 @@ fn sysctl_buf<const N: usize>(name: &str) -> Option<[u8; N]> {
   (ret == 0).then_some(buf)
 }
 
-fn sysctl_u32(name: &str) -> Option<u32> {
+pub(crate) fn sysctl_u32(name: &str) -> Option<u32> {
   sysctl_buf(name).map(u32::from_ne_bytes)
 }
 
@@ -654,7 +654,7 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 // lowest (confirmed via `sysctl hw.perflevel0/1.name` -> Performance/Efficiency on
 // M1-M4). M5 drops E-cores for a new higher "Super" tier above Performance, so the
 // same two-slot ecpu/pcpu split still applies, just relabeled P/S instead of E/P.
-// Unverified on real M5 hardware (see hw_from_profiler for the tested fallback path).
+// An M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12 (issue #47).
 fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static str)> {
   let nperflevels = sysctl_u32("hw.nperflevels")?;
   if nperflevels < 2 {
@@ -701,15 +701,24 @@ pub(crate) fn hw_native() -> WithError<HwInfo> {
   })
 }
 
-/// Read hardware descriptor fields via `system_profiler` (slower, ~250-300ms subprocess
-/// spawn, but battle-tested against real M1-M5 hardware bug reports).
-pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
+/// Hardware and display report of `system_profiler` (~250-300ms subprocess spawn).
+pub(crate) fn profiler_report() -> WithError<serde_json::Value> {
   let out = std::process::Command::new("system_profiler")
     .args(["SPHardwareDataType", "SPDisplaysDataType", "-json"])
     .output()?;
   let out = std::str::from_utf8(&out.stdout)?;
-  let out = serde_json::from_str::<serde_json::Value>(out)?;
+  Ok(serde_json::from_str::<serde_json::Value>(out)?)
+}
 
+/// Read hardware descriptor fields via `system_profiler`.
+///
+/// Deprecated fallback, to be removed: its text format changes between macOS releases (15, 26,
+/// 27), while `hw_native` reads the same data from sysctl and IORegistry.
+pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
+  Ok(hw_from_profiler_report(&profiler_report()?))
+}
+
+pub(crate) fn hw_from_profiler_report(out: &serde_json::Value) -> HwInfo {
   // SPHardwareDataType.0.chip_type
   let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str();
   let chip_name = chip_name.unwrap_or("Unknown chip").to_string();
@@ -731,7 +740,7 @@ pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
   let gpu_cores = out["SPDisplaysDataType"][0]["sppci_cores"].as_str();
   let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
-  Ok(HwInfo {
+  HwInfo {
     chip_name,
     mac_model,
     memory_gb: mem_gb as u16,
@@ -740,7 +749,35 @@ pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
     ecpu_label: if has_mcpu { "P".into() } else { "E".into() },
     pcpu_label: if has_mcpu { "S".into() } else { "P".into() },
     gpu_cores: gpu_cores as u8,
-  })
+  }
+}
+
+/// `cluster-type` of each CPU core from IORegistry (`cpuN` devices): `E`, `M` or `P`.
+pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
+  let mut types = Vec::new();
+  for (entry, name) in IOServiceIterator::new("IOPlatformDevice")? {
+    let id = name.strip_prefix("cpu").unwrap_or_default();
+    if id.is_empty() || !id.bytes().all(|x| x.is_ascii_digit()) {
+      continue;
+    }
+
+    // "-" for a core without a readable type, so the counts still cover every core
+    let mut cluster_type = "-".to_string();
+    if let Ok(item) = cfio_get_props(entry, name) {
+      if let Some(obj) = cfdict_get_val(item, "cluster-type")
+        && unsafe { CFGetTypeID(obj) == CFDataGetTypeID() }
+      {
+        let obj = obj as CFDataRef;
+        let len = unsafe { CFDataGetLength(obj) }.max(0);
+        let mut data = vec![0u8; len as usize];
+        unsafe { CFDataGetBytes(obj, CFRange::init(0, len), data.as_mut_ptr()) };
+        cluster_type = String::from_utf8_lossy(&data).trim_end_matches('\0').to_string();
+      }
+      unsafe { CFRelease(item as _) }
+    }
+    types.push(cluster_type);
+  }
+  Ok(types)
 }
 
 fn load_soc_info() -> WithError<SocInfo> {
