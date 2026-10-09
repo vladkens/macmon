@@ -655,19 +655,27 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 // M1-M4). M5 drops E-cores for a new higher "Super" tier above Performance, so the
 // same two-slot ecpu/pcpu split still applies, just relabeled P/S instead of E/P.
 // An M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12 (issue #47).
-fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static str)> {
-  let nperflevels = sysctl_u32("hw.nperflevels")?;
-  if nperflevels < 2 {
+fn cpu_tiers(
+  perflevel_cores: &[u32],
+  chip_name: &str,
+) -> Option<(u8, u8, &'static str, &'static str)> {
+  if perflevel_cores.len() < 2 {
     return None;
   }
-
-  let hi = sysctl_u32("hw.perflevel0.physicalcpu")?;
-  let lo = sysctl_u32(&format!("hw.perflevel{}.physicalcpu", nperflevels - 1))?;
+  let (hi, lo) = (perflevel_cores[0], perflevel_cores[perflevel_cores.len() - 1]);
 
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
   let (ecpu_label, pcpu_label) = if is_legacy { ("E", "P") } else { ("P", "S") };
 
   Some((lo as u8, hi as u8, ecpu_label, pcpu_label))
+}
+
+fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static str)> {
+  let nperflevels = sysctl_u32("hw.nperflevels")?;
+  let perflevel_cores = (0..nperflevels)
+    .map(|i| sysctl_u32(&format!("hw.perflevel{i}.physicalcpu")))
+    .collect::<Option<Vec<_>>>()?;
+  cpu_tiers(&perflevel_cores, chip_name)
 }
 
 /// Read hardware descriptor fields via sysctl and IORegistry only (no subprocess).
@@ -1614,12 +1622,13 @@ mod tests {
 
   #[test]
   fn parse_cpu_core_counts() {
+    // number_processors read on real machines
     for (value, expected) in [
-      ("proc 8:0:4:4", (4, 4, false)), // M2, macOS 27
-      ("proc 18:6:0:12", (12, 6, true)),
-      ("proc 16:12:4:0", (4, 12, false)),
-      ("proc 8:4:4:0", (4, 4, false)),
-      ("proc 8:4:4", (4, 4, false)),
+      ("proc 8:0:4:4", (4, 4, false)),    // M2, macOS 27.0.1
+      ("proc 18:6:0:12", (12, 6, true)),  // M5 Max, macOS 26.4 beta (issue #47)
+      ("proc 16:12:4:0", (4, 12, false)), // M4 Max, macOS 26
+      ("proc 8:4:4:0", (4, 4, false)),    // M3 Air, macOS 26
+      ("proc 8:4:4", (4, 4, false)),      // M3 Air, macOS 15.6.1; M1, macOS 15.8.1
       ("", (0, 0, false)),
       ("garbage", (0, 0, false)),
       ("10:8:2", (0, 0, false)),
@@ -1628,6 +1637,21 @@ mod tests {
       ("proc 24:6:0:12:6", (0, 0, false)),
     ] {
       assert_eq!(parse_cpu_cores(value), expected, "{value}");
+    }
+  }
+
+  #[test]
+  fn cpu_tiers_from_perflevels() {
+    // hw.perflevelN.physicalcpu read on real machines, highest tier first
+    for (cores, chip, expected) in [
+      (&[4, 4][..], "Apple M1", Some((4, 4, "E", "P"))), // macOS 15.8.1
+      (&[4, 4], "Apple M2", Some((4, 4, "E", "P"))),     // macOS 27.0.1
+      (&[6, 12], "Apple M5 Max", Some((12, 6, "P", "S"))), // Super, Performance (issue #47)
+      (&[2, 4, 6], "Apple M6", Some((6, 2, "P", "S"))),  // three tiers, middle dropped (issue #80)
+      (&[8], "Apple M1", None),
+      (&[], "Apple M1", None),
+    ] {
+      assert_eq!(cpu_tiers(cores, chip), expected, "{chip} {cores:?}");
     }
   }
 
