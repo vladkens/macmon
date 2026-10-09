@@ -877,6 +877,45 @@ mod tests {
 
   #[test]
   #[allow(deprecated)]
+  fn deprecated_fields_keep_the_lowest_and_the_highest_tier() {
+    // two tiers with different values, so a swapped or unfilled field shows
+    let rs = aggregate_ioreport_metrics(
+      Metrics {
+        cpu_tiers: cpu_tiers(vec![core(0, 0, 1200, 0.3, 0.6)], vec![core(0, 0, 3000, 0.7, 0.9)]),
+        ..Default::default()
+      },
+      &soc_info(2, 1),
+    );
+    assert_eq!(
+      (rs.ecpu_freq_mhz, rs.ecpu_scaled_ratio, rs.ecpu_active_ratio),
+      (1200, 0.3 / 2.0, 0.6 / 2.0)
+    );
+    assert_eq!((rs.pcpu_freq_mhz, rs.pcpu_scaled_ratio, rs.pcpu_active_ratio), (3000, 0.7, 0.9));
+    assert_eq!((rs.ecpu_cores[0].freq_mhz, rs.pcpu_cores[0].freq_mhz), (1200, 3000));
+    assert_eq!((rs.cpu_scaled_ratio, rs.cpu_active_ratio), ((0.3 + 0.7) / 3.0, (0.6 + 0.9) / 3.0));
+
+    // JSON keeps the v0.9 keys next to cpu_tiers
+    let json = serde_json::to_value(&rs).unwrap();
+    for (key, tier) in [("ecpu", 0), ("pcpu", 1)] {
+      for field in ["freq_mhz", "scaled_ratio", "active_ratio", "cores"] {
+        assert_eq!(json[format!("{key}_{field}")], json["cpu_tiers"][tier][field], "{key}_{field}");
+      }
+    }
+
+    // pcpu is the highest of three tiers on M6
+    let soc = m6_soc();
+    let tier = |(info, freq): (&CpuTierInfo, u32)| CpuTierMetrics {
+      label: info.label.clone(),
+      cores: vec![core(0, 0, freq, 0.5, 0.5)],
+      ..Default::default()
+    };
+    let tiers = soc.cpu_tiers.iter().zip([2000, 3000, 4000]).map(tier).collect();
+    let rs = aggregate_ioreport_metrics(Metrics { cpu_tiers: tiers, ..Default::default() }, &soc);
+    assert_eq!((rs.ecpu_freq_mhz, rs.pcpu_freq_mhz), (2000, 4000));
+  }
+
+  #[test]
+  #[allow(deprecated)]
   fn frequency_uses_minimum_floor_when_cluster_is_idle() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
