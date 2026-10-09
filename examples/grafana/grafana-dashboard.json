@@ -480,24 +480,17 @@
         },
         {
           "editorMode": "code",
-          "expr": "macmon_ecpu_scaled_ratio",
-          "legendFormat": "E-cores",
+          "expr": "macmon_cpu_tier_scaled_ratio",
+          "legendFormat": "{{tier}}-cores",
           "range": true,
           "refId": "B"
-        },
-        {
-          "editorMode": "code",
-          "expr": "macmon_pcpu_scaled_ratio",
-          "legendFormat": "P-cores",
-          "range": true,
-          "refId": "C"
         },
         {
           "editorMode": "code",
           "expr": "macmon_gpu_scaled_ratio",
           "legendFormat": "GPU",
           "range": true,
-          "refId": "D"
+          "refId": "C"
         }
       ],
       "title": "Utilization",
@@ -754,24 +747,17 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "macmon_ecpu_freq_mhz",
-          "legendFormat": "E-core freq",
+          "expr": "macmon_cpu_tier_freq_mhz",
+          "legendFormat": "{{tier}}-core freq",
           "range": true,
           "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "macmon_pcpu_freq_mhz",
-          "legendFormat": "P-core freq",
-          "range": true,
-          "refId": "B"
         },
         {
           "editorMode": "code",
           "expr": "macmon_gpu_freq_mhz",
           "legendFormat": "GPU freq",
           "range": true,
-          "refId": "C"
+          "refId": "B"
         }
       ],
       "title": "Frequencies",
