@@ -7,7 +7,7 @@ use core_foundation::base::{CFRelease, CFShow};
 
 use crate::shared::{ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel};
 use crate::sources::{
-  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_keys, cfio_get_props,
+  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_data, cfdict_keys, cfio_get_props,
   cfio_get_residencies, cfio_integer_value, cfio_watts, cpu_cluster_types, get_dvfs_mhz,
   hw_from_profiler_report, hw_native, is_pmgr_node, libc_ram, libc_swap, profiler_report,
   sysctl_str, sysctl_u32,
@@ -34,11 +34,12 @@ fn print_divider(msg: &str) {
   println!("\n--- {} {}", msg, "-".repeat(len));
 }
 
-// Native and Profiler side by side; `-` in the Profiler column when system_profiler failed.
-fn print_hw(native: &HwInfo, profiler: Option<&HwInfo>) {
+// Native and Profiler side by side; `-` in the column of the one that failed.
+fn print_hw(native: Option<&HwInfo>, profiler: Option<&HwInfo>) {
   println!("{:<8} {:<24} Profiler (deprecated)", "", "Native");
   let row = |name: &str, value: fn(&HwInfo) -> String| {
-    println!("{name:<8} {:<24} {}", value(native), profiler.map_or("-".into(), value));
+    let cell = |hw: Option<&HwInfo>| hw.map_or("-".into(), value);
+    println!("{name:<8} {:<24} {}", cell(native), cell(profiler));
   };
   row("Chip", |x| x.chip_name.clone());
   row("Model", |x| x.mac_model.clone());
@@ -61,6 +62,15 @@ fn cluster_type_counts(types: &[String]) -> String {
   counts.iter().map(|(x, n)| format!("{x} x{n}")).collect::<Vec<_>>().join(", ")
 }
 
+// CPU clusters of `acc-clusters` (M5+) with their voltage-states tables, as (table, cluster type)
+// and as raw 8-byte entries.
+fn acc_clusters_text(data: &[u8]) -> (String, String) {
+  let chunks = data.as_chunks::<8>().0;
+  let clusters = chunks.iter().map(|x| format!("voltage-states{}-sram type {}", x[0], x[1]));
+  let raw = chunks.iter().map(|x| x.map(|b| format!("{b:02x}")).concat());
+  (clusters.collect::<Vec<_>>().join(", "), raw.collect::<Vec<_>>().join(" "))
+}
+
 pub fn print_debug() -> WithError<()> {
   let os_ver = sysctl_str("kern.osproductversion").unwrap_or("Unknown".into());
   let os_build = sysctl_str("kern.osversion").unwrap_or("Unknown".into());
@@ -70,9 +80,9 @@ pub fn print_debug() -> WithError<()> {
   let report = profiler_report();
   let profiler = report.as_ref().map(hw_from_profiler_report);
   let native = hw_native();
-  match &native {
-    Ok(native) => print_hw(native, profiler.as_ref().ok()),
-    Err(err) => println!("Native: error={err}"),
+  print_hw(native.as_ref().ok(), profiler.as_ref().ok());
+  if let Err(err) = &native {
+    println!("Native: error={err}");
   }
   if let Err(err) = &profiler {
     println!("Profiler: error={err}");
@@ -128,6 +138,12 @@ pub fn print_debug() -> WithError<()> {
         let freqs = freqs.iter().map(|x| x.to_string()).collect::<Vec<String>>().join(" ");
         println!("{:>32}: (v) {}", key, volts);
         println!("{:>32}: (f) {}", key, freqs);
+      }
+
+      if let Some(data) = cfdict_data(item, "acc-clusters") {
+        let (clusters, raw) = acc_clusters_text(&data);
+        println!("{:>32}: {clusters}", "acc-clusters");
+        println!("{:>32}: (raw) {raw}", "acc-clusters");
       }
 
       unsafe { CFRelease(item as _) }
@@ -218,7 +234,18 @@ pub fn print_debug() -> WithError<()> {
 
 #[cfg(test)]
 mod tests {
-  use super::cluster_type_counts;
+  use super::{acc_clusters_text, cluster_type_counts};
+
+  #[test]
+  fn shows_acc_clusters() {
+    // acc-clusters of an M5 Max (issue #47)
+    let data = [0x16, 0, 0, 0, 0, 0, 0, 0, 0x17, 1, 0, 0, 0, 0, 0, 0, 0x05, 2, 0, 0, 0, 0, 0, 0];
+    let (clusters, raw) = acc_clusters_text(&data);
+    let expected =
+      "voltage-states22-sram type 0, voltage-states23-sram type 1, voltage-states5-sram type 2";
+    assert_eq!(clusters, expected);
+    assert_eq!(raw, "1600000000000000 1701000000000000 0502000000000000");
+  }
 
   #[test]
   fn counts_cluster_types() {

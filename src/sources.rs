@@ -120,6 +120,20 @@ pub fn cfdict_get_val(dict: CFDictionaryRef, key: &str) -> Option<CFTypeRef> {
   }
 }
 
+/// Bytes of a CFData value in a dictionary; None when the key is missing or holds another type.
+pub(crate) fn cfdict_data(dict: CFDictionaryRef, key: &str) -> Option<Vec<u8>> {
+  let obj = cfdict_get_val(dict, key)?;
+  if unsafe { CFGetTypeID(obj) != CFDataGetTypeID() } {
+    return None;
+  }
+
+  let obj = obj as CFDataRef;
+  let len = unsafe { CFDataGetLength(obj) }.max(0);
+  let mut data = vec![0u8; len as usize];
+  unsafe { CFDataGetBytes(obj, CFRange::init(0, len), data.as_mut_ptr()) };
+  Some(data)
+}
+
 // MARK: IOReport Bindings
 
 #[link(name = "IOKit", kind = "framework")]
@@ -565,17 +579,7 @@ fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
 
 // Read acc-clusters from pmgr dict and parse into (ecpu_key, pcpu_key).
 fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
-  let obj = cfdict_get_val(dict, "acc-clusters")? as CFDataRef;
-
-  let len = unsafe { CFDataGetLength(obj) } as usize;
-  if len < 8 {
-    return None;
-  }
-
-  let mut data = vec![0u8; len];
-  unsafe { CFDataGetBytes(obj, CFRange::init(0, len as _), data.as_mut_ptr()) };
-
-  parse_acc_clusters(&data)
+  parse_acc_clusters(&cfdict_data(dict, "acc-clusters")?)
 }
 
 // M1-M5 keep DVFS tables on "pmgr"; M6+ move them to a "pmgr-child" node
@@ -796,13 +800,7 @@ pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
     // "-" for a core without a readable type, so the counts still cover every core
     let mut cluster_type = "-".to_string();
     if let Ok(item) = cfio_get_props(entry, name) {
-      if let Some(obj) = cfdict_get_val(item, "cluster-type")
-        && unsafe { CFGetTypeID(obj) == CFDataGetTypeID() }
-      {
-        let obj = obj as CFDataRef;
-        let len = unsafe { CFDataGetLength(obj) }.max(0);
-        let mut data = vec![0u8; len as usize];
-        unsafe { CFDataGetBytes(obj, CFRange::init(0, len), data.as_mut_ptr()) };
+      if let Some(data) = cfdict_data(item, "cluster-type") {
         cluster_type = String::from_utf8_lossy(&data).trim_end_matches('\0').to_string();
       }
       unsafe { CFRelease(item as _) }
