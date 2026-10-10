@@ -7,7 +7,9 @@ a `y`, and only the process that was confirmed is signalled.
 ## Behavior
 
 Messages go on the left of the process box's bottom border, in place of the selected process path
-(`ProcView::border_text`), while they are shown.
+(`ProcView::border_text`), while they are shown. Prompts and one-off messages show whatever is
+selected; the tracking line (`SIGTERM sent…`, `still running…`) only while the tracked process is
+selected or nothing is, otherwise the selected process path shows as before.
 
 - `k` is handled in the global key match of `App::handle_key` (after `update_proc_view`), only
   while the process list is visible and a process is selected. `k` typed into the filter stays
@@ -18,10 +20,14 @@ Messages go on the left of the process box's bottom border, in place of the sele
     signal goes through them.
   - `kill(pid, 0)` fails: `ESRCH` → `<pid> <name> exited`; `EPERM` → `Not permitted to kill <pid>
     <name>`.
-  - Read the identity (start time, see Decisions). Unreadable → `Not permitted to kill <pid>
-    <name>` (setuid processes you launched can pass `kill(pid, 0)` and still be unreadable).
+  - Read the identity (start time, see Decisions). The row has a sampled start time
+    (`ProcInfo::started`, from libproc; `None` for `ps` rows) and the identity, readable or not,
+    doesn't match it → `<pid> <name> exited`: the process is gone since the sample, so the prompt
+    never names one process and asks about another. Otherwise unreadable → `Not permitted to kill
+    <pid> <name>` (setuid processes you launched can pass `kill(pid, 0)` and still be unreadable).
   - Otherwise store the target `(pid, name, identity)` and ask `Kill <pid> <name>? y/n`. Hints
-    while asking: `y kill`, `any key cancel`.
+    while asking: `y kill`, `any key cancel` (`y force kill` on the force-kill prompt). Opening a
+    prompt clears a one-off message.
 - While asking, every key goes to the prompt (Ctrl-C still quits). Only `KeyCode::Char('y')`
   without Ctrl / Alt / Cmd confirms; any other key cancels and does nothing else. A click or wheel
   event, `FocusLost`, and the process list going hidden (`App::set_procs_visible(false)`, e.g. the
@@ -36,16 +42,20 @@ Messages go on the left of the process box's bottom border, in place of the sele
   `<pid> <name> exited`, tracking ends.
 - Still alive 2 s after SIGTERM → `<pid> <name> still running · k force kill`, shown until it
   exits.
-- `k` on the tracked process: before 2 s → `waiting for exit…`, no signal; after it →
-  `Force kill <pid> <name>? y/n`. The prompt is a sub-state of tracking: ticks keep checking the
+- `k` on the tracked process: before 2 s → `waiting for exit…` (it ends at 2 s), no signal;
+  after it → `Force kill <pid> <name>? y/n`. The prompt is a sub-state of tracking: ticks keep checking the
   process, and an exit while it is open closes it and shows `exited`. `y` re-checks the identity
   as above, then sends SIGKILL → `SIGKILL sent to <pid> <name>`, tracked the same way until it
-  exits (no further escalation).
+  exits (no further escalation): `still running` without the force hint, and `k` answers
+  `waiting for exit…`. A failed SIGKILL keeps the tracking and shows the error.
 - `k` on another process opens its own prompt and keeps the old tracking; the old tracking is
-  replaced only when that prompt is confirmed with `y`.
+  replaced only when the new SIGTERM is actually sent after `y`.
 - While the list is hidden, tracking goes on and messages aren't drawn. One-off messages
   (`exited`, errors, refusals) disappear after 5 s; `still running` stays while the process runs.
-- Long names: cut only the name, so `? y/n` and `· k force kill` always stay on the border.
+- Narrow borders: while a kill line is shown, key hints drop from the end until it gets all its
+  text but the name plus up to 16 cells of the name (a line without a name needs its full
+  width); only once no hint is left is the name cut further. Only the name is ever cut, so
+  `? y/n` and `· k force kill` stay on the border.
 
 ## Decisions
 
@@ -97,10 +107,25 @@ Messages go on the left of the process box's bottom border, in place of the sele
       exited; a reused pid (new start time) is never sent SIGKILL; `k` before 2 s sends nothing;
       an exit while the force-kill prompt is open closes it and `y` sends nothing; cancelling a
       prompt for another process keeps the old tracking. One test with a real child: the test
-      spawns `sleep 30`, sends SIGTERM through the libc implementation, reaps it with `wait()`,
-      polls the tracking with real time up to 5 s until `exited`, and kills and reaps the child in
-      a `Drop` guard so a failure never leaves it running.
+      spawns `sleep 30`, sends SIGTERM through the libc implementation, polls the tracking with
+      real time up to 5 s while the child is a zombie (its pid can't be reused) until `exited`,
+      then reaps it with `wait()`, and kills and reaps the child in a `Drop` guard so a failure
+      never leaves it running.
 - [x] `make check` and `make test` pass; commit `feat: force kill a process that ignores SIGTERM`.
+
+### 3. Review fixes
+
+- [x] Narrow borders as in Behavior: `Note::wanted_width` replaces the kept-end flag.
+- [x] `ProcInfo::started` from `proc_bsdinfo` (`None` for `ps` rows), passed to `Kill::ask`;
+      a reused pid since the sample → `exited`, no prompt.
+- [x] The tracking line only while the tracked process or nothing is selected; `y force kill`
+      on the force-kill prompt; `waiting for exit…` as its own message kind, not matched by text.
+- [x] Tests: 80-cell lines for `SIGTERM sent`, `still running` and `Not permitted`; a pid
+      restarted before `k`; the tracking line and the selection; `k` with the list hidden or the
+      help open; the wheel closes a prompt; a failed SIGKILL keeps the tracking; ticks while the
+      list is hidden; no test App with the libc implementation.
+- [x] `make check` and `make test` pass; commit `fix: keep kill messages readable and bind the
+      prompt to the sampled process`.
 
 ## Manual check (outside the tasks)
 

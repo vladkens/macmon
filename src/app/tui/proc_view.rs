@@ -789,12 +789,12 @@ impl App {
     let power_shown = headers.iter().any(|&(column, _)| column == ProcSort::Power);
     self.proc_view.targets = Targets { area, headers, body };
 
-    // hints drop before the end of a prompt (`? y/n`) or of `· k force kill` would be cut
+    // hints drop from the end until a kill note fits with a readable part of its name
     let mut hints = self.footer_hints();
-    let note = self.kill.note();
-    if let Some(kept) = note.as_ref().filter(|note| note.keeps_end()) {
+    let note = self.kill.note(self.proc_view.selected().map(|proc| proc.pid));
+    if let Some(note) = &note {
       while !hints.is_empty()
-        && usize::from(border_text_room(area.width, &hints)) < kept.min_width()
+        && usize::from(border_text_room(area.width, &hints)) < note.wanted_width()
       {
         hints.pop();
       }
@@ -985,6 +985,7 @@ mod tests {
       mem_bytes: mem_mb * MIB,
       power_w: power,
       gpu_pct: gpu,
+      started: None,
     }
   }
 

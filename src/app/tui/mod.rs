@@ -16,7 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use kill::Kill;
+use kill::{Identity, Kill};
 use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
 use proc_view::ProcView;
@@ -446,7 +446,8 @@ impl App {
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
       KeyCode::Char('k') if self.procs_visible() => {
         if let Some(proc) = self.proc_view.selected() {
-          self.kill.ask(proc.pid, &proc.name, Instant::now());
+          let started = proc.started.map(Identity::from);
+          self.kill.ask(proc.pid, &proc.name, started, Instant::now());
         }
       }
       _ => {}
@@ -691,6 +692,7 @@ mod tests {
       mem_bytes: 64 << 20,
       power_w: Some(0.5),
       gpu_pct: 3.0,
+      started: None,
     };
     vec![proc(1, "launchd"), proc(631, "WindowServer"), proc(2301, "Safari")]
   }
@@ -699,7 +701,8 @@ mod tests {
   const WINDOW_SERVER: &str =
     "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer";
 
-  /// Processes with different values, one of them (root's launchd) without a power reading.
+  /// Processes with different values, one of them (root's launchd) without a power reading and a
+  /// start time; the others started at the second of their pid, as in `FakeSys`.
   fn varied_procs() -> Vec<ProcInfo> {
     let path = |name: &str| match name {
       "launchd" => "/sbin/launchd".to_string(),
@@ -715,6 +718,7 @@ mod tests {
       mem_bytes: mem_mb << 20,
       power_w,
       gpu_pct,
+      started: (pid >= 100).then_some((pid as u64, 0)),
     };
     vec![
       proc(1, "launchd", 0.0, 20, None, 0.0),
@@ -1183,7 +1187,10 @@ mod tests {
       gpu_cores: 12,
       ..Default::default()
     };
-    let mut app = App::from_parts(soc, Config::default());
+    let mut app = App {
+      kill: Kill::new(Box::new(FakeSys::default())),
+      ..App::from_parts(soc, Config::default())
+    };
     let cpu_tiers = vec![
       cpu_tier("E", 2940, 0.71, 0.71),
       cpu_tier("P", 2394, 0.25, 0.25),
@@ -1363,55 +1370,178 @@ mod tests {
     assert!(bottom(&mut app).starts_with("╰─ 631 WindowServer exited ─"));
   }
 
-  #[test]
-  fn still_running_keeps_the_force_kill_hint_in_a_narrow_window() {
-    let name = "com.apple.WebKit.WebContent";
+  /// Name of `long_name_app`'s selected process.
+  const LONG_NAME: &str = "com.apple.WebKit.WebContent";
+
+  /// `app_with_procs` of `varied_procs` with Safari renamed to `LONG_NAME` and selected, killing
+  /// through a fake.
+  fn long_name_app() -> (App, FakeSys) {
     let mut procs = varied_procs();
-    procs[2].name = name.to_string();
+    procs[2].name = LONG_NAME.to_string();
     let (mut app, fake) = faking_kill(app_with_procs(procs)); // [631, 2301, 1]
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(press(&mut app, KeyCode::Down).is_continue());
+    (app, fake)
+  }
+
+  #[test]
+  fn tracking_lines_stay_readable_in_a_narrow_window() {
+    let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
+    let (mut app, fake) = long_name_app();
     assert!(app.handle_key(key('k')).is_continue());
     assert!(app.handle_key(key('y')).is_continue());
-    app.kill.tick(Instant::now() + Duration::from_secs(3));
 
-    // the name cut, then the hints left out from the end
-    let line = row(&render_buffer(&mut app, 200, 50), 49);
-    assert!(line.starts_with(&format!("╰─ 2301 {name} still running · k force kill ─")), "{line}");
+    // hints drop from the end until the name gets 16 cells, then the name takes the room left
     assert_eq!(
-      row(&render_buffer(&mut app, 80, 50), 49),
-      "╰─ 2301 c… still running · k force kill ─ q quit | ? help | p procs | v graph ─╯"
+      bottom(&mut app, 80),
+      "╰─ SIGTERM sent to 2301 com.apple.WebKit.WebCont… ─ q quit | ? help | p procs ─╯"
     );
+    app.kill.tick(Instant::now() + Duration::from_secs(3));
+    let line = bottom(&mut app, 200);
+    assert!(line.starts_with(&format!("╰─ 2301 {LONG_NAME} still running · k force kill ─")));
     assert_eq!(
-      row(&render_buffer(&mut app, 46, 50), 49),
-      "╰─ 2301 com.a… still running · k force kill ─╯"
+      bottom(&mut app, 80),
+      "╰─ 2301 com.apple.WebKit.WebC… still running · k force kill ─ q quit | ? help ─╯"
     );
+    // no hint left: the name is cut further
+    assert_eq!(bottom(&mut app, 46), "╰─ 2301 com.a… still running · k force kill ─╯");
+
+    // the force-kill prompt answers with its own hint
+    assert!(app.handle_key(key('k')).is_continue());
+    let line = bottom(&mut app, 200);
+    assert!(line.starts_with(&format!("╰─ Force kill 2301 {LONG_NAME}? y/n ─")), "{line}");
+    assert!(line.ends_with("─ y force kill | any key cancel ─╯"), "{line}");
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
     assert_eq!(fake.sent(), [(2301, libc::SIGTERM)]);
   }
 
   #[test]
-  fn the_kill_prompt_keeps_its_end_in_a_narrow_window() {
-    let name = "com.apple.WebKit.WebContent";
-    let mut procs = varied_procs();
-    procs[2].name = name.to_string();
-    let (mut app, _fake) = faking_kill(app_with_procs(procs)); // [631, 2301, 1]
-    assert!(press(&mut app, KeyCode::Down).is_continue());
-    assert!(press(&mut app, KeyCode::Down).is_continue());
+  fn prompts_and_messages_stay_readable_in_a_narrow_window() {
+    let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
+    let (mut app, fake) = long_name_app();
     assert!(app.handle_key(key('k')).is_continue());
 
-    // the whole name with both hints, then the name cut and the cancel hint left out
-    let line = row(&render_buffer(&mut app, 80, 50), 49);
-    assert!(line.starts_with(&format!("╰─ Kill 2301 {name}? y/n ─")), "{line}");
+    // the whole name with both hints, then the hints left out and the name cut
+    let line = bottom(&mut app, 80);
+    assert!(line.starts_with(&format!("╰─ Kill 2301 {LONG_NAME}? y/n ─")), "{line}");
     assert!(line.ends_with("─ y kill | any key cancel ─╯"), "{line}");
-    assert_eq!(
-      row(&render_buffer(&mut app, 40, 50), 49),
-      "╰─ Kill 2301 com.apple…? y/n ─ y kill ─╯"
-    );
+    assert_eq!(bottom(&mut app, 40), "╰─ Kill 2301 com.apple.WebKit.W…? y/n ─╯");
     assert!(app.kill.asking());
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+
+    fake.fail(2301, libc::EPERM);
+    assert!(app.handle_key(key('k')).is_continue());
+    assert_eq!(
+      bottom(&mut app, 80),
+      "╰─ Not permitted to kill 2301 com.apple.WebKit.W… ─ q quit | ? help | p procs ─╯"
+    );
+    // a line without a name gets its whole width: `q quit` would leave it a cell short
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert_eq!(bottom(&mut app, 40), "╰─ Won't kill launchd (pid 1) ─────────╯");
+    assert_eq!(fake.sent(), []);
   }
 
   #[test]
-  fn clicks_focus_loss_and_hiding_close_the_kill_prompt() {
+  fn the_signalled_process_shows_while_it_or_nothing_is_selected() {
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
+    let bottom = |app: &mut App| row(&render_buffer(app, 200, 50), 49);
+    let sent = "╰─ SIGTERM sent to 631 WindowServer ─";
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(app.handle_key(key('y')).is_continue());
+    assert!(bottom(&mut app).starts_with(sent));
+
+    // another process selected: its path, as before; nothing selected: the signalled process
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let safari = "╰─ 2301 /Applications/Safari.app/Contents/MacOS/Safari ─";
+    assert!(bottom(&mut app).starts_with(safari), "{}", bottom(&mut app));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(bottom(&mut app).starts_with(sent));
+
+    // a prompt and a message show whatever is selected
+    for _ in 0..2 {
+      assert!(press(&mut app, KeyCode::Down).is_continue());
+    }
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(bottom(&mut app).starts_with("╰─ Kill 2301 Safari? y/n ─"));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(bottom(&mut app).starts_with("╰─ Won't kill launchd (pid 1) ─"));
+    assert_eq!(fake.sent(), [(631, libc::SIGTERM)]);
+  }
+
+  #[test]
+  fn k_on_a_row_whose_pid_was_reused_since_the_sample_says_exited() {
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    // the row still names the process sampled before
+    fake.restart(631);
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(!app.kill.asking());
+    let line = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(line.starts_with("╰─ 631 WindowServer exited ─"), "{line}");
+    assert!(app.handle_key(key('y')).is_continue());
+    assert_eq!(fake.sent(), []);
+  }
+
+  #[test]
+  fn k_does_nothing_while_the_list_is_hidden_or_the_help_is_open() {
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+
+    assert!(app.handle_key(key('?')).is_continue());
+    for c in ['k', 'y'] {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(!app.kill.asking() && app.help.is_some());
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert_eq!(app.proc_view.selected_pid(), Some(631));
+
+    // hidden with `p`, then in a window too small for the list
+    assert!(app.handle_key(key('p')).is_continue());
+    render_buffer(&mut app, 200, 50);
+    for c in ['k', 'y'] {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(app.handle_key(key('p')).is_continue());
+    let mut app = with_procs(app, varied_procs());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    render_buffer(&mut app, 60, 12);
+    for c in ['k', 'y'] {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(!app.kill.asking());
+    assert_eq!(fake.calls(), []);
+  }
+
+  #[test]
+  fn ticks_follow_the_signalled_process_while_the_list_is_hidden() {
+    let msec = RwLock::new(TUI_MIN_MS);
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
+    let note = |app: &App| app.kill.note(None).map(|note| note.to_string());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(app.handle_key(key('y')).is_continue());
+
+    render_buffer(&mut app, 60, 12);
+    assert!(!app.procs_visible());
+    assert!(app.handle_event(Event::Tick, &msec).is_continue());
+    assert_eq!(note(&app).as_deref(), Some("SIGTERM sent to 631 WindowServer"));
+    fake.exit(631);
+    assert!(app.handle_event(Event::Tick, &msec).is_continue());
+    assert_eq!(note(&app).as_deref(), Some("631 WindowServer exited"));
+
+    // on screen again: the message is there
+    let mut app = with_procs(app, varied_procs());
+    let line = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(line.starts_with("╰─ 631 WindowServer exited ─"), "{line}");
+    assert_eq!(fake.sent(), [(631, libc::SIGTERM)]);
+  }
+
+  #[test]
+  fn clicks_the_wheel_focus_loss_and_hiding_close_the_kill_prompt() {
     let msec = RwLock::new(TUI_MIN_MS);
     let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
     render_buffer(&mut app, 200, 50);
@@ -1424,6 +1554,13 @@ mod tests {
     // a click on another row only closes it
     ask(&mut app);
     click(&mut app, 10, PROC_Y + 3);
+    assert!(!app.kill.asking());
+    assert_eq!(app.proc_view.selected_pid(), Some(631));
+    assert!(app.handle_key(key('y')).is_continue());
+
+    // the wheel too, without moving the selection
+    ask(&mut app);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10));
     assert!(!app.kill.asking());
     assert_eq!(app.proc_view.selected_pid(), Some(631));
     assert!(app.handle_key(key('y')).is_continue());

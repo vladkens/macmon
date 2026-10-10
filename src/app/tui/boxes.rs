@@ -313,10 +313,12 @@ impl App {
   /// in the order of the original UI with the state of the toggles (`q quit | ? help | p procs |
   /// v graph | r scaled | -/+ 1000ms`; no `p procs` while the window is too small for the process
   /// list), the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`), or
-  /// the answers while the kill prompt is open (`y kill | any key cancel`).
+  /// the answers while a kill prompt is open (`y kill | any key cancel`, `y force kill` for the
+  /// force kill).
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
     if self.kill.asking() {
-      return vec![hint("y", "kill"), hint("any key", "cancel")];
+      let yes = if self.kill.forcing() { "force kill" } else { "kill" };
+      return vec![hint("y", yes), hint("any key", "cancel")];
     }
     if self.proc_view.typing() {
       return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];

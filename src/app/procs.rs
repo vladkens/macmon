@@ -127,6 +127,9 @@ pub struct ProcInfo {
   pub power_w: Option<f32>,
   /// Share of the interval the GPU spent on the process, 0..=100.
   pub gpu_pct: f32,
+  /// Start time in seconds and microseconds, tells the process from a later one with the same
+  /// pid; `None` for other users' processes (`ps` has no exact start time).
+  pub started: Option<(u64, u64)>,
 }
 
 /// Cumulative counters of one process; rates come from two snapshots.
@@ -158,6 +161,8 @@ struct Raw {
   fallback: String,
   /// Read from `ps`: CPU time in 10 ms steps.
   ps: bool,
+  /// Start time in seconds and microseconds of `proc_bsdinfo`; `None` from `ps`.
+  started: Option<(u64, u64)>,
 }
 
 // MARK: Rates
@@ -237,6 +242,7 @@ fn list_pids(pids: &mut Vec<i32>) {
   pids.truncate(count.max(0) as usize);
 }
 
+/// `PROC_PIDTBSDINFO` of `pid`; `None` for other users' processes and gone ones.
 pub(crate) fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
   let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
   let size = mem::size_of::<libc::proc_bsdinfo>() as c_int;
@@ -284,6 +290,7 @@ fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<R
     comm,
     path: None,
     ps: false,
+    started: Some((info.pbi_start_tvsec, info.pbi_start_tvusec)),
   })
 }
 
@@ -342,6 +349,7 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
     comm,
     path: None,
     ps: true,
+    started: None,
   })
 }
 
@@ -679,6 +687,7 @@ impl ProcSampler {
         mem_bytes: raw.mem_bytes,
         power_w: usage.power_w,
         gpu_pct: usage.gpu_pct,
+        started: raw.started,
       });
       let counters = raw.counters;
       known.insert(raw.pid, Known { counters, comm: raw.comm, name, path, cpu_history });
@@ -824,6 +833,7 @@ mod tests {
       path: None,
       fallback: comm.to_string(),
       ps: false,
+      started: None,
     }
   }
 
@@ -937,6 +947,8 @@ mod tests {
     assert_eq!(me.user, user_name(unsafe { libc::geteuid() }));
     assert!(me.mem_bytes > 0);
     assert_eq!(me.cpu_pct, 0.0); // no baseline yet
+    let info = bsd_info(pid).unwrap();
+    assert_eq!(me.started, Some((info.pbi_start_tvsec, info.pbi_start_tvusec)));
     assert_eq!(sampler.known.len(), first.len()); // pids are unique
 
     // launchd belongs to another user, so it's only readable through ps.
@@ -944,7 +956,7 @@ mod tests {
     assert_eq!((launchd.name.as_str(), launchd.path.as_str()), ("launchd", "/sbin/launchd"));
     assert_eq!(launchd.user, "root");
     assert!(launchd.mem_bytes > 0);
-    assert_eq!(launchd.power_w, None);
+    assert_eq!((launchd.power_w, launchd.started), (None, None));
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_millis(50) {
