@@ -9,6 +9,7 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 - Keep CLI-only code and dependencies behind the `app` feature; preserve library builds with `--no-default-features`.
 - Keep normal metric collection rootless and preserve fallbacks for older systems.
 - Add focused tests for changed behavior. `make prepare` applies formatting and fixes; do not use it as a read-only check.
+- Makefile: the first `.PHONY` lists the standard targets (`prepare`, `check`, `test`, `build`, `update`); project-specific targets go after them in their own section with a second `.PHONY`.
 - TUI colors only through `tui/theme.rs` (terminal ANSI colors, no RGB), so macmon follows the terminal's theme.
 - Keep `~/.config/macmon.json` compatible with released versions: same field names and values (`view_type` is `"Sparkline"` / `"Gauge"`).
 - Release builds abort on panic: every terminal mode the TUI enables must be undone in `restore_term_once`.
@@ -24,6 +25,7 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 ## Workflow
 
 - Before each commit, run `make check` (it also checks the library alone, with `--no-default-features`) and `make test`.
+- Keep features small. Measure production lines (tests excluded) with `make loc REF=origin/main`; the PR body states the change. When a feature needs more than ~200 production lines, the implementing agent stops and reports to the orchestrator before going on; the orchestrator simplifies the task or asks the person. There is no fixed budget for the whole codebase.
 - Every change reaches `main` through a pull request, one per feature:
   1. Agree the plan with the person. For multi-step work keep a checklist in `docs/plans/yyyymmdd-<name>.md`; in it, only tick checkboxes: no evidence, progress or status prose.
   2. Branch from an up-to-date `main` as `feat/<name>`, whatever the change. Each implementing agent works in its own git worktree, so parallel tasks don't touch each other's files.
