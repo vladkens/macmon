@@ -856,7 +856,7 @@ mod tests {
     assert!(!app.procs_visible());
     assert!(app.handle_key(key('p')).is_continue());
     assert!(app.cfg.show_procs);
-    assert!(row(&buf, 11).contains(" q quit | ? help | v graph "), "{}", row(&buf, 11));
+    assert!(row(&buf, 11).contains(" quit | ? help | v graph "), "{}", row(&buf, 11));
   }
 
   #[test]
@@ -1292,9 +1292,10 @@ mod tests {
     let mut app = app_with_procs(varied_procs());
     let buf = render_buffer(&mut app, 200, 50);
 
-    // the count and the filter and sort hints on the title, the sort arrow by the sorted column
+    // the count and the filter and sort hints on the title (no `kill` without a selection), the
+    // sort arrow by the sorted column
     let title = proc_row(&buf, 0);
-    assert!(title.starts_with("╭─ proc 3 ─ / filter ─ s sort ─"), "{title}");
+    assert!(title.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{title}");
     let header = proc_row(&buf, 1);
     assert!(header.starts_with("│   PID NAME "), "{header}");
     assert!(header.ends_with(" CPU% ↓    MEM   POWER   GPU% │"), "{header}");
@@ -1312,6 +1313,27 @@ mod tests {
     // load values on the gradient
     let cpu = x_of(&proc_row(&buf, 2), "25.0");
     assert_eq!(buf[(cpu, PROC_Y + 2)].fg, gradient(0.25));
+  }
+
+  #[test]
+  fn kill_is_on_the_process_title_with_a_selection_while_not_typing() {
+    let title = |app: &mut App, width| proc_row(&render_buffer(app, width, 50), 0);
+    let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let full = "╭─ proc 3 ─ / filter ─ sort ─ kill ─";
+    assert!(title(&mut app, 200).starts_with(full), "{}", title(&mut app, 200));
+    // on a narrow box `kill` goes first
+    assert_eq!(title(&mut app, 37), format!("{full}╮"));
+    assert_eq!(title(&mut app, 36), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(7)));
+
+    // typing: keys are text, no hints; then a set filter with the selection in it
+    for c in "/saf".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    let typing = title(&mut app, 200);
+    assert!(typing.starts_with("╭─ proc 1/3 ─ /saf█ ───") && !typing.contains("sort"), "{typing}");
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(title(&mut app, 200).starts_with("╭─ proc 1/3 ─ /saf ─ sort ─ kill ─"));
   }
 
   #[test]
@@ -1347,7 +1369,7 @@ mod tests {
     // the PID and the full path, cut from the left to the room the key hints leave
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ q quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 47..]);
+    let cut = format!("╰─ 631 …{} ─ quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 51..]);
     assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
 
     // without a readable path: the name

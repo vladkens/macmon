@@ -35,6 +35,11 @@ pub(super) fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, DIM)
 }
 
+/// The key to press in a hint or button: underlined, in the default color.
+pub(super) fn key<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, Style::new().fg(TEXT).add_modifier(Modifier::UNDERLINED))
+}
+
 /// Link text: underlined blue (ANSI 4).
 pub(super) fn link<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED))

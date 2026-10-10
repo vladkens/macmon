@@ -7,8 +7,8 @@ use std::{fmt, io, process};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Margin, Position, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::style::Style;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::Clear;
 
 use super::boxes::{Titles, cells, draw_box};
@@ -183,8 +183,7 @@ impl Kill {
     let mut x = inner.x + inner.width.saturating_sub(cells(row)) / 2;
     popup.rects.clear();
     for (i, &(label, _)) in buttons.iter().enumerate() {
-      let underline = if ok { Modifier::UNDERLINED } else { Modifier::empty() };
-      let first = Span::styled(&label[..1], Style::new().fg(theme::TEXT).add_modifier(underline));
+      let first = if ok { theme::key(&label[..1]) } else { text(&label[..1]) };
       let line = Line::from(vec![text("[ "), first, text(&label[1..]), text(" ]")]);
       let rect = Rect::new(x, y, cells(label.len() + 4), 1).intersection(inner);
       let style = if i == popup.selected { theme::SELECTED } else { Style::new() };
