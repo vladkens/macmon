@@ -288,7 +288,8 @@ pub struct App {
   gpu_temp: TempStore,
   fans: FanStore,
 
-  /// CPU clusters, lowest tier first (E / P on M1–M4, P / S on M5 Pro/Max, E / P / S on M6).
+  /// CPU clusters, lowest tier first (E / P on M1–M4, E / S on M5, P / S on M5 Pro/Max, E / P / S
+  /// on M6).
   clusters: CpuClusters,
   igpu_freq: FreqStore,
 

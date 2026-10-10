@@ -476,8 +476,8 @@ pub struct SocInfo {
   pub chip_name: String,
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
-  /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `P`, `S` on
-  /// M5 Pro/Max, `E`, `P`, `S` on M6.
+  /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `E`, `S` on M5,
+  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6.
   pub cpu_tiers: Vec<CpuTierInfo>,
   /// Number of cores of the lowest CPU tier.
   #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
@@ -691,20 +691,39 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
   ok.then_some(val)
 }
 
-// perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the
-// lowest (confirmed via `sysctl hw.perflevel0/1.name` -> Performance/Efficiency on
-// M1-M4). M5 adds a "Super" tier and its chips run two tiers: Super + Performance on M5 Pro/Max,
-// labeled P/S (an M5 Max reads perflevel0 = Super x6, perflevel1 = Performance x12, issue #47).
-// The base M5 runs Super + Efficiency and gets the same P/S labels here, unverified. M6 runs all
-// three tiers at once: 3 perflevels, 2 Super + 4 Performance + 6 Efficiency cores on the base
-// chip (issue #80; IORegistry cluster-type P x2, M x4, E x6 in exelban/stats#3668).
-pub(crate) fn tiers_from_perflevels(perflevel_cores: &[u32], chip_name: &str) -> Option<CpuTiers> {
+// perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the lowest.
+// The perflevel names label the tiers when they are all known, as read on real machines:
+// Performance / Efficiency on M1 and M2, Super / Performance on an M5 Max (issue #47), and
+// Super / Efficiency on the base M5. Without names (macOS 12.1 has none), the labels follow the
+// chip: E/P on M1-M4, P/S on M5 Pro/Max, E/P/S for the three tiers of M6, which runs 2 Super +
+// 4 Performance + 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2,
+// M x4, E x6 in exelban/stats#3668). Its perflevel names haven't been seen yet.
+pub(crate) fn tiers_from_perflevels(
+  perflevel_cores: &[u32],
+  perflevel_names: &[Option<String>],
+  chip_name: &str,
+) -> Option<CpuTiers> {
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
-  match *perflevel_cores {
-    [hi, lo] if is_legacy => Some(vec![(lo as u8, "E"), (hi as u8, "P")]),
-    [hi, lo] => Some(vec![(lo as u8, "P"), (hi as u8, "S")]),
-    [hi, mid, lo] => Some(vec![(lo as u8, "E"), (mid as u8, "P"), (hi as u8, "S")]),
+  let tiers = match *perflevel_cores {
+    [hi, lo] if is_legacy => vec![(lo as u8, "E"), (hi as u8, "P")],
+    [hi, lo] => vec![(lo as u8, "P"), (hi as u8, "S")],
+    [hi, mid, lo] => vec![(lo as u8, "E"), (mid as u8, "P"), (hi as u8, "S")],
+    _ => return None,
+  };
+
+  // names come highest first, tiers lowest first
+  let label = |name: &Option<String>| match name.as_deref()? {
+    "Efficiency" => Some("E"),
+    "Performance" => Some("P"),
+    "Super" => Some("S"),
     _ => None,
+  };
+  let labels = perflevel_names.iter().rev().map(label).collect::<Option<Vec<_>>>();
+  match labels {
+    Some(labels) if labels.len() == tiers.len() => {
+      Some(tiers.into_iter().zip(labels).map(|((cores, _), label)| (cores, label)).collect())
+    }
+    _ => Some(tiers),
   }
 }
 
@@ -713,7 +732,9 @@ fn cpu_tier_counts(chip_name: &str) -> Option<CpuTiers> {
   let perflevel_cores = (0..nperflevels)
     .map(|i| sysctl_u32(&format!("hw.perflevel{i}.physicalcpu")))
     .collect::<Option<Vec<_>>>()?;
-  tiers_from_perflevels(&perflevel_cores, chip_name)
+  let perflevel_names =
+    (0..nperflevels).map(|i| sysctl_str(&format!("hw.perflevel{i}.name"))).collect::<Vec<_>>();
+  tiers_from_perflevels(&perflevel_cores, &perflevel_names, chip_name)
 }
 
 /// Read hardware descriptor fields via sysctl and IORegistry only (no subprocess).
@@ -1681,17 +1702,24 @@ mod tests {
 
   #[test]
   fn cpu_tiers_from_perflevels() {
-    // hw.perflevelN.physicalcpu read on real machines, highest tier first
-    for (cores, chip, expected) in [
-      (&[4, 4][..], "Apple M1", Some(vec![(4, "E"), (4, "P")])), // macOS 15.8.1
-      (&[4, 4], "Apple M2", Some(vec![(4, "E"), (4, "P")])),     // macOS 27.0.1
-      (&[6, 12], "Apple M5 Max", Some(vec![(12, "P"), (6, "S")])), // Super, Performance (issue #47)
-      (&[2, 4, 6], "Apple M6", Some(vec![(6, "E"), (4, "P"), (2, "S")])), // issue #80
-      (&[8], "Apple M1", None),
-      (&[], "Apple M1", None),
+    // hw.perflevelN.physicalcpu and .name read on real machines, highest tier first
+    let pe = ["Performance", "Efficiency"].as_slice();
+    for (cores, names, chip, expected) in [
+      (&[4, 4][..], pe, "Apple M1", Some(vec![(4, "E"), (4, "P")])), // macOS 15.8.1
+      (&[4, 4], pe, "Apple M2", Some(vec![(4, "E"), (4, "P")])),     // macOS 27.0.1
+      (&[6, 12], &["Super", "Performance"], "Apple M5 Max", Some(vec![(12, "P"), (6, "S")])), // #47
+      (&[4, 6], &["Super", "Efficiency"], "Apple M5", Some(vec![(6, "E"), (4, "S")])), /* macOS 27.0.1 */
+      (&[2, 4, 6], &[], "Apple M6", Some(vec![(6, "E"), (4, "P"), (2, "S")])), /* issue #80, names unseen */
+      (&[8], &[], "Apple M1", None),
+      (&[], &[], "Apple M1", None),
     ] {
-      assert_eq!(tiers_from_perflevels(cores, chip), expected, "{chip} {cores:?}");
+      let names = names.iter().map(|x| Some(x.to_string())).collect::<Vec<_>>();
+      assert_eq!(tiers_from_perflevels(cores, &names, chip), expected, "{chip} {cores:?}");
     }
+
+    // without names (macOS 12.1 has none) the labels follow the chip, as on the base M5 before
+    let names = [None, None];
+    assert_eq!(tiers_from_perflevels(&[4, 6], &names, "Apple M5"), Some(vec![(6, "P"), (4, "S")]));
   }
 
   #[test]

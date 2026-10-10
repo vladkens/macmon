@@ -965,7 +965,7 @@ mod tests {
   /// M6 (Mac18,5) as `load_soc_info` builds it: perflevels 2 / 4 / 6 (issue #80) and the
   /// `pmgr-child` tables voltage-states1-sram and voltage-states5-sram (exelban/stats#3668).
   fn m6_soc() -> SocInfo {
-    let tiers = tiers_from_perflevels(&[2, 4, 6], "Apple M6").unwrap();
+    let tiers = tiers_from_perflevels(&[2, 4, 6], &[], "Apple M6").unwrap();
     let ecpu = [972, 1152, 1584, 1980, 2304, 2640, 2940];
     #[rustfmt::skip]
     let pcpu = [
