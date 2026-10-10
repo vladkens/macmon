@@ -25,7 +25,7 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 
 - Before each commit, run `make check` (it also checks the library alone, with `--no-default-features`) and `make test`.
 - Keep planned work in [docs/roadmap.md](docs/roadmap.md), not in GitHub issues; link each item's plan there and tick the item in the PR that finishes it.
-- Small updates that change no code (docs, the roadmap, `agents.md`) may be committed and pushed straight to `main`. Every other change reaches `main` through a pull request, one per feature:
+- Only the agent the person talks to may commit and push small updates that change no code (docs, the roadmap, `agents.md`) straight to `main`. Subagents commit and push only to their own `feat/<name>` branch. Every other change reaches `main` through a pull request, one per feature:
   1. Agree the plan with the person. For multi-step work keep a checklist in `docs/plans/yyyymmdd-<name>.md`; in it, only tick checkboxes: no evidence, progress or status prose.
   2. Branch from an up-to-date `main` as `feat/<name>`, whatever the change, without tracking it: `git switch -c feat/<name> --no-track origin/main` (or `git worktree add <path> -b feat/<name> --no-track origin/main`), and push with `git push -u origin feat/<name>`. With `push.default=upstream`, a branch that tracks `origin/main` pushes straight to `main`. Each implementing agent works in its own git worktree, so parallel tasks don't touch each other's files.
   3. Commit on the branch every step that passes the checks, without asking: one line in the style of the history (`feat: …`, `fix: …`, `chore: …`, `docs: …`), no body, docs updated in the same commit. Any agent on the task may commit; fix-ups are fine, the branch is squashed.
