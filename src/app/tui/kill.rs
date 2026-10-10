@@ -17,7 +17,7 @@ use super::theme::{self, dim, heading, text};
 use crate::procs::{self, ProcInfo};
 
 /// A button: its label and the signal it sends (none: it closes the popup). The choices are pressed
-/// by the first letter of their label (in lower case, underlined); an error has only OK.
+/// by the first letter of their label (in lower case, bold); an error has only OK.
 type Button = (&'static str, Option<i32>);
 const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
@@ -454,12 +454,11 @@ pub(super) mod tests {
     let buf = render(&mut kill, 60, 8);
     let shown = rows(&buf);
     assert_eq!(shown, popup);
-    // the selected button reversed, the letters of the shortcuts underlined, the path dim
+    // the selected button reversed, the letters of the shortcuts bold, the path dim
     let style = |text| buf[find(&shown, text)].modifier;
-    let (none, reversed, underlined) =
-      (Modifier::empty(), Modifier::REVERSED, Modifier::UNDERLINED);
-    assert_eq!((style("[ Terminate"), style("Terminate")), (reversed, reversed | underlined));
-    assert_eq!((style("[ Force"), style("Force"), style("Cancel")), (none, underlined, underlined));
+    let (none, reversed, bold) = (Modifier::empty(), Modifier::REVERSED, Modifier::BOLD);
+    assert_eq!((style("[ Terminate"), style("Terminate")), (reversed, reversed | bold));
+    assert_eq!((style("[ Force"), style("Force"), style("Cancel")), (none, bold, bold));
     assert_eq!(buf[find(&shown, "…tents")].fg, theme::DIM);
 
     // the name cut before `?`, without the blank rows when low

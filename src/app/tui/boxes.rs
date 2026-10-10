@@ -174,9 +174,9 @@ pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
 
 // MARK: Bottom border
 
-/// A key hint: what the key does, the key underlined. A letter key in the label is underlined in
-/// it (the first match: `quit`), any other key comes before it (`? help`, `Enter keep`; `-/+` with
-/// the `/` dim, so it doesn't read as the filter key).
+/// A key hint: what the key does, the key bold (`theme::key`), the rest plain. A letter key in the
+/// label is bold in it (the first match: `quit`), any other key comes before it (`? help`, `Enter
+/// keep`).
 pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'static>> {
   let label = label.into();
   let letter = key.as_bytes().first().filter(|c| key.len() == 1 && c.is_ascii_alphabetic());
@@ -184,13 +184,7 @@ pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'sta
     let (head, tail) = (label[..i].to_string(), label[i + 1..].to_string());
     return vec![text(head), theme::key(label[i..=i].to_string()), text(tail)];
   }
-
-  let mut spans = match key {
-    "-/+" => vec![theme::key("-"), dim("/"), theme::key("+")],
-    _ => vec![theme::key(key)],
-  };
-  spans.push(text(format!(" {label}")));
-  spans
+  vec![theme::key(key), text(format!(" {label}"))]
 }
 
 /// `items` joined by a dim ` | `.
@@ -504,7 +498,7 @@ mod tests {
   use ratatui::text::Span;
 
   use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
-  use crate::tui::theme::{self, dim, text};
+  use crate::tui::theme::{dim, text};
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
   fn border_with(titles: Titles, width: u16) -> String {
@@ -555,9 +549,9 @@ mod tests {
     }
   }
 
-  /// `spans` as text with each underlined span in brackets.
+  /// `spans` as text with each bold span in brackets.
   fn marked(spans: &[Span]) -> String {
-    let mark = |span: &Span| match span.style.add_modifier.contains(Modifier::UNDERLINED) {
+    let mark = |span: &Span| match span.style.add_modifier.contains(Modifier::BOLD) {
       true => format!("[{}]", span.content),
       false => span.content.to_string(),
     };
@@ -565,7 +559,7 @@ mod tests {
   }
 
   #[test]
-  fn hint_underlines_the_key_in_the_label_or_before_it() {
+  fn hint_marks_the_key_in_the_label_or_before_it() {
     let hints = [
       (hint("q", "quit"), "[q]uit"),
       (hint("k", "Kill"), "[K]ill"),
@@ -573,14 +567,10 @@ mod tests {
       (hint("v", "graph"), "[v] graph"),
       (hint("?", "help"), "[?] help"),
       (hint("Enter", "keep"), "[Enter] keep"),
-      (hint("-/+", "1000ms"), "[-]/[+] 1000ms"),
+      (hint("-/+", "1000ms"), "[-/+] 1000ms"),
     ];
     for (spans, text) in hints {
       assert_eq!(marked(&spans), text);
-      // bold is for headings only; the `/` of `-/+` is dim, so it doesn't read as the filter key
-      assert!(spans.iter().all(|span| !span.style.add_modifier.contains(Modifier::BOLD)), "{text}");
-      let slash = spans.iter().find(|span| span.content == "/");
-      assert!(slash.is_none_or(|span| span.style.fg == Some(theme::DIM)), "{text}");
     }
   }
 
@@ -601,12 +591,11 @@ mod tests {
 
     // the hints right-aligned, the text left, a border cell next to the corners
     assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(15)));
-    // only the keys underlined, nothing bold
+    // only the keys bold
     let buf = draw(60);
-    let underlined: Vec<u16> =
-      (0..60).filter(|&x| buf[(x, 0)].modifier.contains(Modifier::UNDERLINED)).collect();
-    assert_eq!(underlined, [44, 51]);
-    assert!(buf.content.iter().all(|cell| !cell.modifier.contains(Modifier::BOLD)));
+    let bold: Vec<u16> =
+      (0..60).filter(|&x| buf[(x, 0)].modifier.contains(Modifier::BOLD)).collect();
+    assert_eq!(bold, [44, 51]);
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
     assert_eq!(border(40), format!("___Power_6.60W_(6.60…__{help}__"));
     assert_eq!(border(30), format!("___Power_6…__{help}__"));
