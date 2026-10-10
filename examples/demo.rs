@@ -1,3 +1,8 @@
+//! A continuous monitoring loop with the minimal `macmon::Sampler` API: CPU tier and GPU active
+//! percentages, CPU and GPU temperatures, and RAM usage. Run with `cargo run --example demo`.
+//!
+//! The presentation is inspired by [homm/pgauge](https://github.com/homm/pgauge).
+
 use macmon::Sampler;
 use owo_colors::OwoColorize;
 
