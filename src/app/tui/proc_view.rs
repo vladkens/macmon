@@ -33,6 +33,8 @@ pub(super) const ELLIPSIS: &str = "…";
 const FILTER_MIN_WIDTH: u16 = 4;
 /// Rows one wheel step moves the selection and scrolls the table.
 const WHEEL_ROWS: usize = 3;
+/// Fewest process rows left below the group totals; with fewer the totals are hidden.
+const GROUPS_MIN_ROWS: u16 = 3;
 
 // MARK: Table
 
@@ -194,6 +196,25 @@ fn sort_procs(procs: &mut [ProcInfo], sort: ProcSort, desc: bool) {
   });
 }
 
+/// Sorts group totals like the processes: PID by the process count, NAME by the term. Groups
+/// without a power reading go last when sorted by power; USER and ties keep the filter's order.
+fn sort_groups(groups: &mut [Group], sort: ProcSort, desc: bool) {
+  let missing = |g: &Group| sort == ProcSort::Power && g.power_w.is_none();
+  groups.sort_by(|a, b| {
+    let ord = match sort {
+      ProcSort::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
+      ProcSort::Mem => a.mem_bytes.cmp(&b.mem_bytes),
+      ProcSort::Power => a.power_w.unwrap_or(0.0).total_cmp(&b.power_w.unwrap_or(0.0)),
+      ProcSort::Gpu => a.gpu_pct.total_cmp(&b.gpu_pct),
+      ProcSort::Pid => a.count.cmp(&b.count),
+      ProcSort::Name => a.term.cmp(&b.term),
+      ProcSort::User => Ordering::Equal,
+    };
+    let ord = if desc { ord.reverse() } else { ord };
+    missing(a).cmp(&missing(b)).then(ord)
+  });
+}
+
 /// Filter text split into terms: `safari, cargo, !helper` keeps processes matching any term and
 /// none of the `!` ones. Each term is a case-insensitive substring of the name or pid; empty
 /// terms are ignored, so a filter still being typed (`safari,`) keeps its rows.
@@ -218,10 +239,45 @@ impl Filter {
   }
 
   fn matches(&self, proc: &ProcInfo) -> bool {
-    let name = proc.name.to_lowercase();
-    let pid = proc.pid.to_string();
-    let hit = |term: &String| name.contains(term.as_str()) || pid.contains(term.as_str());
+    let hit = |term: &String| hit(proc, term);
     (self.any.is_empty() || self.any.iter().any(hit)) && !self.none.iter().any(hit)
+  }
+}
+
+/// Whether the lowercase `term` is in the name or pid of `proc`.
+fn hit(proc: &ProcInfo, term: &str) -> bool {
+  proc.name.to_lowercase().contains(term) || proc.pid.to_string().contains(term)
+}
+
+/// Totals of the listed processes matching one filter term: `chrome` sums Chrome and all its
+/// helpers. A process matching two terms counts in both.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(super) struct Group {
+  term: String,
+  count: usize,
+  cpu_pct: f32,
+  mem_bytes: u64,
+  /// Sum of the known readings; `None` when no process has one.
+  power_w: Option<f32>,
+  /// Some processes have no power reading, so the sum is a lower bound.
+  power_partial: bool,
+  gpu_pct: f32,
+}
+
+impl Group {
+  fn sum<'a>(term: &str, procs: impl Iterator<Item = &'a ProcInfo>) -> Self {
+    let mut group = Self { term: term.to_string(), ..Self::default() };
+    for proc in procs {
+      group.count += 1;
+      group.cpu_pct += proc.cpu_pct;
+      group.mem_bytes += proc.mem_bytes;
+      group.gpu_pct += proc.gpu_pct;
+      match proc.power_w {
+        Some(watts) => *group.power_w.get_or_insert(0.0) += watts,
+        None => group.power_partial = true,
+      }
+    }
+    group
   }
 }
 
@@ -314,6 +370,8 @@ pub(super) struct ProcView {
   procs: Option<Vec<ProcInfo>>,
   /// Indexes of `procs` that pass the filter, in display order.
   rows: Vec<usize>,
+  /// Totals of `rows` for each filter term, sorted like the processes.
+  groups: Vec<Group>,
   selected: Option<Selection>,
   /// First row on screen.
   offset: usize,
@@ -339,6 +397,7 @@ impl ProcView {
       typing: false,
       procs: None,
       rows: vec![],
+      groups: vec![],
       selected: None,
       offset: 0,
       page: 0,
@@ -362,6 +421,19 @@ impl ProcView {
 
   pub(super) fn filter(&self) -> &str {
     &self.filter
+  }
+
+  pub(super) fn groups(&self) -> &[Group] {
+    &self.groups
+  }
+
+  /// Rows the group totals and the line under them take in a table body `height` rows high: none
+  /// without a filter term or a listed process, or when fewer than `GROUPS_MIN_ROWS` processes
+  /// would be left on screen.
+  pub(super) fn groups_height(&self, height: u16) -> u16 {
+    let rows = self.groups.len() as u16 + 1;
+    let shown = !self.groups.is_empty() && !self.rows.is_empty();
+    if shown && height >= rows + GROUPS_MIN_ROWS { rows } else { 0 }
   }
 
   pub(super) fn typing(&self) -> bool {
@@ -409,6 +481,10 @@ impl ProcView {
 
     let filter = Filter::parse(&self.filter);
     self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
+    let groups =
+      filter.any.iter().map(|term| Group::sum(term, self.rows().filter(|p| hit(p, term))));
+    self.groups = groups.collect();
+    sort_groups(&mut self.groups, self.sort, self.sort_desc);
 
     let procs = self.procs.as_deref().unwrap_or_default();
     let rows = &self.rows;
@@ -701,7 +777,14 @@ impl App {
       return Default::default();
     }
 
-    let body = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+    // the group totals between the header and the processes
+    let below_header = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+    let groups_height = self.proc_view.groups_height(below_header.height);
+    let body = Rect {
+      y: below_header.y + groups_height,
+      height: below_header.height - groups_height,
+      ..inner
+    };
     self.proc_view.fit(body.height as usize);
     // one blank cell between the columns and each border, as in the metrics box
     let table = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
@@ -724,6 +807,18 @@ impl App {
     let header_row = Rect { height: 1, ..table };
     draw_row(buf, header_row, &columns, header);
 
+    if groups_height > 0 {
+      let bold = Style::new().add_modifier(Modifier::BOLD);
+      for (i, group) in self.proc_view.groups().iter().enumerate() {
+        let y = below_header.y + i as u16;
+        let cells =
+          columns.iter().map(|&(column, _)| self.group_cell(column, group).patch_style(bold));
+        draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
+      }
+      let line = "─".repeat(usize::from(table.width));
+      buf.set_string(table.x, body.y - 1, line, Style::new().fg(theme::BORDER));
+    }
+
     for (i, (selected, proc)) in self.proc_view.page_rows().enumerate() {
       let y = body.y + i as u16;
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
@@ -740,35 +835,53 @@ impl App {
   /// Text of one table cell. Load values are colored by the gradient, zeros are dim and missing
   /// values show as a dim `-`.
   fn proc_cell(&self, column: ProcSort, proc: &ProcInfo) -> Span<'static> {
-    let load = |value: f64, ratio: f64, text: String| {
-      if value > 0.0 { Span::styled(text, gradient(ratio)) } else { dim(text) }
-    };
-
     match column {
       ProcSort::Pid => text(proc.pid.to_string()),
       ProcSort::Name => text(proc.name.clone()),
       ProcSort::User => text(proc.user.clone()),
-      ProcSort::Cpu => {
-        let cpu = f64::from(proc.cpu_pct);
-        load(cpu, cpu / 100.0, format!("{cpu:.1}"))
-      }
-      ProcSort::Mem => {
-        let mem = proc.mem_bytes as f64;
-        load(mem, ratio(mem, self.mem.ram_total as f64), format_mem(proc.mem_bytes))
-      }
-      ProcSort::Power => match proc.power_w {
-        Some(watts) => {
-          let watts = f64::from(watts);
-          load(watts, watts / POWER_HOT_W, format!("{watts:.2}W"))
-        }
-        None => dim("-"),
-      },
-      ProcSort::Gpu => {
-        let gpu = f64::from(proc.gpu_pct);
-        load(gpu, gpu / 100.0, format!("{gpu:.1}"))
-      }
+      ProcSort::Cpu => pct_cell(proc.cpu_pct),
+      ProcSort::Mem => self.mem_cell(proc.mem_bytes),
+      ProcSort::Power => power_cell(proc.power_w, false),
+      ProcSort::Gpu => pct_cell(proc.gpu_pct),
     }
   }
+
+  /// Text of one cell of a group row: the process count in PID (`×12`), the term in NAME, the
+  /// totals in the load columns; POWER starts with `≥` when some processes have no reading.
+  fn group_cell(&self, column: ProcSort, group: &Group) -> Span<'static> {
+    match column {
+      ProcSort::Pid => text(format!("×{}", group.count)),
+      ProcSort::Name => text(group.term.clone()),
+      ProcSort::User => text(""),
+      ProcSort::Cpu => pct_cell(group.cpu_pct),
+      ProcSort::Mem => self.mem_cell(group.mem_bytes),
+      ProcSort::Power => power_cell(group.power_w, group.power_partial),
+      ProcSort::Gpu => pct_cell(group.gpu_pct),
+    }
+  }
+
+  fn mem_cell(&self, bytes: u64) -> Span<'static> {
+    let mem = bytes as f64;
+    load_cell(mem, ratio(mem, self.mem.ram_total as f64), format_mem(bytes))
+  }
+}
+
+/// A load value colored by the gradient at `ratio`; zero is dim.
+fn load_cell(value: f64, ratio: f64, text: String) -> Span<'static> {
+  if value > 0.0 { Span::styled(text, gradient(ratio)) } else { dim(text) }
+}
+
+/// CPU% or GPU%: 100 is one full core or the whole GPU.
+fn pct_cell(pct: f32) -> Span<'static> {
+  let pct = f64::from(pct);
+  load_cell(pct, pct / 100.0, format!("{pct:.1}"))
+}
+
+/// Power in watts, `≥` before a lower bound; a dim `-` without a reading.
+fn power_cell(watts: Option<f32>, lower_bound: bool) -> Span<'static> {
+  let Some(watts) = watts.map(f64::from) else { return dim("-") };
+  let at_least = if lower_bound { "≥" } else { "" };
+  load_cell(watts, watts / POWER_HOT_W, format!("{at_least}{watts:.2}W"))
 }
 
 /// Cells of each column in the one-row `area`, one blank cell between columns; columns are cut
@@ -963,6 +1076,80 @@ mod tests {
       type_str(&mut view, filter);
       assert_eq!(pids(&view), expected, "{filter:?}");
     }
+  }
+
+  #[test]
+  fn groups_total_each_term_over_the_listed_processes() {
+    let summary = |view: &ProcView| {
+      let group = |g: &super::Group| {
+        (
+          g.term.clone(),
+          g.count,
+          g.cpu_pct,
+          g.mem_bytes / MIB,
+          g.power_w,
+          g.power_partial,
+          g.gpu_pct,
+        )
+      };
+      view.groups().iter().map(group).collect::<Vec<_>>()
+    };
+
+    let mut view = view();
+    assert!(press(&mut view, KeyCode::Char('/')));
+    // `d`: launchd without a power reading and WindowServer; `saf` without the excluded agent
+    type_str(&mut view, "d, saf, !bookmark");
+    let expected = [
+      ("d".to_string(), 2, 25.5, 320, Some(1.5), true, 40.0),
+      ("saf".to_string(), 1, 12.0, 900, Some(0.8), false, 5.0),
+    ];
+    assert_eq!(summary(&view), expected);
+
+    // totals and their order follow new samples: without WindowServer no power is known for `d`
+    let mut procs = sample();
+    procs.remove(1);
+    view.set_procs(procs);
+    let expected = [
+      ("saf".to_string(), 1, 12.0, 900, Some(0.8), false, 5.0),
+      ("d".to_string(), 1, 0.5, 20, None, true, 0.0),
+    ];
+    assert_eq!(summary(&view), expected);
+  }
+
+  #[test]
+  fn groups_sort_like_the_processes() {
+    let terms = |view: &ProcView| view.groups().iter().map(|g| g.term.clone()).collect::<Vec<_>>();
+
+    // CPU: cargo 80, window 25, saf 12 + 0
+    let mut view = view();
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "saf, cargo, window");
+    assert!(press(&mut view, KeyCode::Enter));
+    assert_eq!(terms(&view), ["cargo", "window", "saf"]);
+    assert!(press(&mut view, KeyCode::Char('S')));
+    assert_eq!(terms(&view), ["saf", "window", "cargo"]);
+
+    // PID by the process count, ties in the filter's order
+    view.sort_by(ProcSort::Pid);
+    assert_eq!(terms(&view), ["cargo", "window", "saf"]);
+    view.sort_by(ProcSort::Name);
+    assert_eq!(terms(&view), ["cargo", "saf", "window"]);
+  }
+
+  #[test]
+  fn groups_show_with_room_for_processes_below() {
+    let mut view = view();
+    assert_eq!(view.groups_height(20), 0, "no filter");
+
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "saf, cargo, !77");
+    // two totals and the line under them, while 3 processes still fit
+    assert_eq!((view.groups_height(6), view.groups_height(5)), (3, 0));
+
+    assert!(press(&mut view, KeyCode::Esc));
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "zzz");
+    assert_eq!(view.groups_height(20), 0, "nothing listed");
   }
 
   #[test]

@@ -1211,6 +1211,29 @@ mod tests {
   }
 
   #[test]
+  fn filter_terms_show_their_totals_above_the_processes() {
+    let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+    for c in "/a, w".chars() {
+      assert!(press(&mut app, KeyCode::Char(c)).is_continue());
+    }
+    let buf = render_buffer(&mut app, 200, 50);
+    let words = |y| proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
+
+    // sorted by CPU like the processes; `a`: Safari and launchd, whose missing power reading
+    // makes the sum a lower bound
+    assert_eq!(words(2), ["│", "×1", "w", "25.0", "300M", "1.50W", "40.0", "│"]);
+    assert_eq!(words(3), ["│", "×2", "a", "12.0", "1.5G", "≥0.80W", "5.0", "│"]);
+    assert!(proc_row(&buf, 4).starts_with("│ ────"), "{}", proc_row(&buf, 4));
+    assert_eq!(words(5)[1..3], ["631", "WindowServer"]);
+    let total = x_of(&proc_row(&buf, 3), "×2");
+    assert!(buf[(total, PROC_Y + 3)].modifier.contains(ratatui::style::Modifier::BOLD));
+
+    // a click on the first process below the totals selects it
+    click(&mut app, 10, PROC_Y + 5);
+    assert_eq!(app.proc_view.selected().map(|p| p.pid), Some(631));
+  }
+
+  #[test]
   fn selected_process_and_its_path_on_the_bottom_border() {
     let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
     let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
