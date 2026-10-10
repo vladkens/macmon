@@ -1,4 +1,4 @@
-.PHONY: prepare check test build update bench remote loc
+.PHONY: prepare check test build update
 
 CARGO_FLAGS := --release --locked
 
@@ -22,6 +22,8 @@ build:
 
 update:
 	cargo upgrade -i
+
+.PHONY: loc bench remote
 
 loc: # production lines, tests excluded; REF=origin/main compares with a git ref
 	@./scripts/loc.sh $(REF)

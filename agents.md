@@ -9,6 +9,7 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 - Keep CLI-only code and dependencies behind the `app` feature; preserve library builds with `--no-default-features`.
 - Keep normal metric collection rootless and preserve fallbacks for older systems.
 - Add focused tests for changed behavior. `make prepare` applies formatting and fixes; do not use it as a read-only check.
+- Makefile: the first `.PHONY` lists the standard targets (`prepare`, `check`, `test`, `build`, `update`); project-specific targets go after them in their own section with a second `.PHONY`.
 - TUI colors only through `tui/theme.rs` (terminal ANSI colors, no RGB), so macmon follows the terminal's theme.
 - Keep `~/.config/macmon.json` compatible with released versions: same field names and values (`view_type` is `"Sparkline"` / `"Gauge"`).
 - Release builds abort on panic: every terminal mode the TUI enables must be undone in `restore_term_once`.
