@@ -6,4 +6,5 @@ samples/
 target/
 3rd/
 /out/
+/.worktrees/
 __pycache__/
