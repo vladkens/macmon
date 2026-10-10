@@ -288,7 +288,8 @@ pub struct App {
   gpu_temp: TempStore,
   fans: FanStore,
 
-  /// CPU clusters, lowest tier first (E / P on M1–M4, P / S on M5+).
+  /// CPU clusters, lowest tier first (E / P on M1–M4, E / S on M5, P / S on M5 Pro/Max, E / P / S
+  /// on M6).
   clusters: CpuClusters,
   igpu_freq: FreqStore,
 
@@ -324,7 +325,7 @@ impl App {
     self.all_power.push(data.all_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
-    self.clusters.push(&store::cluster_samples(&data));
+    self.clusters.push(&data);
     let igpu = FreqSample::new(data.gpu_freq_mhz, data.gpu_scaled_ratio, data.gpu_active_ratio);
     self.igpu_freq.push(igpu);
 
@@ -509,7 +510,7 @@ mod tests {
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::time::Duration;
 
-  use macmon::{FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
+  use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::{Buffer, CellDiffOption};
@@ -548,16 +549,20 @@ mod tests {
   }
 
   fn test_soc() -> SocInfo {
+    let tier = |label: &str| CpuTierInfo { label: label.to_string(), cores: 6, freqs: vec![] };
     SocInfo {
       chip_name: "Apple M3 Pro".to_string(),
       memory_gb: 36,
-      ecpu_cores: 6,
-      pcpu_cores: 6,
-      ecpu_label: "E".to_string(),
-      pcpu_label: "P".to_string(),
+      cpu_tiers: vec![tier("E"), tier("P")],
       gpu_cores: 18,
       ..Default::default()
     }
+  }
+
+  /// Sampled CPU tier `label` with no per-core metrics.
+  fn cpu_tier(label: &str, freq_mhz: u32, scaled_ratio: f32, active_ratio: f32) -> CpuTierMetrics {
+    let label = label.to_string();
+    CpuTierMetrics { label, freq_mhz, scaled_ratio, active_ratio, cores: vec![] }
   }
 
   fn test_metrics() -> Metrics {
@@ -570,12 +575,7 @@ mod tests {
         swap_usage: 1 << 30,
       },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
-      ecpu_freq_mhz: 1800,
-      ecpu_scaled_ratio: 0.42,
-      ecpu_active_ratio: 0.5,
-      pcpu_freq_mhz: 3200,
-      pcpu_scaled_ratio: 0.77,
-      pcpu_active_ratio: 0.8,
+      cpu_tiers: vec![cpu_tier("E", 1800, 0.42, 0.5), cpu_tier("P", 3200, 0.77, 0.8)],
       gpu_freq_mhz: 1400,
       gpu_scaled_ratio: 0.23,
       gpu_active_ratio: 0.3,
@@ -1092,6 +1092,33 @@ mod tests {
     let boxes = app.layout(buf.area).boxes;
     let (_, area) = boxes.into_iter().find(|(m, _)| *m == metric).expect("metric box");
     (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect()
+  }
+
+  #[test]
+  fn renders_three_cpu_tiers() {
+    // M6 of issue #80: 6E + 4P + 2S
+    let tier = |label: &str, cores| CpuTierInfo { label: label.into(), cores, freqs: vec![] };
+    let soc = SocInfo {
+      chip_name: "Apple M6".to_string(),
+      memory_gb: 32,
+      cpu_tiers: vec![tier("E", 6), tier("P", 4), tier("S", 2)],
+      gpu_cores: 12,
+      ..Default::default()
+    };
+    let mut app = App::from_parts(soc, Config::default());
+    let cpu_tiers = vec![
+      cpu_tier("E", 2940, 0.71, 0.71),
+      cpu_tier("P", 2394, 0.25, 0.25),
+      cpu_tier("S", 4776, 0.5, 0.5),
+    ];
+    app.update_metrics(Metrics { cpu_tiers, ..test_metrics() });
+
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 0).starts_with("╭─ Apple M6 (6E+4P+2S+12GPU 32GB) ─"), "{}", row(&buf, 0));
+    let screen = screen_text(&buf);
+    for title in ["E-CPU 71% @ 2940 MHz", "P-CPU 25% @ 2394 MHz", "S-CPU 50% @ 4776 MHz"] {
+      assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
+    }
   }
 
   #[test]

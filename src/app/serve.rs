@@ -16,6 +16,7 @@ fn escape_label_value(value: &str) -> String {
 }
 
 #[rustfmt::skip]
+#[allow(deprecated)] // keeps exporting macmon_ecpu_* / macmon_pcpu_*
 fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   let chip = escape_label_value(&soc.chip_name);
   let l = format!(r#"chip="{chip}""#);
@@ -41,6 +42,21 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
+  // One series per CPU tier, labeled `tier="E"` etc.; nothing without CPU tiers.
+  macro_rules! tier_gauge {
+    ($out:expr, $name:literal, $help:literal, $field:ident) => {
+      if !m.cpu_tiers.is_empty() {
+        gauge_head!($out, $name, $help);
+        let name = metric_name!($name);
+        for tier in &m.cpu_tiers {
+          let tier_label = escape_label_value(&tier.label);
+          $out.push_str(&format!("{name}{{{l},tier=\"{tier_label}\"}} {}\n", tier.$field));
+        }
+        $out.push('\n');
+      }
+    };
+  }
+
   let mut out = String::new();
   if let Some(value) = m.temp.cpu_temp_avg {
     gauge!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
@@ -55,14 +71,17 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
-  gauge!(out, "ecpu_freq_mhz", "Efficiency CPU cluster frequency in MHz", m.ecpu_freq_mhz);
-  gauge!(out, "ecpu_scaled_ratio", "Efficiency CPU cluster frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
-  gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_ecpu_scaled_ratio", m.ecpu_scaled_ratio);
-  gauge!(out, "ecpu_active_ratio", "Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
-  gauge!(out, "pcpu_freq_mhz", "Performance CPU cluster frequency in MHz", m.pcpu_freq_mhz);
-  gauge!(out, "pcpu_scaled_ratio", "Performance CPU cluster frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
-  gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_pcpu_scaled_ratio", m.pcpu_scaled_ratio);
-  gauge!(out, "pcpu_active_ratio", "Performance CPU cluster active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
+  gauge!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
+  gauge!(out, "ecpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Lowest CPU tier frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
+  gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.ecpu_scaled_ratio);
+  gauge!(out, "ecpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Lowest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
+  gauge!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
+  gauge!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
+  gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
+  gauge!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
+  tier_gauge!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
+  tier_gauge!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
+  tier_gauge!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
   gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
   gauge!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
   gauge!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
@@ -258,7 +277,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-  use macmon::{Metrics, SocInfo};
+  use macmon::{CpuTierMetrics, Metrics, SocInfo};
 
   use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
 
@@ -270,6 +289,24 @@ mod tests {
     assert!(output.contains("macmon_cpu_temp_celsius{chip=\"\"} 45"));
     assert!(!output.contains("macmon_gpu_temp_celsius"));
     assert!(output.contains("macmon_gpu_freq_mhz"));
+  }
+
+  #[test]
+  fn cpu_tier_gauges_have_a_series_per_tier() {
+    let tier = |label: &str, freq_mhz| CpuTierMetrics {
+      label: label.into(),
+      freq_mhz,
+      ..Default::default()
+    };
+    let metrics =
+      Metrics { cpu_tiers: vec![tier("E", 1800), tier("P", 3200)], ..Default::default() };
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_cpu_tier_freq_mhz{chip=\"\",tier=\"E\"} 1800\n"));
+    assert!(output.contains("macmon_cpu_tier_freq_mhz{chip=\"\",tier=\"P\"} 3200\n"));
+    assert_eq!(output.matches("# TYPE macmon_cpu_tier_active_ratio gauge").count(), 1);
+
+    let output = to_prometheus(&Metrics::default(), &SocInfo::default());
+    assert!(!output.contains("# TYPE macmon_cpu_tier_"));
   }
 
   #[test]
@@ -295,7 +332,7 @@ mod tests {
     let json: serde_json::Value =
       serde_json::from_str(&to_json(&Metrics::default(), &SocInfo::default())).unwrap();
 
-    for field in ["cpu_usage_pct", "ecpu_usage", "pcpu_usage", "gpu_usage"] {
+    for field in ["cpu_tiers", "cpu_usage_pct", "ecpu_usage", "pcpu_usage", "gpu_usage"] {
       assert!(json.get(field).is_some(), "missing {field}");
     }
   }

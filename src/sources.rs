@@ -28,10 +28,10 @@ use core_foundation::array::{
   CFArrayRef, CFMutableArrayRef, kCFTypeArrayCallBacks,
 };
 use core_foundation::base::{
-  CFAllocatorRef, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
+  CFAllocatorRef, CFGetTypeID, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
   kCFAllocatorNull,
 };
-use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataRef};
+use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataGetTypeID, CFDataRef};
 use core_foundation::dictionary::{
   CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
   CFDictionaryGetKeysAndValues, CFDictionaryGetValue, CFDictionaryRef, CFDictionarySetValue,
@@ -118,6 +118,20 @@ pub fn cfdict_get_val(dict: CFDictionaryRef, key: &str) -> Option<CFTypeRef> {
       _ => Some(val),
     }
   }
+}
+
+/// Bytes of a CFData value in a dictionary; None when the key is missing or holds another type.
+pub(crate) fn cfdict_data(dict: CFDictionaryRef, key: &str) -> Option<Vec<u8>> {
+  let obj = cfdict_get_val(dict, key)?;
+  if unsafe { CFGetTypeID(obj) != CFDataGetTypeID() } {
+    return None;
+  }
+
+  let obj = obj as CFDataRef;
+  let len = unsafe { CFDataGetLength(obj) }.max(0);
+  let mut data = vec![0u8; len as usize];
+  unsafe { CFDataGetBytes(obj, CFRange::init(0, len), data.as_mut_ptr()) };
+  Some(data)
 }
 
 // MARK: IOReport Bindings
@@ -462,17 +476,26 @@ pub struct SocInfo {
   pub chip_name: String,
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
-  /// Number of efficiency-tier CPU cores.
+  /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `E`, `S` on M5,
+  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6.
+  pub cpu_tiers: Vec<CpuTierInfo>,
+  /// Number of cores of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_cores: u8,
-  /// Number of performance-tier CPU cores.
+  /// Number of cores of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_cores: u8,
-  /// UI label for the lower CPU tier, for example `E` on M1-M4 or `P` on M5+.
+  /// Label of the lowest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_label: String,
-  /// UI label for the higher CPU tier, for example `P` on M1-M4 or `S` on M5+.
+  /// Label of the highest CPU tier.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_label: String,
-  /// Supported lower-tier CPU frequencies in MHz.
+  /// Frequencies of the lowest CPU tier in MHz.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub ecpu_freqs: Vec<u32>,
-  /// Supported higher-tier CPU frequencies in MHz.
+  /// Frequencies of the highest CPU tier in MHz.
+  #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
   pub pcpu_freqs: Vec<u32>,
   /// Number of GPU cores.
   pub gpu_cores: u8,
@@ -480,11 +503,38 @@ pub struct SocInfo {
   pub gpu_freqs: Vec<u32>,
 }
 
+/// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct CpuTierInfo {
+  /// Tier label: `E`, `P` or `S`.
+  pub label: String,
+  /// Number of cores.
+  pub cores: u8,
+  /// Supported frequencies in MHz.
+  pub freqs: Vec<u32>,
+}
+
 impl SocInfo {
   /// Load static SoC information for the current machine.
   pub fn new() -> WithError<Self> {
     // Keep this constructor for external library users; internal call sites use get_soc_info().
     get_soc_info()
+  }
+
+  // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
+  #[allow(deprecated)]
+  fn with_deprecated_tiers(mut self) -> Self {
+    if let Some(tier) = self.cpu_tiers.first() {
+      self.ecpu_cores = tier.cores;
+      self.ecpu_label = tier.label.clone();
+      self.ecpu_freqs = tier.freqs.clone();
+    }
+    if let Some(tier) = self.cpu_tiers.last() {
+      self.pcpu_cores = tier.cores;
+      self.pcpu_label = tier.label.clone();
+      self.pcpu_freqs = tier.freqs.clone();
+    }
+    self
   }
 }
 
@@ -529,17 +579,7 @@ fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
 
 // Read acc-clusters from pmgr dict and parse into (ecpu_key, pcpu_key).
 fn parse_acc_clusters_from(dict: CFDictionaryRef) -> Option<(String, String)> {
-  let obj = cfdict_get_val(dict, "acc-clusters")? as CFDataRef;
-
-  let len = unsafe { CFDataGetLength(obj) } as usize;
-  if len < 8 {
-    return None;
-  }
-
-  let mut data = vec![0u8; len];
-  unsafe { CFDataGetBytes(obj, CFRange::init(0, len as _), data.as_mut_ptr()) };
-
-  parse_acc_clusters(&data)
+  parse_acc_clusters(&cfdict_data(dict, "acc-clusters")?)
 }
 
 // M1-M5 keep DVFS tables on "pmgr"; M6+ move them to a "pmgr-child" node
@@ -572,18 +612,17 @@ fn cpu_freqs(item: CFDictionaryRef, key: &str, is_ecpu: bool, scale: u32) -> Opt
   Some(to_mhz(freqs, scale))
 }
 
-// Parse "proc T:P:E" (macOS 15) or "proc T:P_or_S:E:M" (macOS 26+) into (ecpu, pcpu, has_mcpu).
-// macOS 26 always uses 4 fields; M5+ has M>0 (ecpu=M, pcpu=S), M1-M4 has M=0 (ecpu=E, pcpu=P).
-fn parse_cpu_cores(s: &str) -> (u64, u64, bool) {
-  let procs = s.strip_prefix("proc ").unwrap_or("");
+// Parse "proc T:P:E" (macOS 15), "proc T:P_or_S:E:M" (macOS 26) or "proc T:S:P:E" (macOS 27)
+// into (ecpu, pcpu, has_mcpu). macOS 26: M5+ has M>0 (ecpu=M, pcpu=S), M1-M4 has M=0 (ecpu=E,
+// pcpu=P). macOS 27 reorders the fields, and M1-M4 have no S cores: an M2 reads "proc 8:0:4:4".
+fn parse_cpu_cores(value: &str) -> (u64, u64, bool) {
+  let procs = value.strip_prefix("proc ").unwrap_or("");
   let parts: Vec<u64> = procs.split(':').map(|x| x.parse().unwrap_or(0)).collect();
 
-  match parts.len() {
-    4 => {
-      let (e, m) = (parts[2], parts[3]);
-      if m > 0 { (m, parts[1], true) } else { (e, parts[1], false) }
-    }
-    3 => (parts[2], parts[1], false), // macOS 15: "proc total:P:E"
+  match parts[..] {
+    [_, 0, p, e] => (e, p, false),
+    [_, s, _, m] if m > 0 => (m, s, true),
+    [_, p, e, _] | [_, p, e] => (e, p, false),
     _ => (0, 0, false),
   }
 }
@@ -596,12 +635,13 @@ pub(crate) struct HwInfo {
   pub(crate) chip_name: String,
   pub(crate) mac_model: String,
   pub(crate) memory_gb: u16,
-  pub(crate) ecpu_cores: u8,
-  pub(crate) pcpu_cores: u8,
-  pub(crate) ecpu_label: String,
-  pub(crate) pcpu_label: String,
+  /// CPU tiers from the lowest to the highest.
+  pub(crate) cpu_tiers: CpuTiers,
   pub(crate) gpu_cores: u8,
 }
+
+/// Core counts and labels of the CPU tiers, from the lowest to the highest.
+pub(crate) type CpuTiers = Vec<(u8, &'static str)>;
 
 /// Read a string sysctl value by name.
 pub(crate) fn sysctl_str(name: &str) -> Option<String> {
@@ -635,7 +675,7 @@ fn sysctl_buf<const N: usize>(name: &str) -> Option<[u8; N]> {
   (ret == 0).then_some(buf)
 }
 
-fn sysctl_u32(name: &str) -> Option<u32> {
+pub(crate) fn sysctl_u32(name: &str) -> Option<u32> {
   sysctl_buf(name).map(u32::from_ne_bytes)
 }
 
@@ -651,24 +691,50 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
   ok.then_some(val)
 }
 
-// perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the
-// lowest (confirmed via `sysctl hw.perflevel0/1.name` -> Performance/Efficiency on
-// M1-M4). M5 drops E-cores for a new higher "Super" tier above Performance, so the
-// same two-slot ecpu/pcpu split still applies, just relabeled P/S instead of E/P.
-// Unverified on real M5 hardware (see hw_from_profiler for the tested fallback path).
-fn cpu_tier_counts(chip_name: &str) -> Option<(u8, u8, &'static str, &'static str)> {
-  let nperflevels = sysctl_u32("hw.nperflevels")?;
-  if nperflevels < 2 {
-    return None;
-  }
-
-  let hi = sysctl_u32("hw.perflevel0.physicalcpu")?;
-  let lo = sysctl_u32(&format!("hw.perflevel{}.physicalcpu", nperflevels - 1))?;
-
+// perflevel0 is Apple's highest-capability CPU cluster, the last perflevel is the lowest.
+// The perflevel names label the tiers when they are all known, as read on real machines:
+// Performance / Efficiency on M1 and M2, Super / Performance on an M5 Max (issue #47), and
+// Super / Efficiency on the base M5. Without names (macOS 12.1 has none), the labels follow the
+// chip: E/P on M1-M4, P/S on M5 Pro/Max, E/P/S for the three tiers of M6, which runs 2 Super +
+// 4 Performance + 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2,
+// M x4, E x6 in exelban/stats#3668). Its perflevel names haven't been seen yet.
+pub(crate) fn tiers_from_perflevels(
+  perflevel_cores: &[u32],
+  perflevel_names: &[Option<String>],
+  chip_name: &str,
+) -> Option<CpuTiers> {
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
-  let (ecpu_label, pcpu_label) = if is_legacy { ("E", "P") } else { ("P", "S") };
+  let tiers = match *perflevel_cores {
+    [hi, lo] if is_legacy => vec![(lo as u8, "E"), (hi as u8, "P")],
+    [hi, lo] => vec![(lo as u8, "P"), (hi as u8, "S")],
+    [hi, mid, lo] => vec![(lo as u8, "E"), (mid as u8, "P"), (hi as u8, "S")],
+    _ => return None,
+  };
 
-  Some((lo as u8, hi as u8, ecpu_label, pcpu_label))
+  // names come highest first, tiers lowest first
+  let label = |name: &Option<String>| match name.as_deref()? {
+    "Efficiency" => Some("E"),
+    "Performance" => Some("P"),
+    "Super" => Some("S"),
+    _ => None,
+  };
+  let labels = perflevel_names.iter().rev().map(label).collect::<Option<Vec<_>>>();
+  match labels {
+    Some(labels) if labels.len() == tiers.len() => {
+      Some(tiers.into_iter().zip(labels).map(|((cores, _), label)| (cores, label)).collect())
+    }
+    _ => Some(tiers),
+  }
+}
+
+fn cpu_tier_counts(chip_name: &str) -> Option<CpuTiers> {
+  let nperflevels = sysctl_u32("hw.nperflevels")?;
+  let perflevel_cores = (0..nperflevels)
+    .map(|i| sysctl_u32(&format!("hw.perflevel{i}.physicalcpu")))
+    .collect::<Option<Vec<_>>>()?;
+  let perflevel_names =
+    (0..nperflevels).map(|i| sysctl_str(&format!("hw.perflevel{i}.name"))).collect::<Vec<_>>();
+  tiers_from_perflevels(&perflevel_cores, &perflevel_names, chip_name)
 }
 
 /// Read hardware descriptor fields via sysctl and IORegistry only (no subprocess).
@@ -677,8 +743,7 @@ pub(crate) fn hw_native() -> WithError<HwInfo> {
   let mac_model = sysctl_str("hw.model").ok_or("Failed to read mac model")?;
   let memory_gb =
     sysctl_u64("hw.memsize").ok_or("Failed to read memory size")? / (1024 * 1024 * 1024);
-  let (ecpu_cores, pcpu_cores, ecpu_label, pcpu_label) =
-    cpu_tier_counts(&chip_name).ok_or("Failed to read CPU core topology")?;
+  let cpu_tiers = cpu_tier_counts(&chip_name).ok_or("Failed to read CPU core topology")?;
 
   let mut gpu_cores = 0u8;
   for (entry, name) in IOServiceIterator::new("AGXAccelerator")? {
@@ -690,27 +755,27 @@ pub(crate) fn hw_native() -> WithError<HwInfo> {
     }
   }
 
-  Ok(HwInfo {
-    chip_name,
-    mac_model,
-    memory_gb: memory_gb as u16,
-    ecpu_cores,
-    pcpu_cores,
-    ecpu_label: ecpu_label.into(),
-    pcpu_label: pcpu_label.into(),
-    gpu_cores,
-  })
+  Ok(HwInfo { chip_name, mac_model, memory_gb: memory_gb as u16, cpu_tiers, gpu_cores })
 }
 
-/// Read hardware descriptor fields via `system_profiler` (slower, ~250-300ms subprocess
-/// spawn, but battle-tested against real M1-M5 hardware bug reports).
-pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
+/// Hardware and display report of `system_profiler` (~250-300ms subprocess spawn).
+pub(crate) fn profiler_report() -> WithError<serde_json::Value> {
   let out = std::process::Command::new("system_profiler")
     .args(["SPHardwareDataType", "SPDisplaysDataType", "-json"])
     .output()?;
   let out = std::str::from_utf8(&out.stdout)?;
-  let out = serde_json::from_str::<serde_json::Value>(out)?;
+  Ok(serde_json::from_str::<serde_json::Value>(out)?)
+}
 
+/// Read hardware descriptor fields via `system_profiler`.
+///
+/// Deprecated fallback, to be removed: its text format changes between macOS releases (15, 26,
+/// 27), while `hw_native` reads the same data from sysctl and IORegistry.
+pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
+  Ok(hw_from_profiler_report(&profiler_report()?))
+}
+
+pub(crate) fn hw_from_profiler_report(out: &serde_json::Value) -> HwInfo {
   // SPHardwareDataType.0.chip_type
   let chip_name = out["SPHardwareDataType"][0]["chip_type"].as_str();
   let chip_name = chip_name.unwrap_or("Unknown chip").to_string();
@@ -732,16 +797,57 @@ pub(crate) fn hw_from_profiler() -> WithError<HwInfo> {
   let gpu_cores = out["SPDisplaysDataType"][0]["sppci_cores"].as_str();
   let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
-  Ok(HwInfo {
+  HwInfo {
     chip_name,
     mac_model,
     memory_gb: mem_gb as u16,
-    ecpu_cores: ecpu_cores as u8,
-    pcpu_cores: pcpu_cores as u8,
-    ecpu_label: if has_mcpu { "P".into() } else { "E".into() },
-    pcpu_label: if has_mcpu { "S".into() } else { "P".into() },
+    cpu_tiers: match has_mcpu {
+      true => vec![(ecpu_cores as u8, "P"), (pcpu_cores as u8, "S")],
+      false => vec![(ecpu_cores as u8, "E"), (pcpu_cores as u8, "P")],
+    },
     gpu_cores: gpu_cores as u8,
-  })
+  }
+}
+
+/// `cluster-type` of each CPU core from IORegistry (`cpuN` devices): `E`, `M` or `P`.
+pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
+  let mut types = Vec::new();
+  for (entry, name) in IOServiceIterator::new("IOPlatformDevice")? {
+    let id = name.strip_prefix("cpu").unwrap_or_default();
+    if id.is_empty() || !id.bytes().all(|x| x.is_ascii_digit()) {
+      continue;
+    }
+
+    // "-" for a core without a readable type, so the counts still cover every core
+    let mut cluster_type = "-".to_string();
+    if let Ok(item) = cfio_get_props(entry, name) {
+      if let Some(data) = cfdict_data(item, "cluster-type") {
+        cluster_type = String::from_utf8_lossy(&data).trim_end_matches('\0').to_string();
+      }
+      unsafe { CFRelease(item as _) }
+    }
+    types.push(cluster_type);
+  }
+  Ok(types)
+}
+
+// CPU tiers with their frequency tables: the E-complex table for the lowest tier, the P-complex one
+// for the tiers above it. M6 Performance cores share the P complex and its states with the Super
+// cores: IOReport lists PACC0_PCPU0-1 and PACC0_MCPU2-5 with the same 20 states, and no other CPU
+// complex than EACC and PACC0 (issue #80, exelban/stats#3668). That a Performance core also runs
+// at the P table's frequency in each state is assumed: not yet checked against powermetrics on
+// M6, and an M5 Max gives its Performance cores a table of their own (voltage-states23-sram).
+pub(crate) fn cpu_tier_infos(
+  tiers: &CpuTiers,
+  ecpu_freqs: &[u32],
+  pcpu_freqs: &[u32],
+) -> Vec<CpuTierInfo> {
+  let tier = |(i, &(cores, label)): (usize, &(u8, &str))| CpuTierInfo {
+    label: label.into(),
+    cores,
+    freqs: if i == 0 { ecpu_freqs } else { pcpu_freqs }.to_vec(),
+  };
+  tiers.iter().enumerate().map(tier).collect()
 }
 
 fn load_soc_info() -> WithError<SocInfo> {
@@ -750,20 +856,9 @@ fn load_soc_info() -> WithError<SocInfo> {
     Err(_) => hw_from_profiler()?,
   };
 
-  let mut info = SocInfo {
-    chip_name: hw.chip_name,
-    mac_model: hw.mac_model,
-    memory_gb: hw.memory_gb,
-    ecpu_cores: hw.ecpu_cores,
-    pcpu_cores: hw.pcpu_cores,
-    ecpu_label: hw.ecpu_label,
-    pcpu_label: hw.pcpu_label,
-    gpu_cores: hw.gpu_cores,
-    ..Default::default()
-  };
-
-  let cpu_scale = cpu_freq_scale(&info.chip_name);
+  let cpu_scale = cpu_freq_scale(&hw.chip_name);
   let gpu_scale: u32 = 1000 * 1000; // MHz
+  let (mut ecpu_freqs, mut pcpu_freqs, mut gpu_freqs) = (Vec::new(), Vec::new(), Vec::new());
 
   // CPU/GPU frequencies always come from IOKit directly, regardless of how the
   // rest of the hardware descriptor above was sourced.
@@ -775,31 +870,40 @@ fn load_soc_info() -> WithError<SocInfo> {
       // 2) sudo powermetrics --samplers cpu_power -i 1000 -n 1 | grep "active residency" | grep
       //    "Cluster"
       // First node with a table wins, so a stub node can't clobber real values.
-      if info.ecpu_freqs.is_empty()
+      if ecpu_freqs.is_empty()
         && let Some(f) = cpu_freqs(item, "voltage-states1-sram", true, cpu_scale)
       {
-        info.ecpu_freqs = f;
+        ecpu_freqs = f;
       }
-      if info.pcpu_freqs.is_empty()
+      if pcpu_freqs.is_empty()
         && let Some(f) = cpu_freqs(item, "voltage-states5-sram", false, cpu_scale)
       {
-        info.pcpu_freqs = f;
+        pcpu_freqs = f;
       }
 
-      if info.gpu_freqs.is_empty()
+      if gpu_freqs.is_empty()
         && let Some((_, freqs)) = get_dvfs_mhz(item, "voltage-states9")
       {
-        info.gpu_freqs = to_mhz(freqs, gpu_scale);
+        gpu_freqs = to_mhz(freqs, gpu_scale);
       }
       unsafe { CFRelease(item as _) }
     }
   }
 
-  if info.ecpu_freqs.is_empty() || info.pcpu_freqs.is_empty() {
+  if ecpu_freqs.is_empty() || pcpu_freqs.is_empty() {
     return Err("No CPU frequencies found".into());
   }
 
-  Ok(info)
+  let info = SocInfo {
+    cpu_tiers: cpu_tier_infos(&hw.cpu_tiers, &ecpu_freqs, &pcpu_freqs),
+    chip_name: hw.chip_name,
+    mac_model: hw.mac_model,
+    memory_gb: hw.memory_gb,
+    gpu_cores: hw.gpu_cores,
+    gpu_freqs,
+    ..Default::default()
+  };
+  Ok(info.with_deprecated_tiers())
 }
 
 /// Load cached static SoC information for the current machine.
@@ -1578,11 +1682,13 @@ mod tests {
 
   #[test]
   fn parse_cpu_core_counts() {
+    // number_processors read on real machines
     for (value, expected) in [
-      ("proc 18:6:0:12", (12, 6, true)),
-      ("proc 16:12:4:0", (4, 12, false)),
-      ("proc 8:4:4:0", (4, 4, false)),
-      ("proc 8:4:4", (4, 4, false)),
+      ("proc 8:0:4:4", (4, 4, false)),    // M2, macOS 27.0.1
+      ("proc 18:6:0:12", (12, 6, true)),  // M5 Max, macOS 26.4 beta (issue #47)
+      ("proc 16:12:4:0", (4, 12, false)), // M4 Max, macOS 26
+      ("proc 8:4:4:0", (4, 4, false)),    // M3 Air, macOS 26
+      ("proc 8:4:4", (4, 4, false)),      // M3 Air, macOS 15.6.1; M1, macOS 15.8.1
       ("", (0, 0, false)),
       ("garbage", (0, 0, false)),
       ("10:8:2", (0, 0, false)),
@@ -1592,6 +1698,47 @@ mod tests {
     ] {
       assert_eq!(parse_cpu_cores(value), expected, "{value}");
     }
+  }
+
+  #[test]
+  fn cpu_tiers_from_perflevels() {
+    // hw.perflevelN.physicalcpu and .name read on real machines, highest tier first
+    let pe = ["Performance", "Efficiency"].as_slice();
+    for (cores, names, chip, expected) in [
+      (&[4, 4][..], pe, "Apple M1", Some(vec![(4, "E"), (4, "P")])), // macOS 15.8.1
+      (&[4, 4], pe, "Apple M2", Some(vec![(4, "E"), (4, "P")])),     // macOS 27.0.1
+      (&[6, 12], &["Super", "Performance"], "Apple M5 Max", Some(vec![(12, "P"), (6, "S")])), // #47
+      (&[4, 6], &["Super", "Efficiency"], "Apple M5", Some(vec![(6, "E"), (4, "S")])), /* macOS 27.0.1 */
+      (&[2, 4, 6], &[], "Apple M6", Some(vec![(6, "E"), (4, "P"), (2, "S")])), /* issue #80, names unseen */
+      (&[8], &[], "Apple M1", None),
+      (&[], &[], "Apple M1", None),
+    ] {
+      let names = names.iter().map(|x| Some(x.to_string())).collect::<Vec<_>>();
+      assert_eq!(tiers_from_perflevels(cores, &names, chip), expected, "{chip} {cores:?}");
+    }
+
+    // without names (macOS 12.1 has none) the labels follow the chip, as on the base M5 before
+    let names = [None, None];
+    assert_eq!(tiers_from_perflevels(&[4, 6], &names, "Apple M5"), Some(vec![(6, "P"), (4, "S")]));
+  }
+
+  #[test]
+  fn tiers_above_the_lowest_use_the_p_complex_table() {
+    let tiers = |tiers: &CpuTiers| {
+      let tiers = cpu_tier_infos(tiers, &[972, 2940], &[1440, 4788]);
+      tiers.into_iter().map(|x| (x.label, x.cores, x.freqs)).collect::<Vec<_>>()
+    };
+    let m2 = vec![(4, "E"), (4, "P")];
+    assert_eq!(tiers(&m2), [("E".into(), 4, vec![972, 2940]), ("P".into(), 4, vec![1440, 4788])]);
+    let m6 = vec![(6, "E"), (4, "P"), (2, "S")];
+    assert_eq!(
+      tiers(&m6),
+      [
+        ("E".into(), 6, vec![972, 2940]),
+        ("P".into(), 4, vec![1440, 4788]),
+        ("S".into(), 2, vec![1440, 4788]),
+      ]
+    );
   }
 
   #[test]

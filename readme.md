@@ -159,18 +159,23 @@ macmon_cpu_scaled_ratio{chip="Apple M3 Pro"} 0.037
 # TYPE macmon_cpu_active_ratio gauge
 macmon_cpu_active_ratio{chip="Apple M3 Pro"} 0.092
 
-# HELP macmon_ecpu_scaled_ratio Efficiency CPU cluster frequency-scaled ratio (0–1)
-# TYPE macmon_ecpu_scaled_ratio gauge
-macmon_ecpu_scaled_ratio{chip="Apple M3 Pro"} 0.083
+# HELP macmon_cpu_tier_freq_mhz CPU tier frequency in MHz
+# TYPE macmon_cpu_tier_freq_mhz gauge
+macmon_cpu_tier_freq_mhz{chip="Apple M3 Pro",tier="E"} 1100
+macmon_cpu_tier_freq_mhz{chip="Apple M3 Pro",tier="P"} 1800
 
-# HELP macmon_ecpu_freq_mhz Efficiency CPU cluster frequency in MHz
-# TYPE macmon_ecpu_freq_mhz gauge
-macmon_ecpu_freq_mhz{chip="Apple M3 Pro"} 1100
+# HELP macmon_cpu_tier_scaled_ratio CPU tier frequency-scaled ratio (0–1)
+# TYPE macmon_cpu_tier_scaled_ratio gauge
+macmon_cpu_tier_scaled_ratio{chip="Apple M3 Pro",tier="E"} 0.083
+macmon_cpu_tier_scaled_ratio{chip="Apple M3 Pro",tier="P"} 0.015
 
-# HELP macmon_ecpu_active_ratio Efficiency CPU cluster active residency ratio (not frequency-scaled, 0–1)
-# TYPE macmon_ecpu_active_ratio gauge
-macmon_ecpu_active_ratio{chip="Apple M3 Pro"} 0.18
+# HELP macmon_cpu_tier_active_ratio CPU tier active residency ratio (not frequency-scaled, 0–1)
+# TYPE macmon_cpu_tier_active_ratio gauge
+macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="E"} 0.18
+macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="P"} 0.04
 ```
+
+`macmon_ecpu_*` and `macmon_pcpu_*` are still exported for the lowest and the highest tier.
 
 </details>
 
@@ -225,20 +230,37 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
   ],
   "cpu_scaled_ratio": 0.036854, // Combined frequency-scaled CPU ratio (weighted by core count, 0–1)
   "cpu_active_ratio": 0.092, // Combined active residency ratio (not frequency-scaled, weighted by core count, 0–1)
-  "ecpu_freq_mhz": 1100, // Cluster frequency
-  "ecpu_scaled_ratio": 0.082656614, // Frequency-scaled ratio (0–1)
-  "ecpu_active_ratio": 0.18, // Active residency (not frequency-scaled, 0–1)
-  "pcpu_freq_mhz": 1800, // Cluster frequency
-  "pcpu_scaled_ratio": 0.015181795, // Frequency-scaled ratio (0–1)
-  "pcpu_active_ratio": 0.04, // Active residency (not frequency-scaled, 0–1)
-  "ecpu_cores": [
-    { "die_id": 0, "core_id": 0, "freq_mhz": 1600, "scaled_ratio": 0.14, "active_ratio": 0.24 },
-    { "die_id": 0, "core_id": 1, "freq_mhz": 1700, "scaled_ratio": 0.12, "active_ratio": 0.2 },
+  "cpu_tiers": [ // CPU core types from the lowest to the highest: E, P on M1–M4; E, S on M5; P, S on M5 Pro/Max; E, P, S on M6
+    {
+      "label": "E",
+      "freq_mhz": 1100, // Tier frequency
+      "scaled_ratio": 0.082656614, // Frequency-scaled ratio (0–1)
+      "active_ratio": 0.18, // Active residency (not frequency-scaled, 0–1)
+      "cores": [
+        { "die_id": 0, "core_id": 0, "freq_mhz": 1600, "scaled_ratio": 0.14, "active_ratio": 0.24 },
+        { "die_id": 0, "core_id": 1, "freq_mhz": 1700, "scaled_ratio": 0.12, "active_ratio": 0.2 },
+      ],
+    },
+    {
+      "label": "P",
+      "freq_mhz": 1800,
+      "scaled_ratio": 0.015181795,
+      "active_ratio": 0.04,
+      "cores": [
+        { "die_id": 0, "core_id": 0, "freq_mhz": 2100, "scaled_ratio": 0.05, "active_ratio": 0.08 },
+        { "die_id": 0, "core_id": 1, "freq_mhz": 2200, "scaled_ratio": 0.07, "active_ratio": 0.06 },
+      ],
+    },
   ],
-  "pcpu_cores": [
-    { "die_id": 0, "core_id": 0, "freq_mhz": 2100, "scaled_ratio": 0.05, "active_ratio": 0.08 },
-    { "die_id": 0, "core_id": 1, "freq_mhz": 2200, "scaled_ratio": 0.07, "active_ratio": 0.06 },
-  ],
+  // Deprecated, use cpu_tiers: ecpu_* is the lowest tier, pcpu_* the highest
+  "ecpu_freq_mhz": 1100,
+  "ecpu_scaled_ratio": 0.082656614,
+  "ecpu_active_ratio": 0.18,
+  "pcpu_freq_mhz": 1800,
+  "pcpu_scaled_ratio": 0.015181795,
+  "pcpu_active_ratio": 0.04,
+  "ecpu_cores": [/* cores of the first tier */],
+  "pcpu_cores": [/* cores of the last tier */],
   "gpu_freq_mhz": 461, // GPU frequency
   "gpu_scaled_ratio": 0.021497859, // Frequency-scaled ratio (0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)
@@ -266,7 +288,7 @@ R_\text{active} = \frac{\sum_i t_i}{T}
 R_\text{scaled} = \frac{\sum_i t_i f_i}{T f_\text{max}}
 ```
 
-CPU ratios are calculated per core and averaged across the cluster. A core that did no work contributes zero; combined CPU ratios average all cores from both clusters:
+CPU ratios are calculated per core and averaged across the cluster. A core that did no work contributes zero; combined CPU ratios average all cores from all clusters:
 
 ```math
 R_\text{cluster} = \frac{1}{N_\text{cores}}\sum_j R_j
@@ -314,8 +336,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => println!("CPU temp:   N/A"),
     }
     println!("RAM usage:  {} / {} bytes", metrics.memory.ram_usage, metrics.memory.ram_total);
-    println!("eCPU:       {} MHz  {:.1}%", metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio * 100.0);
-    println!("pCPU:       {} MHz  {:.1}%", metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio * 100.0);
+    for tier in &metrics.cpu_tiers {
+        println!("{}-CPU:      {} MHz  {:.1}%", tier.label, tier.freq_mhz, tier.scaled_ratio * 100.0);
+    }
 
     Ok(())
 }

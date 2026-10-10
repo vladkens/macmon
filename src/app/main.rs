@@ -31,6 +31,7 @@ struct JsonMetrics<'a> {
   gpu_usage: (u32, f32),
 }
 
+#[allow(deprecated)]
 fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_json::Error> {
   serde_json::to_value(JsonMetrics {
     metrics,

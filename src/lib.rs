@@ -21,7 +21,9 @@
 //!     println!("GPU power: {:.2} W", metrics.gpu_power);
 //!     println!("CPU frequency-scaled ratio: {:.1}%", metrics.cpu_scaled_ratio * 100.0);
 //!     println!("CPU active residency: {:.1}%", metrics.cpu_active_ratio * 100.0);
-//!     println!("E-CPU frequency: {} MHz", metrics.ecpu_freq_mhz);
+//!     for tier in &metrics.cpu_tiers {
+//!       println!("{}-CPU frequency: {} MHz", tier.label, tier.freq_mhz);
+//!     }
 //!   }
 //! }
 //! ```
@@ -80,6 +82,8 @@ pub mod sources;
 
 // Re-export the commonly used types.
 #[doc(inline)]
-pub use metrics::{CpuCoreMetrics, FanMetric, MemMetrics, Metrics, Sampler, TempMetrics};
+pub use metrics::{
+  CpuCoreMetrics, CpuTierMetrics, FanMetric, MemMetrics, Metrics, Sampler, TempMetrics,
+};
 #[doc(inline)]
-pub use sources::SocInfo;
+pub use sources::{CpuTierInfo, SocInfo};
