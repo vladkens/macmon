@@ -1330,8 +1330,8 @@ mod tests {
     assert!(app.handle_key(key('k')).is_continue());
     // centered over the process box
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 31).contains(" ╭─ Kill process ──"), "{}", row(&buf, 31));
-    assert!(row(&buf, 33).contains(" │  WindowServer "), "{}", row(&buf, 33));
+    assert!(row(&buf, 31).contains("╭─ Kill WindowServer? ──"), "{}", row(&buf, 31));
+    assert!(row(&buf, 33).contains("│  pid 631 · vlad "), "{}", row(&buf, 33));
 
     // a new sample without WindowServer drops the selection: `t` still kills the popup's process
     let mut procs = varied_procs();

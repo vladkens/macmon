@@ -11,13 +11,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Clear;
 
-use super::boxes::{Titles, cells, draw_box, hint, render_bottom_border};
+use super::boxes::{Titles, cells, draw_box};
 use super::proc_view::{cut_end, cut_start};
 use super::theme::{self, dim, heading, text};
 use crate::procs::{self, ProcInfo};
 
-/// A button: its label and the signal it sends, pressed by the first letter of the label (in lower
-/// case, underlined); one without a signal closes the popup. An error has only OK.
+/// A button: its label and the signal it sends (none: it closes the popup). The choices are pressed
+/// by the first letter of their label (in lower case, underlined); an error has only OK.
 type Button = (&'static str, Option<i32>);
 const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
@@ -48,11 +48,11 @@ impl KillSys for LibcSys {
   }
 }
 
-/// What the popup says about a failed `kill()`: `exited`, `Not permitted`, or the `strerror`.
+/// The popup's text for a failed `kill()`: `Already exited`, `Not permitted`, or the `strerror`.
 fn failure(errno: i32) -> String {
   let text = io::Error::from_raw_os_error(errno).to_string();
   match errno {
-    libc::ESRCH => "exited".into(),
+    libc::ESRCH => "Already exited".into(),
     libc::EPERM => "Not permitted".into(),
     _ => text.replace(&format!(" (os error {errno})"), ""),
   }
@@ -118,14 +118,13 @@ impl Kill {
     self.popup = None;
   }
 
-  /// A key while the popup is open: `←` `→` and Tab select, Enter presses the selected button, `t`
-  /// / `f` (no modifier) theirs, Esc the last one (Cancel, OK). Other keys do nothing.
+  /// A key while the popup is open: `←` `→` and Tab select, Enter presses the selected button,
+  /// `t` `f` `c` theirs (no modifier, no error), Esc the last one (Cancel, OK); others do nothing.
   pub(super) fn handle_key(&mut self, key: KeyEvent) {
     let Some(popup) = self.popup.as_mut() else { return };
-    let (buttons, selected) =
-      (if popup.state.is_ok() { &CHOICES[..] } else { &OK }, popup.selected);
-    let shortcut =
-      |c: char| buttons.iter().position(|b| b.1.is_some() && b.0.to_lowercase().starts_with(c));
+    let (ok, selected) = (popup.state.is_ok(), popup.selected);
+    let buttons = if ok { &CHOICES[..] } else { &OK };
+    let shortcut = |c: char| CHOICES.iter().position(|b| ok && b.0.to_lowercase().starts_with(c));
     match key.code {
       KeyCode::Left | KeyCode::BackTab => popup.selected = selected.saturating_sub(1),
       KeyCode::Right | KeyCode::Tab => popup.selected = (selected + 1).min(buttons.len() - 1),
@@ -157,36 +156,34 @@ impl Kill {
     }
   }
 
-  /// Draws the popup over `area`: the name, `pid · user · path` or the error, the buttons to click.
+  /// Draws the popup over `area`: `Kill <name>?`, `pid · user` and the path or the error, buttons.
   pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
     let Some(popup) = self.popup.as_mut().filter(|_| !area.is_empty()) else { return };
     let (proc, ok) = (&popup.proc, popup.state.is_ok());
-    let buttons = if ok { &CHOICES[..] } else { &OK };
-    let owner = if ok { format!("{} · {} · ", proc.pid, proc.user) } else { String::new() };
-    let path = if proc.path.is_empty() { &proc.name } else { &proc.path };
-    let about = popup.state.as_ref().err().unwrap_or(path);
-    let width = |text: &str| Span::raw(text).width();
-    let row = |buttons: &[Button]| buttons.iter().map(|b| b.0.len() + 7).sum::<usize>() - 3;
-    // two blank columns on both sides of the text (cut at 56 cells) or the buttons, the borders
-    let text_width = width(&proc.name).max(width(&owner) + width(about)).min(56);
-    let size = Constraint::Length(cells(text_width.max(row(&CHOICES)) + 6));
-    let rect = area.centered(size, Constraint::Length(8));
+    let (buttons, width) = (if ok { &CHOICES[..] } else { &OK }, usize::from(area.width.min(60)));
+    let owner = format!("pid {} · {}", proc.pid, proc.user);
+    // two blank columns on both sides of the text, the borders
+    let lines = match &popup.state {
+      Ok(_) if proc.path.is_empty() => vec![text(owner)],
+      Ok(_) => vec![text(owner), dim(cut_start(&proc.path, width.saturating_sub(6)))],
+      Err(error) => vec![text(error.as_str()), dim(owner)],
+    };
+    let rows = cells(lines.len());
+    let rect = area.centered(Constraint::Length(cells(width)), Constraint::Length(rows + 6));
     f.render_widget(Clear, rect);
-    let inner = draw_box(f, rect, Titles::new(heading("Kill process")));
-    let hints = vec![hint("←→", "select"), hint("↵", "ok"), hint("Esc", "close")];
-    render_bottom_border(f, rect, if ok { hints } else { vec![hint("↵", "ok")] }, |_| vec![]);
-    let room = usize::from(inner.width.saturating_sub(4));
-    let about = format!("{owner}{}", cut_start(about, room.saturating_sub(width(&owner))));
-    let lines = [heading(cut_end(&proc.name, room)), if ok { dim(about) } else { text(about) }];
+    // cut by hand, so `?` stays: `Kill ` and `?` and a blank cell and a border cell on both sides
+    let name = cut_end(&proc.name, width.saturating_sub(12)) + if ok { "?" } else { "" };
+    let inner = draw_box(f, rect, Titles::new(heading(format!("Kill {name}"))));
     // a blank row above, between and below when there is room
-    let gap = u16::from(inner.height >= 6);
+    let gap = u16::from(inner.height >= rows + 4);
     f.render_widget(Text::from_iter(lines), inner.inner(Margin::new(2, gap)));
-    // right-aligned, two blank columns before the border; cut, or none, when they don't fit
-    let y = inner.y + 2 + 2 * gap;
-    let mut x = inner.right().saturating_sub(cells(row(buttons) + 2)).max(inner.x);
+    // centred; cut, or none, when they don't fit
+    let row = buttons.iter().map(|b| b.0.len() + 7).sum::<usize>() - 3;
+    let y = inner.y + rows + 2 * gap;
+    let mut x = inner.x + inner.width.saturating_sub(cells(row)) / 2;
     popup.rects.clear();
-    for (i, &(label, sig)) in buttons.iter().enumerate() {
-      let underline = if sig.is_some() { Modifier::UNDERLINED } else { Modifier::empty() };
+    for (i, &(label, _)) in buttons.iter().enumerate() {
+      let underline = if ok { Modifier::UNDERLINED } else { Modifier::empty() };
       let first = Span::styled(&label[..1], Style::new().fg(theme::TEXT).add_modifier(underline));
       let line = Line::from(vec![text("[ "), first, text(&label[1..]), text(" ]")]);
       let rect = Rect::new(x, y, cells(label.len() + 4), 1).intersection(inner);
@@ -214,7 +211,7 @@ pub(super) mod tests {
   };
   use ratatui::style::Modifier;
 
-  use super::{Kill, KillSys, LibcSys};
+  use super::{Kill, KillSys, LibcSys, theme};
   use crate::procs::{self, ProcInfo};
 
   /// A fake process: its start second (`None`: unreadable, as a zombie) and the errno of signals.
@@ -303,19 +300,19 @@ pub(super) mod tests {
       (own, None, sampled, "Won't kill macmon itself"),
       (631, Some((Some(631), Some(libc::EPERM))), sampled, "Not permitted"),
       (631, Some((Some(631), Some(libc::EINVAL))), sampled, "Invalid argument"),
-      (631, None, sampled, "exited"),
+      (631, None, sampled, "Already exited"),
       // a `ps` row: alive, but the process with its pid now may be another one
       (631, Some((Some(631), None)), None, "Not permitted"),
       // restarted since the sample, or a zombie
-      (631, Some((Some(2000), None)), sampled, "exited"),
-      (631, Some((None, None)), sampled, "exited"),
+      (631, Some((Some(2000), None)), sampled, "Already exited"),
+      (631, Some((None, None)), sampled, "Already exited"),
     ];
     for (pid, proc, started, error) in cases {
       let (mut kill, fake) = FakeSys::kill(&[1, own]);
       fake.set(631, proc);
       kill.open(&ProcInfo { started, ..window_server(pid) });
       // only OK: the keys of the other buttons do nothing, Enter closes
-      for key in [key('t'), key('f'), code(KeyCode::Right), code(KeyCode::Tab)] {
+      for key in [key('t'), key('f'), key('c'), code(KeyCode::Right), code(KeyCode::Tab)] {
         kill.handle_key(key);
         assert_eq!(shown(&kill), Some((Err(error.into()), 0)), "{error}");
       }
@@ -346,6 +343,7 @@ pub(super) mod tests {
       (vec![code(Left), code(BackTab)], Some(0), vec![]),
       (vec![code(Right), code(Right), code(Enter)], None, vec![]),
       (vec![code(Right), code(Esc)], None, vec![]),
+      (vec![key('c')], None, vec![]),
       // other keys and the shortcuts with a modifier do nothing
       (vec![key('q'), key('y'), key('k'), key('n'), key('T'), code(Down)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::CONTROL), chord('f', KeyModifiers::ALT)], Some(0), vec![]),
@@ -365,9 +363,9 @@ pub(super) mod tests {
     let failing = Some((Some(631), Some(libc::EINVAL)));
     // 631 at the key (`None`: exited), the key, the error shown, the signals sent
     let cases = [
-      (None, key('t'), "exited", vec![]),
-      (Some((Some(2000), None)), key('t'), "exited", vec![]),
-      (Some((None, None)), key('f'), "exited", vec![]),
+      (None, key('t'), "Already exited", vec![]),
+      (Some((Some(2000), None)), key('t'), "Already exited", vec![]),
+      (Some((None, None)), key('f'), "Already exited", vec![]),
       (failing, code(KeyCode::Enter), "Invalid argument", vec![(631, libc::SIGTERM)]),
     ];
     for (proc, press, error, sent) in cases {
@@ -375,7 +373,7 @@ pub(super) mod tests {
       kill.open(&window_server(631));
       fake.set(631, proc);
       // OK selected, the keys of the other buttons do nothing, Esc closes
-      for key in [press, key('t'), key('f'), code(KeyCode::Right)] {
+      for key in [press, key('t'), key('f'), key('c'), code(KeyCode::Right)] {
         kill.handle_key(key);
         assert_eq!(shown(&kill), Some((Err(error.into()), 0)), "{error}");
       }
@@ -437,55 +435,56 @@ pub(super) mod tests {
   #[test]
   fn the_popup_draws_in_any_window() {
     let (mut kill, _) = FakeSys::kill(&[33928]);
-    let chrome = "Google Chrome Helper (Renderer)";
-    let path = format!("/Applications/Google Chrome.app/Contents/Frameworks/Helpers/{chrome}");
-    kill.open(&ProcInfo { name: chrome.into(), path, user: "user".into(), ..window_server(33928) });
+    let teams = "Microsoft Teams WebView Helper (Renderer)";
+    let path = format!("/Applications/{teams}.app/Contents/MacOS/{teams}");
+    kill.open(&ProcInfo { name: teams.into(), path, user: "user".into(), ..window_server(33928) });
     for (width, height) in (0..70).flat_map(|w| (0..10).map(move |h| (w, h))) {
       render(&mut kill, width, height);
     }
-    // the path cut from the start, the buttons right-aligned
+    // the path cut from the start, the buttons centred
     let popup = [
-      "╭─ Kill process ─────────────────────────────────────────────╮",
-      "│                                                            │",
-      "│  Google Chrome Helper (Renderer)                           │",
-      "│  33928 · user · …/Helpers/Google Chrome Helper (Renderer)  │",
-      "│                                                            │",
-      "│               [ Terminate ]   [ Force kill ]   [ Cancel ]  │",
-      "│                                                            │",
-      "╰───────────────────────────── ←→ select | ↵ ok | Esc close ─╯",
+      "╭─ Kill Microsoft Teams WebView Helper (Renderer)? ────────╮",
+      "│                                                          │",
+      "│  pid 33928 · user                                        │",
+      "│  …tents/MacOS/Microsoft Teams WebView Helper (Renderer)  │",
+      "│                                                          │",
+      "│       [ Terminate ]   [ Force kill ]   [ Cancel ]        │",
+      "│                                                          │",
+      "╰──────────────────────────────────────────────────────────╯",
     ];
-    let buf = render(&mut kill, 62, 8);
+    let buf = render(&mut kill, 60, 8);
     let shown = rows(&buf);
     assert_eq!(shown, popup);
-    // the selected button reversed, the letters of the shortcuts underlined
+    // the selected button reversed, the letters of the shortcuts underlined, the path dim
     let style = |text| buf[find(&shown, text)].modifier;
     let (none, reversed, underlined) =
       (Modifier::empty(), Modifier::REVERSED, Modifier::UNDERLINED);
     assert_eq!((style("[ Terminate"), style("Terminate")), (reversed, reversed | underlined));
-    assert_eq!((style("[ Force"), style("Force"), style("Cancel")), (none, underlined, none));
+    assert_eq!((style("[ Force"), style("Force"), style("Cancel")), (none, underlined, underlined));
+    assert_eq!(buf[find(&shown, "…tents")].fg, theme::DIM);
 
-    // without the blank rows when low, cut when narrow
+    // the name cut before `?`, without the blank rows when low
     let narrow = [
-      "╭─ Kill process ───────────────────────╮",
-      "│  Google Chrome Helper (Renderer)     │",
-      "│  33928 · user · … Helper (Renderer)  │",
-      "│[ Terminate ]   [ Force kill ]   [ Can│",
+      "╭─ Kill Microsoft Teams WebView Helper (Rende…? ─╮",
+      "│  pid 33928 · user                              │",
+      "│  …S/Microsoft Teams WebView Helper (Renderer)  │",
+      "│  [ Terminate ]   [ Force kill ]   [ Cancel ]   │",
     ];
-    assert_eq!(rows(&render(&mut kill, 40, 6))[..4], narrow);
+    assert_eq!(rows(&render(&mut kill, 50, 6))[..4], narrow);
 
-    // an error over OK, as wide as the three buttons
+    // an error over OK
     kill.open(&window_server(1));
     let error = [
-      "╭─ Kill process ────────────────────────────────╮",
-      "│                                               │",
-      "│  WindowServer                                 │",
-      "│  Won't kill launchd                           │",
-      "│                                               │",
-      "│                                       [ OK ]  │",
-      "│                                               │",
-      "╰──────────────────────────────────────── ↵ ok ─╯",
+      "╭─ Kill WindowServer ────────────────────────────────────╮",
+      "│                                                        │",
+      "│  Won't kill launchd                                    │",
+      "│  pid 1 · _windowserver                                 │",
+      "│                                                        │",
+      "│                         [ OK ]                         │",
+      "│                                                        │",
+      "╰────────────────────────────────────────────────────────╯",
     ];
-    assert_eq!(rows(&render(&mut kill, 49, 8)), error);
+    assert_eq!(rows(&render(&mut kill, 58, 8)), error);
   }
 
   /// A child of the test, killed and reaped when the test ends, however it ends.
