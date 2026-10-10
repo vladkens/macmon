@@ -312,7 +312,7 @@ pub(super) fn cut_end(text: &str, max: usize) -> String {
 }
 
 /// `text` cut to its last `max` cells, starting with `…` when cut.
-fn cut_start(text: &str, max: usize) -> String {
+pub(super) fn cut_start(text: &str, max: usize) -> String {
   match max {
     _ if Span::raw(text).width() <= max => text.to_string(),
     0 => String::new(),

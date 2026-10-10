@@ -1,23 +1,30 @@
 # Kill the selected process (#84)
 
-`k` in the TUI opens a small confirmation popup for the selected process: `t` sends SIGTERM, `f`
-SIGKILL. One key, no signal menu, no tracking after the signal: the list shows whether the process
-is gone, and one that ignores SIGTERM gets `k` then `f`.
+`k` in the TUI opens a confirmation popup for the selected process with the buttons Terminate
+(SIGTERM), Force kill (SIGKILL) and Cancel. No signal menu, no tracking after the signal: the list
+shows whether the process is gone, and one that ignores SIGTERM gets `k` then Force kill.
 
 ## Behavior
 
 - `k` works while the process list is visible, a process is selected, no filter is typed and the
   help is closed. The popup is centered over the process list (`Clear` + `draw_box`, like the
-  help): `Kill <pid>` in the title, the name (cut to fit), then `t terminate | f force kill | Esc
-  cancel`.
-- While it is open every key goes to it (Ctrl-C still quits): `t` / `f` without a modifier send
-  the signal and close it, any other key closes it. A click or the wheel, `FocusLost` and the list
-  going hidden close it too.
-- Errors replace the keys line, and any key closes the popup: pid <= 0, 1 and macmon's own pid
-  are refused before any system call (`Won't kill …`); `kill(pid, 0)` ESRCH → `exited`, EPERM →
-  `Not permitted`; a row without a sampled start time (`ps` rows) → `Not permitted`; a start time
-  other than the sampled one → `exited`. At `t` / `f` the start time is read again right before
-  `kill()`: changed or unreadable → `exited`; `kill()` errors as above, others → the strerror text.
+  help), sized to its text and at least as wide as the buttons: `Kill process` in the title, the
+  name (bold), then `pid · user · path` (dim, the path cut from the start; the name without a
+  path), and `[ Terminate ]  [ Force kill ]  [ Cancel ]` right-aligned, the selected one
+  highlighted like the selected row, `t` / `f` underlined. Hints on the bottom border:
+  `←→ select | ↵ ok | Esc close`.
+- While it is open every key goes to it (Ctrl-C still quits): `←` `→` / Tab / Shift-Tab move the
+  selection (Terminate first, no wrap), Enter presses the selected button, `t` / `f` without a
+  modifier press Terminate / Force kill, Esc closes; other keys do nothing. A left click on a
+  button presses it; other clicks, the wheel and `FocusLost` do nothing. The list going hidden
+  closes it.
+- Terminate and Force kill send the signal and close the popup; Cancel closes it. Errors replace
+  the `pid · user · path` line over a single selected `[ OK ]` (hint `↵ ok`), which Enter, Esc or a
+  click closes: pid <= 0, 1 and macmon's own pid are refused before any system call (`Won't kill
+  …`); `kill(pid, 0)` ESRCH → `exited`, EPERM → `Not permitted`; a row without a sampled start
+  time (`ps` rows) → `Not permitted`; a start time other than the sampled one → `exited`. On a
+  signal button the start time is read again right before `kill()`: changed or unreadable →
+  `exited`; `kill()` errors as above, others → the strerror text.
 
 ## Decisions
 

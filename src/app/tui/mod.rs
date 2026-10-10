@@ -387,11 +387,9 @@ impl App {
         self.update_procs(showing, procs);
         return ControlFlow::Continue(());
       }
-      // switching away is done typing: keys back as shortcuts, the filter stays; the kill popup
-      // closes
+      // switching away is done typing: keys back as shortcuts, the filter stays
       Event::FocusLost => {
         self.proc_view.end_typing();
-        self.kill.close();
         return ControlFlow::Continue(());
       }
       Event::Tick => return ControlFlow::Continue(()),
@@ -442,7 +440,7 @@ impl App {
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
       KeyCode::Char('k') if self.procs_visible() => {
         if let Some(proc) = self.proc_view.selected() {
-          self.kill.open(proc.pid, &proc.name, proc.started);
+          self.kill.open(proc);
         }
       }
       _ => {}
@@ -459,10 +457,10 @@ impl App {
 
   /// Applies a mouse event at the cells of the last frame to the process list, only while the
   /// mouse is captured (events still on the way when capture turns off are dropped). While the
-  /// kill popup is open, a click or the wheel only closes it.
+  /// kill popup is open, they go to it.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
     if self.kill.is_open() {
-      self.kill.close();
+      self.kill.handle_mouse(mouse);
     } else if self.wants_mouse() {
       self.update_proc_view(|view| view.handle_mouse(mouse));
     }
@@ -1332,8 +1330,8 @@ mod tests {
     assert!(app.handle_key(key('k')).is_continue());
     // centered over the process box
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 33).contains(" ╭─ Kill 631 ──"), "{}", row(&buf, 33));
-    assert!(row(&buf, 34).contains(" │ WindowServer "), "{}", row(&buf, 34));
+    assert!(row(&buf, 31).contains(" ╭─ Kill process ──"), "{}", row(&buf, 31));
+    assert!(row(&buf, 33).contains(" │  WindowServer "), "{}", row(&buf, 33));
 
     // a new sample without WindowServer drops the selection: `t` still kills the popup's process
     let mut procs = varied_procs();
@@ -1346,22 +1344,25 @@ mod tests {
   }
 
   #[test]
-  fn clicks_the_wheel_focus_loss_and_hiding_close_the_kill_popup() {
-    let closers: [fn(&mut App); 4] = [
-      |app| click(app, 10, PROC_Y + 3),
-      |app| app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10)),
-      |app| assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue()),
-      // the window too small for the list
-      |app| drop(render_buffer(app, 60, 12)),
-    ];
-    for (i, close) in closers.into_iter().enumerate() {
-      let (mut app, fake) = kill_app();
-      assert!(app.handle_key(key('k')).is_continue());
-      close(&mut app);
-      assert!(!app.kill.is_open(), "{i}");
-      assert!(app.handle_key(key('t')).is_continue());
-      assert_eq!(fake.calls(), [(631, 0)], "{i}");
-    }
+  fn the_kill_popup_takes_clicks_on_its_buttons_and_closes_with_the_list() {
+    let (mut app, fake) = kill_app();
+    assert!(app.handle_key(key('k')).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    // a click on the list, the wheel and focus loss leave the popup and the list as they are
+    click(&mut app, 10, PROC_Y + 3);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10));
+    assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue());
+    assert!(app.kill.is_open() && app.proc_view.selected_pid() == Some(631));
+
+    let y = (0..50).find(|&y| row(&buf, y).contains("[ Force kill ]")).unwrap();
+    click(&mut app, x_of(&row(&buf, y), "[ Force kill ]"), y);
+    assert!(!app.kill.is_open());
+    assert_eq!(fake.calls(), [(631, 0), (631, libc::SIGKILL)]);
+
+    // the window too small for the list
+    assert!(app.handle_key(key('k')).is_continue());
+    drop(render_buffer(&mut app, 60, 12));
+    assert!(!app.kill.is_open());
   }
 
   #[test]
