@@ -15,8 +15,10 @@ POWER does today.
       Works for every process (the path is readable for all users).
 - [ ] **3. Open files and sockets of a process.** Enter on a process opens its list, as Activity
       Monitor's "Open Files and Ports" and Sloth show it: working directory, files and sockets
-      (`local → remote` address), read with `proc_pidfdinfo` as `lsof` does. The list has a filter;
-      Enter on a file reveals it in Finder (`open -R`), Esc goes back to the processes.
+      (`local → remote` address), read as `lsof` does: the working directory with
+      `proc_pidinfo(PROC_PIDVNODEPATHINFO)`, the descriptors with `PROC_PIDLISTFDS` and each one with
+      `proc_pidfdinfo`. The list has a filter; Enter on a file reveals it in Finder (`open -R`), Esc
+      goes back to the processes.
 - [ ] **4. A C library for other UIs.** Ship macmon as a dylib with a C header, so Swift, Python
       or C apps sample metrics without parsing `macmon pipe`. Builds on #59 and
       [homm/macmon-bindings](https://github.com/homm/macmon-bindings) (Python and Swift today,
