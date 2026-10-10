@@ -3,8 +3,10 @@
 set -eu
 cd "$(dirname "$0")/.."
 ref=${1:-}
+[ -z "$ref" ] || git rev-parse --verify --quiet "$ref^{tree}" >/dev/null || { echo "unknown ref: $ref" >&2; exit 1; }
 
 # Lines of one file on stdin: stops at `#[cfg(test)] mod tests`, skips other `#[cfg(test)]` items by brace depth.
+# Approximation: unbalanced braces inside literals or comments of those items would shift the count (none today).
 prod() {
   awk '
     /^[ \t]*#\[cfg\(test\)\]/ { skip = 1; d = 0; next }
