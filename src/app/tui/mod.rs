@@ -2,6 +2,7 @@
 
 mod boxes;
 mod help;
+mod kill;
 mod layout;
 mod proc_view;
 mod store;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use kill::Kill;
 use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
 use proc_view::ProcView;
@@ -309,6 +311,8 @@ pub struct App {
 
   /// The help overlay (`?`) with its first line on screen, while it is open.
   help: Option<usize>,
+  /// The kill prompt (`k`) and its outcome.
+  kill: Kill,
 }
 
 impl App {
@@ -348,11 +352,12 @@ impl App {
 
   /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
   /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
-  /// filter input, so keys don't go to a filter that isn't on screen.
+  /// filter input and closes the kill prompt, so keys don't go to something that isn't on screen.
   fn set_procs_visible(&mut self, visible: bool) {
     self.procs_shown.set(visible);
     if !visible {
       self.proc_view.clear();
+      self.kill.cancel();
     }
   }
 
@@ -382,9 +387,11 @@ impl App {
         self.update_procs(showing, procs);
         return ControlFlow::Continue(());
       }
-      // switching away is done typing: keys back as shortcuts, the filter stays
+      // switching away is done typing: keys back as shortcuts, the filter stays; and no answer
+      // to the kill prompt
       Event::FocusLost => {
         self.proc_view.end_typing();
+        self.kill.cancel();
         return ControlFlow::Continue(());
       }
       Event::Tick => return ControlFlow::Continue(()),
@@ -395,8 +402,9 @@ impl App {
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit. The help
-  /// overlay takes every key while it is open; then keys of the process panel (only while it is
-  /// on screen) take precedence, and while a filter is typed every key except Ctrl-C goes to it.
+  /// overlay takes every key while it is open, then the kill prompt; then keys of the process
+  /// panel (only while it is on screen) take precedence, and while a filter is typed every key
+  /// except Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
@@ -409,6 +417,11 @@ impl App {
         KeyCode::Down => Some(scroll + 1),
         _ => Some(scroll),
       };
+      return ControlFlow::Continue(());
+    }
+
+    if self.kill.asking() {
+      self.kill.answer(key);
       return ControlFlow::Continue(());
     }
 
@@ -427,6 +440,11 @@ impl App {
       // change a setting without a change on screen
       KeyCode::Char('p') if self.procs_fit => self.cfg.toggle_procs(),
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
+      KeyCode::Char('k') if self.procs_visible() => {
+        if let Some(proc) = self.proc_view.selected() {
+          self.kill.ask(proc.pid, &proc.name);
+        }
+      }
       _ => {}
     }
 
@@ -440,9 +458,12 @@ impl App {
   }
 
   /// Applies a mouse event at the cells of the last frame to the process list, only while the
-  /// mouse is captured (events still on the way when capture turns off are dropped).
+  /// mouse is captured (events still on the way when capture turns off are dropped). While the
+  /// kill prompt is open, a click or the wheel only closes it.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
-    if self.wants_mouse() {
+    if self.kill.asking() {
+      self.kill.cancel();
+    } else if self.wants_mouse() {
       self.update_proc_view(|view| view.handle_mouse(mouse));
     }
   }
@@ -531,6 +552,7 @@ mod tests {
   };
   use ratatui::layout::Margin;
 
+  use super::kill::{FakeSys, Kill};
   use super::layout::Metric;
   use super::theme::gradient;
   use super::{App, restore_term_once, run_procs_thread};
@@ -599,9 +621,11 @@ mod tests {
     }
   }
 
-  /// App for `test_soc` with a few samples of `test_metrics` changed by `edit`.
+  /// App for `test_soc` with a few samples of `test_metrics` changed by `edit`, killing through a
+  /// fake without processes.
   fn test_app_with(edit: impl Fn(&mut Metrics)) -> App {
     let mut app = App::from_parts(test_soc(), Config::default());
+    app.kill = Kill::new(Box::new(FakeSys::default()));
     for _ in 0..3 {
       let mut metrics = test_metrics();
       edit(&mut metrics);
@@ -719,6 +743,13 @@ mod tests {
     let mut app = app_with_procs(procs.collect());
     render_buffer(&mut app, 200, 50);
     app
+  }
+
+  /// `app` killing through a fake with the processes of `varied_procs`.
+  fn faking_kill(mut app: App) -> (App, FakeSys) {
+    let fake = FakeSys::with(&[1, 631, 2301]);
+    app.kill = Kill::new(Box::new(fake.clone()));
+    (app, fake)
   }
 
   fn shown_pids(app: &App) -> Vec<i32> {
@@ -1288,6 +1319,97 @@ mod tests {
     let mut app = app_with_procs(test_procs());
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with("╰─ 1 launchd ─"));
+  }
+
+  #[test]
+  fn k_asks_and_y_kills_the_process_asked_about() {
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
+    let bottom = |app: &mut App| row(&render_buffer(app, 200, 50), 49);
+
+    // nothing selected: nothing to ask about
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(!app.kill.asking());
+
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    let line = bottom(&mut app);
+    assert!(line.starts_with("╰─ Kill 631 WindowServer? y/n ─"), "{line}");
+    assert!(line.ends_with("─ y kill | any key cancel ─╯"), "{line}");
+
+    // a new sample without WindowServer drops the selection: `y` still kills what it asked about
+    let mut procs = varied_procs();
+    procs.remove(1);
+    put_procs(&mut app, procs);
+    assert_eq!(app.proc_view.selected_pid(), None);
+    assert!(app.handle_key(key('y')).is_continue());
+    assert_eq!(fake.sent(), [(631, libc::SIGTERM)]);
+    let line = bottom(&mut app);
+    assert!(line.starts_with("╰─ SIGTERM sent to 631 WindowServer ─"), "{line}");
+    assert!(line.ends_with(" q quit | ? help | p procs | v graph | r scaled | -/+ 1000ms ─╯"));
+  }
+
+  #[test]
+  fn the_kill_prompt_keeps_its_end_in_a_narrow_window() {
+    let name = "com.apple.WebKit.WebContent";
+    let mut procs = varied_procs();
+    procs[2].name = name.to_string();
+    let (mut app, _fake) = faking_kill(app_with_procs(procs)); // [631, 2301, 1]
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+
+    // the whole name with both hints, then the name cut and the cancel hint left out
+    let line = row(&render_buffer(&mut app, 80, 50), 49);
+    assert!(line.starts_with(&format!("╰─ Kill 2301 {name}? y/n ─")), "{line}");
+    assert!(line.ends_with("─ y kill | any key cancel ─╯"), "{line}");
+    assert_eq!(
+      row(&render_buffer(&mut app, 40, 50), 49),
+      "╰─ Kill 2301 com.apple…? y/n ─ y kill ─╯"
+    );
+    assert!(app.kill.asking());
+  }
+
+  #[test]
+  fn clicks_focus_loss_and_hiding_close_the_kill_prompt() {
+    let msec = RwLock::new(TUI_MIN_MS);
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs())); // [631, 2301, 1]
+    render_buffer(&mut app, 200, 50);
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let ask = |app: &mut App| {
+      assert!(app.handle_key(key('k')).is_continue());
+      assert!(app.kill.asking());
+    };
+
+    // a click on another row only closes it
+    ask(&mut app);
+    click(&mut app, 10, PROC_Y + 3);
+    assert!(!app.kill.asking());
+    assert_eq!(app.proc_view.selected_pid(), Some(631));
+    assert!(app.handle_key(key('y')).is_continue());
+
+    ask(&mut app);
+    assert!(app.handle_event(super::Event::FocusLost, &msec).is_continue());
+    assert!(!app.kill.asking());
+    assert!(app.handle_key(key('y')).is_continue());
+
+    // the window too small for the list
+    ask(&mut app);
+    render_buffer(&mut app, 60, 12);
+    assert!(!app.kill.asking());
+    assert!(app.handle_key(key('y')).is_continue());
+    assert_eq!(fake.sent(), []);
+  }
+
+  #[test]
+  fn k_typed_into_the_filter_stays_text() {
+    let (mut app, fake) = faking_kill(app_with_procs(varied_procs()));
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    for c in "/k".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert_eq!((app.proc_view.filter(), app.kill.asking()), ("k", false));
+    assert!(app.handle_key(key('y')).is_continue());
+    assert_eq!(fake.calls(), []);
   }
 
   #[test]

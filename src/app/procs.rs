@@ -237,7 +237,7 @@ fn list_pids(pids: &mut Vec<i32>) {
   pids.truncate(count.max(0) as usize);
 }
 
-fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
+pub(crate) fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
   let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
   let size = mem::size_of::<libc::proc_bsdinfo>() as c_int;
   let ptr = &mut info as *mut libc::proc_bsdinfo as *mut c_void;

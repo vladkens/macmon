@@ -236,6 +236,25 @@ fn cut_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
   cut
 }
 
+/// Number of leading `hints` that `render_bottom_border` shows on the bottom border of a box
+/// `width` cells wide, and the cells left for the text (without its blank cells).
+fn fit_bottom_border(width: u16, hints: &[Vec<Span<'static>>]) -> (usize, u16) {
+  let free = width.saturating_sub(4);
+  let widths: Vec<u16> = hints.iter().map(|hint| spans_width(hint)).collect();
+  let shown = fit_joined(free, &widths);
+  // the hints shown with their separators, their blank cells and a border cell before them
+  let used = match shown {
+    0 => 0,
+    n => widths[..n].iter().sum::<u16>() + cells(SEPARATOR.len() * (n - 1)) + 3,
+  };
+  (shown, free.saturating_sub(used).saturating_sub(2))
+}
+
+/// Cells for the text on the bottom border of a box `width` cells wide next to `hints`.
+pub(super) fn border_text_room(width: u16, hints: &[Vec<Span<'static>>]) -> u16 {
+  fit_bottom_border(width, hints).1
+}
+
 /// Draws `hints` (right-aligned) and a text (left) over the bottom border of box `area`. Like
 /// titles, they keep a border cell next to the corners and between each other. The hints come
 /// first and drop from the end when the border is too short, so `q quit` stays as long as it
@@ -248,18 +267,13 @@ pub(super) fn render_bottom_border(
   text: impl FnOnce(usize) -> Vec<Span<'static>>,
 ) {
   let y = area.bottom() - 1;
-  let mut free = area.width.saturating_sub(4);
-
-  let widths: Vec<u16> = hints.iter().map(|hint| spans_width(hint)).collect();
-  let shown = fit_joined(free, &widths);
+  let (shown, room) = fit_bottom_border(area.width, &hints);
   if shown > 0 {
     let line = padded(join(hints.into_iter().take(shown)));
     let width = width_u16(&line);
     f.buffer_mut().set_line(area.right() - 2 - width, y, &line, width);
-    free = free.saturating_sub(width + 1);
   }
 
-  let room = free.saturating_sub(2);
   if room >= BORDER_TEXT_MIN {
     let spans = cut_spans(text(usize::from(room)), usize::from(room));
     if !spans.is_empty() {
@@ -298,8 +312,12 @@ impl App {
   /// Key hints for the bottom border of the lowest box, keys bold, labels plain: the global keys
   /// in the order of the original UI with the state of the toggles (`q quit | ? help | p procs |
   /// v graph | r scaled | -/+ 1000ms`; no `p procs` while the window is too small for the process
-  /// list), or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`).
+  /// list), the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`), or
+  /// the answers while the kill prompt is open (`y kill | any key cancel`).
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
+    if self.kill.asking() {
+      return vec![hint("y", "kill"), hint("any key", "cancel")];
+    }
     if self.proc_view.typing() {
       return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
     }

@@ -13,7 +13,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::boxes::{Titles, draw_box, hint, render_bottom_border, title_text_room};
+use super::boxes::{
+  Titles, border_text_room, draw_box, hint, render_bottom_border, title_text_room,
+};
 use super::store::ratio;
 use super::theme::{self, dim, gradient, heading, text};
 use crate::config::{Config, ProcSort};
@@ -303,7 +305,7 @@ fn scroll_offset(offset: usize, selected: Option<usize>, height: usize, len: usi
 }
 
 /// `text` cut to `max` cells, ending with `…` when cut.
-fn cut_end(text: &str, max: usize) -> String {
+pub(super) fn cut_end(text: &str, max: usize) -> String {
   match max {
     _ if Span::raw(text).width() <= max => text.to_string(),
     0 => String::new(),
@@ -779,16 +781,31 @@ impl ProcView {
 
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
-  /// the process rows, and the selected process and the key hints on the bottom border. Keeps the
-  /// cells that react to the mouse for `ProcView::handle_mouse`.
+  /// the process rows, and the selected process (or the kill prompt or its outcome) and the key
+  /// hints on the bottom border. Keeps the cells that react to the mouse for
+  /// `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let inner = draw_box(f, area, self.proc_view.titles(area.width));
     let (headers, body) = self.render_proc_table(f, inner);
     let power_shown = headers.iter().any(|&(column, _)| column == ProcSort::Power);
     self.proc_view.targets = Targets { area, headers, body };
 
+    // the prompt's hints drop before its end (`? y/n`) would be cut
+    let mut hints = self.footer_hints();
+    let note = self.kill.note();
+    if let Some(prompt) = note.as_ref().filter(|_| self.kill.asking()) {
+      while !hints.is_empty()
+        && usize::from(border_text_room(area.width, &hints)) < prompt.min_width()
+      {
+        hints.pop();
+      }
+    }
+
     let view = &self.proc_view;
-    render_bottom_border(f, area, self.footer_hints(), |room| view.border_text(room, power_shown));
+    render_bottom_border(f, area, hints, |room| match note {
+      Some(note) => note.spans(room),
+      None => view.border_text(room, power_shown),
+    });
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the
