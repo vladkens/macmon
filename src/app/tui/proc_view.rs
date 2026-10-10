@@ -281,6 +281,14 @@ impl Group {
   }
 }
 
+/// Drops the last word of a filter and the commas and spaces after it: `claude, clan` →
+/// `claude, `, then `claude, ` → ``.
+fn delete_word(text: &mut String) {
+  let separator = |c: char| c == ',' || c.is_whitespace();
+  let kept = text.trim_end_matches(separator).trim_end_matches(|c| !separator(c)).len();
+  text.truncate(kept);
+}
+
 /// First visible row so that row `selected` is on screen, moving as little as possible from
 /// `offset`.
 fn scroll_offset(offset: usize, selected: Option<usize>, height: usize, len: usize) -> usize {
@@ -650,10 +658,23 @@ impl ProcView {
     self.select(index);
   }
 
-  /// Filter input: characters and Backspace edit, Enter keeps the filter, Esc clears it.
+  /// Filter input: characters and Backspace edit, Ctrl-W / Alt-Backspace delete the last word,
+  /// Ctrl-U (what Ghostty sends for Cmd-Backspace) and Cmd-Backspace delete the whole text,
+  /// Enter keeps the filter, Esc clears it and ends the input.
   fn type_key(&mut self, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
     match key.code {
-      KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+      KeyCode::Char('u') if ctrl => self.filter.clear(),
+      KeyCode::Backspace if cmd => self.filter.clear(),
+      KeyCode::Char('w') if ctrl => delete_word(&mut self.filter),
+      KeyCode::Backspace if alt => delete_word(&mut self.filter),
+      KeyCode::Char(c)
+        if !key
+          .modifiers
+          .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+      {
         self.filter.push(c);
       }
       KeyCode::Backspace => {
@@ -1160,11 +1181,39 @@ mod tests {
     assert_eq!(view.filter(), "qcsS/1");
     assert_eq!((view.sort, view.sort_desc), (ProcSort::Cpu, true));
 
-    // control / alt chords don't edit the filter, but are still used
-    let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
-    let alt_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
-    assert!(view.handle_key(ctrl_u) && view.handle_key(alt_x));
+    // other control / alt / cmd chords don't edit the filter, but are still used
+    for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
+      assert!(view.handle_key(KeyEvent::new(KeyCode::Char('x'), modifiers)));
+    }
     assert_eq!(view.filter(), "qcsS/1");
+  }
+
+  #[test]
+  fn filter_input_deletes_words_and_the_whole_text() {
+    let key = |code, modifiers| KeyEvent::new(code, modifiers);
+    let mut view = view();
+    assert!(press(&mut view, KeyCode::Char('/')));
+
+    // Ctrl-W and Alt-Backspace: the last word with the separators after it
+    for delete_word in
+      [key(KeyCode::Char('w'), KeyModifiers::CONTROL), key(KeyCode::Backspace, KeyModifiers::ALT)]
+    {
+      type_str(&mut view, "claude, !clan");
+      assert!(view.handle_key(delete_word));
+      assert_eq!(view.filter(), "claude, ");
+      assert!(view.handle_key(delete_word));
+      assert_eq!(view.filter(), "");
+    }
+
+    // Ctrl-U (Cmd-Backspace in Ghostty) and Cmd-Backspace: the whole text, still typing
+    for delete_all in
+      [key(KeyCode::Char('u'), KeyModifiers::CONTROL), key(KeyCode::Backspace, KeyModifiers::SUPER)]
+    {
+      type_str(&mut view, "saf, cargo");
+      assert!(view.handle_key(delete_all));
+      assert_eq!((view.filter(), view.typing()), ("", true));
+      assert_eq!(pids(&view).len(), 5);
+    }
   }
 
   #[test]
