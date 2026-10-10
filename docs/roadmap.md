@@ -7,10 +7,9 @@ Process data beyond CPU% and memory comes from libproc, which reads only the use
 processes without root (all of them under sudo). Other users' processes show `-` there, as
 POWER does today.
 
-- [ ] **1. Kill the selected process** (#84). `k` → `Kill <pid> <name>? y/n` → SIGTERM; the exit
-      is tracked on every tick; after 2 s `still running · k force kill` → another y/n →
-      SIGKILL. Never pid ≤ 0, launchd or macmon itself; the start time is checked before every
-      signal. Plan: [docs/plans/20261010-kill-process.md](plans/20261010-kill-process.md).
+- [x] **1. Kill the selected process** (#89). `k` → popup: Terminate / Force kill / Cancel; the
+      start time is checked before the signal; launchd and macmon are refused.
+      Plan: [docs/plans/20261010-kill-process.md](plans/20261010-kill-process.md).
 - [ ] **2. Show in Finder.** A key on the selected process runs `open -R` on its executable.
       Works for every process (the path is readable for all users).
 - [ ] **3. Open files and sockets of a process.** Enter on a process opens its list, as Activity

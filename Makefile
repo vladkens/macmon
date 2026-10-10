@@ -26,7 +26,7 @@ update:
 .PHONY: loc bench remote
 
 loc: # production lines, tests excluded; REF=origin/main compares with a git ref
-	@./scripts/loc.sh $(REF)
+	@python3 scripts/loc.py $(REF)
 
 bench: # compare startup time
 	cargo build $(CARGO_FLAGS)
