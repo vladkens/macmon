@@ -19,8 +19,8 @@ use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
 use proc_view::ProcView;
 use ratatui::crossterm::event::{
-  self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-  MouseEvent, MouseEventKind,
+  self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, KeyCode,
+  KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::{ExecutableCommand, cursor, terminal};
 use ratatui::prelude::*;
@@ -46,9 +46,9 @@ impl Drop for TermGuard {
   }
 }
 
-/// Raw mode and the alternate screen; `run_loop` turns mouse capture on while the process list is
-/// shown. Whatever happens next, the terminal is restored by the guard, the panic hook or
-/// `leave_term`.
+/// Raw mode, the alternate screen and focus reports (focus loss ends filter input); `run_loop`
+/// turns mouse capture on while the process list is shown. Whatever happens next, the terminal is
+/// restored by the guard, the panic hook or `leave_term`.
 fn enter_term() -> WithError<(Terminal<CrosstermBackend<Stdout>>, TermGuard)> {
   std::panic::set_hook(Box::new(|info| {
     leave_term();
@@ -60,6 +60,7 @@ fn enter_term() -> WithError<(Terminal<CrosstermBackend<Stdout>>, TermGuard)> {
   let guard = TermGuard;
   terminal::enable_raw_mode()?;
   stdout().execute(terminal::EnterAlternateScreen)?;
+  stdout().execute(EnableFocusChange)?;
   Ok((Terminal::new(CrosstermBackend::new(stdout()))?, guard))
 }
 
@@ -68,10 +69,10 @@ fn leave_term() {
   restore_term_once(&TERM_ACTIVE, &mut stdout(), terminal::disable_raw_mode);
 }
 
-/// Turns mouse capture off, leaves the alternate screen, shows the cursor (ratatui hides it while
-/// drawing, and a panic aborts before the terminal is dropped) and turns raw mode off when
-/// `active` is set, and clears it. Every step runs even if an earlier one fails. Returns whether
-/// it ran.
+/// Turns mouse capture and focus reports off, leaves the alternate screen, shows the cursor
+/// (ratatui hides it while drawing, and a panic aborts before the terminal is dropped) and turns
+/// raw mode off when `active` is set, and clears it. Every step runs even if an earlier one fails.
+/// Returns whether it ran.
 fn restore_term_once(
   active: &AtomicBool,
   out: &mut impl Write,
@@ -82,6 +83,7 @@ fn restore_term_once(
   }
 
   let _ = out.execute(DisableMouseCapture);
+  let _ = out.execute(DisableFocusChange);
   let _ = out.execute(terminal::LeaveAlternateScreen);
   let _ = out.execute(cursor::Show);
   let _ = disable_raw_mode();
@@ -110,11 +112,14 @@ enum Event {
   },
   Key(KeyEvent),
   Mouse(MouseEvent),
+  /// The terminal window lost focus.
+  FocusLost,
   /// Redraw: the periodic tick, and a resize, so the mouse targets follow the new layout at once.
   Tick,
 }
 
-/// App event of a terminal event: keys, left clicks and the wheel, and a resize as a redraw.
+/// App event of a terminal event: keys, left clicks and the wheel, focus loss, and a resize as a
+/// redraw.
 /// Mouse capture reports every move too; moves, drags and releases are dropped here, so they
 /// don't cost a frame each.
 fn input_event(event: event::Event) -> Option<Event> {
@@ -129,6 +134,7 @@ fn input_event(event: event::Event) -> Option<Event> {
       );
       action.then_some(Event::Mouse(mouse))
     }
+    event::Event::FocusLost => Some(Event::FocusLost),
     event::Event::Resize(..) => Some(Event::Tick),
     _ => None,
   }
@@ -374,6 +380,11 @@ impl App {
       }
       Event::Procs { showing, procs } => {
         self.update_procs(showing, procs);
+        return ControlFlow::Continue(());
+      }
+      // switching away is done typing: keys back as shortcuts, the filter stays
+      Event::FocusLost => {
+        self.proc_view.end_typing();
         return ControlFlow::Continue(());
       }
       Event::Tick => return ControlFlow::Continue(()),
@@ -734,6 +745,7 @@ mod tests {
     for mode in modes {
       assert!(text.contains(&format!("\x1b[?{mode}l")), "{mode} stays on: {text:?}");
     }
+    assert!(text.contains("\x1b[?1004l"), "focus reports stay on: {text:?}");
     // the main screen, with the cursor that drawing hid (a panic never drops the terminal)
     assert!(text.ends_with("\x1b[?1049l\x1b[?25h"), "{text:?}");
     assert_eq!(raw_off, 1);
@@ -922,6 +934,32 @@ mod tests {
     assert!(press(&mut app, KeyCode::Esc).is_continue());
     assert!(!app.proc_view.typing());
     assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+  }
+
+  #[test]
+  fn focus_loss_and_clicks_end_typing_and_keep_the_filter() {
+    let msec = RwLock::new(TUI_MIN_MS);
+    let typing = |app: &mut App| {
+      for c in "/saf".chars() {
+        assert!(app.handle_key(key(c)).is_continue());
+      }
+      assert!(app.proc_view.typing());
+    };
+
+    // switching to another window
+    let mut app = app_with_procs(varied_procs());
+    typing(&mut app);
+    assert!(app.handle_event(super::Event::FocusLost, &msec).is_continue());
+    assert_eq!((app.proc_view.typing(), app.proc_view.filter()), (false, "saf"));
+    assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
+
+    // a click, which also selects the row under it: Safari below the `saf` total and its line
+    let mut app = app_with_procs(varied_procs());
+    typing(&mut app);
+    render_buffer(&mut app, 200, 50);
+    click(&mut app, 10, PROC_Y + 4);
+    assert_eq!((app.proc_view.typing(), app.proc_view.filter()), (false, "saf"));
+    assert_eq!(app.proc_view.selected().map(|p| p.pid), Some(2301));
   }
 
   #[test]

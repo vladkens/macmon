@@ -448,6 +448,11 @@ impl ProcView {
     self.typing
   }
 
+  /// Ends filter input as Enter does: the filter stays, keys act as shortcuts again.
+  pub(super) fn end_typing(&mut self) {
+    self.typing = false;
+  }
+
   #[cfg(test)]
   pub(super) fn selected_pid(&self) -> Option<i32> {
     self.selected.map(|s| s.pid)
@@ -614,10 +619,10 @@ impl ProcView {
     }
   }
 
-  /// Applies a mouse event to the cells of the last render: a click on a column header sorts by
-  /// it (again: reverses), on a process selects it (on the selected one clears the selection);
-  /// the wheel over the box moves the selection `WHEEL_ROWS` rows, or scrolls without one.
-  /// Anything else is ignored.
+  /// Applies a mouse event to the cells of the last render: any click ends filter input, a click
+  /// on a column header sorts by it (again: reverses), on a process selects it (on the selected
+  /// one clears the selection); the wheel over the box moves the selection `WHEEL_ROWS` rows, or
+  /// scrolls without one. Anything else is ignored.
   pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
     let at = Position::new(mouse.column, mouse.row);
     let over_box = self.targets.area.contains(at);
@@ -630,6 +635,7 @@ impl ProcView {
   }
 
   fn click(&mut self, at: Position) {
+    self.end_typing();
     let targets = &self.targets;
     if let Some(&(column, _)) = targets.headers.iter().find(|(_, cells)| cells.contains(at)) {
       self.sort_by(column);
