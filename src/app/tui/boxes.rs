@@ -174,17 +174,17 @@ pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
 
 // MARK: Bottom border
 
-/// A key hint: what the key does, the key bold (`theme::key`), the rest plain. A letter key in the
-/// label is bold in it (the first match: `quit`), any other key comes before it (`? help`, `Enter
-/// keep`).
+/// A key hint: what the key does, dim, around the key in the default color (`theme::key`). A
+/// letter key in the label stays in it (the first match: `quit`), any other key comes before it
+/// (`? help`, `Enter keep`).
 pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'static>> {
   let label = label.into();
   let letter = key.as_bytes().first().filter(|c| key.len() == 1 && c.is_ascii_alphabetic());
   if let Some(i) = letter.and_then(|c| label.bytes().position(|b| b.eq_ignore_ascii_case(c))) {
     let (head, tail) = (label[..i].to_string(), label[i + 1..].to_string());
-    return vec![text(head), theme::key(label[i..=i].to_string()), text(tail)];
+    return vec![dim(head), theme::key(label[i..=i].to_string()), dim(tail)];
   }
-  vec![theme::key(key), text(format!(" {label}"))]
+  vec![theme::key(key), dim(format!(" {label}"))]
 }
 
 /// `items` joined by a dim ` | `.
@@ -494,11 +494,11 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
   use ratatui::layout::Rect;
-  use ratatui::style::{Modifier, Style};
+  use ratatui::style::Style;
   use ratatui::text::Span;
 
   use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
-  use crate::tui::theme::{dim, text};
+  use crate::tui::theme::{self, dim, text};
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
   fn border_with(titles: Titles, width: u16) -> String {
@@ -549,9 +549,9 @@ mod tests {
     }
   }
 
-  /// `spans` as text with each bold span in brackets.
+  /// `spans` as text with each span that isn't dim in brackets.
   fn marked(spans: &[Span]) -> String {
-    let mark = |span: &Span| match span.style.add_modifier.contains(Modifier::BOLD) {
+    let mark = |span: &Span| match span.style.fg != Some(theme::DIM) {
       true => format!("[{}]", span.content),
       false => span.content.to_string(),
     };
@@ -571,6 +571,7 @@ mod tests {
     ];
     for (spans, text) in hints {
       assert_eq!(marked(&spans), text);
+      assert!(spans.iter().all(|span| span.style.add_modifier.is_empty()), "{text}");
     }
   }
 
@@ -591,11 +592,11 @@ mod tests {
 
     // the hints right-aligned, the text left, a border cell next to the corners
     assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(15)));
-    // only the keys bold
+    // the keys in the default color, the rest of the hints dim, nothing bold or underlined
     let buf = draw(60);
-    let bold: Vec<u16> =
-      (0..60).filter(|&x| buf[(x, 0)].modifier.contains(Modifier::BOLD)).collect();
-    assert_eq!(bold, [44, 51]);
+    let shown = |x: u16| buf[(x, 0)].symbol() != " " && buf[(x, 0)].fg != theme::DIM;
+    assert_eq!((43..58).filter(|&x| shown(x)).collect::<Vec<_>>(), [44, 51]);
+    assert!(buf.content.iter().all(|cell| cell.modifier.is_empty()));
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
     assert_eq!(border(40), format!("___Power_6.60W_(6.60…__{help}__"));
     assert_eq!(border(30), format!("___Power_6…__{help}__"));

@@ -703,10 +703,10 @@ impl ProcView {
   }
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// `/ filter`, or the filter once there is one or it is being typed, then `sort` and, with a
-  /// process selected, `kill` (not while typing: keys are text then). A filter too long for the
-  /// border shows its end (`/…ari█`) and leaves out the key hints; with no room for that next to
-  /// the count, the filter takes the count's place.
+  /// `/ filter`, or the filter once there is one or it is being typed, then `sort`, and `kill`
+  /// on the right with a process selected (neither while typing: keys are text then). A filter
+  /// too long for the border shows its end (`/…ari█`) and leaves out the key hints; with no room
+  /// for that next to the count, the filter takes the count's place.
   fn titles(&self, width: u16) -> Titles<'static> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
@@ -718,14 +718,11 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let mut keys = vec![];
-    if !self.typing {
-      keys.push(hint("s", "sort"));
-      if self.selected().is_some() {
-        keys.push(hint("k", "kill"));
-      }
-    }
-    let with_keys = |titles: Titles<'static>| keys.into_iter().fold(titles, Titles::left);
+    let with_keys = |titles: Titles<'static>| match self.typing {
+      true => titles,
+      false if self.selected().is_some() => titles.left(hint("s", "sort")).right(hint("k", "kill")),
+      false => titles.left(hint("s", "sort")),
+    };
     if !self.typing && self.filter.is_empty() {
       return with_keys(Titles::new(name).left(hint("/", "filter")));
     }

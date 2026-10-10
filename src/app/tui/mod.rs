@@ -1320,10 +1320,10 @@ mod tests {
     let title = |app: &mut App, width| proc_row(&render_buffer(app, width, 50), 0);
     let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
     assert!(press(&mut app, KeyCode::Down).is_continue());
-    let full = "╭─ proc 3 ─ / filter ─ sort ─ kill ─";
-    assert!(title(&mut app, 200).starts_with(full), "{}", title(&mut app, 200));
+    let wide = title(&mut app, 200);
+    assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───") && wide.ends_with("─ kill ─╮"));
     // on a narrow box `kill` goes first
-    assert_eq!(title(&mut app, 37), format!("{full}╮"));
+    assert_eq!(title(&mut app, 37), "╭─ proc 3 ─ / filter ─ sort ─ kill ─╮");
     assert_eq!(title(&mut app, 36), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(7)));
 
     // typing: keys are text, no hints; then a set filter with the selection in it
@@ -1332,8 +1332,12 @@ mod tests {
     }
     let typing = title(&mut app, 200);
     assert!(typing.starts_with("╭─ proc 1/3 ─ /saf█ ───") && !typing.contains("sort"), "{typing}");
+    assert!(!typing.contains("kill"), "{typing}");
     assert!(press(&mut app, KeyCode::Down).is_continue());
-    assert!(title(&mut app, 200).starts_with("╭─ proc 1/3 ─ /saf ─ sort ─ kill ─"));
+    let filtered = title(&mut app, 200);
+    assert!(
+      filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───") && filtered.ends_with(" kill ─╮")
+    );
   }
 
   #[test]

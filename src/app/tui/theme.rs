@@ -35,9 +35,9 @@ pub(super) fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, DIM)
 }
 
-/// The key to press in a hint or button: bold in the default color, as a heading.
+/// The key to press in a hint: plain text in the default color, set off by its dim label.
 pub(super) fn key<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
-  heading(text)
+  Span::styled(text, TEXT)
 }
 
 /// Link text: underlined blue (ANSI 4).
