@@ -1373,6 +1373,17 @@ mod tests {
   }
 
   #[test]
+  fn k_after_moving_from_the_filter_into_the_list_opens_the_popup() {
+    let mut app = app_with_procs(varied_procs());
+    for c in "/saf".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert_eq!((app.proc_view.filter(), app.kill.is_open()), ("saf", true));
+  }
+
+  #[test]
   fn a_sample_started_before_a_hide_and_show_never_reaches_the_list() {
     let mut app = test_app();
     render_buffer(&mut app, 200, 50);
