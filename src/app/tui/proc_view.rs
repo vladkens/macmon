@@ -781,21 +781,20 @@ impl ProcView {
 
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
-  /// the process rows, and the selected process (or the kill prompt or its outcome) and the key
-  /// hints on the bottom border. Keeps the cells that react to the mouse for
-  /// `ProcView::handle_mouse`.
+  /// the process rows, and the selected process (or a kill prompt or message) and the key hints on
+  /// the bottom border. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let inner = draw_box(f, area, self.proc_view.titles(area.width));
     let (headers, body) = self.render_proc_table(f, inner);
     let power_shown = headers.iter().any(|&(column, _)| column == ProcSort::Power);
     self.proc_view.targets = Targets { area, headers, body };
 
-    // the prompt's hints drop before its end (`? y/n`) would be cut
+    // hints drop before the end of a prompt (`? y/n`) or of `· k force kill` would be cut
     let mut hints = self.footer_hints();
     let note = self.kill.note();
-    if let Some(prompt) = note.as_ref().filter(|_| self.kill.asking()) {
+    if let Some(kept) = note.as_ref().filter(|note| note.keeps_end()) {
       while !hints.is_empty()
-        && usize::from(border_text_room(area.width, &hints)) < prompt.min_width()
+        && usize::from(border_text_room(area.width, &hints)) < kept.min_width()
       {
         hints.pop();
       }

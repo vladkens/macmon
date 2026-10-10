@@ -311,7 +311,7 @@ pub struct App {
 
   /// The help overlay (`?`) with its first line on screen, while it is open.
   help: Option<usize>,
-  /// The kill prompt (`k`) and its outcome.
+  /// The kill prompt (`k`), the process signalled last until it exits, and the messages.
   kill: Kill,
 }
 
@@ -394,7 +394,11 @@ impl App {
         self.kill.cancel();
         return ControlFlow::Continue(());
       }
-      Event::Tick => return ControlFlow::Continue(()),
+      // the signalled process is followed by time, also while the list is hidden
+      Event::Tick => {
+        self.kill.tick(Instant::now());
+        return ControlFlow::Continue(());
+      }
     };
 
     *msec.write().unwrap() = self.cfg.interval();
@@ -421,7 +425,7 @@ impl App {
     }
 
     if self.kill.asking() {
-      self.kill.answer(key);
+      self.kill.answer(key, Instant::now());
       return ControlFlow::Continue(());
     }
 
@@ -442,7 +446,7 @@ impl App {
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
       KeyCode::Char('k') if self.procs_visible() => {
         if let Some(proc) = self.proc_view.selected() {
-          self.kill.ask(proc.pid, &proc.name);
+          self.kill.ask(proc.pid, &proc.name, Instant::now());
         }
       }
       _ => {}
@@ -540,7 +544,7 @@ mod tests {
   use std::ops::ControlFlow;
   use std::sync::atomic::AtomicBool;
   use std::sync::{Arc, Mutex, RwLock, mpsc};
-  use std::time::Duration;
+  use std::time::{Duration, Instant};
 
   use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
@@ -555,7 +559,7 @@ mod tests {
   use super::kill::{FakeSys, Kill};
   use super::layout::Metric;
   use super::theme::gradient;
-  use super::{App, restore_term_once, run_procs_thread};
+  use super::{App, Event, restore_term_once, run_procs_thread};
   use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
 
@@ -636,6 +640,11 @@ mod tests {
 
   fn test_app() -> App {
     test_app_with(|_| {})
+  }
+
+  /// `App::default()` before any sample, killing through a fake without processes.
+  fn bare_app() -> App {
+    App { kill: Kill::new(Box::new(FakeSys::default())), ..App::default() }
   }
 
   /// `test_app` saving its settings to `file`.
@@ -794,7 +803,7 @@ mod tests {
 
   #[test]
   fn quit_keys_break() {
-    let mut app = App::default();
+    let mut app = bare_app();
     assert_eq!(app.handle_key(key('q')), ControlFlow::Break(()));
 
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -1119,7 +1128,7 @@ mod tests {
         m.sys_power = 0.0;
       });
       // with every sensor, without swap, fans and system power, and before the first sample
-      for (i, mut app) in [test_app(), bare, App::default()].into_iter().enumerate() {
+      for (i, mut app) in [test_app(), bare, bare_app()].into_iter().enumerate() {
         app.proc_view.set_procs(varied_procs());
         let buf = render_buffer(&mut app, width, height);
         let plan = app.layout(buf.area);
@@ -1346,6 +1355,38 @@ mod tests {
     let line = bottom(&mut app);
     assert!(line.starts_with("╰─ SIGTERM sent to 631 WindowServer ─"), "{line}");
     assert!(line.ends_with(" q quit | ? help | p procs | v graph | r scaled | -/+ 1000ms ─╯"));
+
+    // ticks follow it until it exits
+    let msec = RwLock::new(TUI_MIN_MS);
+    fake.exit(631);
+    assert!(app.handle_event(Event::Tick, &msec).is_continue());
+    assert!(bottom(&mut app).starts_with("╰─ 631 WindowServer exited ─"));
+  }
+
+  #[test]
+  fn still_running_keeps_the_force_kill_hint_in_a_narrow_window() {
+    let name = "com.apple.WebKit.WebContent";
+    let mut procs = varied_procs();
+    procs[2].name = name.to_string();
+    let (mut app, fake) = faking_kill(app_with_procs(procs)); // [631, 2301, 1]
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(app.handle_key(key('y')).is_continue());
+    app.kill.tick(Instant::now() + Duration::from_secs(3));
+
+    // the name cut, then the hints left out from the end
+    let line = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(line.starts_with(&format!("╰─ 2301 {name} still running · k force kill ─")), "{line}");
+    assert_eq!(
+      row(&render_buffer(&mut app, 80, 50), 49),
+      "╰─ 2301 c… still running · k force kill ─ q quit | ? help | p procs | v graph ─╯"
+    );
+    assert_eq!(
+      row(&render_buffer(&mut app, 46, 50), 49),
+      "╰─ 2301 com.a… still running · k force kill ─╯"
+    );
+    assert_eq!(fake.sent(), [(2301, libc::SIGTERM)]);
   }
 
   #[test]

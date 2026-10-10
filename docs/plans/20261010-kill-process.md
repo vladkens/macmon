@@ -88,19 +88,19 @@ Messages go on the left of the process box's bottom border, in place of the sele
 
 ### 2. Track the exit and force kill
 
-- [ ] Tracking after SIGTERM: tick checks, `exited`, `still running · k force kill` after 2 s,
+- [x] Tracking after SIGTERM: tick checks, `exited`, `still running · k force kill` after 2 s,
       5 s expiry of one-off messages.
-- [ ] `k` on the tracked process: `waiting for exit…` before 2 s; after it the force-kill prompt
+- [x] `k` on the tracked process: `waiting for exit…` before 2 s; after it the force-kill prompt
       as a sub-state of tracking, the identity re-check at `y`, SIGKILL and its tracking. `k` on
       another process replaces the tracking only at `y`.
-- [ ] Tests with the fake and explicit times: exit before and after 2 s; a zombie counts as
+- [x] Tests with the fake and explicit times: exit before and after 2 s; a zombie counts as
       exited; a reused pid (new start time) is never sent SIGKILL; `k` before 2 s sends nothing;
       an exit while the force-kill prompt is open closes it and `y` sends nothing; cancelling a
       prompt for another process keeps the old tracking. One test with a real child: the test
       spawns `sleep 30`, sends SIGTERM through the libc implementation, reaps it with `wait()`,
       polls the tracking with real time up to 5 s until `exited`, and kills and reaps the child in
       a `Drop` guard so a failure never leaves it running.
-- [ ] `make check` and `make test` pass; commit `feat: force kill a process that ignores SIGTERM`.
+- [x] `make check` and `make test` pass; commit `feat: force kill a process that ignores SIGTERM`.
 
 ## Manual check (outside the tasks)
 
