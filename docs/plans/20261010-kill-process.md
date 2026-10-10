@@ -2,7 +2,7 @@
 
 `k` in the TUI sends SIGTERM to the selected process after a y/n confirmation and, once the
 process has had 2 s to exit, offers SIGKILL. One key, no signal menu, nothing is signalled without
-a `y`, and only the process that was confirmed is signalled.
+a `y`, and only the process that was confirmed is signalled (up to the race in Decisions).
 
 ## Behavior
 
@@ -20,11 +20,13 @@ selected or nothing is, otherwise the selected process path shows as before.
     signal goes through them.
   - `kill(pid, 0)` fails: `ESRCH` → `<pid> <name> exited`; `EPERM` → `Not permitted to kill <pid>
     <name>`.
-  - Read the identity (start time, see Decisions). The row has a sampled start time
-    (`ProcInfo::started`, from libproc; `None` for `ps` rows) and the identity, readable or not,
-    doesn't match it → `<pid> <name> exited`: the process is gone since the sample, so the prompt
-    never names one process and asks about another. Otherwise unreadable → `Not permitted to kill
-    <pid> <name>` (setuid processes you launched can pass `kill(pid, 0)` and still be unreadable).
+  - The row has no sampled start time (`ProcInfo::started`, from libproc; `None` for `ps` rows)
+    → `Not permitted to kill <pid> <name>`: rows without a sampled start time, i.e. `ps` rows,
+    are never killed, since whichever process has the pid now can't be told from the sampled one
+    (setuid processes you launched can pass `kill(pid, 0)` and still be unreadable).
+  - Read the identity (start time, see Decisions). Unreadable or different from the sampled one
+    → `<pid> <name> exited`: the process is gone since the sample, so the prompt never names one
+    process and asks about another.
   - Otherwise store the target `(pid, name, identity)` and ask `Kill <pid> <name>? y/n`. Hints
     while asking: `y kill`, `any key cancel` (`y force kill` on the force-kill prompt). Opening a
     prompt clears a one-off message.
@@ -62,7 +64,12 @@ selected or nothing is, otherwise the selected process path shows as before.
 - Identity is the process start time (`pbi_start_tvsec`, `pbi_start_tvusec` of `proc_bsdinfo`,
   read with `proc_pidinfo(PROC_PIDTBSDINFO)`), not name and path: a reused pid can run the same
   program. Make `procs::bsd_info` `pub(crate)` and reuse it. A zombie is either unreadable or
-  `pbi_status == SZOMB`; treat both as gone.
+  `pbi_status == SZOMB`; treat both as gone. Rows without a sampled start time (`ps` rows) are
+  never killed: the prompt could name one process and signal another.
+- The start time is re-read right before every `kill()`, which leaves only the gap between the
+  two calls. macOS has no identity-bound kill (no pidfd; a task port needs `task_for_pid`, i.e.
+  root or entitlements), and it hands out pids in sequence, so a reuse inside that gap would need
+  the pid to be freed and handed out again within microseconds. No workaround beyond that.
 - Liveness uses `kill(pid, 0)` plus the identity on each tick, not the process sample, whose
   interval can be up to 10 s.
 - Code: a new `src/app/tui/kill.rs` with the state machine. System calls go through a small trait
@@ -104,9 +111,9 @@ selected or nothing is, otherwise the selected process path shows as before.
       as a sub-state of tracking, the identity re-check at `y`, SIGKILL and its tracking. `k` on
       another process replaces the tracking only at `y`.
 - [x] Tests with the fake and explicit times: exit before and after 2 s; a zombie counts as
-      exited; a reused pid (new start time) is never sent SIGKILL; `k` before 2 s sends nothing;
-      an exit while the force-kill prompt is open closes it and `y` sends nothing; cancelling a
-      prompt for another process keeps the old tracking. One test with a real child: the test
+      exited; a pid reused before `y` (new start time) gets no SIGKILL; `k` before 2 s sends
+      nothing; an exit while the force-kill prompt is open closes it and `y` sends nothing;
+      cancelling a prompt for another process keeps the old tracking. One test with a real child: the test
       spawns `sleep 30`, sends SIGTERM through the libc implementation, polls the tracking with
       real time up to 5 s while the child is a zombie (its pid can't be reused) until `exited`,
       then reaps it with `wait()`, and kills and reaps the child in a `Drop` guard so a failure

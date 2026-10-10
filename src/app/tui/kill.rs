@@ -1,6 +1,10 @@
 //! Killing the selected process (`k`): a y/n prompt bound to the process it asks about, then
 //! SIGTERM; the process is followed until it exits, and offered SIGKILL once it has had
-//! `FORCE_AFTER` to. Nothing is signalled without `y`, and only the process the prompt was for.
+//! `FORCE_AFTER` to. Nothing is signalled without `y`, and only the process the prompt was for:
+//! a row without a sampled start time (a `ps` row) gets no prompt, and the start time is read
+//! again right before every `kill()`. That leaves only the gap between the two calls: macOS has no
+//! identity-bound kill, and it hands out pids in sequence, so a reuse inside that gap would need
+//! the pid to be freed and handed out again within microseconds.
 
 use std::time::{Duration, Instant};
 use std::{fmt, io, process};
@@ -295,9 +299,10 @@ impl Kill {
   }
 
   /// `k` at `now` on process `pid` named `name`, sampled with the start time `started` (`None`
-  /// when unknown). The signalled process: `waiting for exit…` until it has had `FORCE_AFTER`
-  /// after SIGTERM, then the force-kill prompt. Another process: asks to kill it (the tracking
-  /// stays until that is confirmed), or says why it can't be.
+  /// when unknown: such a process is never asked about). The signalled process: `waiting for
+  /// exit…` until it has had `FORCE_AFTER` after SIGTERM, then the force-kill prompt. Another
+  /// process: asks to kill it (the tracking stays until that is confirmed), or says why it can't
+  /// be.
   pub(super) fn ask(&mut self, pid: i32, name: &str, started: Option<Identity>, now: Instant) {
     // a signalled process that exited since the last tick is asked about anew
     self.tick(now);
@@ -323,8 +328,8 @@ impl Kill {
 
   /// The target for a prompt about `pid`, or why there is none: it is refused, gone (also when
   /// it is not the process sampled with the start time `started` any more, so the prompt never
-  /// names one process and asks about another), or not signalled or read by this user (setuid
-  /// processes it launched can take a signal and still be unreadable).
+  /// names one process and asks about another), not signalled by this user, or sampled without a
+  /// start time (`ps` rows: whichever process has the pid now can't be told from the sampled one).
   fn check(&self, pid: i32, name: &str, started: Option<Identity>) -> Result<Target, Note> {
     if let Some(refusal) = refusal(pid) {
       return Err(refusal);
@@ -338,11 +343,14 @@ impl Kill {
       Err(errno) => return Err(about("Failed to kill ", format!(": {}", strerror(errno)))),
     }
 
-    match (self.sys.identity(pid), started) {
-      (identity, Some(started)) if identity != Some(started) => Err(about("", " exited".into())),
-      (Some(identity), _) => Ok(Target { pid, name: name.to_string(), identity }),
-      (None, _) => Err(about("Not permitted to kill ", String::new())),
+    let Some(identity) = started else {
+      return Err(about("Not permitted to kill ", String::new()));
+    };
+    // gone since the sample, or a zombie (unreadable)
+    if self.sys.identity(pid) != Some(identity) {
+      return Err(about("", " exited".into()));
     }
+    Ok(Target { pid, name: name.to_string(), identity })
   }
 
   /// A key at `now` while a prompt is open: `y` (without Ctrl, Alt or Cmd) sends its signal, any
@@ -372,7 +380,8 @@ impl Kill {
   }
 
   /// Sends `sig` to `target` if it is still the same process: its start time is read again
-  /// right before, so a pid reused since the prompt is never signalled.
+  /// right before, so a pid reused since the prompt is not signalled. A reuse between that read
+  /// and `kill()` is not caught (see the module doc).
   fn send(&self, target: &Target, sig: i32) -> Sent {
     if let Some(refusal) = refusal(target.pid) {
       return Sent::Failed(refusal);
@@ -523,9 +532,14 @@ mod tests {
     move |ms| start + Duration::from_millis(ms)
   }
 
+  /// The start time `FakeSys` gives `pid`, as a sample of it has it.
+  fn sampled(pid: i32) -> Option<Identity> {
+    Some(Identity::from((pid as u64, 0)))
+  }
+
   /// `kill` asked about `pid` and told `y` at `at`.
   fn terminate(kill: &mut Kill, pid: i32, name: &str, at: Instant) {
-    kill.ask(pid, name, None, at);
+    kill.ask(pid, name, sampled(pid), at);
     assert!(kill.asking(), "{pid}");
     kill.answer(key('y'), at);
   }
@@ -562,10 +576,11 @@ mod tests {
     let cases = [
       (631, "WindowServer", "Not permitted to kill 631 WindowServer"),
       (2301, "Safari", "2301 Safari exited"),
-      (77, "sudo", "Not permitted to kill 77 sudo"),
+      // unreadable since the sample: a zombie
+      (77, "sudo", "77 sudo exited"),
     ];
     for (pid, name, message) in cases {
-      kill.ask(pid, name, None, at(0));
+      kill.ask(pid, name, sampled(pid), at(0));
       assert!(!kill.asking(), "{pid}");
       assert_eq!(note(&kill).as_deref(), Some(message), "{pid}");
       kill.answer(key('y'), at(0));
@@ -574,10 +589,22 @@ mod tests {
   }
 
   #[test]
+  fn a_row_without_a_sampled_start_time_gets_no_prompt() {
+    let at = clock();
+    let (mut kill, fake) = kill_with(&[631]);
+    // a `ps` row: alive and signalable, but the process with its pid now may be another one
+    kill.ask(631, "WindowServer", None, at(0));
+    assert!(!kill.asking());
+    assert_eq!(note(&kill).as_deref(), Some("Not permitted to kill 631 WindowServer"));
+    kill.answer(key('y'), at(0));
+    assert_eq!(fake.calls(), [(631, 0)], "only checked");
+  }
+
+  #[test]
   fn y_sends_sigterm_once() {
     let at = clock();
     let (mut kill, fake) = kill_with(&[631]);
-    kill.ask(631, "WindowServer", None, at(0));
+    kill.ask(631, "WindowServer", sampled(631), at(0));
     assert!(kill.asking());
     assert_eq!(note(&kill).as_deref(), Some("Kill 631 WindowServer? y/n"));
     assert_eq!(fake.calls(), [(631, 0)], "only checked");
@@ -609,7 +636,7 @@ mod tests {
       chord(KeyModifiers::SUPER),
     ];
     for key in keys {
-      kill.ask(631, "WindowServer", None, at(0));
+      kill.ask(631, "WindowServer", sampled(631), at(0));
       kill.answer(key, at(0));
       assert_eq!((kill.asking(), note(&kill)), (false, None), "{key:?}");
     }
@@ -622,12 +649,12 @@ mod tests {
     let (mut kill, fake) = kill_with(&[631, 2301]);
 
     // the same pid, started again since the prompt
-    kill.ask(631, "WindowServer", None, at(0));
+    kill.ask(631, "WindowServer", sampled(631), at(0));
     fake.restart(631);
     kill.answer(key('y'), at(0));
     assert_eq!(note(&kill).as_deref(), Some("631 WindowServer exited"));
 
-    kill.ask(2301, "Safari", None, at(0));
+    kill.ask(2301, "Safari", sampled(2301), at(0));
     fake.exit(2301);
     kill.answer(key('y'), at(0));
     assert_eq!(note(&kill).as_deref(), Some("2301 Safari exited"));
@@ -639,9 +666,8 @@ mod tests {
     let at = clock();
     let (mut kill, fake) = kill_with(&[631]);
     // the row was sampled before the restart: its name is the old process'
-    let sampled = Some(Identity::from((631, 0)));
     fake.restart(631);
-    kill.ask(631, "WindowServer", sampled, at(0));
+    kill.ask(631, "WindowServer", sampled(631), at(0));
     assert!(!kill.asking());
     assert_eq!(note(&kill).as_deref(), Some("631 WindowServer exited"));
     kill.answer(key('y'), at(0));
@@ -657,7 +683,7 @@ mod tests {
   fn a_failed_signal_says_why() {
     let at = clock();
     let (mut kill, fake) = kill_with(&[631]);
-    kill.ask(631, "WindowServer", None, at(0));
+    kill.ask(631, "WindowServer", sampled(631), at(0));
     fake.fail(631, libc::EINVAL);
     kill.answer(key('y'), at(0));
     assert_eq!(fake.sent(), [(631, libc::SIGTERM)]);
@@ -702,8 +728,9 @@ mod tests {
     fake.hide(631);
     kill.tick(at(250));
     assert_eq!(note(&kill).as_deref(), Some("631 WindowServer exited"));
-    kill.ask(631, "WindowServer", None, at(500));
+    kill.ask(631, "WindowServer", sampled(631), at(500));
     assert!(!kill.asking());
+    assert_eq!(note(&kill).as_deref(), Some("631 WindowServer exited"));
     assert_eq!(fake.sent(), [(631, libc::SIGTERM)]);
   }
 
@@ -712,7 +739,7 @@ mod tests {
     let at = clock();
     let (mut kill, fake) = kill_with(&[631]);
     terminate(&mut kill, 631, "WindowServer", at(0));
-    kill.ask(631, "WindowServer", None, at(1000));
+    kill.ask(631, "WindowServer", sampled(631), at(1000));
     assert!(!kill.asking());
     assert_eq!(note(&kill).as_deref(), Some("waiting for exit…"));
     kill.answer(key('y'), at(1100));
@@ -729,7 +756,7 @@ mod tests {
     let (mut kill, fake) = kill_with(&[631]);
     terminate(&mut kill, 631, "WindowServer", at(0));
     // without a tick since 2 s too
-    kill.ask(631, "WindowServer", None, at(2100));
+    kill.ask(631, "WindowServer", sampled(631), at(2100));
     assert!(kill.asking());
     assert_eq!(note(&kill).as_deref(), Some("Force kill 631 WindowServer? y/n"));
     kill.answer(key('y'), at(2200));
@@ -738,7 +765,7 @@ mod tests {
     // tracked the same way, without another offer
     kill.tick(at(4200));
     assert_eq!(note(&kill).as_deref(), Some("631 WindowServer still running"));
-    kill.ask(631, "WindowServer", None, at(4300));
+    kill.ask(631, "WindowServer", sampled(631), at(4300));
     assert!(!kill.asking());
     assert_eq!(note(&kill).as_deref(), Some("waiting for exit…"));
     fake.exit(631);
@@ -753,7 +780,7 @@ mod tests {
     let (mut kill, fake) = kill_with(&[631]);
     terminate(&mut kill, 631, "WindowServer", at(0));
     kill.tick(at(2000));
-    kill.ask(631, "WindowServer", None, at(2100));
+    kill.ask(631, "WindowServer", sampled(631), at(2100));
     assert!(kill.asking());
     fake.fail(631, libc::EINVAL);
     kill.answer(key('y'), at(2200));
@@ -763,18 +790,18 @@ mod tests {
     // still followed after the message, and offered SIGKILL again
     kill.tick(at(7200));
     assert_eq!(note(&kill).as_deref(), Some("631 WindowServer still running · k force kill"));
-    kill.ask(631, "WindowServer", None, at(7300));
+    kill.ask(631, "WindowServer", sampled(631), at(7300));
     assert_eq!(note(&kill).as_deref(), Some("Force kill 631 WindowServer? y/n"));
     assert_eq!(fake.sent(), [(631, libc::SIGTERM), (631, libc::SIGKILL)]);
   }
 
   #[test]
-  fn a_reused_pid_never_gets_sigkill() {
+  fn a_pid_reused_before_y_gets_no_sigkill() {
     let at = clock();
     let (mut kill, fake) = kill_with(&[631]);
     terminate(&mut kill, 631, "WindowServer", at(0));
     kill.tick(at(2000));
-    kill.ask(631, "WindowServer", None, at(2100));
+    kill.ask(631, "WindowServer", sampled(631), at(2100));
     assert!(kill.asking());
     // exits and its pid is taken between the ticks
     fake.restart(631);
@@ -790,7 +817,7 @@ mod tests {
     let (mut kill, fake) = kill_with(&[631]);
     terminate(&mut kill, 631, "WindowServer", at(0));
     kill.tick(at(2000));
-    kill.ask(631, "WindowServer", None, at(2100));
+    kill.ask(631, "WindowServer", sampled(631), at(2100));
     assert!(kill.asking());
     fake.exit(631);
     kill.tick(at(2250));
@@ -809,19 +836,19 @@ mod tests {
     let still_running = Some("631 WindowServer still running · k force kill");
 
     // cancelled or answered with another key: the tracking goes on
-    kill.ask(2301, "Safari", None, at(2100));
+    kill.ask(2301, "Safari", sampled(2301), at(2100));
     assert_eq!(note(&kill).as_deref(), Some("Kill 2301 Safari? y/n"));
     kill.cancel();
     assert_eq!(note(&kill).as_deref(), still_running);
-    kill.ask(2301, "Safari", None, at(2200));
+    kill.ask(2301, "Safari", sampled(2301), at(2200));
     kill.answer(key('n'), at(2200));
     assert_eq!(note(&kill).as_deref(), still_running);
-    kill.ask(631, "WindowServer", None, at(2300));
+    kill.ask(631, "WindowServer", sampled(631), at(2300));
     assert_eq!(note(&kill).as_deref(), Some("Force kill 631 WindowServer? y/n"));
     kill.cancel();
 
     // ticks go on behind a prompt; `y` replaces the tracking
-    kill.ask(2301, "Safari", None, at(2400));
+    kill.ask(2301, "Safari", sampled(2301), at(2400));
     kill.tick(at(2500));
     kill.answer(key('y'), at(2600));
     assert_eq!(note(&kill).as_deref(), Some("SIGTERM sent to 2301 Safari"));
