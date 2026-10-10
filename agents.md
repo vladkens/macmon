@@ -24,9 +24,10 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 ## Workflow
 
 - Before each commit, run `make check` (it also checks the library alone, with `--no-default-features`) and `make test`.
+- Keep planned work in [docs/roadmap.md](docs/roadmap.md), not in GitHub issues; link each item's plan there and tick the item in the PR that finishes it.
 - Every change reaches `main` through a pull request, one per feature:
   1. Agree the plan with the person. For multi-step work keep a checklist in `docs/plans/yyyymmdd-<name>.md`; in it, only tick checkboxes: no evidence, progress or status prose.
-  2. Branch from an up-to-date `main` as `feat/<name>`, whatever the change. Each implementing agent works in its own git worktree, so parallel tasks don't touch each other's files.
+  2. Branch from an up-to-date `main` as `feat/<name>`, whatever the change, without tracking it: `git switch -c feat/<name> --no-track origin/main` (or `git worktree add <path> -b feat/<name> --no-track origin/main`), and push with `git push -u origin feat/<name>`. With `push.default=upstream`, a branch that tracks `origin/main` pushes straight to `main`. Each implementing agent works in its own git worktree, so parallel tasks don't touch each other's files.
   3. Commit on the branch every step that passes the checks, without asking: one line in the style of the history (`feat: …`, `fix: …`, `chore: …`, `docs: …`), no body, docs updated in the same commit. Any agent on the task may commit; fix-ups are fine, the branch is squashed.
   4. Push the branch and open the PR with `gh pr create`. The title becomes the squash commit, in the same style. The body is short: what changed, compatibility (JSON, Prometheus, library API, config), the checks run, and what was tested by hand and what wasn't.
   5. The orchestrating agent reviews the diff, reruns the checks and sends findings back to the implementing agent until the PR is clean, then hands it to the person. CI runs `make check` and `make test`, but no runtime check on real hardware. Copilot reviews every PR automatically (repository ruleset): fix what is right, answer the rest in the thread.
