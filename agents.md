@@ -24,6 +24,7 @@ The TUI is in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from 
 ## Workflow
 
 - Before each commit, run `make check` (it also checks the library alone, with `--no-default-features`) and `make test`.
+- Keep features small. Measure production lines (tests excluded) with `make loc REF=origin/main`; the PR body states the change. When a feature needs more than ~200 production lines, the implementing agent stops and reports to the orchestrator before going on; the orchestrator simplifies the task or asks the person. There is no fixed budget for the whole codebase.
 - Every change reaches `main` through a pull request, one per feature:
   1. Agree the plan with the person. For multi-step work keep a checklist in `docs/plans/yyyymmdd-<name>.md`; in it, only tick checkboxes: no evidence, progress or status prose.
   2. Branch from an up-to-date `main` as `feat/<name>`, whatever the change. Each implementing agent works in its own git worktree, so parallel tasks don't touch each other's files.
