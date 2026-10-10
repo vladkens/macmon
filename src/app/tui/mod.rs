@@ -2,6 +2,7 @@
 
 mod boxes;
 mod help;
+mod kill;
 mod layout;
 mod proc_view;
 mod store;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use kill::Kill;
 use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
 use proc_view::ProcView;
@@ -309,6 +311,8 @@ pub struct App {
 
   /// The help overlay (`?`) with its first line on screen, while it is open.
   help: Option<usize>,
+  /// The kill popup (`k`) for the selected process.
+  kill: Kill,
 }
 
 impl App {
@@ -348,11 +352,12 @@ impl App {
 
   /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
   /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
-  /// filter input, so keys don't go to a filter that isn't on screen.
+  /// filter input and closes the kill popup, so keys don't go to something that isn't on screen.
   fn set_procs_visible(&mut self, visible: bool) {
     self.procs_shown.set(visible);
     if !visible {
       self.proc_view.clear();
+      self.kill.close();
     }
   }
 
@@ -395,8 +400,9 @@ impl App {
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit. The help
-  /// overlay takes every key while it is open; then keys of the process panel (only while it is
-  /// on screen) take precedence, and while a filter is typed every key except Ctrl-C goes to it.
+  /// overlay takes every key while it is open, then the kill popup; then keys of the process panel
+  /// (only while it is on screen) take precedence, and while a filter is typed every key except
+  /// Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
@@ -409,6 +415,11 @@ impl App {
         KeyCode::Down => Some(scroll + 1),
         _ => Some(scroll),
       };
+      return ControlFlow::Continue(());
+    }
+
+    if self.kill.is_open() {
+      self.kill.handle_key(key);
       return ControlFlow::Continue(());
     }
 
@@ -427,6 +438,11 @@ impl App {
       // change a setting without a change on screen
       KeyCode::Char('p') if self.procs_fit => self.cfg.toggle_procs(),
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
+      KeyCode::Char('k') if self.procs_visible() => {
+        if let Some(proc) = self.proc_view.selected() {
+          self.kill.open(proc);
+        }
+      }
       _ => {}
     }
 
@@ -440,9 +456,12 @@ impl App {
   }
 
   /// Applies a mouse event at the cells of the last frame to the process list, only while the
-  /// mouse is captured (events still on the way when capture turns off are dropped).
+  /// mouse is captured (events still on the way when capture turns off are dropped). While the
+  /// kill popup is open, they go to it.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
-    if self.wants_mouse() {
+    if self.kill.is_open() {
+      self.kill.handle_mouse(mouse);
+    } else if self.wants_mouse() {
       self.update_proc_view(|view| view.handle_mouse(mouse));
     }
   }
@@ -478,6 +497,7 @@ impl App {
     self.render_metrics_box(f, &plan);
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
+      self.kill.render(f, r);
     }
     if let Some(scroll) = self.help {
       self.help = Some(help::render(f, f.area(), scroll));
@@ -531,9 +551,10 @@ mod tests {
   };
   use ratatui::layout::Margin;
 
+  use super::kill::tests::FakeSys;
   use super::layout::Metric;
   use super::theme::gradient;
-  use super::{App, restore_term_once, run_procs_thread};
+  use super::{App, Event, restore_term_once, run_procs_thread};
   use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
 
@@ -658,6 +679,7 @@ mod tests {
       mem_bytes: 64 << 20,
       power_w: Some(0.5),
       gpu_pct: 3.0,
+      started: None,
     };
     vec![proc(1, "launchd"), proc(631, "WindowServer"), proc(2301, "Safari")]
   }
@@ -666,7 +688,8 @@ mod tests {
   const WINDOW_SERVER: &str =
     "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer";
 
-  /// Processes with different values, one of them (root's launchd) without a power reading.
+  /// Processes with different values, one of them (root's launchd) without a power reading and a
+  /// start time; the others started at the second of their pid, as in `FakeSys`.
   fn varied_procs() -> Vec<ProcInfo> {
     let path = |name: &str| match name {
       "launchd" => "/sbin/launchd".to_string(),
@@ -682,6 +705,7 @@ mod tests {
       mem_bytes: mem_mb << 20,
       power_w,
       gpu_pct,
+      started: (pid >= 100).then_some((pid as u64, 0)),
     };
     vec![
       proc(1, "launchd", 0.0, 20, None, 0.0),
@@ -1288,6 +1312,75 @@ mod tests {
     let mut app = app_with_procs(test_procs());
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with("╰─ 1 launchd ─"));
+  }
+
+  /// `app_with_procs` of `varied_procs` with WindowServer selected, killing through a fake with
+  /// their processes.
+  fn kill_app() -> (App, FakeSys) {
+    let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+    let (kill, fake) = FakeSys::kill(&[1, 631, 2301]);
+    app.kill = kill;
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    (app, fake)
+  }
+
+  #[test]
+  fn k_opens_a_popup_and_t_kills_its_process() {
+    let (mut app, fake) = kill_app();
+    assert!(app.handle_key(key('k')).is_continue());
+    // centered over the process box
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 31).contains("╭─ Kill WindowServer? ──"), "{}", row(&buf, 31));
+    assert!(row(&buf, 33).contains("│  pid 631 · vlad "), "{}", row(&buf, 33));
+
+    // a new sample without WindowServer drops the selection: `t` still kills the popup's process
+    let mut procs = varied_procs();
+    procs.remove(1);
+    put_procs(&mut app, procs);
+    assert_eq!(app.proc_view.selected_pid(), None);
+    assert!(app.handle_key(key('t')).is_continue());
+    assert!(!app.kill.is_open());
+    assert_eq!(fake.calls(), [(631, 0), (631, libc::SIGTERM)]);
+  }
+
+  #[test]
+  fn the_kill_popup_takes_clicks_on_its_buttons_and_closes_with_the_list() {
+    let (mut app, fake) = kill_app();
+    assert!(app.handle_key(key('k')).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    // a click on the list, the wheel and focus loss leave the popup and the list as they are
+    click(&mut app, 10, PROC_Y + 3);
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10));
+    assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue());
+    assert!(app.kill.is_open() && app.proc_view.selected_pid() == Some(631));
+
+    let y = (0..50).find(|&y| row(&buf, y).contains("[ Force kill ]")).unwrap();
+    click(&mut app, x_of(&row(&buf, y), "[ Force kill ]"), y);
+    assert!(!app.kill.is_open());
+    assert_eq!(fake.calls(), [(631, 0), (631, libc::SIGKILL)]);
+
+    // the window too small for the list
+    assert!(app.handle_key(key('k')).is_continue());
+    drop(render_buffer(&mut app, 60, 12));
+    assert!(!app.kill.is_open());
+  }
+
+  #[test]
+  fn k_typed_into_the_filter_stays_text() {
+    let (mut app, fake) = kill_app();
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('k')).is_continue());
+    assert_eq!((app.proc_view.filter(), app.kill.is_open(), fake.calls()), ("k", false, vec![]));
+  }
+
+  #[test]
+  fn k_after_moving_from_the_filter_into_the_list_opens_the_popup() {
+    let mut app = app_with_procs(varied_procs());
+    for c in "/saf".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(app.handle_key(key('k')).is_continue());
+    assert_eq!((app.proc_view.filter(), app.kill.is_open()), ("saf", true));
   }
 
   #[test]

@@ -303,7 +303,7 @@ fn scroll_offset(offset: usize, selected: Option<usize>, height: usize, len: usi
 }
 
 /// `text` cut to `max` cells, ending with `…` when cut.
-fn cut_end(text: &str, max: usize) -> String {
+pub(super) fn cut_end(text: &str, max: usize) -> String {
   match max {
     _ if Span::raw(text).width() <= max => text.to_string(),
     0 => String::new(),
@@ -312,7 +312,7 @@ fn cut_end(text: &str, max: usize) -> String {
 }
 
 /// `text` cut to its last `max` cells, starting with `…` when cut.
-fn cut_start(text: &str, max: usize) -> String {
+pub(super) fn cut_start(text: &str, max: usize) -> String {
   match max {
     _ if Span::raw(text).width() <= max => text.to_string(),
     0 => String::new(),
@@ -566,9 +566,11 @@ impl ProcView {
   }
 
   /// Applies a key press. Returns `false` for keys the panel doesn't use, so they can act as
-  /// global shortcuts; while typing a filter every key is used.
+  /// global shortcuts; while typing a filter every key is used. A navigation key ends filter input
+  /// as Enter does.
   pub(super) fn handle_key(&mut self, key: KeyEvent) -> bool {
     if self.navigate(key.code) {
+      self.end_typing();
       return true;
     }
 
@@ -969,6 +971,7 @@ mod tests {
       mem_bytes: mem_mb * MIB,
       power_w: power,
       gpu_pct: gpu,
+      started: None,
     }
   }
 
@@ -1192,6 +1195,27 @@ mod tests {
       assert!(view.handle_key(KeyEvent::new(KeyCode::Char('x'), modifiers)));
     }
     assert_eq!(view.filter(), "qcsS/1");
+  }
+
+  #[test]
+  fn navigation_ends_filter_input_keeping_the_filter() {
+    // Safari selected, then filtered to [2301, 77]
+    for (code, pid) in
+      [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::End, 77), (KeyCode::Up, 2301)]
+    {
+      let mut view = view(); // [4410, 631, 2301, 1, 77]
+      for _ in 0..3 {
+        assert!(press(&mut view, KeyCode::Down));
+      }
+      assert!(press(&mut view, KeyCode::Char('/')));
+      type_str(&mut view, "saf");
+      assert!(press(&mut view, code));
+      assert_eq!((view.filter(), view.typing(), view.selected_pid()), ("saf", false, Some(pid)));
+
+      // keys are shortcuts again
+      assert!(press(&mut view, KeyCode::Char('s')));
+      assert_eq!((view.filter(), view.sort), ("saf", ProcSort::Mem), "{code:?}");
+    }
   }
 
   #[test]

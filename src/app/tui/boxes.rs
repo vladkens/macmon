@@ -180,7 +180,7 @@ pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'sta
 }
 
 /// `items` joined by a dim ` | `.
-fn join(items: impl IntoIterator<Item = Vec<Span<'static>>>) -> Vec<Span<'static>> {
+pub(super) fn join(items: impl IntoIterator<Item = Vec<Span<'static>>>) -> Vec<Span<'static>> {
   let mut spans = vec![];
   for (i, item) in items.into_iter().enumerate() {
     if i > 0 {

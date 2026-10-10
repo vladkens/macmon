@@ -29,6 +29,7 @@ const HELP: &[Row] = &[
   Key("/", "filter the processes"),
   Key("s / S", "sort by the next column / reverse"),
   Key("↑ ↓", "select a process"),
+  Key("k", "kill the selected process"),
   Key("Esc", "clear the selection and the filter"),
   Key("?", "show / hide this help"),
   Section("Mouse"),
