@@ -314,10 +314,10 @@ cargo add macmon --no-default-features
 
 The default `app` feature enables the `macmon` executable and its terminal UI dependencies. Disable default features when using `macmon` only as a library.
 
-Run the standalone [demo app](examples/demo-app):
+Run the [demo example](examples/demo.rs) from this repository:
 
 ```sh
-cargo run --manifest-path examples/demo-app/Cargo.toml
+cargo run --example demo
 ```
 
 Then use the `Sampler` to collect metrics:

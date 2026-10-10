@@ -9,7 +9,7 @@ repository = "https://github.com/vladkens/macmon"
 homepage = "https://github.com/vladkens/macmon"
 documentation = "https://docs.rs/macmon"
 readme = "readme.md"
-include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/readme.md"]
+include = ["/src/**", "/examples/demo.rs", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/readme.md"]
 keywords = ["macos", "apple-silicon", "monitoring", "prometheus", "tui"]
 categories = ["command-line-utilities", "hardware-support", "visualization"]
 
@@ -57,3 +57,6 @@ ratatui = { version = "0.30.2", features = ["serde"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde-inline-default = { version = "1.0.2", optional = true }
 serde_json = "1.0.151"
+
+[dev-dependencies]
+owo-colors = "4.3.0"
