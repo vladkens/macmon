@@ -194,11 +194,35 @@ fn sort_procs(procs: &mut [ProcInfo], sort: ProcSort, desc: bool) {
   });
 }
 
-/// Case-insensitive substring match on the name or pid; `filter` is already lowercase.
-fn matches(proc: &ProcInfo, filter: &str) -> bool {
-  filter.is_empty()
-    || proc.name.to_lowercase().contains(filter)
-    || proc.pid.to_string().contains(filter)
+/// Filter text split into terms: `safari, cargo, !helper` keeps processes matching any term and
+/// none of the `!` ones. Each term is a case-insensitive substring of the name or pid; empty
+/// terms are ignored, so a filter still being typed (`safari,`) keeps its rows.
+#[derive(Debug, Default)]
+struct Filter {
+  any: Vec<String>,
+  none: Vec<String>,
+}
+
+impl Filter {
+  fn parse(text: &str) -> Self {
+    let mut filter = Self::default();
+    for term in text.split(',').map(|t| t.trim().to_lowercase()) {
+      match term.strip_prefix('!').map(str::trim) {
+        Some(not) if !not.is_empty() => filter.none.push(not.to_string()),
+        Some(_) => {}
+        None if !term.is_empty() => filter.any.push(term),
+        None => {}
+      }
+    }
+    filter
+  }
+
+  fn matches(&self, proc: &ProcInfo) -> bool {
+    let name = proc.name.to_lowercase();
+    let pid = proc.pid.to_string();
+    let hit = |term: &String| name.contains(term.as_str()) || pid.contains(term.as_str());
+    (self.any.is_empty() || self.any.iter().any(hit)) && !self.none.iter().any(hit)
+  }
 }
 
 /// First visible row so that row `selected` is on screen, moving as little as possible from
@@ -383,8 +407,8 @@ impl ProcView {
     let procs = self.procs.as_deref_mut().unwrap_or_default();
     sort_procs(procs, self.sort, self.sort_desc);
 
-    let filter = self.filter.to_lowercase();
-    self.rows = (0..procs.len()).filter(|&i| matches(&procs[i], &filter)).collect();
+    let filter = Filter::parse(&self.filter);
+    self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
 
     let procs = self.procs.as_deref().unwrap_or_default();
     let rows = &self.rows;
@@ -916,6 +940,29 @@ mod tests {
     }
     type_str(&mut view, "1");
     assert_eq!(pids(&view), [4410, 631, 2301, 1]);
+  }
+
+  #[test]
+  fn filter_terms_match_any_and_exclude_with_bang() {
+    // [4410, 631, 2301, 1, 77] by CPU
+    let cases: [(&str, &[i32]); 7] = [
+      ("cargo, window", &[4410, 631]),
+      (" Cargo ,WINDOW ", &[4410, 631]),
+      // a term still being typed changes nothing
+      ("cargo,", &[4410]),
+      ("cargo, !", &[4410]),
+      // exclusions alone keep the rest
+      ("!saf", &[4410, 631, 1]),
+      ("saf, !bookmark", &[2301]),
+      ("saf, !77", &[2301]),
+    ];
+
+    for (filter, expected) in cases {
+      let mut view = view();
+      assert!(press(&mut view, KeyCode::Char('/')));
+      type_str(&mut view, filter);
+      assert_eq!(pids(&view), expected, "{filter:?}");
+    }
   }
 
   #[test]
