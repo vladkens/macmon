@@ -21,7 +21,7 @@ count() { # REF DIR: production lines of the .rs files directly in DIR, in the w
   done | awk '{ s += $1 } END { print s + 0 }'
 }
 
-row() { # NAME NOW BASE
+row() { # NAME NOW BASE DIFF
   if [ -n "$ref" ]; then printf '%-8s %6s %12s %6s\n' "$1" "$2" "$3" "$4"; else printf '%-8s %6s\n' "$1" "$2"; fi
 }
 
