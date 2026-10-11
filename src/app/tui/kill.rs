@@ -7,18 +7,17 @@ use std::{fmt, io, process};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Margin, Position, Rect};
-use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::Clear;
 
 use super::boxes::{Titles, cells, draw_box};
 use super::proc_view::{cut_end, cut_start};
-use super::theme::{self, dim, heading, text};
+use super::theme::{self, dim, faint, heading, text};
 use crate::procs::{self, ProcInfo};
 
 /// A button: its label and the signal it sends (none: it closes the popup). The choices are pressed
-/// by the first letter of their label (in lower case); the buttons not selected are dim but for
-/// that letter; an error has only OK.
+/// by the first letter of their label (in lower case); the buttons not selected show that letter
+/// as a key and the rest faint; an error has only OK.
 type Button = (&'static str, Option<i32>);
 const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
@@ -184,11 +183,16 @@ impl Kill {
     let mut x = inner.x + inner.width.saturating_sub(cells(row)) / 2;
     popup.rects.clear();
     for (i, &(label, _)) in buttons.iter().enumerate() {
-      let rest = |s| if i == popup.selected { text(s) } else { dim(s) };
-      let line = Line::from(vec![rest("[ "), text(&label[..1]), rest(&label[1..]), rest(" ]")]);
+      // selected: plain text in the reversed bar; others: dim brackets, the key and a faint rest
+      let line = match i == popup.selected {
+        true => Line::from(text(format!("[ {label} ]"))).style(theme::SELECTED),
+        false => {
+          let (first, rest) = label.split_at(1);
+          Line::from(vec![dim("[ "), theme::key(first), faint(rest), dim(" ]")])
+        }
+      };
       let rect = Rect::new(x, y, cells(label.len() + 4), 1).intersection(inner);
-      let style = if i == popup.selected { theme::SELECTED } else { Style::new() };
-      f.render_widget(line.style(style), rect);
+      f.render_widget(line, rect);
       popup.rects.push(rect);
       x = x.saturating_add(cells(label.len() + 7));
     }
@@ -455,18 +459,23 @@ pub(super) mod tests {
     let buf = render(&mut kill, 60, 8);
     let shown = rows(&buf);
     assert_eq!(shown, popup);
-    // the selected button reversed, the others dim but for the letters of their shortcuts, the
-    // path dim
+    // the selected button reversed plain text; the others with dim brackets, the letter of their
+    // shortcut a key and the rest faint; the path dim
     let style = |text| {
       let cell = &buf[find(&shown, text)];
       (cell.fg, cell.modifier)
     };
-    let (none, reversed) = (Modifier::empty(), Modifier::REVERSED);
-    let (selected, key, other) = ((theme::TEXT, reversed), (theme::TEXT, none), (theme::DIM, none));
-    assert_eq!([style("[ Terminate"), style("Terminate"), style("erminate")], [selected; 3]);
+    let selected = (theme::TEXT, Modifier::REVERSED);
+    let (bracket, key, label) = (
+      (theme::DIM, Modifier::empty()),
+      (theme::KEY, Modifier::empty()),
+      (theme::TEXT, Modifier::DIM),
+    );
+    let terminate = ["[ Terminate", "Terminate", "erminate", "e ]", "]   [ Force"];
+    assert_eq!(terminate.map(style), [selected; 5]);
     assert_eq!(
-      [style("[ Force"), style("Force"), style("orce"), style("Cancel")],
-      [other, key, other, key]
+      ["[ Force", "Force", "orce", "l ]", "]   [ Cancel", "Cancel"].map(style),
+      [bracket, key, label, label, bracket, key]
     );
     assert_eq!(buf[find(&shown, "…tents")].fg, theme::DIM);
 
@@ -491,7 +500,13 @@ pub(super) mod tests {
       "│                                                        │",
       "╰────────────────────────────────────────────────────────╯",
     ];
-    assert_eq!(rows(&render(&mut kill, 58, 8)), error);
+    let buf = render(&mut kill, 58, 8);
+    let shown = rows(&buf);
+    assert_eq!(shown, error);
+    for text in ["[ OK", "OK", "K ]"] {
+      let cell = &buf[find(&shown, text)];
+      assert_eq!((cell.fg, cell.modifier), selected, "{text}");
+    }
   }
 
   /// A child of the test, killed and reaped when the test ends, however it ends.

@@ -15,7 +15,7 @@ use super::App;
 use super::layout::{LayoutPlan, Metric};
 use super::proc_view::{ELLIPSIS, head};
 use super::store::{FreqStore, PowerStore, ratio};
-use super::theme::{self, dim, gradient, heading, text};
+use super::theme::{self, dim, faint, gradient, heading, text};
 use super::widgets::{Gauge, Graph};
 use crate::config::{RatioMode, TUI_MAX_MS, ViewType};
 
@@ -174,17 +174,20 @@ pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
 
 // MARK: Bottom border
 
-/// A key hint: what the key does, dim, around the key in the default color (`theme::key`). A
-/// letter key in the label stays in it (the first match: `quit`), any other key comes before it
-/// (`? help`, `Enter keep`).
+/// A key hint: the key in `theme::key`, what it does `theme::faint` around it. A letter key in the
+/// label stays in it (the first match: `quit`), any other key comes before it (`/ filter`, `Enter
+/// keep`); with an empty label only the key shows (`?`).
 pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'static>> {
   let label = label.into();
   let letter = key.as_bytes().first().filter(|c| key.len() == 1 && c.is_ascii_alphabetic());
   if let Some(i) = letter.and_then(|c| label.bytes().position(|b| b.eq_ignore_ascii_case(c))) {
     let (head, tail) = (label[..i].to_string(), label[i + 1..].to_string());
-    return vec![dim(head), theme::key(label[i..=i].to_string()), dim(tail)];
+    return vec![faint(head), theme::key(label[i..=i].to_string()), faint(tail)];
   }
-  vec![theme::key(key), dim(format!(" {label}"))]
+  if label.is_empty() {
+    return vec![theme::key(key)];
+  }
+  vec![theme::key(key), faint(format!(" {label}"))]
 }
 
 /// `items` joined by a dim ` | `.
@@ -303,17 +306,18 @@ impl App {
     Span::styled(format!("{:.decimals$}%", load * 100.0), gradient(load))
   }
 
-  /// Key hints for the bottom border of the lowest box (see `hint`): the global keys, help first,
-  /// with the ratio mode and the interval (`? help | quit | procs | view | freq | -/+ 1000ms`; no
-  /// `procs` while the window is too small for the process list), or the filter keys while a
-  /// filter is typed (`Enter keep | Esc clear | ↑↓ select`). The mode and the interval are
-  /// padded to their widest value, so a toggle doesn't move the hints left of them.
+  /// Key hints for the bottom border of the lowest box (see `hint`): the global keys, help first as
+  /// a lone `?` (hints drop from the end), with the ratio mode and the interval (`? | quit | procs
+  /// | view | freq | -/+  1000ms`; no `procs` while the window is too small for the process list),
+  /// or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`). The mode
+  /// and the interval are padded to their widest value, so a toggle doesn't move the hints left of
+  /// them.
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
     if self.proc_view.typing() {
       return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
     }
 
-    let mut hints = vec![hint("?", "help"), hint("q", "quit")];
+    let mut hints = vec![hint("?", ""), hint("q", "quit")];
     if self.procs_fit {
       hints.push(hint("p", "procs"));
     }
@@ -494,7 +498,7 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
   use ratatui::layout::Rect;
-  use ratatui::style::Style;
+  use ratatui::style::{Color, Modifier, Style};
   use ratatui::text::Span;
 
   use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
@@ -549,11 +553,13 @@ mod tests {
     }
   }
 
-  /// `spans` as text with each span that isn't dim in brackets.
+  /// `spans` as text with the keys (`theme::KEY`, no modifier) in brackets and the faint text
+  /// (default color, `Modifier::DIM`) plain; any other style panics.
   fn marked(spans: &[Span]) -> String {
-    let mark = |span: &Span| match span.style.fg != Some(theme::DIM) {
-      true => format!("[{}]", span.content),
-      false => span.content.to_string(),
+    let mark = |span: &Span| match (span.style.fg, span.style.add_modifier) {
+      (Some(theme::KEY), modifier) if modifier.is_empty() => format!("[{}]", span.content),
+      (Some(theme::TEXT), Modifier::DIM) => span.content.to_string(),
+      style => panic!("{:?} in {style:?}", span.content),
     };
     spans.iter().map(mark).collect()
   }
@@ -569,11 +575,13 @@ mod tests {
       (hint("?", "help"), "[?] help"),
       (hint("Enter", "keep"), "[Enter] keep"),
       (hint("-/+", "1000ms"), "[-/+] 1000ms"),
+      // an empty label: only the key, no blank after it
+      (hint("?", ""), "[?]"),
     ];
     for (spans, text) in hints {
       assert_eq!(marked(&spans), text);
-      assert!(spans.iter().all(|span| span.style.add_modifier.is_empty()), "{text}");
     }
+    assert_eq!(hint("?", "").len(), 1);
   }
 
   #[test]
@@ -593,11 +601,16 @@ mod tests {
 
     // the hints right-aligned, the text left, a border cell next to the corners
     assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(15)));
-    // the keys in the default color, the rest of the hints dim, nothing bold or underlined
+    // the keys cyan, the labels faint in the default color, the separators dim, nothing bold or
+    // underlined
     let buf = draw(60);
-    let shown = |x: u16| buf[(x, 0)].symbol() != " " && buf[(x, 0)].fg != theme::DIM;
-    assert_eq!((43..58).filter(|&x| shown(x)).collect::<Vec<_>>(), [44, 53]);
-    assert!(buf.content.iter().all(|cell| cell.modifier.is_empty()));
+    let at = |x: u16| (buf[(x, 0)].fg, buf[(x, 0)].modifier);
+    let cells_with = |style| (43..58).filter(|&x| at(x) == style).collect::<Vec<_>>();
+    assert_eq!(cells_with((theme::KEY, Modifier::empty())), [44, 53]);
+    assert_eq!(cells_with((theme::TEXT, Modifier::DIM)), [45, 46, 47, 48, 49, 54, 55, 56]);
+    assert_eq!(cells_with((theme::DIM, Modifier::empty())), [50, 51, 52]);
+    assert_eq!(theme::DIM, Color::DarkGray);
+    assert!(buf.content.iter().all(|cell| Modifier::DIM.contains(cell.modifier)));
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
     assert_eq!(border(40), format!("___Power_6.60W_(6.60…__{help}__"));
     assert_eq!(border(30), format!("___Power_6…__{help}__"));

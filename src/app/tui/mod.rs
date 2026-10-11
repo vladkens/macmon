@@ -550,10 +550,11 @@ mod tests {
     EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
   };
   use ratatui::layout::Margin;
+  use ratatui::style::Modifier;
 
   use super::kill::tests::FakeSys;
   use super::layout::Metric;
-  use super::theme::gradient;
+  use super::theme::{self, gradient};
   use super::{App, Event, restore_term_once, run_procs_thread};
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
@@ -871,7 +872,7 @@ mod tests {
     assert!(!app.procs_visible());
     assert!(app.handle_key(key('p')).is_continue());
     assert!(app.cfg.show_procs);
-    assert!(row(&buf, 11).contains(" ? help | quit | view "), "{}", row(&buf, 11));
+    assert!(row(&buf, 11).contains(" ? | quit | view "), "{}", row(&buf, 11));
   }
 
   #[test]
@@ -1337,6 +1338,16 @@ mod tests {
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let wide = title(&mut app, 200);
     assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───") && wide.ends_with("─ kill ─╮"));
+    // the count bold and plain, the hint keys cyan, their labels faint
+    let buf = render_buffer(&mut app, 200, 50);
+    let style = |text| {
+      let cell = &buf[(x_of(&wide, text), PROC_Y)];
+      (cell.fg, cell.modifier)
+    };
+    let (bold, plain) = ((theme::TEXT, Modifier::BOLD), (theme::TEXT, Modifier::empty()));
+    let (cyan, faint) = ((theme::KEY, Modifier::empty()), (theme::TEXT, Modifier::DIM));
+    let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "kill", "ill"];
+    assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint]);
     // on a narrow box `kill` goes first
     assert_eq!(title(&mut app, 37), "╭─ proc 3 ─ / filter ─ sort ─ kill ─╮");
     assert_eq!(title(&mut app, 36), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(7)));
@@ -1388,7 +1399,7 @@ mod tests {
     // the PID and the full path, cut from the left to the room the key hints leave
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ ? help |", &WINDOW_SERVER[WINDOW_SERVER.len() - 57..]);
+    let cut = format!("╰─ 631 …{} ─ ? | quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 62..]);
     assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
 
     // without a readable path: the name
