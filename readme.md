@@ -376,6 +376,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Creating `Sampler` inside the worker keeps its low-level macOS handles on that thread. In an async runtime, use its blocking-thread facility rather than calling `get_metrics` directly from an executor worker.
 
+### C library
+
+`libmacmon` exposes the same rootless metrics to Swift, Python, Go or C apps as JSON: power, temperatures, CPU tiers with per-core frequency and ratios, GPU, memory, swap, fans and SoC info. Processes are not exposed. Each release (and the `dev` pre-release, with `-dev` names) ships, for arm64 and macOS 11+:
+
+- `libmacmon-vX.Y.Z.tar.gz`: `include/macmon.h` and `lib/libmacmon.dylib`, for C, Python and Go.
+- `CMacmon.xcframework-vX.Y.Z.zip`: a static library with the `CMacmon` module for Swift, and its SwiftPM checksum in `CMacmon.xcframework-vX.Y.Z.zip.sha256`.
+
+The dylib is ad-hoc signed, not notarized: download it with `curl` (no quarantine attribute), or run `xattr -dr com.apple.quarantine` on what a browser downloaded. `make capi` and `make xcframework` build both from source into `out/`.
+
+| Function                    | Description                                                             |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `macmon_abi_version`        | `MACMON_ABI_VERSION` the library was built with                         |
+| `macmon_version`            | macmon's version, e.g. `"0.10.0"`                                       |
+| `macmon_sampler_new`        | Creates a sampler and primes its baseline                               |
+| `macmon_sampler_next_json`  | One sample, `interval_ms` after the previous one (`0`: at once); blocks |
+| `macmon_sampler_free`       | Frees a sampler (`NULL`: no-op)                                         |
+| `macmon_get_soc_info_json`  | SoC info                                                                |
+| `macmon_string_free`        | Frees a returned JSON string (`NULL`: no-op)                            |
+| `macmon_last_error_message` | This thread's last error, `NULL` after a success                        |
+
+- **Threading:** a sampler may be used from any thread, one call at a time, never concurrently. As in Rust, sample on a worker thread.
+- **Errors:** functions that return a status (`0` OK, `1` invalid argument, `2` init failed, `3` sample failed, `4` internal error, after which the sampler can only be freed) set `*out` to `NULL` first and, on an error, the message read with `macmon_last_error_message()`.
+- **Versioning:** every JSON document carries `"schema"`, equal to `macmon_abi_version()`. Symbols and keys are only added; removing, renaming or retyping one bumps the version. Check it once at start.
+- **JSON:** the [output format](#output-format) of `pipe`, except `timestamp_ms` (Unix milliseconds) instead of the RFC 3339 `timestamp`, no v0.7 aliases (`cpu_usage_pct`, `ecpu_usage`, `pcpu_usage`, `gpu_usage`) and no deprecated `ecpu_*`/`pcpu_*` keys.
+
+Python with `ctypes` (`out_json` as `POINTER(c_char)`, so it can be passed back to `macmon_string_free`):
+
+```python
+import json
+from ctypes import CDLL, POINTER, byref, c_char, c_char_p, c_uint32, c_void_p, string_at
+
+lib = CDLL("lib/libmacmon.dylib")
+lib.macmon_abi_version.restype = c_uint32
+lib.macmon_last_error_message.restype = c_char_p
+lib.macmon_sampler_new.argtypes = [POINTER(c_void_p)]
+lib.macmon_sampler_next_json.argtypes = [c_void_p, c_uint32, POINTER(POINTER(c_char))]
+lib.macmon_string_free.argtypes = [POINTER(c_char)]
+lib.macmon_sampler_free.argtypes = [c_void_p]
+
+def check(status):
+    if status != 0:
+        raise RuntimeError(lib.macmon_last_error_message().decode())
+
+assert lib.macmon_abi_version() == 1, "unsupported libmacmon"
+sampler = c_void_p()
+check(lib.macmon_sampler_new(byref(sampler)))
+try:
+    out = POINTER(c_char)()
+    check(lib.macmon_sampler_next_json(sampler, 1000, byref(out)))  # blocks for 1000 ms
+    metrics = json.loads(string_at(out))
+    lib.macmon_string_free(out)
+finally:
+    lib.macmon_sampler_free(sampler)
+
+print(f"CPU {metrics['cpu_power']:.2f} W, GPU {metrics['gpu_power']:.2f} W")
+```
+
+Swift with SwiftPM: add `.binaryTarget(name: "CMacmon", url: "https://github.com/vladkens/macmon/releases/download/vX.Y.Z/CMacmon.xcframework-vX.Y.Z.zip", checksum: "<the .sha256 file>")` and depend on `CMacmon`; no linker flags are needed.
+
+```swift
+import CMacmon
+import Foundation
+
+struct Metrics: Decodable { let timestampMs: Int64; let cpuPower: Double; let gpuPower: Double }
+
+func check(_ status: macmon_status_t) throws {
+  guard status == 0 else {
+    throw NSError(domain: "macmon", code: Int(status), userInfo: [
+      NSLocalizedDescriptionKey: macmon_last_error_message().map { String(cString: $0) } ?? "",
+    ])
+  }
+}
+
+precondition(macmon_abi_version() == 1, "unsupported libmacmon")
+var sampler: OpaquePointer?
+try check(macmon_sampler_new(&sampler))
+defer { macmon_sampler_free(sampler) }
+
+var json: UnsafeMutablePointer<CChar>?
+try check(macmon_sampler_next_json(sampler, 1000, &json))  // blocks for 1000 ms
+let data = Data(bytes: json!, count: strlen(json!))
+macmon_string_free(json)
+
+let decoder = JSONDecoder()
+decoder.keyDecodingStrategy = .convertFromSnakeCase
+let metrics = try decoder.decode(Metrics.self, from: data)
+print("CPU \(metrics.cpuPower) W, GPU \(metrics.gpuPower) W")
+```
+
 ## 🤝 Contributing
 
 All contributions are welcome! Feel free to open an issue or submit a pull request.

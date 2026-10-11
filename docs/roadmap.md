@@ -18,7 +18,7 @@ POWER does today.
       `proc_pidinfo(PROC_PIDVNODEPATHINFO)`, the descriptors with `PROC_PIDLISTFDS` and each one with
       `proc_pidfdinfo`. The list has a filter; Enter on a file reveals it in Finder (`open -R`), Esc
       goes back to the processes.
-- [ ] **4. A C library for other UIs.** Ship macmon as a dylib with a C header, so Swift, Python
+- [x] **4. A C library for other UIs.** Ship macmon as a dylib with a C header, so Swift, Python
       or C apps sample metrics without parsing `macmon pipe`. Builds on #59 and
       [homm/macmon-bindings](https://github.com/homm/macmon-bindings) (Python and Swift today,
       published from a fork). Decision point before the plan: a C API of plain structs, as in
