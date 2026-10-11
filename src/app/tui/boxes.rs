@@ -31,11 +31,6 @@ fn temp_ratio(celsius: f32) -> f64 {
   (f64::from(celsius) - 30.0) / 70.0
 }
 
-/// `45°C`, colored by the temperature, when the sensor exists.
-fn temp(celsius: Option<f32>) -> Option<Span<'static>> {
-  celsius.map(|c| Span::styled(format!("{c:.0}°C"), gradient(temp_ratio(c))))
-}
-
 /// `width` cells as `u16`, the type of screen coordinates; saturating, as no text on screen is
 /// wider than the screen.
 pub(super) fn cells(width: usize) -> u16 {
@@ -327,8 +322,9 @@ impl App {
     let Some(area) = plan.top else { return };
     draw_box(f, area, self.metrics_titles());
 
-    for &(metric, r) in &plan.boxes {
-      let metric = self.metric_box(metric);
+    let fans = self.fans.label();
+    for &(kind, r) in &plan.boxes {
+      let metric = self.metric_box(kind);
       let inner = draw_box(f, r, fit_titles(r.width, metric.titles));
       let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
       match metric.scale {
@@ -337,6 +333,11 @@ impl App {
         }
         Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
+      }
+
+      // the fans (`Fan 1200 RPM`) right on the bottom border of the total power box
+      if kind == Metric::TotalPower && !fans.is_empty() && r.height >= 2 {
+        render_bottom_border(f, r, vec![vec![text(fans.clone())]], |_| vec![]);
       }
     }
 
@@ -387,8 +388,8 @@ impl App {
       }
       Metric::Gpu => self.freq_box("GPU".to_string(), &self.igpu_freq),
       Metric::Ram => self.ram_box(),
-      Metric::CpuPower => self.power_box("CPU", &self.cpu_power, temp(self.cpu_temp.last())),
-      Metric::GpuPower => self.power_box("GPU", &self.gpu_power, temp(self.gpu_temp.last())),
+      Metric::CpuPower => self.power_box("CPU", &self.cpu_power, self.cpu_temp.last()),
+      Metric::GpuPower => self.power_box("GPU", &self.gpu_power, self.gpu_temp.last()),
       Metric::AnePower => self.power_box("ANE", &self.ane_power, None),
       Metric::TotalPower => self.total_power_box(),
     }
@@ -441,14 +442,14 @@ impl App {
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
-  /// that doesn't fit, with `right` (the temperature, the fans) on the right, over the power
-  /// history in the low load color, scaled to its largest visible sample. Always a graph, as in
-  /// the original.
+  /// that doesn't fit, with the temperature (`45°C`) on the right when the sensor exists, over the
+  /// power history in the low load color, scaled to its largest visible sample. Always a graph,
+  /// as in the original.
   fn power_box<'a>(
     &self,
     label: &'static str,
     store: &'a PowerStore,
-    right: Option<Span<'static>>,
+    temp: Option<f32>,
   ) -> MetricBox<'a> {
     let short = vec![heading(label), text(format!(" {:.2}W", store.top_value))];
     let mut full = short.clone();
@@ -456,8 +457,10 @@ impl App {
 
     let titles = [full, short].map(|left| {
       let titles = Titles::new(left);
-      match &right {
-        Some(right) => titles.right(right.clone()),
+      match temp {
+        Some(temp) => {
+          titles.right(Span::styled(format!("{temp:.0}°C"), gradient(temp_ratio(temp))))
+        }
         None => titles,
       }
     });
@@ -466,15 +469,13 @@ impl App {
   }
 
   /// `Total 12.00W (12.00, 12.00)`, the whole system, or `Power 6.60W (6.60, 6.60)`, CPU + GPU +
-  /// ANE, without the system power sensor; the fans (`Fan 1200 RPM`) on the right when they exist.
+  /// ANE, without the system power sensor. The fans go on its bottom border (`render_metrics_box`).
   fn total_power_box(&self) -> MetricBox<'_> {
-    let fans = self.fans.label();
-    let fans = (!fans.is_empty()).then(|| text(fans));
     // the newest sample, not the smoothed `top_value`, so the box switches as soon as it reads 0
     if self.sys_power.items.first().is_some_and(|&mw| mw > 0) {
-      self.power_box("Total", &self.sys_power, fans)
+      self.power_box("Total", &self.sys_power, None)
     } else {
-      self.power_box("Power", &self.all_power, fans)
+      self.power_box("Power", &self.all_power, None)
     }
   }
 }

@@ -1152,9 +1152,15 @@ mod tests {
 
   /// Top border of the metric box `metric` in a rendered frame.
   fn box_top(app: &App, buf: &Buffer, metric: Metric) -> String {
+    box_row(app, buf, metric, false)
+  }
+
+  /// Top or bottom border of the metric box `metric` in a rendered frame.
+  fn box_row(app: &App, buf: &Buffer, metric: Metric, bottom: bool) -> String {
     let boxes = app.layout(buf.area).boxes;
     let (_, area) = boxes.into_iter().find(|(m, _)| *m == metric).expect("metric box");
-    (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol()).collect()
+    let y = if bottom { area.bottom() - 1 } else { area.y };
+    (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect()
   }
 
   #[test]
@@ -1200,9 +1206,25 @@ mod tests {
     assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45°C ─╮"));
     assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40°C ─╮"));
     assert!(box_top(&app, &buf, Metric::AnePower).ends_with("───╮"));
-    // the fans right on the total power box; no summary on the bottom border of the metrics box
-    assert!(box_top(&app, &buf, Metric::TotalPower).ends_with("─ Fan 1200 RPM ─╮"));
+    // nothing right on the total power box; no summary on the bottom border of the metrics box
+    assert!(box_top(&app, &buf, Metric::TotalPower).ends_with("───╮"));
     assert_eq!(row(&buf, PROC_Y - 1), format!("╰{}╯", "─".repeat(198)));
+  }
+
+  #[test]
+  fn fans_on_the_bottom_border_of_the_total_power_box() {
+    let cases: [(&[u32], &str); 3] = [
+      (&[1200], "─ Fan 1200 RPM ─╯"),
+      (&[1200, 1300], "─ Fans 1200/1300 RPM ─╯"),
+      (&[], "─────────────────────────╯"),
+    ];
+    for (rpms, end) in cases {
+      let fan = |&rpm: &u32| FanMetric { name: "fan".to_string(), rpm, max_rpm: None };
+      let mut app = test_app_with(|m| m.fans = rpms.iter().map(fan).collect());
+      let buf = render_buffer(&mut app, 200, 50);
+      let bottom = box_row(&app, &buf, Metric::TotalPower, true);
+      assert!(bottom.starts_with("╰───") && bottom.ends_with(end), "{bottom}");
+    }
   }
 
   #[test]
