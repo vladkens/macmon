@@ -15,9 +15,9 @@ use super::proc_view::{cut_end, cut_start};
 use super::theme::{self, dim, faint, heading, text};
 use crate::procs::{self, ProcInfo};
 
-/// A button: its label and the signal it sends (none: it closes the popup). The choices are pressed
-/// by the first letter of their label (in lower case); the buttons not selected show that letter
-/// as a key and the rest faint; an error has only OK.
+/// A button: its label and the signal it sends (none: it closes the popup). The buttons with a
+/// signal are pressed by the first letter of their label (in lower case), shown as a key when not
+/// selected; Cancel has no letter (Esc closes, as in macOS dialogs); an error has only OK.
 type Button = (&'static str, Option<i32>);
 const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
@@ -119,12 +119,13 @@ impl Kill {
   }
 
   /// A key while the popup is open: `←` `→` and Tab select, Enter presses the selected button,
-  /// `t` `f` `c` theirs (no modifier, no error), Esc the last one (Cancel, OK); others do nothing.
+  /// `t` `f` theirs (no modifier, no error), Esc the last one (Cancel, OK); others do nothing.
   pub(super) fn handle_key(&mut self, key: KeyEvent) {
     let Some(popup) = self.popup.as_mut() else { return };
     let (ok, selected) = (popup.state.is_ok(), popup.selected);
     let buttons = if ok { &CHOICES[..] } else { &OK };
-    let shortcut = |c: char| CHOICES.iter().position(|b| ok && b.0.to_lowercase().starts_with(c));
+    let letter = |b: &Button, c| b.1.is_some() && b.0.to_lowercase().starts_with(c);
+    let shortcut = |c: char| CHOICES.iter().position(|b| ok && letter(b, c));
     match key.code {
       KeyCode::Left | KeyCode::BackTab => popup.selected = selected.saturating_sub(1),
       KeyCode::Right | KeyCode::Tab => popup.selected = (selected + 1).min(buttons.len() - 1),
@@ -182,14 +183,16 @@ impl Kill {
     let y = inner.y + rows + 2 * gap;
     let mut x = inner.x + inner.width.saturating_sub(cells(row)) / 2;
     popup.rects.clear();
-    for (i, &(label, _)) in buttons.iter().enumerate() {
-      // selected: plain text in the reversed bar; others: dim brackets, the key and a faint rest
-      let line = match i == popup.selected {
-        true => Line::from(text(format!("[ {label} ]"))).style(theme::SELECTED),
-        false => {
+    for (i, &(label, sig)) in buttons.iter().enumerate() {
+      // selected: plain text in the reversed bar; others: dim brackets around a faint label, its
+      // first letter a key when it is a shortcut (a button with a signal)
+      let line = match (i == popup.selected, sig) {
+        (true, _) => Line::from(text(format!("[ {label} ]"))).style(theme::SELECTED),
+        (false, Some(_)) => {
           let (first, rest) = label.split_at(1);
           Line::from(vec![dim("[ "), theme::key(first), faint(rest), dim(" ]")])
         }
+        (false, None) => Line::from(vec![dim("[ "), faint(label), dim(" ]")]),
       };
       let rect = Rect::new(x, y, cells(label.len() + 4), 1).intersection(inner);
       f.render_widget(line, rect);
@@ -347,8 +350,9 @@ pub(super) mod tests {
       (vec![code(Left), code(BackTab)], Some(0), vec![]),
       (vec![code(Right), code(Right), code(Enter)], None, vec![]),
       (vec![code(Right), code(Esc)], None, vec![]),
-      (vec![key('c')], None, vec![]),
-      // other keys and the shortcuts with a modifier do nothing
+      // other keys (Cancel has no letter) and the shortcuts with a modifier do nothing
+      (vec![key('c'), key('C')], Some(0), vec![]),
+      (vec![code(Right), code(Right), key('c')], Some(2), vec![]),
       (vec![key('q'), key('y'), key('k'), key('n'), key('T'), code(Down)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::CONTROL), chord('f', KeyModifiers::ALT)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::SUPER)], Some(0), vec![]),
@@ -460,7 +464,7 @@ pub(super) mod tests {
     let shown = rows(&buf);
     assert_eq!(shown, popup);
     // the selected button reversed plain text; the others with dim brackets, the letter of their
-    // shortcut a key and the rest faint; the path dim
+    // shortcut a key and the rest faint, Cancel (no shortcut) all faint; the path dim
     let style = |text| {
       let cell = &buf[find(&shown, text)];
       (cell.fg, cell.modifier)
@@ -474,9 +478,11 @@ pub(super) mod tests {
     let terminate = ["[ Terminate", "Terminate", "erminate", "e ]", "]   [ Force"];
     assert_eq!(terminate.map(style), [selected; 5]);
     assert_eq!(
-      ["[ Force", "Force", "orce", "l ]", "]   [ Cancel", "Cancel"].map(style),
-      [bracket, key, label, label, bracket, key]
+      ["[ Force", "Force", "orce", "l ]", "]   [ Cancel", "Cancel", "ancel", "el ]"].map(style),
+      [bracket, key, label, label, bracket, label, label, label]
     );
+    let (x, y) = find(&shown, "[ Cancel ]");
+    assert!((x..x + 10).all(|x| buf[(x, y)].fg != theme::KEY), "a key in Cancel");
     assert_eq!(buf[find(&shown, "…tents")].fg, theme::DIM);
 
     // the name cut before `?`, without the blank rows when low
