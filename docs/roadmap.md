@@ -10,14 +10,14 @@ POWER does today.
 - [x] **1. Kill the selected process** (#89). `k` → popup: Terminate / Force kill / Cancel; the
       start time is checked before the signal; launchd and macmon are refused.
       Plan: [docs/plans/20261010-kill-process.md](plans/20261010-kill-process.md).
-- [x] **2. Show in Finder.** `f` on the selected process runs `open -R` on its executable.
+- [x] **2. Show in Finder.** `e` on the selected process runs `open -R` on its executable.
       Works for every process (the path is readable for all users).
       Plan: [docs/plans/20261011-process-info.md](plans/20261011-process-info.md).
 - [x] **3. Open files and sockets of a process.** `i` on a process opens its list, as Activity
       Monitor's "Open Files and Ports" and Sloth show it: working directory, files and sockets
       (`local → remote` address), read as `lsof` does: the working directory with
       `proc_pidinfo(PROC_PIDVNODEPATHINFO)`, the descriptors with `PROC_PIDLISTFDS` and each one with
-      `proc_pidfdinfo`. The list has a filter; `f` on a file reveals it in Finder (`open -R`), Esc
+      `proc_pidfdinfo`. The list has a filter; `e` on a file reveals it in Finder (`open -R`), Esc
       goes back to the processes.
       Plan: [docs/plans/20261011-process-info.md](plans/20261011-process-info.md).
 - [ ] **4. A C library for other UIs.** Ship macmon as a dylib with a C header, so Swift, Python

@@ -771,7 +771,7 @@ impl ProcView {
     }
 
     let titles = filter_titles(name, &self.filter, self.typing, width);
-    let actions = || join([hint("i", "info"), hint("f", "finder"), hint("k", "kill")]);
+    let actions = || join([hint("i", "info"), hint("e", "finder"), hint("k", "kill")]);
     match self.typing {
       true => titles,
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),

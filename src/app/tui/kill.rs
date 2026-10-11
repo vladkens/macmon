@@ -90,7 +90,7 @@ struct Popup {
 /// The kill popup (`k`) with the system calls it goes through.
 #[derive(Debug)]
 pub(super) struct Kill {
-  /// Shared with the info overlay and `f`, which `App` hands them to.
+  /// Shared with the info overlay and `e`, which `App` hands them to.
   pub(super) sys: Box<dyn ProcSys>,
   popup: Option<Popup>,
 }

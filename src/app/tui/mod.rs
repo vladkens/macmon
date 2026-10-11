@@ -453,7 +453,7 @@ impl App {
       KeyCode::Char(c) if self.procs_visible() => match (c, self.proc_view.selected()) {
         ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
         ('k', Some(proc)) => self.kill.open(proc),
-        ('f', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
+        ('e', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
         _ => {}
       },
       _ => {}
@@ -1366,11 +1366,11 @@ mod tests {
     let (bold, plain) = ((theme::TEXT, Modifier::BOLD), (theme::TEXT, Modifier::empty()));
     let (cyan, faint) = ((theme::KEY, Modifier::empty()), (theme::TEXT, Modifier::DIM));
     let sep = (theme::DIM, Modifier::empty());
-    let cells =
-      ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | ", "finder", "inder"];
-    let styles = [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep, cyan, faint];
-    assert_eq!(cells.map(style), styles);
-    assert_eq!(["| kill", "kill", "ill"].map(style), [sep, cyan, faint]);
+    let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | "];
+    assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep]);
+    // `e` inside `finder`
+    let cells = ["finder", "er | ", "r | ", "| kill", "kill", "ill"];
+    assert_eq!(cells.map(style), [faint, cyan, faint, sep, cyan, faint]);
     // on a narrow box they go first, all together
     assert_eq!(title(&mut app, 53), "╭─ proc 3 ─ / filter ─ sort ─ info | finder | kill ─╮");
     assert_eq!(title(&mut app, 52), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(23)));
@@ -1520,9 +1520,10 @@ mod tests {
     assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
-    // the wheel moves its selection, not the list's; `f` reveals the selected file
+    // the wheel moves its selection, not the list's; `e` reveals the selected file, `f` nothing
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
-    assert!(app.handle_key(key('f')).is_continue());
+    assert!(app.handle_key(key('f')).is_continue() && fake.0.borrow().revealed.is_empty());
+    assert!(app.handle_key(key('e')).is_continue());
     assert_eq!(fake.0.borrow().revealed, ["/var/log/system.log"]);
     assert_eq!(app.proc_view.selected_pid(), Some(631));
 
@@ -1563,15 +1564,17 @@ mod tests {
   }
 
   #[test]
-  fn f_shows_the_selected_process_in_finder() {
+  fn e_shows_the_selected_process_in_finder() {
     let (mut app, fake) = info_app();
-    assert!(app.handle_key(key('f')).is_continue());
+    // `f` is not bound
+    assert!(app.handle_key(key('f')).is_continue() && fake.0.borrow().revealed.is_empty());
+    assert!(app.handle_key(key('e')).is_continue());
     assert_eq!(fake.0.borrow().revealed, [WINDOW_SERVER]);
 
-    // typed into the filter it is text; without a selection `i` and `f` do nothing
-    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('f')).is_continue());
-    assert_eq!(app.proc_view.filter(), "f");
-    for code in [KeyCode::Esc, KeyCode::Esc, KeyCode::Char('f'), KeyCode::Char('i')] {
+    // typed into the filter it is text; without a selection `i` and `e` do nothing
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('e')).is_continue());
+    assert_eq!(app.proc_view.filter(), "e");
+    for code in [KeyCode::Esc, KeyCode::Esc, KeyCode::Char('e'), KeyCode::Char('i')] {
       assert!(press(&mut app, code).is_continue());
     }
     assert_eq!((app.proc_view.selected_pid(), app.info.is_none()), (None, true));
@@ -1581,7 +1584,7 @@ mod tests {
     let mut app = app_with_procs(test_procs());
     let (kill, fake) = FakeSys::kill(&[]);
     app.kill = kill;
-    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('f')).is_continue());
+    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('e')).is_continue());
     assert!(fake.0.borrow().revealed.is_empty());
   }
 

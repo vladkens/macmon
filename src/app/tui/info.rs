@@ -1,4 +1,4 @@
-//! The info overlay (`i`): open files and sockets of the selected process; `f` reveals one.
+//! The info overlay (`i`): open files and sockets of the selected process; `e` reveals one.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
@@ -72,7 +72,7 @@ impl Info {
     self.select(at.unwrap_or(self.index));
   }
 
-  /// A key: navigation ends filter input, the filter keys are those of the process list, `f`
+  /// A key: navigation ends filter input, the filter keys are those of the process list, `e`
   /// reveals the selected file or the cwd, Esc clears the filter; `false` when Esc or `q` (no
   /// modifier, not typed into the filter) closes the overlay, as they close the other popups.
   pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
@@ -88,7 +88,7 @@ impl Info {
         }
       }
       KeyCode::Char('/') => self.typing = true,
-      KeyCode::Char('f') => {
+      KeyCode::Char('e') => {
         let path = |f: &&OpenFile| matches!(f.kind, Kind::File | Kind::Cwd) && !f.text.is_empty();
         if let Some(file) = self.rows().get(self.index).copied().filter(path) {
           sys.reveal(&file.text);
@@ -120,7 +120,7 @@ impl Info {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
     let titles = filter_titles(name, &self.filter, self.typing, area.width);
-    let titles = if self.typing { titles } else { titles.right(hint("f", "finder")) };
+    let titles = if self.typing { titles } else { titles.right(hint("e", "finder")) };
     let inner = draw_box(f, area, titles);
     self.page = usize::from(inner.height);
     self.offset = scroll_offset(self.offset, Some(self.index), self.page, self.rows().len());
@@ -299,7 +299,7 @@ mod tests {
     assert_eq!(filter("nothing"), []);
 
     // the selection, filtered out, goes to the row in its place; while typing no `finder` on top,
-    // the filter keys on the bottom border; ↓ ends the input, `f` and Esc act again
+    // the filter keys on the bottom border; ↓ ends the input, `e` and Esc act again
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "tcp, unix");
     assert_eq!((info.typing, shown(&info)), (true, (Some(4), vec![Some(4), Some(5), Some(7)])));
@@ -320,14 +320,16 @@ mod tests {
   }
 
   #[test]
-  fn f_reveals_the_selected_file_or_the_cwd_only() {
+  fn e_reveals_the_selected_file_or_the_cwd_only() {
     // a file the kernel gives no path for
     let mut files = files();
     files.push(file(10, Kind::File, ""));
     let (mut info, fake) = info(Ok(files.clone()));
-    // `f` on every row: the cwd and the files with a path, not the sockets, the pipe and the kqueue
+    // `e` on every row: the cwd and the files with a path, not the sockets, the pipe and the
+    // kqueue; `f` nothing
     for _ in 0..files.len() {
       assert!(press(&mut info, &fake, KeyCode::Char('f')));
+      assert!(press(&mut info, &fake, KeyCode::Char('e')));
       assert!(press(&mut info, &fake, KeyCode::Down));
     }
     assert_eq!(revealed(&fake), ["/Users/vlad/Code/macmon", "/dev/ttys004", LOG]);
@@ -335,8 +337,8 @@ mod tests {
     // typed, it is text
     assert!(press(&mut info, &fake, KeyCode::Home));
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
-    type_str(&mut info, &fake, "f");
-    assert_eq!((info.filter.as_str(), revealed(&fake).len()), ("f", 3));
+    type_str(&mut info, &fake, "e");
+    assert_eq!((info.filter.as_str(), revealed(&fake).len()), ("e", 3));
   }
 
   #[test]
@@ -422,7 +424,7 @@ mod tests {
       assert_eq!((buf[(2, 1)].fg, buf[(2, 1)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
       assert_eq!(shown[4], format!("╰{}╯", "─".repeat(38)));
       // nothing to select or reveal
-      for code in [KeyCode::Down, KeyCode::End, KeyCode::Char('f')] {
+      for code in [KeyCode::Down, KeyCode::End, KeyCode::Char('e')] {
         assert!(press(&mut info, &fake, code));
       }
       assert_eq!((info.index, revealed(&fake)), (0, Vec::<String>::new()), "{text}");
@@ -466,7 +468,8 @@ mod tests {
     assert_eq!([cell(1, 3), cell(2, 3), cell(58, 3)], [(theme::TEXT, Modifier::REVERSED); 3]);
     let x = |text| shown[0][..shown[0].find(text).unwrap()].chars().count() as u16;
     let key = (theme::KEY, Modifier::empty());
-    assert_eq!([x("finder"), x("inder")].map(|x| cell(x, 0)), [key, faint]);
+    let finder = x("finder");
+    assert_eq!([0, 3, 4, 5].map(|dx| cell(finder + dx, 0)), [faint, faint, key, faint]);
   }
 
   /// The only test with the real calls: the test's own process, and no reveal.
