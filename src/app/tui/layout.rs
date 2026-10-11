@@ -2,8 +2,8 @@
 //! process list in the rest.
 //!
 //! The metrics box holds two rows of boxes: one per CPU cluster, then GPU and RAM on top, CPU /
-//! GPU / ANE power below. The boxes of a row split its width evenly, the rows split the height
-//! (the top row gets the odd one). One structure at every size, only the scale changes.
+//! GPU / ANE / total power below. The boxes of a row split its width evenly, the rows split the
+//! height (the top row gets the odd one). One structure at every size, only the scale changes.
 
 use ratatui::layout::{Margin, Rect};
 
@@ -27,6 +27,8 @@ pub(super) enum Metric {
   CpuPower,
   GpuPower,
   AnePower,
+  /// System power, or CPU + GPU + ANE without the system power sensor.
+  TotalPower,
 }
 
 /// Rectangles for one frame. Hidden parts are `None` / left out; every rect is non-empty.
@@ -48,8 +50,9 @@ fn top_row(clusters: usize) -> Vec<Metric> {
   boxes
 }
 
-/// Boxes of the bottom row: CPU, GPU and ANE power.
-const BOTTOM_ROW: [Metric; 3] = [Metric::CpuPower, Metric::GpuPower, Metric::AnePower];
+/// Boxes of the bottom row: CPU, GPU, ANE and total power.
+const BOTTOM_ROW: [Metric; 4] =
+  [Metric::CpuPower, Metric::GpuPower, Metric::AnePower, Metric::TotalPower];
 
 /// Height of the metrics box over the process list on a screen `height` rows tall:
 /// `METRICS_HEIGHT_PCT` of it, rounded, but at least `METRICS_MIN_HEIGHT`.
