@@ -12,6 +12,9 @@ pub(super) const BORDER: Color = Color::DarkGray;
 pub(super) const DIM: Color = Color::DarkGray;
 /// Titles and text: the terminal's default foreground.
 pub(super) const TEXT: Color = Color::Reset;
+/// The key in a hint or a button: cyan (ANSI 6), which no value uses (green, yellow and red are
+/// load, blue is links).
+pub(super) const KEY: Color = Color::Cyan;
 /// Selected process row: reverse video over the default colors, so the row reads as one bar
 /// instead of reversing each load color in it.
 pub(super) const SELECTED: Style = Style::new().fg(TEXT).add_modifier(Modifier::REVERSED);
@@ -33,6 +36,18 @@ pub(super) fn text<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
 
 pub(super) fn dim<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
   Span::styled(text, DIM)
+}
+
+/// The key to press in a hint or a button: `KEY`, no modifier.
+pub(super) fn key<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, KEY)
+}
+
+/// The label of a hint or a button: the default color, faint (SGR 2). Terminals that support it
+/// blend the text toward the background, so it reads the same in light and dark themes, unlike
+/// ANSI 8; the others show plain text.
+pub(super) fn faint<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
+  Span::styled(text, Style::new().fg(TEXT).add_modifier(Modifier::DIM))
 }
 
 /// Link text: underlined blue (ANSI 4).

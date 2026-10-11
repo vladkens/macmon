@@ -550,12 +550,13 @@ mod tests {
     EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
   };
   use ratatui::layout::Margin;
+  use ratatui::style::Modifier;
 
   use super::kill::tests::FakeSys;
   use super::layout::Metric;
-  use super::theme::gradient;
+  use super::theme::{self, gradient};
   use super::{App, Event, restore_term_once, run_procs_thread};
-  use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
+  use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -823,12 +824,27 @@ mod tests {
       assert_eq!(cells, line, "row {y}");
     }
     // the key hints show the settings
-    let hints = " v gauge | r active | -/+ 1250ms ─╯";
+    let hints = " view | raw  | -/+  1250ms ─╯";
     assert!(row(&buf, 49).ends_with(hints), "{}", row(&buf, 49));
 
     assert!(app.handle_key(key('v')).is_continue());
     assert_eq!(app.cfg.view_type, ViewType::Graph);
     assert_eq!(file.saved()["view_type"], "Sparkline");
+  }
+
+  #[test]
+  fn the_footer_keeps_its_width_through_the_modes_and_intervals() {
+    let mut app = test_app();
+    let width = |app: &App| {
+      app.footer_hints().iter().flatten().map(ratatui::text::Span::width).sum::<usize>()
+    };
+    let start = width(&app);
+    app.cfg.ratio_mode = RatioMode::Active;
+    assert_eq!(width(&app), start);
+    for interval in [TUI_MIN_MS, TUI_MAX_MS] {
+      app.cfg.set_run_interval(interval);
+      assert_eq!(width(&app), start, "{interval}");
+    }
   }
 
   #[test]
@@ -856,7 +872,7 @@ mod tests {
     assert!(!app.procs_visible());
     assert!(app.handle_key(key('p')).is_continue());
     assert!(app.cfg.show_procs);
-    assert!(row(&buf, 11).contains(" q quit | ? help | v graph "), "{}", row(&buf, 11));
+    assert!(row(&buf, 11).contains(" ? | quit | view "), "{}", row(&buf, 11));
   }
 
   #[test]
@@ -1292,9 +1308,10 @@ mod tests {
     let mut app = app_with_procs(varied_procs());
     let buf = render_buffer(&mut app, 200, 50);
 
-    // the count and the filter and sort hints on the title, the sort arrow by the sorted column
+    // the count and the filter and sort hints on the title (no `kill` without a selection), the
+    // sort arrow by the sorted column
     let title = proc_row(&buf, 0);
-    assert!(title.starts_with("╭─ proc 3 ─ / filter ─ s sort ─"), "{title}");
+    assert!(title.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{title}");
     let header = proc_row(&buf, 1);
     assert!(header.starts_with("│   PID NAME "), "{header}");
     assert!(header.ends_with(" CPU% ↓    MEM   POWER   GPU% │"), "{header}");
@@ -1312,6 +1329,41 @@ mod tests {
     // load values on the gradient
     let cpu = x_of(&proc_row(&buf, 2), "25.0");
     assert_eq!(buf[(cpu, PROC_Y + 2)].fg, gradient(0.25));
+  }
+
+  #[test]
+  fn kill_is_on_the_process_title_with_a_selection_while_not_typing() {
+    let title = |app: &mut App, width| proc_row(&render_buffer(app, width, 50), 0);
+    let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let wide = title(&mut app, 200);
+    assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───") && wide.ends_with("─ kill ─╮"));
+    // the count bold and plain, the hint keys cyan, their labels faint
+    let buf = render_buffer(&mut app, 200, 50);
+    let style = |text| {
+      let cell = &buf[(x_of(&wide, text), PROC_Y)];
+      (cell.fg, cell.modifier)
+    };
+    let (bold, plain) = ((theme::TEXT, Modifier::BOLD), (theme::TEXT, Modifier::empty()));
+    let (cyan, faint) = ((theme::KEY, Modifier::empty()), (theme::TEXT, Modifier::DIM));
+    let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "kill", "ill"];
+    assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint]);
+    // on a narrow box `kill` goes first
+    assert_eq!(title(&mut app, 37), "╭─ proc 3 ─ / filter ─ sort ─ kill ─╮");
+    assert_eq!(title(&mut app, 36), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(7)));
+
+    // typing: keys are text, no hints; then a set filter with the selection in it
+    for c in "/saf".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    let typing = title(&mut app, 200);
+    assert!(typing.starts_with("╭─ proc 1/3 ─ /saf█ ───") && !typing.contains("sort"), "{typing}");
+    assert!(!typing.contains("kill"), "{typing}");
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let filtered = title(&mut app, 200);
+    assert!(
+      filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───") && filtered.ends_with(" kill ─╮")
+    );
   }
 
   #[test]
@@ -1347,7 +1399,7 @@ mod tests {
     // the PID and the full path, cut from the left to the room the key hints leave
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ q quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 47..]);
+    let cut = format!("╰─ 631 …{} ─ ? | quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 62..]);
     assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
 
     // without a readable path: the name
@@ -1383,6 +1435,17 @@ mod tests {
     assert!(app.handle_key(key('t')).is_continue());
     assert!(!app.kill.is_open());
     assert_eq!(fake.calls(), [(631, 0), (631, libc::SIGTERM)]);
+  }
+
+  #[test]
+  fn q_closes_the_kill_popup_without_quitting() {
+    let (mut app, fake) = kill_app();
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(app.handle_key(key('q')).is_continue());
+    assert!(!app.kill.is_open());
+    assert_eq!(fake.calls(), [(631, 0)]);
+    // closed: `q` quits again
+    assert!(app.handle_key(key('q')).is_break());
   }
 
   #[test]

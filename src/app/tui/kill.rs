@@ -7,17 +7,18 @@ use std::{fmt, io, process};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Margin, Position, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Text};
 use ratatui::widgets::Clear;
 
 use super::boxes::{Titles, cells, draw_box};
 use super::proc_view::{cut_end, cut_start};
-use super::theme::{self, dim, heading, text};
+use super::theme::{self, dim, faint, heading, text};
 use crate::procs::{self, ProcInfo};
 
-/// A button: its label and the signal it sends (none: it closes the popup). The choices are pressed
-/// by the first letter of their label (in lower case, underlined); an error has only OK.
+/// A button: its label and the signal it sends (none: it closes the popup). The buttons with a
+/// signal are pressed by the first letter of their label (in lower case), shown as a key when not
+/// selected; Cancel has no letter (Esc and `q` close, as in macOS dialogs and the help); an error
+/// has only OK.
 type Button = (&'static str, Option<i32>);
 const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
@@ -119,18 +120,22 @@ impl Kill {
   }
 
   /// A key while the popup is open: `←` `→` and Tab select, Enter presses the selected button,
-  /// `t` `f` `c` theirs (no modifier, no error), Esc the last one (Cancel, OK); others do nothing.
+  /// `t` `f` theirs (no modifier, no error), Esc and `q` (no modifier) the last one (Cancel, OK),
+  /// as in the help; others do nothing.
   pub(super) fn handle_key(&mut self, key: KeyEvent) {
     let Some(popup) = self.popup.as_mut() else { return };
     let (ok, selected) = (popup.state.is_ok(), popup.selected);
     let buttons = if ok { &CHOICES[..] } else { &OK };
-    let shortcut = |c: char| CHOICES.iter().position(|b| ok && b.0.to_lowercase().starts_with(c));
+    let letter = |b: &Button, c| b.1.is_some() && b.0.to_lowercase().starts_with(c);
+    let shortcut = |c: char| CHOICES.iter().position(|b| ok && letter(b, c));
+    let (plain, close) = (key.modifiers.is_empty(), Some(buttons.len() - 1));
     match key.code {
       KeyCode::Left | KeyCode::BackTab => popup.selected = selected.saturating_sub(1),
       KeyCode::Right | KeyCode::Tab => popup.selected = (selected + 1).min(buttons.len() - 1),
       KeyCode::Enter => self.press(Some(selected)),
-      KeyCode::Esc => self.press(Some(buttons.len() - 1)),
-      KeyCode::Char(c) if key.modifiers.is_empty() => self.press(shortcut(c)),
+      KeyCode::Esc => self.press(close),
+      KeyCode::Char('q') if plain => self.press(close),
+      KeyCode::Char(c) if plain => self.press(shortcut(c)),
       _ => {}
     }
   }
@@ -182,13 +187,19 @@ impl Kill {
     let y = inner.y + rows + 2 * gap;
     let mut x = inner.x + inner.width.saturating_sub(cells(row)) / 2;
     popup.rects.clear();
-    for (i, &(label, _)) in buttons.iter().enumerate() {
-      let underline = if ok { Modifier::UNDERLINED } else { Modifier::empty() };
-      let first = Span::styled(&label[..1], Style::new().fg(theme::TEXT).add_modifier(underline));
-      let line = Line::from(vec![text("[ "), first, text(&label[1..]), text(" ]")]);
+    for (i, &(label, sig)) in buttons.iter().enumerate() {
+      // selected: plain text in the reversed bar; others: dim brackets around a faint label, its
+      // first letter a key when it is a shortcut (a button with a signal)
+      let line = match (i == popup.selected, sig) {
+        (true, _) => Line::from(text(format!("[ {label} ]"))).style(theme::SELECTED),
+        (false, Some(_)) => {
+          let (first, rest) = label.split_at(1);
+          Line::from(vec![dim("[ "), theme::key(first), faint(rest), dim(" ]")])
+        }
+        (false, None) => Line::from(vec![dim("[ "), faint(label), dim(" ]")]),
+      };
       let rect = Rect::new(x, y, cells(label.len() + 4), 1).intersection(inner);
-      let style = if i == popup.selected { theme::SELECTED } else { Style::new() };
-      f.render_widget(line.style(style), rect);
+      f.render_widget(line, rect);
       popup.rects.push(rect);
       x = x.saturating_add(cells(label.len() + 7));
     }
@@ -338,15 +349,19 @@ pub(super) mod tests {
       (vec![code(Right), code(Left), code(Enter)], None, term.clone()),
       // a shortcut presses its button whatever is selected
       (vec![code(Right), code(Right), key('t')], None, term),
-      // no wrap around, Cancel and Esc only close
+      // no wrap around, Cancel, Esc and `q` only close
       (vec![code(Right); 4], Some(2), vec![]),
       (vec![code(Left), code(BackTab)], Some(0), vec![]),
       (vec![code(Right), code(Right), code(Enter)], None, vec![]),
       (vec![code(Right), code(Esc)], None, vec![]),
-      (vec![key('c')], None, vec![]),
-      // other keys and the shortcuts with a modifier do nothing
-      (vec![key('q'), key('y'), key('k'), key('n'), key('T'), code(Down)], Some(0), vec![]),
+      (vec![key('q')], None, vec![]),
+      (vec![code(Right), key('q')], None, vec![]),
+      // other keys (Cancel has no letter) and the shortcuts with a modifier do nothing
+      (vec![key('c'), key('C'), key('Q')], Some(0), vec![]),
+      (vec![code(Right), code(Right), key('c')], Some(2), vec![]),
+      (vec![key('y'), key('k'), key('n'), key('T'), code(Down)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::CONTROL), chord('f', KeyModifiers::ALT)], Some(0), vec![]),
+      (vec![chord('q', KeyModifiers::CONTROL)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::SUPER)], Some(0), vec![]),
     ];
     for (keys, selected, sent) in cases {
@@ -361,23 +376,24 @@ pub(super) mod tests {
   #[test]
   fn a_signal_that_fails_shows_why_over_ok() {
     let failing = Some((Some(631), Some(libc::EINVAL)));
-    // 631 at the key (`None`: exited), the key, the error shown, the signals sent
+    let (esc, q) = (code(KeyCode::Esc), key('q'));
+    // 631 at the key (`None`: exited), the key, the error shown, the signals sent, the key closing
     let cases = [
-      (None, key('t'), "Already exited", vec![]),
-      (Some((Some(2000), None)), key('t'), "Already exited", vec![]),
-      (Some((None, None)), key('f'), "Already exited", vec![]),
-      (failing, code(KeyCode::Enter), "Invalid argument", vec![(631, libc::SIGTERM)]),
+      (None, key('t'), "Already exited", vec![], esc),
+      (Some((Some(2000), None)), key('t'), "Already exited", vec![], q),
+      (Some((None, None)), key('f'), "Already exited", vec![], esc),
+      (failing, code(KeyCode::Enter), "Invalid argument", vec![(631, libc::SIGTERM)], q),
     ];
-    for (proc, press, error, sent) in cases {
+    for (proc, press, error, sent, close) in cases {
       let (mut kill, fake) = FakeSys::kill(&[631]);
       kill.open(&window_server(631));
       fake.set(631, proc);
-      // OK selected, the keys of the other buttons do nothing, Esc closes
+      // OK selected, the keys of the other buttons do nothing, Esc and `q` close
       for key in [press, key('t'), key('f'), key('c'), code(KeyCode::Right)] {
         kill.handle_key(key);
         assert_eq!(shown(&kill), Some((Err(error.into()), 0)), "{error}");
       }
-      kill.handle_key(code(KeyCode::Esc));
+      kill.handle_key(close);
       assert_eq!((shown(&kill), fake.calls()), (None, [vec![(631, 0)], sent].concat()), "{error}");
     }
   }
@@ -455,12 +471,26 @@ pub(super) mod tests {
     let buf = render(&mut kill, 60, 8);
     let shown = rows(&buf);
     assert_eq!(shown, popup);
-    // the selected button reversed, the letters of the shortcuts underlined, the path dim
-    let style = |text| buf[find(&shown, text)].modifier;
-    let (none, reversed, underlined) =
-      (Modifier::empty(), Modifier::REVERSED, Modifier::UNDERLINED);
-    assert_eq!((style("[ Terminate"), style("Terminate")), (reversed, reversed | underlined));
-    assert_eq!((style("[ Force"), style("Force"), style("Cancel")), (none, underlined, underlined));
+    // the selected button reversed plain text; the others with dim brackets, the letter of their
+    // shortcut a key and the rest faint, Cancel (no shortcut) all faint; the path dim
+    let style = |text| {
+      let cell = &buf[find(&shown, text)];
+      (cell.fg, cell.modifier)
+    };
+    let selected = (theme::TEXT, Modifier::REVERSED);
+    let (bracket, key, label) = (
+      (theme::DIM, Modifier::empty()),
+      (theme::KEY, Modifier::empty()),
+      (theme::TEXT, Modifier::DIM),
+    );
+    let terminate = ["[ Terminate", "Terminate", "erminate", "e ]", "]   [ Force"];
+    assert_eq!(terminate.map(style), [selected; 5]);
+    assert_eq!(
+      ["[ Force", "Force", "orce", "l ]", "]   [ Cancel", "Cancel", "ancel", "el ]"].map(style),
+      [bracket, key, label, label, bracket, label, label, label]
+    );
+    let (x, y) = find(&shown, "[ Cancel ]");
+    assert!((x..x + 10).all(|x| buf[(x, y)].fg != theme::KEY), "a key in Cancel");
     assert_eq!(buf[find(&shown, "…tents")].fg, theme::DIM);
 
     // the name cut before `?`, without the blank rows when low
@@ -484,7 +514,13 @@ pub(super) mod tests {
       "│                                                        │",
       "╰────────────────────────────────────────────────────────╯",
     ];
-    assert_eq!(rows(&render(&mut kill, 58, 8)), error);
+    let buf = render(&mut kill, 58, 8);
+    let shown = rows(&buf);
+    assert_eq!(shown, error);
+    for text in ["[ OK", "OK", "K ]"] {
+      let cell = &buf[find(&shown, text)];
+      assert_eq!((cell.fg, cell.modifier), selected, "{text}");
+    }
   }
 
   /// A child of the test, killed and reaped when the test ends, however it ends.

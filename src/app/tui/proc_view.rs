@@ -703,10 +703,10 @@ impl ProcView {
   }
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// `/ filter`, or the filter once there is one or it is being typed, then `s sort` (not while
-  /// typing: `s` is text then). A filter too long for the border shows its end (`/…ari█`) and
-  /// leaves out the sort hint; with no room for that next to the count, the filter takes the
-  /// count's place.
+  /// `/ filter`, or the filter once there is one or it is being typed, then `sort`, and `kill`
+  /// on the right with a process selected (neither while typing: keys are text then). A filter
+  /// too long for the border shows its end (`/…ari█`) and leaves out the key hints; with no room
+  /// for that next to the count, the filter takes the count's place.
   fn titles(&self, width: u16) -> Titles<'static> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
@@ -718,21 +718,21 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let sort = (!self.typing).then(|| hint("s", "sort"));
-    let with_sort = |titles: Titles<'static>| match sort {
-      Some(sort) => titles.left(sort),
-      None => titles,
+    let with_keys = |titles: Titles<'static>| match self.typing {
+      true => titles,
+      false if self.selected().is_some() => titles.left(hint("s", "sort")).right(hint("k", "kill")),
+      false => titles.left(hint("s", "sort")),
     };
     if !self.typing && self.filter.is_empty() {
-      return with_sort(Titles::new(name).left(hint("/", "filter")));
+      return with_keys(Titles::new(name).left(hint("/", "filter")));
     }
 
     // the filter's text after the count, or alone on the border
     let beside = title_text_room(width, &[Line::from(name.clone())]);
     if beside >= FILTER_MIN_WIDTH {
-      with_sort(Titles::new(name).left(self.filter_title(beside)))
+      with_keys(Titles::new(name).left(self.filter_title(beside)))
     } else {
-      with_sort(Titles::new(self.filter_title(title_text_room(width, &[]))))
+      with_keys(Titles::new(self.filter_title(title_text_room(width, &[]))))
     }
   }
 

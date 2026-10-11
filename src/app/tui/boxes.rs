@@ -15,9 +15,9 @@ use super::App;
 use super::layout::{LayoutPlan, Metric};
 use super::proc_view::{ELLIPSIS, head};
 use super::store::{FreqStore, PowerStore, ratio};
-use super::theme::{self, dim, gradient, heading, text};
+use super::theme::{self, dim, faint, gradient, heading, text};
 use super::widgets::{Gauge, Graph};
-use crate::config::ViewType;
+use crate::config::{RatioMode, TUI_MAX_MS, ViewType};
 
 /// Bytes in a GiB, the unit of the RAM box title.
 const GIB: f64 = (1u64 << 30) as f64;
@@ -174,9 +174,20 @@ pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
 
 // MARK: Bottom border
 
-/// A key hint: the key symbol bold, then what it does (`q quit`).
+/// A key hint: the key in `theme::key`, what it does `theme::faint` around it. A letter key in the
+/// label stays in it (the first match: `quit`), any other key comes before it (`/ filter`, `Enter
+/// keep`); with an empty label only the key shows (`?`).
 pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'static>> {
-  vec![heading(key), text(format!(" {}", label.into()))]
+  let label = label.into();
+  let letter = key.as_bytes().first().filter(|c| key.len() == 1 && c.is_ascii_alphabetic());
+  if let Some(i) = letter.and_then(|c| label.bytes().position(|b| b.eq_ignore_ascii_case(c))) {
+    let (head, tail) = (label[..i].to_string(), label[i + 1..].to_string());
+    return vec![faint(head), theme::key(label[i..=i].to_string()), faint(tail)];
+  }
+  if label.is_empty() {
+    return vec![theme::key(key)];
+  }
+  vec![theme::key(key), faint(format!(" {label}"))]
 }
 
 /// `items` joined by a dim ` | `.
@@ -238,9 +249,9 @@ fn cut_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
 
 /// Draws `hints` (right-aligned) and a text (left) over the bottom border of box `area`. Like
 /// titles, they keep a border cell next to the corners and between each other. The hints come
-/// first and drop from the end when the border is too short, so `q quit` stays as long as it
-/// fits. The text gets the cells left: `text` makes it for that many cells (without its blank
-/// cells), and it is cut with `…` when longer, or left out with fewer than `BORDER_TEXT_MIN`.
+/// first and drop from the end when the border is too short, so `quit` stays as long as it fits.
+/// The text gets the cells left: `text` makes it for that many cells (without its blank cells), and
+/// it is cut with `…` when longer, or left out with fewer than `BORDER_TEXT_MIN`.
 pub(super) fn render_bottom_border(
   f: &mut Frame,
   area: Rect,
@@ -295,24 +306,25 @@ impl App {
     Span::styled(format!("{:.decimals$}%", load * 100.0), gradient(load))
   }
 
-  /// Key hints for the bottom border of the lowest box, keys bold, labels plain: the global keys
-  /// in the order of the original UI with the state of the toggles (`q quit | ? help | p procs |
-  /// v graph | r scaled | -/+ 1000ms`; no `p procs` while the window is too small for the process
-  /// list), or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`).
+  /// Key hints for the bottom border of the lowest box (see `hint`): the global keys, help first as
+  /// a lone `?` (hints drop from the end), with the ratio mode and the interval (`? | quit | procs
+  /// | view | freq | -/+  1000ms`; no `procs` while the window is too small for the process list),
+  /// or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`). The mode
+  /// and the interval are padded to their widest value, so a toggle doesn't move the hints left of
+  /// them.
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
     if self.proc_view.typing() {
       return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
     }
 
-    let mut hints = vec![hint("q", "quit"), hint("?", "help")];
+    let mut hints = vec![hint("?", ""), hint("q", "quit")];
     if self.procs_fit {
       hints.push(hint("p", "procs"));
     }
-    hints.extend([
-      hint("v", self.cfg.view_type.label()),
-      hint("r", self.cfg.ratio_mode.label()),
-      hint("-/+", format!("{}ms", self.cfg.interval())),
-    ]);
+    let modes = [RatioMode::Scaled, RatioMode::Active].map(|mode| mode.label().len());
+    let mode = format!("{:1$}", self.cfg.ratio_mode.label(), modes.into_iter().max().unwrap_or(0));
+    let interval = format!("{:>1$}ms", self.cfg.interval(), TUI_MAX_MS.to_string().len());
+    hints.extend([hint("v", "view"), hint("r", mode), hint("-/+", interval)]);
     hints
   }
 
@@ -486,10 +498,11 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
   use ratatui::layout::Rect;
-  use ratatui::style::Style;
+  use ratatui::style::{Color, Modifier, Style};
+  use ratatui::text::Span;
 
   use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
-  use crate::tui::theme::{dim, text};
+  use crate::tui::theme::{self, dim, text};
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
   fn border_with(titles: Titles, width: u16) -> String {
@@ -540,27 +553,72 @@ mod tests {
     }
   }
 
+  /// `spans` as text with the keys (`theme::KEY`, no modifier) in brackets and the faint text
+  /// (default color, `Modifier::DIM`) plain; any other style panics.
+  fn marked(spans: &[Span]) -> String {
+    let mark = |span: &Span| match (span.style.fg, span.style.add_modifier) {
+      (Some(theme::KEY), modifier) if modifier.is_empty() => format!("[{}]", span.content),
+      (Some(theme::TEXT), Modifier::DIM) => span.content.to_string(),
+      style => panic!("{:?} in {style:?}", span.content),
+    };
+    spans.iter().map(mark).collect()
+  }
+
+  #[test]
+  fn hint_marks_the_key_in_the_label_or_before_it() {
+    let hints = [
+      (hint("q", "quit"), "[q]uit"),
+      (hint("k", "Kill"), "[K]ill"),
+      (hint("s", "sessions"), "[s]essions"),
+      (hint("v", "graph"), "[v] graph"),
+      (hint("r", "freq"), "f[r]eq"),
+      (hint("?", "help"), "[?] help"),
+      (hint("Enter", "keep"), "[Enter] keep"),
+      (hint("-/+", "1000ms"), "[-/+] 1000ms"),
+      // an empty label: only the key, no blank after it
+      (hint("?", ""), "[?]"),
+    ];
+    for (spans, text) in hints {
+      assert_eq!(marked(&spans), text);
+    }
+    assert_eq!(hint("?", "").len(), 1);
+  }
+
   #[test]
   fn bottom_border_hints_come_first_then_the_text() {
-    let border = |width| {
-      let hints = vec![hint("q", "quit"), hint("?", "help")];
+    let draw = |width| {
+      let hints = vec![hint("?", "help"), hint("q", "quit")];
       let power = |_: usize| vec![text("Power 6.60W"), dim(" (6.60, 6.60)")];
       let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
-      let frame = term.draw(|f| render_bottom_border(f, f.area(), hints, power)).unwrap();
-      (0..width).map(|x| frame.buffer[(x, 0)].symbol()).collect::<String>().replace(' ', "_")
+      term.draw(|f| render_bottom_border(f, f.area(), hints, power)).unwrap().buffer.clone()
+    };
+    let border = |width| {
+      let buf = draw(width);
+      (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>().replace(' ', "_")
     };
     let blank = |cells: usize| "_".repeat(cells);
-    let help = "_q_quit_|_?_help_";
+    let help = "_?_help_|_quit_";
 
     // the hints right-aligned, the text left, a border cell next to the corners
-    assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(13)));
+    assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(15)));
+    // the keys cyan, the labels faint in the default color, the separators dim, nothing bold or
+    // underlined
+    let buf = draw(60);
+    let at = |x: u16| (buf[(x, 0)].fg, buf[(x, 0)].modifier);
+    let cells_with = |style| (43..58).filter(|&x| at(x) == style).collect::<Vec<_>>();
+    assert_eq!(cells_with((theme::KEY, Modifier::empty())), [44, 53]);
+    assert_eq!(cells_with((theme::TEXT, Modifier::DIM)), [45, 46, 47, 48, 49, 54, 55, 56]);
+    assert_eq!(cells_with((theme::DIM, Modifier::empty())), [50, 51, 52]);
+    assert_eq!(theme::DIM, Color::DarkGray);
+    assert!(buf.content.iter().all(|cell| Modifier::DIM.contains(cell.modifier)));
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
-    assert_eq!(border(40), format!("___Power_6.60W_(6.…__{help}__"));
-    assert_eq!(border(32), format!("___Power_6…__{help}__"));
-    assert_eq!(border(31), format!("{}{help}__", blank(12)));
-    // hints drop from the end, `q quit` stays as long as it fits
-    assert_eq!(border(20), format!("{}_q_quit___", blank(10)));
-    assert_eq!(border(12), "___q_quit___");
+    assert_eq!(border(40), format!("___Power_6.60W_(6.60…__{help}__"));
+    assert_eq!(border(30), format!("___Power_6…__{help}__"));
+    assert_eq!(border(29), format!("{}{help}__", blank(12)));
+    // hints drop from the end, the first one stays as long as it fits
+    assert_eq!(border(19), format!("__{help}__"));
+    assert_eq!(border(18), format!("{}_?_help___", blank(8)));
+    assert_eq!(border(12), "___?_help___");
     assert_eq!(border(11), blank(11));
   }
 }
