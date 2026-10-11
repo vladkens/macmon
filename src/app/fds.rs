@@ -236,7 +236,7 @@ mod tests {
   use std::fs::{self, File};
   use std::net::{TcpListener, TcpStream, UdpSocket};
   use std::os::fd::AsRawFd;
-  use std::os::unix::net::UnixListener;
+  use std::os::unix::net::{UnixListener, UnixStream};
 
   use super::*;
 
@@ -317,9 +317,12 @@ mod tests {
     let path = std::env::temp_dir().join(format!("macmon-fds-{}.sock", std::process::id()));
     let _ = fs::remove_file(&path);
     let unix = UnixListener::bind(&path).unwrap();
-    let listed = entry(&unix);
+    // an unbound client shows its peer's path
+    let peer = UnixStream::connect(&path).unwrap();
+    let listed = [entry(&unix), entry(&peer)];
     fs::remove_file(&path).unwrap();
-    assert_eq!(listed, (Kind::Unix, path.to_string_lossy().into_owned()));
+    let path = path.to_string_lossy().into_owned();
+    assert_eq!(listed, [(Kind::Unix, path.clone()), (Kind::Unix, path)]);
   }
 
   #[test]

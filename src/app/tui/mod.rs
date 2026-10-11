@@ -368,8 +368,7 @@ impl App {
 
   /// Stores a process sample started in the panel's `showing`. Only one of the current showing
   /// gets in: one still in flight when the panel got hidden is dropped, also when the panel is
-  /// back by now, so a re-shown panel reads "collecting…" until its own first sample. The info
-  /// overlay reads its files again with it.
+  /// back by now, so a re-shown panel reads "collecting…" until its own first sample.
   fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
@@ -450,6 +449,7 @@ impl App {
       // change a setting without a change on screen
       KeyCode::Char('p') if self.procs_fit => self.cfg.toggle_procs(),
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
+      // the last `Char` arm: it takes every character left while the list is on screen
       KeyCode::Char(c) if self.procs_visible() => match (c, self.proc_view.selected()) {
         ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
         ('k', Some(proc)) => self.kill.open(proc),
@@ -1517,6 +1517,8 @@ mod tests {
     for c in ['q', 'k', 'i', 'p', 's', 'v'] {
       assert!(app.handle_key(key(c)).is_continue(), "{c}");
     }
+    assert!(app.handle_key(key('?')).is_continue());
+    assert!(app.help.is_none(), "help doesn't open over it");
     assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));

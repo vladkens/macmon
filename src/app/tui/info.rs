@@ -1,5 +1,4 @@
-//! Open files and sockets of the selected process (`i`) in an overlay over the process list; `o`
-//! shows the selected file in Finder.
+//! The info overlay (`i`): open files and sockets of the selected process; `o` reveals one.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
@@ -8,7 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Clear;
 
 use super::boxes::{draw_box, hint, render_bottom_border};
-use super::kill::{KillSys, failure};
+use super::kill::{ProcSys, failure};
 use super::proc_view::{
   Filter, cut_middle, cut_start, filter_titles, scroll_offset, step, type_filter,
 };
@@ -16,8 +15,7 @@ use super::theme::{self, dim, heading, text};
 use crate::fds::{Kind, OpenFile};
 use crate::procs::ProcInfo;
 
-/// The info overlay (`i`) of one process: its files or why they can't be read, the filter and the
-/// selection. It goes through the system calls of the kill popup.
+/// The info overlay of one process: its files (or why they can't be read), filter and selection.
 #[derive(Debug)]
 pub(super) struct Info {
   proc: ProcInfo,
@@ -34,7 +32,7 @@ pub(super) struct Info {
 
 impl Info {
   /// The overlay of `proc`, its first row selected.
-  pub(super) fn new(proc: &ProcInfo, sys: &dyn KillSys) -> Self {
+  pub(super) fn new(proc: &ProcInfo, sys: &dyn ProcSys) -> Self {
     let (proc, files, filter) = (proc.clone(), Ok(vec![]), String::new());
     let mut info =
       Self { proc, files, filter, typing: false, index: 0, fd: None, offset: 0, page: 0 };
@@ -44,7 +42,7 @@ impl Info {
 
   /// Reads the files again. A pid reused since the sample (another start time) reads as exited, a
   /// `ps` row (no start time) as not permitted, as kill takes them.
-  pub(super) fn refresh(&mut self, sys: &dyn KillSys) {
+  pub(super) fn refresh(&mut self, sys: &dyn ProcSys) {
     let (pid, started) = (self.proc.pid, self.proc.started);
     let files = sys.open_files(pid).and_then(|files| {
       let started = started.ok_or(libc::EPERM)?;
@@ -80,7 +78,7 @@ impl Info {
   /// A key: navigation ends filter input, the filter keys are those of the process list, `o`
   /// reveals the selected file or the cwd, Esc clears the filter; `false` when Esc closes the
   /// overlay.
-  pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn KillSys) -> bool {
+  pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
     if let Some(index) = step(key.code, self.index, self.page.max(1)) {
       self.typing = false;
       self.select(index);
@@ -94,8 +92,8 @@ impl Info {
       }
       KeyCode::Char('/') => self.typing = true,
       KeyCode::Char('o') => {
-        let file = self.rows().get(self.index).copied();
-        if let Some(file) = file.filter(|f| matches!(f.kind, Kind::File | Kind::Cwd)) {
+        let path = |f: &&OpenFile| matches!(f.kind, Kind::File | Kind::Cwd) && !f.text.is_empty();
+        if let Some(file) = self.rows().get(self.index).copied().filter(path) {
           sys.reveal(&file.text);
         }
       }
@@ -110,7 +108,7 @@ impl Info {
   }
 
   /// The wheel moves the selection as ↑ / ↓ do; other mouse events do nothing.
-  pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, sys: &dyn KillSys) {
+  pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, sys: &dyn ProcSys) {
     let up = mouse.kind == MouseEventKind::ScrollUp;
     if up || mouse.kind == MouseEventKind::ScrollDown {
       self.handle_key(KeyEvent::from(if up { KeyCode::Up } else { KeyCode::Down }), sys);
@@ -165,7 +163,7 @@ mod tests {
   use crate::fds::{Kind, OpenFile};
   use crate::procs::{self, ProcInfo};
   use crate::tui::kill::tests::FakeSys;
-  use crate::tui::kill::{KillSys, LibcSys};
+  use crate::tui::kill::{LibcSys, ProcSys};
   use crate::tui::theme;
 
   /// A file open on `fd` (negative: the cwd).
@@ -324,9 +322,12 @@ mod tests {
 
   #[test]
   fn o_reveals_the_selected_file_or_the_cwd_only() {
-    let (mut info, fake) = info(Ok(files()));
-    // `o` on every row: the cwd and the files, not the sockets, the pipe and the kqueue
-    for _ in 0..files().len() {
+    // a file the kernel gives no path for
+    let mut files = files();
+    files.push(file(10, Kind::File, ""));
+    let (mut info, fake) = info(Ok(files.clone()));
+    // `o` on every row: the cwd and the files with a path, not the sockets, the pipe and the kqueue
+    for _ in 0..files.len() {
       assert!(press(&mut info, &fake, KeyCode::Char('o')));
       assert!(press(&mut info, &fake, KeyCode::Down));
     }

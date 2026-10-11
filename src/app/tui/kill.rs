@@ -2,7 +2,8 @@
 //! Cancel. Only the sampled process gets a signal: a `ps` row (no sampled start time) gets none,
 //! and the start time is read again right before `kill()`; macOS has no identity-bound kill.
 
-use std::{fmt, io, process};
+use std::process::{self, Command, Stdio};
+use std::{fmt, io};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -25,13 +26,14 @@ const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
 const OK: [Button; 1] = [("OK", None)];
 
-/// System calls of `Kill` and `Info`, so tests can use a fake.
-pub(super) trait KillSys: fmt::Debug {
+/// System calls of the process actions (kill, info, reveal), so tests can use a fake.
+pub(super) trait ProcSys: fmt::Debug {
   /// `kill(pid, sig)`; the errno when it fails.
   fn signal(&self, pid: i32, sig: i32) -> Result<(), i32>;
   /// Start time of `pid` (seconds, microseconds), as `ProcInfo::started` has it; `None` when it
   /// is gone, a zombie or not readable for this user.
   fn identity(&self, pid: i32) -> Option<(u64, u64)>;
+  /// The working directory and open descriptors of `pid`; the errno when it can't be read.
   fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32>;
   /// `open -R path`: shows it in Finder.
   fn reveal(&self, path: &str);
@@ -41,7 +43,7 @@ pub(super) trait KillSys: fmt::Debug {
 #[derive(Debug)]
 pub(super) struct LibcSys;
 
-impl KillSys for LibcSys {
+impl ProcSys for LibcSys {
   fn signal(&self, pid: i32, sig: i32) -> Result<(), i32> {
     let failed = unsafe { libc::kill(pid, sig) } != 0;
     if failed { Err(io::Error::last_os_error().raw_os_error().unwrap_or(0)) } else { Ok(()) }
@@ -58,8 +60,8 @@ impl KillSys for LibcSys {
 
   /// Spawned with null stdio and reaped on a thread, so the UI never waits and no zombie stays.
   fn reveal(&self, path: &str) {
-    let (mut open, null) = (process::Command::new("/usr/bin/open"), process::Stdio::null);
-    open.args(["-R", path]).stdin(null()).stdout(null()).stderr(null());
+    let mut open = Command::new("/usr/bin/open");
+    open.args(["-R", path]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Ok(mut child) = open.spawn() {
       std::thread::spawn(move || child.wait());
     }
@@ -88,8 +90,8 @@ struct Popup {
 /// The kill popup (`k`) with the system calls it goes through.
 #[derive(Debug)]
 pub(super) struct Kill {
-  /// The info overlay goes through them too.
-  pub(super) sys: Box<dyn KillSys>,
+  /// Shared with the info overlay and `o`, which `App` hands them to.
+  pub(super) sys: Box<dyn ProcSys>,
   popup: Option<Popup>,
 }
 
@@ -240,7 +242,7 @@ pub(super) mod tests {
   };
   use ratatui::style::Modifier;
 
-  use super::{Kill, KillSys, LibcSys, theme};
+  use super::{Kill, LibcSys, ProcSys, theme};
   use crate::fds::OpenFile;
   use crate::procs::{self, ProcInfo};
 
@@ -287,7 +289,7 @@ pub(super) mod tests {
     }
   }
 
-  impl KillSys for FakeSys {
+  impl ProcSys for FakeSys {
     fn signal(&self, pid: i32, sig: i32) -> Result<(), i32> {
       let state = &mut *self.0.borrow_mut();
       state.calls.push((pid, sig));

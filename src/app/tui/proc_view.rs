@@ -404,9 +404,11 @@ pub(super) fn cut_start(text: &str, max: usize) -> String {
 /// `text` cut to `max` cells in the middle with `…`, keeping its start and the file name (from the
 /// last `/`); from the start when even the name doesn't fit.
 pub(super) fn cut_middle(text: &str, max: usize) -> String {
+  if Span::raw(text).width() <= max {
+    return text.to_string();
+  }
   let name = &text[text.rfind('/').unwrap_or(0)..];
   match max.saturating_sub(Span::raw(name).width() + 1) {
-    _ if Span::raw(text).width() <= max => text.to_string(),
     0 => cut_start(text, max),
     room => format!("{}{ELLIPSIS}{name}", head(text, room)),
   }
