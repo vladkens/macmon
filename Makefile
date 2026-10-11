@@ -4,17 +4,18 @@ CARGO_FLAGS := --release --locked
 
 prepare:
 	cargo +nightly fmt
-	cargo clippy $(CARGO_FLAGS) --fix --all-targets --allow-dirty -- -D warnings
+	cargo clippy $(CARGO_FLAGS) --fix --all-targets --allow-dirty --features capi -- -D warnings
 	cargo check $(CARGO_FLAGS)
 
 check:
 	cargo +nightly fmt --check
-	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
+	cargo clippy $(CARGO_FLAGS) --all-targets --features capi -- -D warnings
 	cargo check $(CARGO_FLAGS) --bin macmon
 	cargo check $(CARGO_FLAGS) --lib --no-default-features
+	cargo check $(CARGO_FLAGS) --lib --no-default-features --features capi
 
 test:
-	cargo test $(CARGO_FLAGS)
+	cargo test $(CARGO_FLAGS) --features capi
 
 build:
 	cargo build $(CARGO_FLAGS)

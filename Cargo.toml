@@ -31,6 +31,8 @@ app = [
   "dep:ratatui",
   "dep:serde-inline-default",
 ]
+# C API (include/macmon.h), built as a dylib with `--profile capi`
+capi = []
 
 [lints.rust]
 non_camel_case_types = "allow"
@@ -46,6 +48,11 @@ single_match = "allow"
 panic = "abort"
 strip = false
 lto = false
+
+# the C library returns MACMON_STATUS_PANIC instead of aborting the host app
+[profile.capi]
+inherits = "release"
+panic = "unwind"
 
 [dependencies]
 chrono = { version = "0.4.45", optional = true }
