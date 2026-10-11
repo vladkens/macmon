@@ -10,7 +10,6 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod config;
-#[cfg_attr(not(test), expect(dead_code))]
 mod fds;
 mod find_clpc;
 mod procs;

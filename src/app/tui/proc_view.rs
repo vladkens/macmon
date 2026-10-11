@@ -13,7 +13,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::boxes::{Titles, draw_box, hint, render_bottom_border, title_text_room};
+use super::boxes::{Titles, draw_box, hint, join, render_bottom_border, title_text_room};
 use super::store::ratio;
 use super::theme::{self, dim, gradient, heading, text};
 use crate::config::{Config, ProcSort};
@@ -215,17 +215,17 @@ fn sort_groups(groups: &mut [Group], sort: ProcSort, desc: bool) {
   });
 }
 
-/// Filter text split into terms: `safari, cargo, !helper` keeps processes matching any term and
-/// none of the `!` ones. Each term is a case-insensitive substring of the name or pid; empty
-/// terms are ignored, so a filter still being typed (`safari,`) keeps its rows.
+/// Filter text split into terms: `safari, cargo, !helper` keeps rows matching any term and none of
+/// the `!` ones. Each term is lowercase (a process matches it in its name or pid); empty terms are
+/// ignored, so a filter still being typed (`safari,`) keeps its rows.
 #[derive(Debug, Default)]
-struct Filter {
+pub(super) struct Filter {
   any: Vec<String>,
   none: Vec<String>,
 }
 
 impl Filter {
-  fn parse(text: &str) -> Self {
+  pub(super) fn parse(text: &str) -> Self {
     let mut filter = Self::default();
     for term in text.split(',').map(|t| t.trim().to_lowercase()) {
       match term.strip_prefix('!').map(str::trim) {
@@ -238,8 +238,9 @@ impl Filter {
     filter
   }
 
-  fn matches(&self, proc: &ProcInfo) -> bool {
-    let hit = |term: &String| hit(proc, term);
+  /// Whether a row passes, `hit` telling whether a term is in it.
+  pub(super) fn matches(&self, hit: impl Fn(&str) -> bool) -> bool {
+    let hit = |term: &String| hit(term);
     (self.any.is_empty() || self.any.iter().any(hit)) && !self.none.iter().any(hit)
   }
 }
@@ -289,12 +290,92 @@ fn delete_word(text: &mut String) {
   text.truncate(kept);
 }
 
-/// First visible row so that row `selected` is on screen, moving as little as possible from
-/// `offset`.
-fn scroll_offset(offset: usize, selected: Option<usize>, height: usize, len: usize) -> usize {
-  let offset = match selected {
-    Some(selected) if selected < offset => selected,
-    Some(selected) if selected >= offset + height => (selected + 1).saturating_sub(height),
+/// Filter input on `filter`: characters and Backspace edit, Ctrl-W / Alt-Backspace delete the last
+/// word, Ctrl-U (what Ghostty sends for Cmd-Backspace) and Cmd-Backspace delete the whole text,
+/// Enter keeps the filter, Esc clears it; both end the input. Returns whether the filter changed.
+pub(super) fn type_filter(filter: &mut String, typing: &mut bool, key: KeyEvent) -> bool {
+  let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+  let alt = key.modifiers.contains(KeyModifiers::ALT);
+  let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+  match key.code {
+    KeyCode::Char('u') if ctrl => filter.clear(),
+    KeyCode::Backspace if cmd => filter.clear(),
+    KeyCode::Char('w') if ctrl => delete_word(filter),
+    KeyCode::Backspace if alt => delete_word(filter),
+    KeyCode::Char(c) if !(ctrl || alt || cmd) => filter.push(c),
+    KeyCode::Backspace => {
+      filter.pop();
+    }
+    KeyCode::Enter => {
+      *typing = false;
+      return false;
+    }
+    KeyCode::Esc => {
+      *typing = false;
+      filter.clear();
+    }
+    _ => return false,
+  }
+  true
+}
+
+/// `name`, then `/ filter`, or the filter once there is one or it is being typed. A filter too
+/// long for the border shows its end (`/…ari█`); with no room for that next to `name`, the filter
+/// takes its place.
+pub(super) fn filter_titles(
+  name: Vec<Span<'static>>,
+  filter: &str,
+  typing: bool,
+  width: u16,
+) -> Titles<'static> {
+  if !typing && filter.is_empty() {
+    return Titles::new(name).left(hint("/", "filter"));
+  }
+  let beside = title_text_room(width, &[Line::from(name.clone())]);
+  if beside >= FILTER_MIN_WIDTH {
+    Titles::new(name).left(filter_title(filter, typing, beside))
+  } else {
+    Titles::new(filter_title(filter, typing, title_text_room(width, &[])))
+  }
+}
+
+/// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
+fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'static>> {
+  // `/` and the cursor (one cell each) around the filter text
+  let text_room = usize::from(room).saturating_sub(1 + usize::from(typing));
+
+  let mut spans = vec![heading("/")];
+  if Span::raw(filter).width() <= text_room {
+    spans.push(text(filter.to_string()));
+  } else {
+    spans.push(dim(ELLIPSIS));
+    spans.push(text(tail(filter, text_room.saturating_sub(1)).to_string()));
+  }
+  if typing {
+    spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
+  }
+  spans
+}
+
+/// The row a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from row `at`,
+/// not clamped, with `page` rows on screen; `None` for other keys.
+pub(super) fn step(code: KeyCode, at: usize, page: usize) -> Option<usize> {
+  Some(match code {
+    KeyCode::Home => 0,
+    KeyCode::End => usize::MAX,
+    KeyCode::Up => at.saturating_sub(1),
+    KeyCode::Down => at + 1,
+    KeyCode::PageUp => at.saturating_sub(page),
+    KeyCode::PageDown => at + page,
+    _ => return None,
+  })
+}
+
+/// First visible row so that row `at` is on screen, moving as little as possible from `offset`.
+pub(super) fn scroll_offset(offset: usize, at: Option<usize>, height: usize, len: usize) -> usize {
+  let offset = match at {
+    Some(at) if at < offset => at,
+    Some(at) if at >= offset + height => (at + 1).saturating_sub(height),
     _ => offset,
   };
 
@@ -317,6 +398,17 @@ pub(super) fn cut_start(text: &str, max: usize) -> String {
     _ if Span::raw(text).width() <= max => text.to_string(),
     0 => String::new(),
     _ => format!("{ELLIPSIS}{}", tail(text, max - 1)),
+  }
+}
+
+/// `text` cut to `max` cells in the middle with `…`, keeping its start and the file name (from the
+/// last `/`); from the start when even the name doesn't fit.
+pub(super) fn cut_middle(text: &str, max: usize) -> String {
+  let name = &text[text.rfind('/').unwrap_or(0)..];
+  match max.saturating_sub(Span::raw(name).width() + 1) {
+    _ if Span::raw(text).width() <= max => text.to_string(),
+    0 => cut_start(text, max),
+    room => format!("{}{ELLIPSIS}{name}", head(text, room)),
   }
 }
 
@@ -493,7 +585,7 @@ impl ProcView {
     sort_procs(procs, self.sort, self.sort_desc);
 
     let filter = Filter::parse(&self.filter);
-    self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
+    self.rows = (0..procs.len()).filter(|&i| filter.matches(|t| hit(&procs[i], t))).collect();
     let groups =
       filter.any.iter().map(|term| Group::sum(term, self.rows().filter(|p| hit(p, term))));
     self.groups = groups.collect();
@@ -549,15 +641,7 @@ impl ProcView {
       return true;
     };
 
-    let index = match code {
-      KeyCode::Home => 0,
-      KeyCode::End => usize::MAX,
-      KeyCode::Up => selected.saturating_sub(1),
-      KeyCode::Down => selected + 1,
-      KeyCode::PageUp => selected.saturating_sub(page),
-      KeyCode::PageDown => selected + page,
-      _ => return false,
-    };
+    let Some(index) = step(code, selected, page) else { return false };
 
     if let Some(last) = self.rows.len().checked_sub(1) {
       self.select(index.min(last));
@@ -575,7 +659,11 @@ impl ProcView {
     }
 
     match key.code {
-      _ if self.typing => self.type_key(key),
+      _ if self.typing => {
+        if type_filter(&mut self.filter, &mut self.typing, key) {
+          self.refresh();
+        }
+      }
       KeyCode::Char('/') => self.typing = true,
       KeyCode::Char('S') => self.reverse_sort(),
       KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => self.reverse_sort(),
@@ -666,48 +754,10 @@ impl ProcView {
     self.select(index);
   }
 
-  /// Filter input: characters and Backspace edit, Ctrl-W / Alt-Backspace delete the last word,
-  /// Ctrl-U (what Ghostty sends for Cmd-Backspace) and Cmd-Backspace delete the whole text,
-  /// Enter keeps the filter, Esc clears it and ends the input.
-  fn type_key(&mut self, key: KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let cmd = key.modifiers.contains(KeyModifiers::SUPER);
-    match key.code {
-      KeyCode::Char('u') if ctrl => self.filter.clear(),
-      KeyCode::Backspace if cmd => self.filter.clear(),
-      KeyCode::Char('w') if ctrl => delete_word(&mut self.filter),
-      KeyCode::Backspace if alt => delete_word(&mut self.filter),
-      KeyCode::Char(c)
-        if !key
-          .modifiers
-          .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
-      {
-        self.filter.push(c);
-      }
-      KeyCode::Backspace => {
-        self.filter.pop();
-      }
-      KeyCode::Enter => {
-        self.typing = false;
-        return;
-      }
-      KeyCode::Esc => {
-        self.typing = false;
-        self.filter.clear();
-      }
-      _ => return,
-    }
-
-    self.refresh();
-  }
-
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// `/ filter`, or the filter once there is one or it is being typed, then `sort`, and `kill`
-  /// on the right with a process selected (neither while typing: keys are text then). A filter
-  /// too long for the border shows its end (`/…ari█`) and leaves out the key hints; with no room
-  /// for that next to the count, the filter takes the count's place.
-  fn titles(&self, width: u16) -> Titles<'static> {
+  /// the filter as `filter_titles` shows it, then `sort`, and `info | open | kill` on the right
+  /// with a process selected (neither while typing: keys are text then).
+  fn titles(&self, width: u16) -> Titles<'_> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
       let count = if self.filter.is_empty() {
@@ -718,41 +768,13 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let with_keys = |titles: Titles<'static>| match self.typing {
+    let titles = filter_titles(name, &self.filter, self.typing, width);
+    let actions = || join([hint("i", "info"), hint("o", "open"), hint("k", "kill")]);
+    match self.typing {
       true => titles,
-      false if self.selected().is_some() => titles.left(hint("s", "sort")).right(hint("k", "kill")),
+      false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),
       false => titles.left(hint("s", "sort")),
-    };
-    if !self.typing && self.filter.is_empty() {
-      return with_keys(Titles::new(name).left(hint("/", "filter")));
     }
-
-    // the filter's text after the count, or alone on the border
-    let beside = title_text_room(width, &[Line::from(name.clone())]);
-    if beside >= FILTER_MIN_WIDTH {
-      with_keys(Titles::new(name).left(self.filter_title(beside)))
-    } else {
-      with_keys(Titles::new(self.filter_title(title_text_room(width, &[]))))
-    }
-  }
-
-  /// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after
-  /// `…`.
-  fn filter_title(&self, room: u16) -> Vec<Span<'static>> {
-    // `/` and the cursor (one cell each) around the filter text
-    let text_room = usize::from(room).saturating_sub(1 + usize::from(self.typing));
-
-    let mut spans = vec![heading("/")];
-    if Span::raw(&self.filter).width() <= text_room {
-      spans.push(text(self.filter.clone()));
-    } else {
-      spans.push(dim(ELLIPSIS));
-      spans.push(text(tail(&self.filter, text_room.saturating_sub(1)).to_string()));
-    }
-    if self.typing {
-      spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
-    }
-    spans
   }
 
   /// Left side of the bottom border of the process box in `room` cells: the selected process
@@ -955,7 +977,7 @@ mod tests {
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
 
-  use super::{ProcView, column_areas, cut_end, cut_start, fit_columns};
+  use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns};
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
 
@@ -1374,5 +1396,15 @@ mod tests {
     assert_eq!(cut_start("/usr/libexec/foo", 16), "/usr/libexec/foo");
     assert_eq!(cut_start("/usr/libexec/foo", 8), "…xec/foo");
     assert_eq!(cut_start("/usr/libexec/foo", 0), "");
+
+    // the start and the file name; from the start when the name doesn't fit
+    let path = "/Users/vlad/Library/Caches/com.apple.Safari/Cache.db";
+    assert_eq!(cut_middle(path, 52), path);
+    assert_eq!(cut_middle(path, 30), "/Users/vlad/Library/…/Cache.db");
+    assert_eq!(cut_middle(path, 11), "/…/Cache.db");
+    assert_eq!(cut_middle(path, 10), "…/Cache.db");
+    assert_eq!(cut_middle(path, 9), "…Cache.db");
+    assert_eq!(cut_middle("127.0.0.1:8080 (listen)", 10), "… (listen)");
+    assert_eq!(cut_middle(path, 0), "");
   }
 }

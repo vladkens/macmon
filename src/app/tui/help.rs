@@ -31,6 +31,8 @@ const HELP: &[Row] = &[
   Key("/", "filter the processes"),
   Key("s / S", "sort by the next column / reverse"),
   Key("↑ ↓", "select a process"),
+  Key("i", "open files and sockets of the selected process"),
+  Key("o", "show the selected process in Finder"),
   Key("k", "kill the selected process"),
   Key("Esc", "clear the selection and the filter"),
   Key("?", "show / hide this help"),

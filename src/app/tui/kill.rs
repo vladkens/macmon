@@ -13,6 +13,7 @@ use ratatui::widgets::Clear;
 use super::boxes::{Titles, cells, draw_box};
 use super::proc_view::{cut_end, cut_start};
 use super::theme::{self, dim, faint, heading, text};
+use crate::fds::{self, OpenFile};
 use crate::procs::{self, ProcInfo};
 
 /// A button: its label and the signal it sends (none: it closes the popup). The buttons with a
@@ -24,18 +25,21 @@ const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
 const OK: [Button; 1] = [("OK", None)];
 
-/// System calls of `Kill`, so tests can use a fake.
+/// System calls of `Kill` and `Info`, so tests can use a fake.
 pub(super) trait KillSys: fmt::Debug {
   /// `kill(pid, sig)`; the errno when it fails.
   fn signal(&self, pid: i32, sig: i32) -> Result<(), i32>;
   /// Start time of `pid` (seconds, microseconds), as `ProcInfo::started` has it; `None` when it
   /// is gone, a zombie or not readable for this user.
   fn identity(&self, pid: i32) -> Option<(u64, u64)>;
+  fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32>;
+  /// `open -R path`: shows it in Finder.
+  fn reveal(&self, path: &str);
 }
 
 /// The real system calls.
 #[derive(Debug)]
-struct LibcSys;
+pub(super) struct LibcSys;
 
 impl KillSys for LibcSys {
   fn signal(&self, pid: i32, sig: i32) -> Result<(), i32> {
@@ -47,10 +51,23 @@ impl KillSys for LibcSys {
     let info = procs::bsd_info(pid)?;
     (info.pbi_status != libc::SZOMB).then_some((info.pbi_start_tvsec, info.pbi_start_tvusec))
   }
+
+  fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32> {
+    fds::open_files(pid)
+  }
+
+  /// Spawned with null stdio and reaped on a thread, so the UI never waits and no zombie stays.
+  fn reveal(&self, path: &str) {
+    let (mut open, null) = (process::Command::new("/usr/bin/open"), process::Stdio::null);
+    open.args(["-R", path]).stdin(null()).stdout(null()).stderr(null());
+    if let Ok(mut child) = open.spawn() {
+      std::thread::spawn(move || child.wait());
+    }
+  }
 }
 
-/// The popup's text for a failed `kill()`: `Already exited`, `Not permitted`, or the `strerror`.
-fn failure(errno: i32) -> String {
+/// The text for a failed call: `Already exited`, `Not permitted`, or the `strerror`.
+pub(super) fn failure(errno: i32) -> String {
   let text = io::Error::from_raw_os_error(errno).to_string();
   match errno {
     libc::ESRCH => "Already exited".into(),
@@ -71,7 +88,8 @@ struct Popup {
 /// The kill popup (`k`) with the system calls it goes through.
 #[derive(Debug)]
 pub(super) struct Kill {
-  sys: Box<dyn KillSys>,
+  /// The info overlay goes through them too.
+  pub(super) sys: Box<dyn KillSys>,
   popup: Option<Popup>,
 }
 
@@ -223,18 +241,28 @@ pub(super) mod tests {
   use ratatui::style::Modifier;
 
   use super::{Kill, KillSys, LibcSys, theme};
+  use crate::fds::OpenFile;
   use crate::procs::{self, ProcInfo};
 
   /// A fake process: its start second (`None`: unreadable, as a zombie) and the errno of signals.
   type FakeProc = (Option<u64>, Option<i32>);
-  /// The fake processes and `(pid, signal)` of every `signal` call.
-  type FakeState = (HashMap<i32, FakeProc>, Vec<(i32, i32)>);
 
-  /// Fake system calls: only the processes it is given exist, and every `signal` call is logged.
-  /// Clones share all that, so a test keeps one while the app owns another. No test may use the
-  /// real ones (but the one with its own child): the test pids are real pids on the dev machine.
+  /// The fake processes, `(pid, signal)` of every `signal` call, the open files of each pid (none
+  /// listed: `ESRCH`) and the path of every `reveal` call.
+  #[derive(Debug, Default)]
+  pub(crate) struct FakeState {
+    procs: HashMap<i32, FakeProc>,
+    calls: Vec<(i32, i32)>,
+    pub(crate) files: HashMap<i32, Result<Vec<OpenFile>, i32>>,
+    pub(crate) revealed: Vec<String>,
+  }
+
+  /// Fake system calls: only the processes it is given exist, and every `signal` and `reveal` call
+  /// is logged. Clones share all that, so a test keeps one while the app owns another. No test may
+  /// use the real ones (but those on their own processes): the test pids are real pids on the dev
+  /// machine, and a reveal opens Finder.
   #[derive(Debug, Default, Clone)]
-  pub(crate) struct FakeSys(Rc<RefCell<FakeState>>);
+  pub(crate) struct FakeSys(pub(crate) Rc<RefCell<FakeState>>);
 
   impl FakeSys {
     /// `Kill` through a fake with the processes `pids`, each started at the second of its pid.
@@ -246,7 +274,7 @@ pub(super) mod tests {
 
     /// `pid` becomes `proc`, or exits with `None`.
     fn set(&self, pid: i32, proc: Option<FakeProc>) {
-      let procs = &mut self.0.borrow_mut().0;
+      let procs = &mut self.0.borrow_mut().procs;
       match proc {
         Some(proc) => procs.insert(pid, proc),
         None => procs.remove(&pid),
@@ -255,19 +283,27 @@ pub(super) mod tests {
 
     /// `(pid, signal)` of every `signal` call, the checks with signal 0 too.
     pub(crate) fn calls(&self) -> Vec<(i32, i32)> {
-      self.0.borrow().1.clone()
+      self.0.borrow().calls.clone()
     }
   }
 
   impl KillSys for FakeSys {
     fn signal(&self, pid: i32, sig: i32) -> Result<(), i32> {
-      let (procs, calls) = &mut *self.0.borrow_mut();
-      calls.push((pid, sig));
-      procs.get(&pid).map_or(Err(libc::ESRCH), |&(_, errno)| errno.map_or(Ok(()), Err))
+      let state = &mut *self.0.borrow_mut();
+      state.calls.push((pid, sig));
+      state.procs.get(&pid).map_or(Err(libc::ESRCH), |&(_, errno)| errno.map_or(Ok(()), Err))
     }
 
     fn identity(&self, pid: i32) -> Option<(u64, u64)> {
-      Some((self.0.borrow().0.get(&pid)?.0?, 0))
+      Some((self.0.borrow().procs.get(&pid)?.0?, 0))
+    }
+
+    fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32> {
+      self.0.borrow().files.get(&pid).cloned().unwrap_or(Err(libc::ESRCH))
+    }
+
+    fn reveal(&self, path: &str) {
+      self.0.borrow_mut().revealed.push(path.into());
     }
   }
 

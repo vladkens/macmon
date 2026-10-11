@@ -95,16 +95,16 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
 
 ### 2. Info overlay and reveal in Finder
 
-- [ ] Remove the `expect(dead_code)` from task 1. Title actions `info | open | kill`, `o` reveal,
+- [x] Remove the `expect(dead_code)` from task 1. Title actions `info | open | kill`, `o` reveal,
       the info overlay with every behavior above, the footer and help lines, the roadmap ticks.
-- [ ] Tests with the fake: actions on the title only with a selection and not while typing (update
+- [x] Tests with the fake: actions on the title only with a selection and not while typing (update
       `kill_is_on_the_process_title_with_a_selection_while_not_typing` for the longer title); `o`
       reveals the selected process's path and nothing for an empty path; `i` opens the overlay
       with fake rows; navigation and the wheel, the filter and its hints, `o` on a file and on a
       socket, the Esc order, focus loss; refresh keeps the selection on its fd; a reused pid,
       `Not permitted` and `Already exited`; middle cut and the bottom-border path at a narrow
       width; any window size renders without panic.
-- [ ] `make check`, `make test` and `make loc REF=origin/feat/hint-style` (report the delta);
+- [x] `make check`, `make test` and `make loc REF=origin/feat/hint-style` (report the delta);
       commit `feat: process info overlay and reveal in Finder`.
 
 ## Manual check (outside the tasks)

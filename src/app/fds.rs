@@ -101,6 +101,13 @@ pub enum Kind {
   Other,
 }
 
+impl Kind {
+  /// The type column of the info overlay.
+  pub fn label(self) -> &'static str {
+    ["cwd", "file", "tcp", "udp", "unix", "pipe", "kqueue", "other"][self as usize]
+  }
+}
+
 /// The working directory or an open descriptor of a process.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenFile {

@@ -2,6 +2,7 @@
 
 mod boxes;
 mod help;
+mod info;
 mod kill;
 mod layout;
 mod proc_view;
@@ -16,6 +17,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use info::Info;
 use kill::Kill;
 use layout::{LayoutPlan, compute_layout};
 use macmon::{Metrics, Sampler, SocInfo};
@@ -311,6 +313,8 @@ pub struct App {
 
   /// The help overlay (`?`) with its first line on screen, while it is open.
   help: Option<usize>,
+  /// The info overlay (`i`) of the selected process, while it is open.
+  info: Option<Info>,
   /// The kill popup (`k`) for the selected process.
   kill: Kill,
 }
@@ -352,21 +356,24 @@ impl App {
 
   /// Follows the process list visibility (`p` or auto-hidden). A hidden panel drops its
   /// list, so it reads "collecting…" when shown again instead of showing stale rows, and ends
-  /// filter input and closes the kill popup, so keys don't go to something that isn't on screen.
+  /// filter input and closes the overlays, so keys don't go to something that isn't on screen.
   fn set_procs_visible(&mut self, visible: bool) {
     self.procs_shown.set(visible);
     if !visible {
       self.proc_view.clear();
+      self.info = None;
       self.kill.close();
     }
   }
 
   /// Stores a process sample started in the panel's `showing`. Only one of the current showing
   /// gets in: one still in flight when the panel got hidden is dropped, also when the panel is
-  /// back by now, so a re-shown panel reads "collecting…" until its own first sample.
+  /// back by now, so a re-shown panel reads "collecting…" until its own first sample. The info
+  /// overlay reads its files again with it.
   fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
+      self.info.iter_mut().for_each(|info| info.refresh(&*self.kill.sys));
     }
   }
 
@@ -390,6 +397,7 @@ impl App {
       // switching away is done typing: keys back as shortcuts, the filter stays
       Event::FocusLost => {
         self.proc_view.end_typing();
+        self.info.iter_mut().for_each(|info| info.typing = false);
         return ControlFlow::Continue(());
       }
       Event::Tick => return ControlFlow::Continue(()),
@@ -400,9 +408,9 @@ impl App {
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit. The help
-  /// overlay takes every key while it is open, then the kill popup; then keys of the process panel
-  /// (only while it is on screen) take precedence, and while a filter is typed every key except
-  /// Ctrl-C goes to it.
+  /// overlay takes every key while it is open, then the info overlay and the kill popup; then keys
+  /// of the process panel (only while it is on screen) take precedence, and while a filter is
+  /// typed every key except Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
@@ -418,6 +426,10 @@ impl App {
       return ControlFlow::Continue(());
     }
 
+    if let Some(mut info) = self.info.take() {
+      self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
+      return ControlFlow::Continue(());
+    }
     if self.kill.is_open() {
       self.kill.handle_key(key);
       return ControlFlow::Continue(());
@@ -438,11 +450,12 @@ impl App {
       // change a setting without a change on screen
       KeyCode::Char('p') if self.procs_fit => self.cfg.toggle_procs(),
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
-      KeyCode::Char('k') if self.procs_visible() => {
-        if let Some(proc) = self.proc_view.selected() {
-          self.kill.open(proc);
-        }
-      }
+      KeyCode::Char(c) if self.procs_visible() => match (c, self.proc_view.selected()) {
+        ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
+        ('k', Some(proc)) => self.kill.open(proc),
+        ('o', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
+        _ => {}
+      },
       _ => {}
     }
 
@@ -456,10 +469,12 @@ impl App {
   }
 
   /// Applies a mouse event at the cells of the last frame to the process list, only while the
-  /// mouse is captured (events still on the way when capture turns off are dropped). While the
-  /// kill popup is open, they go to it.
+  /// mouse is captured (events still on the way when capture turns off are dropped). While an
+  /// overlay is open, they go to it.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
-    if self.kill.is_open() {
+    if let Some(info) = &mut self.info {
+      info.handle_mouse(mouse, &*self.kill.sys);
+    } else if self.kill.is_open() {
       self.kill.handle_mouse(mouse);
     } else if self.wants_mouse() {
       self.update_proc_view(|view| view.handle_mouse(mouse));
@@ -497,6 +512,7 @@ impl App {
     self.render_metrics_box(f, &plan);
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
+      self.info.iter_mut().for_each(|info| info.render(f, r));
       self.kill.render(f, r);
     }
     if let Some(scroll) = self.help {
@@ -557,6 +573,7 @@ mod tests {
   use super::theme::{self, gradient};
   use super::{App, Event, restore_term_once, run_procs_thread};
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
+  use crate::fds::{Kind, OpenFile};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -1332,13 +1349,15 @@ mod tests {
   }
 
   #[test]
-  fn kill_is_on_the_process_title_with_a_selection_while_not_typing() {
+  fn info_open_kill_are_on_the_process_title_with_a_selection_while_not_typing() {
     let title = |app: &mut App, width| proc_row(&render_buffer(app, width, 50), 0);
     let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
+    assert!(!title(&mut app, 200).contains("kill"), "no selection");
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let wide = title(&mut app, 200);
-    assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───") && wide.ends_with("─ kill ─╮"));
-    // the count bold and plain, the hint keys cyan, their labels faint
+    assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{wide}");
+    assert!(wide.ends_with("─ info | open | kill ─╮"), "{wide}");
+    // the count bold and plain, the hint keys cyan, their labels faint, the separators dim
     let buf = render_buffer(&mut app, 200, 50);
     let style = |text| {
       let cell = &buf[(x_of(&wide, text), PROC_Y)];
@@ -1346,11 +1365,14 @@ mod tests {
     };
     let (bold, plain) = ((theme::TEXT, Modifier::BOLD), (theme::TEXT, Modifier::empty()));
     let (cyan, faint) = ((theme::KEY, Modifier::empty()), (theme::TEXT, Modifier::DIM));
-    let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "kill", "ill"];
-    assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint]);
-    // on a narrow box `kill` goes first
-    assert_eq!(title(&mut app, 37), "╭─ proc 3 ─ / filter ─ sort ─ kill ─╮");
-    assert_eq!(title(&mut app, 36), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(7)));
+    let sep = (theme::DIM, Modifier::empty());
+    let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | ", "open", "pen"];
+    let styles = [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep, cyan, faint];
+    assert_eq!(cells.map(style), styles);
+    assert_eq!(["| kill", "kill", "ill"].map(style), [sep, cyan, faint]);
+    // on a narrow box they go first, all together
+    assert_eq!(title(&mut app, 51), "╭─ proc 3 ─ / filter ─ sort ─ info | open | kill ─╮");
+    assert_eq!(title(&mut app, 50), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(21)));
 
     // typing: keys are text, no hints; then a set filter with the selection in it
     for c in "/saf".chars() {
@@ -1362,7 +1384,8 @@ mod tests {
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let filtered = title(&mut app, 200);
     assert!(
-      filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───") && filtered.ends_with(" kill ─╮")
+      filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───")
+        && filtered.ends_with(" info | open | kill ─╮")
     );
   }
 
@@ -1468,6 +1491,81 @@ mod tests {
     assert!(app.handle_key(key('k')).is_continue());
     drop(render_buffer(&mut app, 60, 12));
     assert!(!app.kill.is_open());
+  }
+
+  /// `kill_app` with the cwd and a log file open in WindowServer.
+  fn info_app() -> (App, FakeSys) {
+    let (app, fake) = kill_app();
+    let cwd = OpenFile { fd: None, kind: Kind::Cwd, text: "/".into() };
+    let log = OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into() };
+    fake.0.borrow_mut().files.insert(631, Ok(vec![cwd, log]));
+    (app, fake)
+  }
+
+  #[test]
+  fn i_opens_the_files_of_the_selected_process_over_the_list() {
+    let (mut app, fake) = info_app();
+    assert!(app.handle_key(key('i')).is_continue());
+    let buf = render_buffer(&mut app, 200, 50);
+    let title = proc_row(&buf, 0);
+    assert!(title.starts_with("╭─ WindowServer 631 ─ / filter ───"), "{title}");
+    assert!(proc_row(&buf, 1).starts_with("│ cwd    / "), "{}", proc_row(&buf, 1));
+    assert!(proc_row(&buf, 2).starts_with("│ file   /var/log/system.log "));
+    assert!(proc_row(&buf, 29).starts_with("╰─ / ─") && proc_row(&buf, 29).ends_with(" close ─╯"));
+
+    // it takes every key, the list's and the global ones; Ctrl-C still quits
+    for c in ['q', 'k', 'i', 'p', 's', 'v'] {
+      assert!(app.handle_key(key(c)).is_continue(), "{c}");
+    }
+    assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
+    // the wheel moves its selection, not the list's; `o` reveals the selected file
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
+    assert!(app.handle_key(key('o')).is_continue());
+    assert_eq!(fake.0.borrow().revealed, ["/var/log/system.log"]);
+    assert_eq!(app.proc_view.selected_pid(), Some(631));
+
+    // each sample reads the files again
+    let pipe = OpenFile { fd: Some(4), kind: Kind::Pipe, text: String::new() };
+    fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().push(pipe);
+    put_procs(&mut app, varied_procs());
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 3).starts_with("│ pipe "));
+    // focus loss ends filter input, Esc then closes it and the list has its keys back
+    assert!(app.handle_key(key('/')).is_continue());
+    assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue());
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(app.info.is_none());
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert_eq!(app.proc_view.selected_pid(), Some(2301));
+
+    // it closes with the list
+    assert!(press(&mut app, KeyCode::Up).is_continue() && app.handle_key(key('i')).is_continue());
+    render_buffer(&mut app, 60, 12);
+    assert!(app.info.is_none());
+  }
+
+  #[test]
+  fn o_shows_the_selected_process_in_finder() {
+    let (mut app, fake) = info_app();
+    assert!(app.handle_key(key('o')).is_continue());
+    assert_eq!(fake.0.borrow().revealed, [WINDOW_SERVER]);
+
+    // typed into the filter it is text; without a selection `i` and `o` do nothing
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('o')).is_continue());
+    assert_eq!(app.proc_view.filter(), "o");
+    for code in [KeyCode::Esc, KeyCode::Esc, KeyCode::Char('o'), KeyCode::Char('i')] {
+      assert!(press(&mut app, code).is_continue());
+    }
+    assert_eq!((app.proc_view.selected_pid(), app.info.is_none()), (None, true));
+    assert_eq!(fake.0.borrow().revealed.len(), 1);
+
+    // nothing for a process without a readable path
+    let mut app = app_with_procs(test_procs());
+    let (kill, fake) = FakeSys::kill(&[]);
+    app.kill = kill;
+    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('o')).is_continue());
+    assert!(fake.0.borrow().revealed.is_empty());
   }
 
   #[test]
