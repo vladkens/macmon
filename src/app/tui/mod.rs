@@ -553,15 +553,7 @@ impl App {
     loop {
       term.draw(|f| self.render(f))?;
       mouse = set_mouse_capture(&mut stdout(), mouse, self.wants_mouse())?;
-      // the info overlay's marquee wakes the loop while it moves, nothing else does
-      let event = match self.info.as_ref().and_then(Info::next_frame) {
-        Some(wait) => match rx.recv_timeout(wait) {
-          Err(mpsc::RecvTimeoutError::Timeout) => Event::Tick,
-          event => event?,
-        },
-        None => rx.recv()?,
-      };
-      if self.handle_event(event, &msec).is_break() {
+      if self.handle_event(rx.recv()?, &msec).is_break() {
         break;
       }
     }
@@ -1586,7 +1578,7 @@ mod tests {
     assert!(proc_row(&buf, 3).starts_with(&format!("│ exe       {WINDOW_SERVER} ")));
     assert!(proc_row(&buf, 4).starts_with("│ cwd       / "), "{}", proc_row(&buf, 4));
     assert!(proc_row(&buf, 5).starts_with("│ file  r   /var/log/system.log "));
-    assert_eq!(proc_row(&buf, 29), format!("╰{}╯", "─".repeat(198)));
+    assert_eq!(proc_row(&buf, 29), format!("╰{} ? | q back ─╯", "─".repeat(185)));
 
     // it takes every key, the list's and the global ones (`q` closes it); Ctrl-C still quits
     for c in ['k', 'i', 'p', 's', 'v'] {

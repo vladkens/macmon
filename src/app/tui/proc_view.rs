@@ -445,7 +445,7 @@ pub(super) fn head(text: &str, max: usize) -> &str {
 }
 
 /// The longest end of `text` (whole characters) at most `max` cells wide.
-pub(super) fn tail(text: &str, max: usize) -> &str {
+fn tail(text: &str, max: usize) -> &str {
   let mut start = text.len();
   for (i, _) in text.char_indices().rev() {
     if Span::raw(&text[i..]).width() > max {

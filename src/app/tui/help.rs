@@ -41,7 +41,7 @@ const HELP: &[Row] = &[
   Key("/", "filter the files"),
   Key("e", "show the selected file in Finder"),
   Key("c", "copy the selected path"),
-  Key("Esc", "close"),
+  Key("q / Esc", "back to the processes"),
   Section("Mouse"),
   Term("click", "a column header to sort, a row to select"),
   Section("Notes"),
