@@ -24,6 +24,9 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
       - run: make test
+      - run: make capi-test
+        env:
+          MACMON_CAPI_ALLOW_NO_HW: 1 # CI VMs lack the metric sources
 
   dev:
     runs-on: macos-latest
@@ -44,6 +47,7 @@ jobs:
 
       - run: rustup update --no-self-update stable && rustup default stable
       - run: make build
+      - run: make capi xcframework CAPI_TAG=dev
 
       - name: Archive binary
         run: tar czf macmon-dev.tar.gz readme.md LICENSE -C target/release macmon
@@ -57,13 +61,14 @@ jobs:
             exit 0
           fi
           NOTES="Latest build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
+          ASSETS=(macmon-dev.tar.gz out/libmacmon-dev.tar.gz out/CMacmon.xcframework-dev.zip out/CMacmon.xcframework-dev.zip.sha256)
           git tag -f dev
           git push -f origin refs/tags/dev
           if gh release view dev >/dev/null 2>&1; then
-            gh release upload dev macmon-dev.tar.gz --clobber
+            gh release upload dev "${ASSETS[@]}" --clobber
             gh release edit dev --title "Dev build" --notes "$NOTES"
           else
-            gh release create dev macmon-dev.tar.gz --prerelease --title "Dev build" --notes "$NOTES"
+            gh release create dev "${ASSETS[@]}" --prerelease --title "Dev build" --notes "$NOTES"
           fi
 
   release:
@@ -122,6 +127,17 @@ jobs:
           tar czf "macmon-${TAG}.tar.gz" readme.md LICENSE -C target/release macmon
           ls -lah "macmon-${TAG}.tar.gz"
 
+      - run: make capi-test xcframework
+        env:
+          MACMON_CAPI_ALLOW_NO_HW: 1 # CI VMs lack the metric sources
+
+      - name: Check C library version matches tag
+        env:
+          MACMON_CAPI_ALLOW_NO_HW: 1 # CI VMs lack the metric sources
+        run: |
+          out/capi_smoke > capi_smoke.txt
+          test "$(head -1 capi_smoke.txt)" = "macmon_version: ${TAG#v}"
+
       # https://crates.io/docs/trusted-publishing
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
@@ -139,11 +155,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          XCF="CMacmon.xcframework-${TAG}.zip"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, using its archive"
-            gh release download "$TAG" --pattern "macmon-${TAG}.tar.gz" --clobber
+            echo "Release $TAG already exists, using its archives and adding missing assets"
+            EXISTING="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            # never replace an archive: Homebrew and SPM pin their checksums, ditto zips aren't reproducible
+            for f in "macmon-${TAG}.tar.gz" "out/libmacmon-${TAG}.tar.gz" "out/$XCF"; do
+              if grep -qxF "$(basename "$f")" <<< "$EXISTING"; then
+                gh release download "$TAG" --pattern "$(basename "$f")" --dir "$(dirname "$f")" --clobber
+              else
+                gh release upload "$TAG" "$f"
+              fi
+            done
+            # the checksum of the zip that is published
+            swift package --scratch-path out/.build compute-checksum "out/$XCF" > "out/$XCF.sha256"
+            gh release upload "$TAG" "out/$XCF.sha256" --clobber
+            # a cancelled `gh release create` can leave a draft
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
+              gh release edit "$TAG" --draft=false
+            fi
           else
-            gh release create "$TAG" --target "$GITHUB_SHA" --notes-file release_notes.txt "macmon-${TAG}.tar.gz"
+            gh release create "$TAG" --target "$GITHUB_SHA" --notes-file release_notes.txt "macmon-${TAG}.tar.gz" \
+              "out/libmacmon-${TAG}.tar.gz" "out/$XCF" "out/$XCF.sha256"
           fi
 
       - name: Bump Homebrew formula

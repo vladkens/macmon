@@ -1,0 +1,9 @@
+module CMacmon {
+  header "macmon.h"
+  // system libraries of the static libmacmon.a in CMacmon.xcframework, linked automatically
+  link framework "CoreFoundation"
+  link framework "IOKit"
+  link "IOReport"
+  link "iconv"
+  export *
+}

@@ -70,6 +70,8 @@
 //! }
 //! ```
 
+#[cfg(feature = "capi")]
+mod capi;
 mod clpc;
 
 #[cfg(feature = "app")]
