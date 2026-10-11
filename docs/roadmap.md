@@ -36,6 +36,17 @@ POWER does today.
 - [ ] **6. Column picker.** Only if item 5 leaves too many columns: an overlay with checkboxes
       (like htop's F2) saved in `~/.config/macmon.json` under a new field. Released versions
       ignore the field but drop it when they save, so a missing field means the default columns.
+- [ ] **7. A clearer info overlay.** Two PRs. First, the files list: `exe` and `cwd` first, then
+      files grouped under their directory, a type and open mode (`r`, `w`, `rw`) on every row,
+      duplicates as `×N`, pipes, kqueues and unnamed sockets left out of the list and counted in
+      a line above it (`116 fds  8 files  3 dev  96 pipes …`). Second, a process summary line
+      above the counts (cpu, mem, power, threads, uptime, parent) and presets on `s` / `S` (`all`,
+      `files`, `network`, `home`, `not home`) saved in `~/.config/macmon.json`.
+- [ ] **8. macmon's own cost, before the release.** Measure what the TUI, `pipe` and `serve` cost
+      at 1000 ms and 250 ms: CPU time per minute and power (macmon's own POWER, `powermetrics`
+      task energy, Activity Monitor's Energy Impact), with the process list shown and hidden.
+      Profile the hot paths (sampling, IORegistry GPU reads, `ps`, rendering) and fix what is
+      cheap to fix; report before / after numbers in the PR.
 
 Later, only on request: automatic grouping of an app's processes (filter terms with totals
 cover the known-app case), per-process network (only `nettop` has it without root), history
