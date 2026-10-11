@@ -61,7 +61,8 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
   field of `Info` read from `HOME` once, set directly in tests.
 - No directory rows: the first version grouped 2 or more files of one directory under a
   directory row with indented names; the owner dropped it after trying it, as devices in the
-  list. Showing a full path past the row width (wrap or scroll) is not part of this PR.
+  list.
+- The full path of a cut row scrolls on the bottom border in the next PR, with the scrollbar.
 
 ## Tasks
 
