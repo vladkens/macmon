@@ -14,7 +14,7 @@ use super::boxes::{
 };
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
-  ELLIPSIS, Filter, cut_middle, filter_title, head, scroll_offset, step, type_filter,
+  ELLIPSIS, Filter, cut_middle, filter_title, head, scroll_offset, step, tail, type_filter,
 };
 use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
@@ -358,9 +358,10 @@ impl Info {
     let ms = self.since.elapsed().as_millis() as u64;
     if let Some(full) = full {
       render_bottom_border(f, area, vec![], |room| {
-        self.overflow = full.chars().count().saturating_sub(room);
-        let shown: String = full.chars().skip(marquee(ms, self.overflow).0).collect();
-        vec![text(head(&shown, room).to_string())]
+        let width = Span::raw(&full).width();
+        self.overflow = width.saturating_sub(room);
+        let moved = marquee(ms, self.overflow).0;
+        vec![text(head(tail(&full, width - moved), room).to_string())]
       });
     }
   }
@@ -932,6 +933,23 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Down));
     assert_eq!(rows(&render(&mut info, 60, 12))[11], format!("╰{}╯", "─".repeat(58)));
     assert_eq!(info.next_frame(), None);
+  }
+
+  #[test]
+  fn the_marquee_counts_cells_not_characters() {
+    // 69 cells in 39 characters: 15 cells more than the 54 on the bottom border
+    let path = format!("/tmp/{}.log", "文".repeat(30));
+    let (mut info, fake) = info(Ok(vec![file(3, Kind::File, "r", &path)]));
+    assert!(press(&mut info, &fake, KeyCode::Down));
+    let bottom = |info: &mut Info, ms| {
+      info.since = Instant::now().checked_sub(Duration::from_millis(ms)).unwrap();
+      rows(&render(info, 60, 12)).pop().unwrap()
+    };
+    // a wide character's second cell reads as a blank
+    assert!(bottom(&mut info, 0).starts_with("╰─ /tmp/文 文 "));
+    assert!(bottom(&mut info, 3000).ends_with(
+      "─ 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 文 .log ─╯"
+    ));
   }
 
   /// The only test with the real calls: the test's own process, and no reveal.
