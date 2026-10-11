@@ -17,7 +17,7 @@ use super::proc_view::{ELLIPSIS, head};
 use super::store::{FreqStore, PowerStore, ratio};
 use super::theme::{self, dim, gradient, heading, text};
 use super::widgets::{Gauge, Graph};
-use crate::config::ViewType;
+use crate::config::{RatioMode, TUI_MAX_MS, ViewType};
 
 /// Bytes in a GiB, the unit of the RAM box title.
 const GIB: f64 = (1u64 << 30) as f64;
@@ -303,24 +303,24 @@ impl App {
     Span::styled(format!("{:.decimals$}%", load * 100.0), gradient(load))
   }
 
-  /// Key hints for the bottom border of the lowest box (see `hint`): the global keys in the order
-  /// of the original UI with the state of the toggles (`quit | ? help | procs | v graph | r scaled
-  /// | -/+ 1000ms`; no `procs` while the window is too small for the process list), or the filter
-  /// keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`).
+  /// Key hints for the bottom border of the lowest box (see `hint`): the global keys, help first,
+  /// with the ratio mode and the interval (`? help | quit | procs | view | freq | -/+ 1000ms`; no
+  /// `procs` while the window is too small for the process list), or the filter keys while a
+  /// filter is typed (`Enter keep | Esc clear | ↑↓ select`). The mode and the interval are
+  /// padded to their widest value, so a toggle doesn't move the hints left of them.
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
     if self.proc_view.typing() {
       return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
     }
 
-    let mut hints = vec![hint("q", "quit"), hint("?", "help")];
+    let mut hints = vec![hint("?", "help"), hint("q", "quit")];
     if self.procs_fit {
       hints.push(hint("p", "procs"));
     }
-    hints.extend([
-      hint("v", self.cfg.view_type.label()),
-      hint("r", self.cfg.ratio_mode.label()),
-      hint("-/+", format!("{}ms", self.cfg.interval())),
-    ]);
+    let modes = [RatioMode::Scaled, RatioMode::Active].map(|mode| mode.label().len());
+    let mode = format!("{:1$}", self.cfg.ratio_mode.label(), modes.into_iter().max().unwrap_or(0));
+    let interval = format!("{:>1$}ms", self.cfg.interval(), TUI_MAX_MS.to_string().len());
+    hints.extend([hint("v", "view"), hint("r", mode), hint("-/+", interval)]);
     hints
   }
 
@@ -565,6 +565,7 @@ mod tests {
       (hint("k", "Kill"), "[K]ill"),
       (hint("s", "sessions"), "[s]essions"),
       (hint("v", "graph"), "[v] graph"),
+      (hint("r", "freq"), "f[r]eq"),
       (hint("?", "help"), "[?] help"),
       (hint("Enter", "keep"), "[Enter] keep"),
       (hint("-/+", "1000ms"), "[-/+] 1000ms"),
@@ -578,7 +579,7 @@ mod tests {
   #[test]
   fn bottom_border_hints_come_first_then_the_text() {
     let draw = |width| {
-      let hints = vec![hint("q", "quit"), hint("?", "help")];
+      let hints = vec![hint("?", "help"), hint("q", "quit")];
       let power = |_: usize| vec![text("Power 6.60W"), dim(" (6.60, 6.60)")];
       let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
       term.draw(|f| render_bottom_border(f, f.area(), hints, power)).unwrap().buffer.clone()
@@ -588,23 +589,23 @@ mod tests {
       (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>().replace(' ', "_")
     };
     let blank = |cells: usize| "_".repeat(cells);
-    let help = "_quit_|_?_help_";
+    let help = "_?_help_|_quit_";
 
     // the hints right-aligned, the text left, a border cell next to the corners
     assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(15)));
     // the keys in the default color, the rest of the hints dim, nothing bold or underlined
     let buf = draw(60);
     let shown = |x: u16| buf[(x, 0)].symbol() != " " && buf[(x, 0)].fg != theme::DIM;
-    assert_eq!((43..58).filter(|&x| shown(x)).collect::<Vec<_>>(), [44, 51]);
+    assert_eq!((43..58).filter(|&x| shown(x)).collect::<Vec<_>>(), [44, 53]);
     assert!(buf.content.iter().all(|cell| cell.modifier.is_empty()));
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
     assert_eq!(border(40), format!("___Power_6.60W_(6.60…__{help}__"));
     assert_eq!(border(30), format!("___Power_6…__{help}__"));
     assert_eq!(border(29), format!("{}{help}__", blank(12)));
-    // hints drop from the end, `quit` stays as long as it fits
+    // hints drop from the end, the first one stays as long as it fits
     assert_eq!(border(19), format!("__{help}__"));
-    assert_eq!(border(18), format!("{}_quit___", blank(10)));
-    assert_eq!(border(10), "___quit___");
-    assert_eq!(border(9), blank(9));
+    assert_eq!(border(18), format!("{}_?_help___", blank(8)));
+    assert_eq!(border(12), "___?_help___");
+    assert_eq!(border(11), blank(11));
   }
 }

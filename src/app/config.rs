@@ -22,15 +22,6 @@ pub enum ViewType {
   Gauge,
 }
 
-impl ViewType {
-  pub fn label(self) -> &'static str {
-    match self {
-      Self::Graph => "graph",
-      Self::Gauge => "gauge",
-    }
-  }
-}
-
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub enum RatioMode {
   Scaled,
@@ -38,10 +29,12 @@ pub enum RatioMode {
 }
 
 impl RatioMode {
+  /// Name on screen: `freq` (weighted by frequency) or `raw` (share of time busy); the config
+  /// keeps the released names.
   pub fn label(self) -> &'static str {
     match self {
-      Self::Scaled => "scaled",
-      Self::Active => "active",
+      Self::Scaled => "freq",
+      Self::Active => "raw",
     }
   }
 }

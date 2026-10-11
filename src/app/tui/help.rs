@@ -24,7 +24,7 @@ const HELP: &[Row] = &[
   Key("q", "quit"),
   Key("p", "show / hide the processes"),
   Key("v", "graph / gauge"),
-  Key("r", "CPU and GPU usage: scaled / active"),
+  Key("r", "CPU and GPU usage: freq / raw"),
   Key("- / +", "update interval"),
   Key("/", "filter the processes"),
   Key("s / S", "sort by the next column / reverse"),
@@ -36,7 +36,7 @@ const HELP: &[Row] = &[
   Key("click", "a column header to sort, a row to select"),
   Section("Notes"),
   Key("CPU%", "100% is one fully busy core"),
-  Key("scaled", "usage weighted by frequency; active: share of time busy"),
+  Key("freq", "usage weighted by frequency; raw: share of time busy"),
   Key("POWER -", "not available for other users' processes"),
 ];
 

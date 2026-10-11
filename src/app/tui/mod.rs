@@ -555,7 +555,7 @@ mod tests {
   use super::layout::Metric;
   use super::theme::gradient;
   use super::{App, Event, restore_term_once, run_procs_thread};
-  use crate::config::{Config, ProcSort, RatioMode, TUI_MIN_MS, TempConfig, ViewType};
+  use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::procs::ProcInfo;
 
   fn key(c: char) -> KeyEvent {
@@ -823,12 +823,27 @@ mod tests {
       assert_eq!(cells, line, "row {y}");
     }
     // the key hints show the settings
-    let hints = " v gauge | r active | -/+ 1250ms ─╯";
+    let hints = " view | raw  | -/+  1250ms ─╯";
     assert!(row(&buf, 49).ends_with(hints), "{}", row(&buf, 49));
 
     assert!(app.handle_key(key('v')).is_continue());
     assert_eq!(app.cfg.view_type, ViewType::Graph);
     assert_eq!(file.saved()["view_type"], "Sparkline");
+  }
+
+  #[test]
+  fn the_footer_keeps_its_width_through_the_modes_and_intervals() {
+    let mut app = test_app();
+    let width = |app: &App| {
+      app.footer_hints().iter().flatten().map(ratatui::text::Span::width).sum::<usize>()
+    };
+    let start = width(&app);
+    app.cfg.ratio_mode = RatioMode::Active;
+    assert_eq!(width(&app), start);
+    for interval in [TUI_MIN_MS, TUI_MAX_MS] {
+      app.cfg.set_run_interval(interval);
+      assert_eq!(width(&app), start, "{interval}");
+    }
   }
 
   #[test]
@@ -856,7 +871,7 @@ mod tests {
     assert!(!app.procs_visible());
     assert!(app.handle_key(key('p')).is_continue());
     assert!(app.cfg.show_procs);
-    assert!(row(&buf, 11).contains(" quit | ? help | v graph "), "{}", row(&buf, 11));
+    assert!(row(&buf, 11).contains(" ? help | quit | view "), "{}", row(&buf, 11));
   }
 
   #[test]
@@ -1373,7 +1388,7 @@ mod tests {
     // the PID and the full path, cut from the left to the room the key hints leave
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 51..]);
+    let cut = format!("╰─ 631 …{} ─ ? help |", &WINDOW_SERVER[WINDOW_SERVER.len() - 57..]);
     assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
 
     // without a readable path: the name
