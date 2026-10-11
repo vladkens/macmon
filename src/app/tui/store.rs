@@ -198,15 +198,13 @@ impl FanStore {
     self.items = value;
   }
 
+  /// `✇ 1200 rpm`, `✇ 1200/1300 rpm` with several fans; empty without fans.
   pub(super) fn label(&self) -> String {
-    match self.items.as_slice() {
-      [] => "".to_string(),
-      [fan] => format!("Fan {} RPM", fan.rpm),
-      fans => {
-        let values = fans.iter().map(|fan| fan.rpm.to_string()).collect::<Vec<_>>().join("/");
-        format!("Fans {values} RPM")
-      }
+    if self.items.is_empty() {
+      return String::new();
     }
+    let rpms: Vec<String> = self.items.iter().map(|fan| fan.rpm.to_string()).collect();
+    format!("✇ {} rpm", rpms.join("/"))
   }
 }
 
