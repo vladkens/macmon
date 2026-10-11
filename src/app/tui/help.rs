@@ -2,21 +2,23 @@
 
 use std::num::NonZeroU16;
 
-use Row::{Key, Section};
+use Row::{Key, Section, Term};
 use ratatui::Frame;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 
 use super::boxes::{Titles, cells, draw_box, hint};
-use super::theme::{heading, link, text};
+use super::theme::{self, faint, heading, link, text};
 
 /// One line of the help.
 enum Row {
   Section(&'static str),
-  /// Keys (or what to do with the mouse) and what they do.
+  /// Keys and what they do; several keys are separated by ` / `.
   Key(&'static str, &'static str),
+  /// What to do with the mouse, or a value, and what it means.
+  Term(&'static str, &'static str),
 }
 
 const HELP: &[Row] = &[
@@ -33,11 +35,11 @@ const HELP: &[Row] = &[
   Key("Esc", "clear the selection and the filter"),
   Key("?", "show / hide this help"),
   Section("Mouse"),
-  Key("click", "a column header to sort, a row to select"),
+  Term("click", "a column header to sort, a row to select"),
   Section("Notes"),
-  Key("CPU%", "100% is one fully busy core"),
-  Key("freq", "usage weighted by frequency; raw: share of time busy"),
-  Key("POWER -", "not available for other users' processes"),
+  Term("CPU%", "100% is one fully busy core"),
+  Term("freq", "usage weighted by frequency; raw: share of time busy"),
+  Term("POWER -", "not available for other users' processes"),
 ];
 
 /// Cells of the key column, the gap after it included.
@@ -48,13 +50,30 @@ const SUPPORT_PREFIX: &str = "Like macmon? Support it: ";
 const SUPPORT_TEXT: &str = "buymeacoffee.com/vladkens";
 const SUPPORT_URL: &str = "https://buymeacoffee.com/vladkens";
 
-/// The help text: section names bold, keys bold, the rest plain, then the support line.
+/// `keys` as in hints (`theme::key`), the ` / ` between them faint, indented and padded to
+/// `KEYS_WIDTH`.
+fn key_column(keys: &'static str) -> Vec<Span<'static>> {
+  let mut spans = vec![text("  ")];
+  for (i, key) in keys.split(" / ").enumerate() {
+    if i > 0 {
+      spans.push(faint(" / "));
+    }
+    spans.push(theme::key(key));
+  }
+  let width = spans.iter().map(Span::width).sum::<usize>() - 2;
+  spans.push(text(" ".repeat(KEYS_WIDTH.saturating_sub(width))));
+  spans
+}
+
+/// The help text: section names bold, keys as in hints, terms bold, the rest plain, then the
+/// support line.
 fn lines() -> Vec<Line<'static>> {
   let mut lines: Vec<Line<'static>> = HELP
     .iter()
     .map(|line| match *line {
       Section(name) => Line::from(heading(name)),
-      Key(keys, what) => Line::from(vec![heading(format!("  {keys:KEYS_WIDTH$}")), text(what)]),
+      Key(keys, what) => Line::from([key_column(keys), vec![text(what)]].concat()),
+      Term(term, what) => Line::from(vec![heading(format!("  {term:KEYS_WIDTH$}")), text(what)]),
     })
     .collect();
   lines.push(Line::default());
@@ -116,4 +135,43 @@ pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
     hyperlink(buf, support_x + prefix, y, link_width, SUPPORT_URL);
   }
   scroll
+}
+
+#[cfg(test)]
+mod tests {
+  use ratatui::Terminal;
+  use ratatui::backend::TestBackend;
+  use ratatui::style::Modifier;
+
+  use super::render;
+  use crate::tui::theme;
+
+  #[test]
+  fn keys_are_cyan_and_terms_bold() {
+    let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    term.draw(|f| _ = render(f, f.area(), 0)).unwrap();
+    let buf = term.backend().buffer();
+    let rows: Vec<String> =
+      (0..40).map(|y| (0..80).map(|x| buf[(x, y)].symbol()).collect()).collect();
+    // `(fg, modifier)` of each cell of `text` on the row that says `what`
+    let style = |what: &str, text: &str| {
+      let y = rows.iter().position(|row| row.contains(what)).unwrap();
+      let x = rows[y][..rows[y].find(text).unwrap()].chars().count() as u16;
+      let cells = x..x + text.chars().count() as u16;
+      cells.map(|x| (buf[(x, y as u16)].fg, buf[(x, y as u16)].modifier)).collect::<Vec<_>>()
+    };
+    let (key, faint) = ((theme::KEY, Modifier::empty()), (theme::TEXT, Modifier::DIM));
+    let (bold, plain) = ((theme::TEXT, Modifier::BOLD), (theme::TEXT, Modifier::empty()));
+
+    // keys cyan, the ` / ` between them faint, what they do plain
+    assert_eq!(style("quit", "q"), [key]);
+    assert_eq!(style("update interval", "- / +"), [key, faint, faint, faint, key]);
+    assert_eq!(style("select a process", "↑ ↓"), [key; 3]);
+    assert_eq!(style("clear the selection", "Esc"), [key; 3]);
+    assert_eq!(style("update interval", "update"), [plain; 6]);
+    // the mouse and the notes bold, not keys
+    assert_eq!(style("a row to select", "click"), [bold; 5]);
+    assert_eq!(style("fully busy core", "CPU%"), [bold; 4]);
+    assert_eq!(style("other users'", "POWER -"), [bold; 7]);
+  }
 }
