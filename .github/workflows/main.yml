@@ -24,6 +24,9 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: make check
       - run: make test
+      - run: make capi-test
+        env:
+          MACMON_CAPI_ALLOW_NO_HW: 1 # CI VMs lack the metric sources
 
   dev:
     runs-on: macos-latest
