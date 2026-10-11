@@ -1,6 +1,5 @@
 //! The info overlay (`i`): the executable, working directory, open files and sockets of the
-//! selected process, files grouped by directory, under a line counting the descriptors; `e`
-//! reveals one.
+//! selected process, under a line counting the descriptors; `e` reveals one.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
@@ -29,26 +28,23 @@ const COUNTS_MIN_HEIGHT: u16 = 8;
 /// The type and mode columns with their blank cells: ` file  rw  `.
 const COLUMNS: usize = 11;
 
-/// What a row is, so the selection follows it: kind, text, mode and whether it's a directory row.
-type Key = (Kind, String, &'static str, bool);
+/// What a row is, so the selection follows it: kind, text and mode.
+type Key = (Kind, String, &'static str);
 
-/// A listed row: the entries with one kind, text and mode, or the directory of a group of files.
+/// A listed row: the entries with one kind, text and mode.
 #[derive(Debug, Clone, PartialEq)]
 struct Row {
   kind: Kind,
   mode: &'static str,
-  /// The path or the socket text; a directory row has the directory with a trailing `/`.
+  /// The path or the socket text.
   text: String,
-  /// Entries behind it, `×N` from 2; 0 for a directory row.
+  /// Entries behind it, `×N` from 2.
   count: usize,
-  dir: bool,
-  /// A file under its directory row, shown by name.
-  member: bool,
 }
 
 impl Row {
   fn key(&self) -> Key {
-    (self.kind, self.text.clone(), self.mode, self.dir)
+    (self.kind, self.text.clone(), self.mode)
   }
 }
 
@@ -66,18 +62,17 @@ fn order(file: &OpenFile) -> (Kind, &str, &str, &'static str) {
 }
 
 /// `path` cut to `max` cells by components: the first 2 (else 1) and the longest tail of whole
-/// components that fits around `…`, a trailing `/` kept; `cut_middle` when none fits.
+/// components that fits around `…`; `cut_middle` when none fits.
 fn cut_path(path: &str, max: usize) -> String {
   if Span::raw(path).width() <= max {
     return path.to_string();
   }
-  let (body, slash) = path.strip_suffix('/').map_or((path, ""), |body| (body, "/"));
-  let parts: Vec<&str> = body.split('/').collect();
+  let parts: Vec<&str> = path.split('/').collect();
   let root = usize::from(parts[0].is_empty());
   for head in [2, 1] {
     for tail in (1..parts.len().saturating_sub(root + head)).rev() {
       let (head, tail) = (parts[..root + head].join("/"), parts[parts.len() - tail..].join("/"));
-      let cut = format!("{head}/{ELLIPSIS}/{tail}{slash}");
+      let cut = format!("{head}/{ELLIPSIS}/{tail}");
       if Span::raw(&cut).width() <= max {
         return cut;
       }
@@ -137,9 +132,9 @@ impl Info {
     }
   }
 
-  /// The rows: the executable, then the files with a text, but pipes and kqueues, passing the
-  /// filter (its terms in the type, the path or its `~` form), sorted, equal ones collapsed, and
-  /// 2 or more files in one directory under a directory row.
+  /// The rows: the executable, then the files with a text, but devices, pipes and kqueues,
+  /// passing the filter (its terms in the type, the path or its `~` form), sorted, equal ones
+  /// collapsed.
   fn rows(&self) -> Vec<Row> {
     let Ok(files) = &self.files else { return vec![] };
     let filter = Filter::parse(&self.filter);
@@ -149,35 +144,17 @@ impl Info {
     };
     let exe = OpenFile { fd: None, kind: Kind::Exe, text: self.proc.path.clone(), mode: "" };
     let mut entries: Vec<&OpenFile> = (std::iter::once(&exe).chain(files))
-      .filter(|f| !f.text.is_empty() && !matches!(f.kind, Kind::Pipe | Kind::Kqueue))
+      .filter(|f| !f.text.is_empty() && !matches!(f.kind, Kind::Dev | Kind::Pipe | Kind::Kqueue))
       .filter(|f| filter.matches(|term| hit(f, term)))
       .collect();
     entries.sort_by_key(|f| order(f));
 
-    let mut collapsed: Vec<(&OpenFile, usize)> = vec![];
+    let mut rows: Vec<Row> = vec![];
     for f in entries {
-      match collapsed.last_mut() {
-        Some((last, n)) if (last.kind, &last.text, last.mode) == (f.kind, &f.text, f.mode) => {
-          *n += 1
-        }
-        _ => collapsed.push((f, 1)),
+      match rows.last_mut() {
+        Some(row) if (row.kind, &row.text, row.mode) == (f.kind, &f.text, f.mode) => row.count += 1,
+        _ => rows.push(Row { kind: f.kind, mode: f.mode, text: f.text.clone(), count: 1 }),
       }
-    }
-
-    let mut rows = vec![];
-    let files_in_one_dir = |(a, _): &(&OpenFile, usize), (b, _): &(&OpenFile, usize)| {
-      a.kind == Kind::File && b.kind == Kind::File && split(&a.text).0 == split(&b.text).0
-    };
-    for run in collapsed.chunk_by(files_in_one_dir) {
-      let member = run[0].0.text != run[run.len() - 1].0.text;
-      if member {
-        let text = format!("{}/", split(&run[0].0.text).0);
-        rows.push(Row { kind: Kind::File, mode: "", text, count: 0, dir: true, member: false });
-      }
-      rows.extend(run.iter().map(|&(f, count)| {
-        let (kind, mode, text) = (f.kind, f.mode, f.text.clone());
-        Row { kind, mode, text, count, dir: false, member }
-      }));
     }
     rows
   }
@@ -215,7 +192,7 @@ impl Info {
       }
       KeyCode::Char('/') => self.typing = true,
       KeyCode::Char('e') => {
-        // exe, cwd, dir and file rows (directory rows are file rows), not devices and sockets
+        // exe, cwd, dir and file rows, not sockets
         if let Some(row) = self.rows().get(self.index).filter(|row| row.kind <= Kind::File) {
           sys.reveal(&row.text);
         }
@@ -291,14 +268,10 @@ impl Info {
     for (y, (i, row)) in (list.y..list.bottom()).zip(rows) {
       // the columns and `×N` faint unless selected, a blank cell at both borders
       let side = |s: String| if i == self.index { text(s) } else { faint(s) };
-      let columns = match row.dir {
-        true => " ".repeat(COLUMNS),
-        false => format!(" {:5} {:2}  ", row.kind.label(), row.mode),
-      };
+      let columns = format!(" {:5} {:2}  ", row.kind.label(), row.mode);
       let count = if row.count > 1 { format!("  ×{}", row.count) } else { String::new() };
       let room = usize::from(list.width).saturating_sub(COLUMNS + 1 + Span::raw(&count).width());
       let shown = match row.kind {
-        _ if row.member => format!("  {}", cut_path(split(&row.text).1, room.saturating_sub(2))),
         kind if kind > Kind::Dev => cut_middle(&self.tilde(&row.text), room), // sockets
         _ => cut_path(&self.tilde(&row.text), room),
       };
@@ -354,12 +327,11 @@ mod tests {
     ]
   }
 
-  /// The rows of `files()`, in order.
-  const ROWS: [&str; 8] = [
+  /// The rows of `files()`, in order: devices, pipes and kqueues are only counted.
+  const ROWS: [&str; 7] = [
     EXE,
     "/Users/vlad/Code/macmon",
     LOG,
-    "/dev/ttys004",
     "127.0.0.1:52344 → 140.82.112.4:443 (established)",
     "[::1]:8080 (listen)",
     "0.0.0.0:5353",
@@ -369,7 +341,7 @@ mod tests {
   const CHROME: &str = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome \
                         Framework.framework/Versions/131.0.6778.86";
 
-  /// A Chrome renderer: the resources two files share, a file open twice, /dev/null three times.
+  /// A Chrome renderer: two resources, a file open twice, /dev/null three times.
   fn chrome_files() -> Vec<OpenFile> {
     let rules = "/Users/vlad/Library/Application Support/Google/Chrome/Subresource Filter/\
                  Indexed Rules/37/9.57.0/Ruleset Data";
@@ -488,8 +460,8 @@ mod tests {
     };
     // the first row, the exe, selected; a page is the 6 rows on screen
     assert_eq!(selected(&info), EXE);
-    let steps = [(Up, 0), (Down, 1), (PageDown, 7), (PageDown, 7), (Down, 7), (PageUp, 1)];
-    for (code, index) in steps.into_iter().chain([(End, 7), (Home, 0)]) {
+    let steps = [(Up, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (Down, 6), (PageUp, 0)];
+    for (code, index) in steps.into_iter().chain([(End, 6), (Home, 0)]) {
       assert!(press(&mut info, &fake, code));
       assert_eq!(info.index, index, "{code:?}");
     }
@@ -501,7 +473,7 @@ mod tests {
     // the list scrolls to keep the selection on screen
     assert!(press(&mut info, &fake, End));
     let shown = rows(&render(&mut info, 80, 8));
-    assert!(shown[1].starts_with("│ file  r   ~/Library/") && shown[6].starts_with("│ unix "));
+    assert!(shown[1].starts_with("│ cwd       ~/Code/macmon ") && shown[6].starts_with("│ unix "));
   }
 
   #[test]
@@ -513,12 +485,12 @@ mod tests {
       type_str(&mut info, &fake, text);
       texts(&info)
     };
-    assert_eq!(filter("TCP, /var"), [ROWS[4], ROWS[5], ROWS[7]]);
+    assert_eq!(filter("TCP, /var"), [ROWS[3], ROWS[4], ROWS[6]]);
     // pipes and kqueues match but aren't listed
-    assert_eq!(filter("!/, !tcp"), [ROWS[6]]);
+    assert_eq!(filter("!/, !tcp"), [ROWS[5]]);
     assert_eq!(filter("cwd"), [ROWS[1]]);
-    // `exe` is in `indexeddb` too
-    assert_eq!(filter("exe, dev"), [ROWS[0], ROWS[2], ROWS[3]]);
+    // `exe` is in `indexeddb` too; devices aren't listed
+    assert_eq!(filter("exe, dev"), [ROWS[0], ROWS[2]]);
     assert_eq!(filter("~/library"), [LOG]);
     assert_eq!(filter("nothing"), Vec::<String>::new());
 
@@ -526,7 +498,7 @@ mod tests {
     // the filter keys on the bottom border; ↓ ends the input, `e` and Esc act again
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "tcp, unix");
-    assert_eq!((info.typing, selected(&info)), (true, ROWS[4].into()));
+    assert_eq!((info.typing, selected(&info)), (true, ROWS[3].into()));
     let buf = render(&mut info, 80, 8);
     assert!(rows(&buf)[0].starts_with("╭─ WindowServer 631 ─ /tcp, unix█ ──"), "{}", rows(&buf)[0]);
     assert!(rows(&buf)[0].ends_with("──╮"), "{}", rows(&buf)[0]);
@@ -538,7 +510,7 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Down));
     assert_eq!(
       (info.typing, info.filter.as_str(), selected(&info)),
-      (false, "tcp, unix", ROWS[5].into())
+      (false, "tcp, unix", ROWS[4].into())
     );
     let buf = render(&mut info, 80, 8);
     assert!(rows(&buf)[0].starts_with("╭─ WindowServer 631 ─ /tcp, unix ──"), "{}", rows(&buf)[0]);
@@ -547,13 +519,13 @@ mod tests {
   }
 
   #[test]
-  fn e_reveals_the_exe_the_cwd_directories_and_files_only() {
+  fn e_reveals_the_exe_the_cwd_dirs_and_files_only() {
     // a file the kernel gives no path for isn't listed
     let mut files = files();
     files.push(file(10, Kind::File, "r", ""));
     files.push(file(11, Kind::Dir, "r", "/Users/vlad/Downloads"));
     let (mut info, fake) = info(Ok(files.clone()));
-    // `e` on every row: not the device and the sockets; `f` nothing
+    // `e` on every row: not the sockets; `f` nothing
     for _ in 0..files.len() {
       assert!(press(&mut info, &fake, KeyCode::Char('f')));
       assert!(press(&mut info, &fake, KeyCode::Char('e')));
@@ -566,13 +538,6 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "e");
     assert_eq!((info.filter.as_str(), revealed(&fake).len()), ("e", 4));
-
-    // a directory row reveals the directory
-    let (mut info, fake) = chrome();
-    assert!(press(&mut info, &fake, KeyCode::Down));
-    assert!(press(&mut info, &fake, KeyCode::Down));
-    assert!(press(&mut info, &fake, KeyCode::Char('e')));
-    assert_eq!(revealed(&fake), [format!("{CHROME}/Resources/")]);
   }
 
   #[test]
@@ -582,14 +547,14 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "tcp");
     assert!(press(&mut info, &fake, KeyCode::Esc));
-    assert_eq!(typed(&info), (false, String::new(), 8));
+    assert_eq!(typed(&info), (false, String::new(), 7));
 
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "tcp");
     assert!(press(&mut info, &fake, KeyCode::Enter));
     assert_eq!(typed(&info), (false, "tcp".into(), 2));
     assert!(press(&mut info, &fake, KeyCode::Esc));
-    assert_eq!(typed(&info), (false, String::new(), 8));
+    assert_eq!(typed(&info), (false, String::new(), 7));
     assert!(!press(&mut info, &fake, KeyCode::Esc), "closes");
   }
 
@@ -627,21 +592,13 @@ mod tests {
     info.refresh(&fake);
     assert!(selected(&info).ends_with("Ruleset Data") && info.rows()[info.index].count == 1);
 
-    // on the directory row: its key is the directory, not the fds
-    at(&mut info, "Resources/");
+    // the row closed: the row in its place
     let index = info.index;
-    files.retain(|file| file.fd != Some(3));
-    files.push(file(16, Kind::File, "r", &format!("{CHROME}/Resources/v8_context_snapshot.bin")));
-    set(files.clone());
-    info.refresh(&fake);
-    assert_eq!((selected(&info), info.index), (format!("{CHROME}/Resources/"), index));
-    // the group gone, the row in its place: the first file, its full path back
-    files.retain(|file| file.fd != Some(16));
+    files.retain(|file| !file.text.ends_with("Ruleset Data"));
     set(files);
     info.refresh(&fake);
-    let pak = format!("{CHROME}/Resources/chrome_100_percent.pak");
-    assert_eq!((selected(&info), info.index), (pak, index));
-    assert!(!info.rows()[index].member);
+    let tcp = "192.168.1.20:50122 → 140.82.112.4:443 (established)";
+    assert_eq!((selected(&info), info.index), (tcp.into(), index));
 
     // the exe too has its own key
     assert!(press(&mut info, &fake, KeyCode::Home));
@@ -685,7 +642,7 @@ mod tests {
   }
 
   #[test]
-  fn files_group_under_their_directory_and_duplicates_collapse() {
+  fn files_list_by_directory_and_name_and_duplicates_collapse() {
     let (mut info, _fake) = chrome();
     let buf = render(&mut info, 100, 16);
     let overlay = [
@@ -694,46 +651,36 @@ mod tests {
       "├──────────────────────────────────────────────────────────────────────────────────────────────────┤",
       "│ exe       /Applications/Google Chrome.app/…/Contents/MacOS/Google Chrome Helper (Renderer)       │",
       "│ cwd       /                                                                                      │",
-      "│           /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/                    │",
-      "│ file  r     chrome_100_percent.pak                                                               │",
-      "│ file  r     icudtl.dat                                                                           │",
+      "│ file  r   /Applications/Google Chrome.app/…/131.0.6778.86/Resources/chrome_100_percent.pak       │",
+      "│ file  r   /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/icudtl.dat          │",
       "│ file  rw  ~/Library/Application Support/Google/Chrome/Default/Shared Dictionary/db               │",
       "│ file  r   ~/Library/…/Google/Chrome/Subresource Filter/Indexed Rules/37/9.57.0/Ruleset Data  ×2  │",
-      "│ dev   rw  /dev/null  ×3                                                                          │",
       "│ tcp       192.168.1.20:50122 → 140.82.112.4:443 (established)                                    │",
       "│ unix      /var/run/mDNSResponder                                                                 │",
+      "│                                                                                                  │",
+      "│                                                                                                  │",
       "│                                                                                                  │",
       "│                                                                                                  │",
       "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
     ];
     assert_eq!(rows(&buf), overlay);
-    // `×N` faint like the type and the mode, the paths and the directory plain, the exe selected
+    // `×N` faint like the type and the mode, the paths plain, the exe selected
     let cell = |x: u16, y: u16| (buf[(x, y)].fg, buf[(x, y)].modifier);
     let (plain, faint) = ((theme::TEXT, Modifier::empty()), (theme::TEXT, Modifier::DIM));
-    let x = overlay[9].chars().position(|c| c == '×').unwrap() as u16;
-    assert_eq!([cell(2, 9), cell(8, 9), cell(12, 9), cell(x, 9)], [faint, faint, plain, faint]);
-    assert_eq!([cell(12, 5), cell(14, 6)], [plain, plain]);
+    let x = overlay[8].chars().position(|c| c == '×').unwrap() as u16;
+    assert_eq!([cell(2, 8), cell(8, 8), cell(12, 8), cell(x, 8)], [faint, faint, plain, faint]);
     assert_eq!(cell(2, 3), (theme::TEXT, Modifier::REVERSED));
   }
 
   #[test]
-  fn a_file_alone_in_its_directory_and_one_left_by_the_filter_show_their_full_path() {
+  fn a_filter_counts_the_descriptors_of_its_rows() {
     let (mut info, fake) = chrome();
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
-    type_str(&mut info, &fake, "icudtl");
-    let rows = info.rows();
-    assert_eq!(texts(&info), [format!("{CHROME}/Resources/icudtl.dat")]);
-    assert!(!rows[0].member && !rows[0].dir);
-    let shown = self::rows(&render(&mut info, 100, 16));
-    assert!(
-      shown[3].starts_with(
-        "│ file  r   /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/icudtl.dat "
-      ),
-      "{}",
-      shown[3]
-    );
-    // 1 of the 16 descriptors listed; the kinds stay totals
-    assert!(shown[1].starts_with("│ 1/16 fds  5 files  3 dev "), "{}", shown[1]);
+    type_str(&mut info, &fake, "ruleset");
+    let shown = rows(&render(&mut info, 100, 16));
+    // 2 of the 16 descriptors listed; the kinds stay totals
+    assert!(shown[1].starts_with("│ 2/16 fds  5 files  3 dev "), "{}", shown[1]);
+    assert!(shown[3].ends_with("Ruleset Data  ×2  │") && shown[4].starts_with("│    "));
   }
 
   #[test]
@@ -751,8 +698,7 @@ mod tests {
     for (max, cut) in cuts {
       assert_eq!(cut_path(path, max), cut, "{max}");
     }
-    // the home form, a trailing `/`, a relative name
-    assert_eq!(cut_path("~/Library/Application Support/Google/", 30), "~/Library/…/Google/");
+    // the home form, a relative name
     assert_eq!(cut_path("~/a/b/c", 6), "~/…/c");
     assert_eq!(cut_path("chrome_100_percent.pak", 10), "…rcent.pak");
   }
@@ -796,9 +742,9 @@ mod tests {
       "│ exe       /System/Library/…/Resources/WindowServer       │",
       "│ cwd       ~/Code/macmon                                  │",
       "│ file  r   ~/Library/…/000003.log                         │",
-      "│ dev   rw  /dev/ttys004                                   │",
       "│ tcp       ….0.0.1:52344 → 140.82.112.4:443 (established) │",
       "│ tcp       [::1]:8080 (listen)                            │",
+      "│ udp       0.0.0.0:5353                                   │",
       "╰──────────────────────────────────────────────────────────╯",
     ];
     let shown = rows(&buf);

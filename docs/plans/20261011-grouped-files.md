@@ -1,8 +1,8 @@
-# Grouped files list in the info overlay (roadmap item 7, first PR)
+# Files list in the info overlay (roadmap item 7, first PR)
 
 The info overlay (`i`) lists the open files of a process in fd order today. This PR makes the
 list readable for processes with hundreds of descriptors: a counts line, `exe` and `cwd` first,
-files grouped under their directory, an open mode, duplicates collapsed, pipes and kqueues only
+files sorted by directory, an open mode, duplicates collapsed, devices, pipes and kqueues only
 counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and report past it.
 
 ## Behavior
@@ -13,12 +13,10 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
 ├──────────────────────────────────────────────────────────────────────────────────────────┤
 │ exe       /Applications/Google Chrome.app/…/MacOS/Google Chrome Helper (Renderer)        │
 │ cwd       /                                                                              │
-│           /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/            │
-│ file  r     chrome_100_percent.pak                                                       │
-│ file  r     icudtl.dat                                                                   │
-│ file  r   ~/Library/…/Indexed Rules/37/9.57.0/Ruleset Data  ×2                           │
+│ file  r   /Applications/Google Chrome.app/…/Resources/chrome_100_percent.pak             │
+│ file  r   /Applications/Google Chrome.app/…/Resources/icudtl.dat                         │
 │ file  rw  ~/Library/…/Default/Shared Dictionary/db                                       │
-│ dev   rw  /dev/null  ×3                                                                  │
+│ file  r   ~/Library/…/Indexed Rules/37/9.57.0/Ruleset Data  ×2                           │
 │ tcp       192.168.1.20:50122 → 140.82.112.4:443 (established)                            │
 │ unix      /var/run/mDNSResponder                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────╯
@@ -31,25 +29,22 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
   listed rows), like `proc 12/312`; the kind counts stay totals. Pairs that don't fit drop from the
   end. Below 8 inner rows the counts line and the divider are hidden. The bottom border keeps only
   the typing hints.
-- Rows in this order: `exe` (`ProcInfo.path`, when not empty), `cwd`, vnode descriptors (`dir`,
-  `file`, `dev`), then `tcp`, `udp`, `unix`, `other`. Pipes, kqueues and rows without text are
-  not listed.
+- Rows in this order: `exe` (`ProcInfo.path`, when not empty), `cwd`, `dir` and `file`
+  descriptors, then `tcp`, `udp`, `unix`, `other`. Devices (`/dev/null`, ttys), pipes, kqueues and
+  rows without text are only counted.
 - A type on every row and an open mode after it: `r`, `w`, `rw` (`fi_openflags` FREAD / FWRITE)
-  for `dir`, `file`, `dev`; blank for exe, cwd and sockets. Both faint unless selected.
+  for `dir` and `file`; blank for exe, cwd and sockets. Both faint unless selected.
 - Rows with the same kind, text and mode collapse into one with a faint `  ×N` after the text.
-- Among `file` rows (after the filter), when 2 or more distinct files share a directory, a
-  directory row comes first (no type, no mode, the directory with a trailing `/`) and those files
-  show only their name, indented 2 cells. A file alone in its directory shows its full path. Vnode
-  rows sort by (kind dir / file / dev, directory, name), sockets by text.
+- Every row shows its full path. `dir` and `file` rows sort by (kind, directory, name), so a
+  directory's files stay together around its subdirectories; sockets by text.
 - Paths show `$HOME` as `~`. Long paths are cut by components: the first 2 components, `…`, then
   the longest tail of whole components that fits; else 1 head component; else `cut_middle`.
   Socket text keeps `cut_middle`.
-- Every row is selectable. The selection follows its key (kind, text, mode, directory row) across
-  refreshes and filter changes; when the key is gone, the row at the same index (clamped).
-- `e` reveals exe, cwd, a directory row (the directory), `dir` and `file` rows (the full path);
-  not `dev`, not sockets.
+- Every row is selectable. The selection follows its key (kind, text, mode) across refreshes and
+  filter changes; when the key is gone, the row at the same index (clamped).
+- `e` reveals exe, cwd, `dir` and `file` rows; not sockets.
 - `/` keeps the filter rules (comma terms, `!` excludes), matched against the type, the full path
-  and its `~` form, before grouping and collapsing; directory rows come from what passes.
+  and its `~` form, before collapsing.
 - Everything else stays: top border, Esc / q, Not permitted / Already exited, refresh per sample.
 
 ## Decisions
@@ -59,8 +54,11 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
   libc's `vnode_info_path`; `vst_mode & S_IFMT`: `S_IFDIR` → dir, `S_IFCHR` → dev, else file. The
   layout test locks `fi_openflags` at 0, `vst_mode` at 28, `vip_path` at 176, size 1200.
 - `Exe` rows come from the overlay (`ProcInfo.path`), not from `open_files`.
-- Rows are rebuilt from the files on each use (filter, sort, collapse, group); the home directory
-  is a field of `Info` read from `HOME` once, set directly in tests.
+- Rows are rebuilt from the files on each use (filter, sort, collapse); the home directory is a
+  field of `Info` read from `HOME` once, set directly in tests.
+- No directory rows: the first version grouped 2 or more files of one directory under a
+  directory row with indented names; the owner dropped it after trying it, as devices in the
+  list. Showing a full path past the row width (wrap or scroll) is not part of this PR.
 
 ## Tasks
 
@@ -82,3 +80,10 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
       a filter and hidden at low height, any window size renders without panic.
 - [x] `make check`, `make test`, `make loc REF=origin/main`; commit
       `feat: grouped files list in the info overlay`.
+
+### 3. Full paths, no devices
+
+- [x] `info.rs`: devices only counted; no directory rows, every row its full path; the code and
+      tests that served the grouping removed; plan and roadmap text updated.
+- [x] `make check`, `make test`, `make loc REF=origin/main`; commit
+      `feat: no devices and no directory rows in the files list`.
