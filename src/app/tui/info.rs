@@ -65,8 +65,7 @@ impl Info {
   fn select(&mut self, index: usize) {
     let rows = self.rows();
     let index = index.min(rows.len().saturating_sub(1));
-    let fd = rows.get(index).map_or(self.fd, |file| file.fd);
-    (self.index, self.fd) = (index, fd);
+    (self.index, self.fd) = (index, rows.get(index).map_or(self.fd, |file| file.fd));
   }
 
   /// After the rows changed: the selection stays on its fd while it is listed.
@@ -76,8 +75,8 @@ impl Info {
   }
 
   /// A key: navigation ends filter input, the filter keys are those of the process list, `o`
-  /// reveals the selected file or the cwd, Esc clears the filter; `false` when Esc closes the
-  /// overlay.
+  /// reveals the selected file or the cwd, Esc clears the filter; `false` when Esc or `q` (no
+  /// modifier, not typed into the filter) closes the overlay, as they close the other popups.
   pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
     if let Some(index) = step(key.code, self.index, self.page.max(1)) {
       self.typing = false;
@@ -102,6 +101,7 @@ impl Info {
         self.follow();
       }
       KeyCode::Esc => return false,
+      KeyCode::Char('q') if key.modifiers.is_empty() => return false,
       _ => {}
     }
     true
@@ -357,6 +357,24 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Esc));
     assert_eq!(typed(&info), (false, String::new(), 9));
     assert!(!press(&mut info, &fake, KeyCode::Esc), "closes");
+  }
+
+  #[test]
+  fn q_closes_unless_typed_into_the_filter() {
+    let (mut info, fake) = info(Ok(files()));
+    // with a modifier or in upper case it does nothing
+    for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
+      assert!(info.handle_key(KeyEvent::new(KeyCode::Char('q'), modifiers), &fake));
+    }
+    assert!(press(&mut info, &fake, KeyCode::Char('Q')));
+    // typed, it is text; then it closes, the filter set or not
+    assert!(press(&mut info, &fake, KeyCode::Char('/')));
+    type_str(&mut info, &fake, "q");
+    assert_eq!((info.typing, info.filter.as_str()), (true, "q"));
+    assert!(press(&mut info, &fake, KeyCode::Enter));
+    assert!(!press(&mut info, &fake, KeyCode::Char('q')), "closes");
+    let (mut info, fake) = self::info(Ok(files()));
+    assert!(!press(&mut info, &fake, KeyCode::Char('q')), "closes");
   }
 
   #[test]

@@ -1513,8 +1513,8 @@ mod tests {
     assert!(proc_row(&buf, 2).starts_with("│ file   /var/log/system.log "));
     assert!(proc_row(&buf, 29).starts_with("╰─ / ─") && proc_row(&buf, 29).ends_with(" close ─╯"));
 
-    // it takes every key, the list's and the global ones; Ctrl-C still quits
-    for c in ['q', 'k', 'i', 'p', 's', 'v'] {
+    // it takes every key, the list's and the global ones (`q` closes it); Ctrl-C still quits
+    for c in ['k', 'i', 'p', 's', 'v'] {
       assert!(app.handle_key(key(c)).is_continue(), "{c}");
     }
     assert!(app.handle_key(key('?')).is_continue());
@@ -1545,6 +1545,23 @@ mod tests {
     assert!(press(&mut app, KeyCode::Up).is_continue() && app.handle_key(key('i')).is_continue());
     render_buffer(&mut app, 60, 12);
     assert!(app.info.is_none());
+  }
+
+  #[test]
+  fn q_closes_the_info_overlay_without_quitting() {
+    let (mut app, _fake) = info_app();
+    let title = |app: &mut App| proc_row(&render_buffer(app, 200, 50), 0);
+    assert!(app.handle_key(key('i')).is_continue());
+    // typed into its filter `q` is text
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('q')).is_continue());
+    assert!(press(&mut app, KeyCode::Enter).is_continue());
+    assert!(title(&mut app).starts_with("╭─ WindowServer 631 ─ /q ───"), "{}", title(&mut app));
+    // then it closes the overlay, with the filter set too
+    assert!(app.handle_key(key('q')).is_continue());
+    assert!(app.info.is_none());
+    assert!(title(&mut app).starts_with("╭─ proc 3 ─"), "{}", title(&mut app));
+    // closed: `q` quits again
+    assert!(app.handle_key(key('q')).is_break());
   }
 
   #[test]
