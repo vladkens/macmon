@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 
-use super::boxes::{Titles, draw_box, draw_divider, hint, join, title_text_room};
+use super::boxes::{Titles, draw_box, draw_divider, draw_scrollbar, hint, join, title_text_room};
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
   ELLIPSIS, Filter, cut_middle, filter_title, scroll_offset, step, type_filter,
@@ -264,8 +264,8 @@ impl Info {
 
   /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `finder`
   /// (not while typing) on the top border, the counts line when there is room, the divider with
-  /// the filter when there is room for a row below it, then the rows (paths cut by components)
-  /// or why there are none.
+  /// the filter when there is room for a row below it, then the rows (paths cut by components),
+  /// with a scrollbar when they don't fit, or why there are none.
   pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
@@ -285,7 +285,8 @@ impl Info {
       f.render_widget(Line::from(faint(format!(" {error}"))), list);
     }
     self.page = usize::from(list.height);
-    self.offset = scroll_offset(self.offset, Some(self.index), self.page, rows.len());
+    let len = rows.len();
+    self.offset = scroll_offset(self.offset, Some(self.index), self.page, len);
 
     let rows = rows.iter().enumerate().skip(self.offset);
     for (y, (i, row)) in (list.y..list.bottom()).zip(rows) {
@@ -304,6 +305,7 @@ impl Info {
         f.buffer_mut().set_style(line, theme::SELECTED);
       }
     }
+    draw_scrollbar(f, area, list, len, self.offset);
   }
 }
 
@@ -750,17 +752,17 @@ mod tests {
     for (width, height) in (1..70).flat_map(|w| (1..12).map(move |h| (w, h))) {
       render(&mut info, width, height);
     }
-    // `finder` on the top border, `/ filter` on the divider
+    // `finder` on the top border, `/ filter` on the divider, 5 of the 7 rows beside a scrollbar
     assert!(press(&mut info, &fake, KeyCode::Down));
     let buf = render(&mut info, 60, 8);
     let overlay = [
       "╭─ WindowServer 631 ────────────────────────────── finder ─╮",
       "├─ / filter ───────────────────────────────────────────────┤",
-      "│ exe       /System/Library/…/Resources/WindowServer       │",
-      "│ cwd       ~/Code/macmon                                  │",
-      "│ file  r   ~/Library/…/000003.log                         │",
+      "│ exe       /System/Library/…/Resources/WindowServer       ↑",
+      "│ cwd       ~/Code/macmon                                  ┃",
+      "│ file  r   ~/Library/…/000003.log                         ┃",
       "│ tcp       ….0.0.1:52344 → 140.82.112.4:443 (established) │",
-      "│ tcp       [::1]:8080 (listen)                            │",
+      "│ tcp       [::1]:8080 (listen)                            ↓",
       "╰──────────────────────────────────────────────────────────╯",
     ];
     let shown = rows(&buf);
@@ -776,6 +778,31 @@ mod tests {
     assert_eq!((cell(0, 1).0, cell(3, 1), cell(5, 1)), (theme::BORDER, key, faint));
     let finder = x("finder");
     assert_eq!([0, 3, 4, 5].map(|dx| cell(finder + dx, 0)), [faint, faint, key, faint]);
+  }
+
+  #[test]
+  fn a_scrollbar_on_the_right_border_shows_where_the_rows_on_screen_are() {
+    // the exe and 30 files, 8 rows on screen at 60x12
+    let files = (0..30).map(|fd| file(fd, Kind::File, "r", &format!("/tmp/{fd:02}"))).collect();
+    let (mut info, fake) = info(Ok(files));
+    let border = |info: &mut Info| {
+      let buf = render(info, 60, 12);
+      (0..12).map(|y| buf[(59, y)].symbol().to_string()).collect::<String>()
+    };
+    // beside the list below the divider: `↑`, a track of 6 cells with a thumb of 2, `↓`
+    assert_eq!(border(&mut info), "╮│┤↑┃┃││││↓╯");
+    // row 19 selected: rows 12 to 19 on screen, then the end
+    (0..19).for_each(|_| assert!(press(&mut info, &fake, KeyCode::Down)));
+    assert_eq!(border(&mut info), "╮│┤↑││┃┃││↓╯");
+    assert!(press(&mut info, &fake, KeyCode::End));
+    assert_eq!(border(&mut info), "╮│┤↑││││┃┃↓╯");
+    let buf = render(&mut info, 60, 12);
+    let fg = |y: u16| buf[(59, y)].fg;
+    assert_eq!([fg(3), fg(8), fg(10)], [theme::BORDER, theme::TEXT, theme::BORDER]);
+
+    // the 7 rows of `files()` fit
+    let (mut info, _) = self::info(Ok(self::files()));
+    assert_eq!(border(&mut info), format!("╮│┤{}╯", "│".repeat(8)));
   }
 
   #[test]

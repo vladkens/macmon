@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType};
+use ratatui::widgets::{Block, BorderType, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use super::App;
 use super::layout::{LayoutPlan, Metric};
@@ -178,6 +178,28 @@ pub(super) fn draw_divider(f: &mut Frame, area: Rect, y: u16, titles: Titles) {
   let line = format!("├{}┤", "─".repeat(usize::from(area.width.saturating_sub(2))));
   f.buffer_mut().set_string(area.x, y, line, theme::BORDER);
   titles.render(Rect { y, height: 1, ..area }, f.buffer_mut(), Style::new().fg(theme::TEXT));
+}
+
+/// Draws a scrollbar over the right border of box `area` beside `rows`, the cells of a list of
+/// `len` rows scrolled to `offset`, when they don't fit: `↑` and `↓` at the ends, the thumb
+/// between them on the border line. Fewer than 3 rows leave no room for it.
+pub(super) fn draw_scrollbar(f: &mut Frame, area: Rect, rows: Rect, len: usize, offset: usize) {
+  let page = usize::from(rows.height);
+  if len <= page || area.width < 2 {
+    return;
+  }
+  let bar = Rect { x: area.right() - 1, width: 1, ..rows };
+  // scroll positions, not rows, so the thumb reaches the bottom at the last one
+  let mut state =
+    ScrollbarState::new(len - page + 1).position(offset).viewport_content_length(page);
+  let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(Some("↑"))
+    .end_symbol(Some("↓"))
+    .track_symbol(None)
+    .thumb_symbol("┃")
+    .style(theme::BORDER)
+    .thumb_style(theme::TEXT);
+  f.render_stateful_widget(scrollbar, bar, &mut state);
 }
 
 // MARK: Bottom border

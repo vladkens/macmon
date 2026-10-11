@@ -1097,6 +1097,53 @@ mod tests {
   }
 
   #[test]
+  fn a_scrollbar_on_the_right_border_shows_where_the_rows_on_screen_are() {
+    // the right border from the header to the corner: beside the 27 rows of 100 processes `↑`, a
+    // track of 25 cells with a thumb of 7 (27 / 100 of it), `↓`
+    let mut app = hundred_procs_app();
+    let border = |app: &mut App| {
+      let buf = render_buffer(app, 200, 50);
+      (PROC_Y + 1..50).map(|y| buf[(199, y)].symbol().to_string()).collect::<String>()
+    };
+    let bar = |above: usize, below: usize| {
+      format!("│↑{}{}{}↓╯", "│".repeat(above), "┃".repeat(7), "│".repeat(below))
+    };
+    assert_eq!(border(&mut app), bar(0, 18));
+    // scrolled to row 36 of the 73 it can start at, then to the end
+    for _ in 0..12 {
+      app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10));
+    }
+    assert_eq!(border(&mut app), bar(9, 9));
+    assert!(press(&mut app, KeyCode::End).is_continue());
+    assert_eq!(border(&mut app), bar(18, 0));
+    // the arrows in the border color, the thumb in the text color
+    let buf = render_buffer(&mut app, 200, 50);
+    let fg = |y: u16| buf[(199, PROC_Y + y)].fg;
+    assert_eq!([fg(2), fg(27), fg(28)], [theme::BORDER, theme::TEXT, theme::BORDER]);
+
+    // the 11 rows of `proc9` fit: the plain border
+    for c in "/proc9".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert_eq!(border(&mut app), format!("{}╯", "│".repeat(28)));
+
+    // in any window the box keeps its corners
+    let widths = [1, 2, 3, 5, 10, 20, 40, 60, 80, 100, 119];
+    for (width, height) in widths.into_iter().flat_map(|w| (1..40).map(move |h| (w, h))) {
+      let mut app = hundred_procs_app();
+      let buf = render_buffer(&mut app, width, height);
+      let Some(r) = app.layout(buf.area).proc.filter(|r| r.width >= 2 && r.height >= 2) else {
+        continue;
+      };
+      let (right, bottom) = (r.right() - 1, r.bottom() - 1);
+      let corners = [(right, r.y, "╮"), (right, bottom, "╯")];
+      for (x, y, corner) in corners {
+        assert_eq!(buf[(x, y)].symbol(), corner, "{width}x{height}");
+      }
+    }
+  }
+
+  #[test]
   fn mouse_does_nothing_while_process_list_hidden() {
     let mut app = app_with_procs(varied_procs());
     let mem = (x_of(&proc_row(&render_buffer(&mut app, 200, 50), 1), "MEM"), PROC_Y + 1);
