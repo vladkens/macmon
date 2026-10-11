@@ -25,6 +25,7 @@ POWER does today.
       #59, or a small one that returns the `pipe` JSON (sampler new / next / free, SoC info,
       last error), which keeps the ABI stable while metrics change. Release packaging: the dylib,
       the header and an `XCFramework`; bindings stay outside this repository.
+      Plan: [docs/plans/20261011-c-library.md](plans/20261011-c-library.md).
 - [ ] **5. More process columns.** Candidates: CPU TIME (total, all processes: already sampled
       from `rusage` and `ps`), THREADS (`proc_taskinfo`), IDLE WAKE/s (`rusage`
       `ri_pkg_idle_wkups`), FDS (open file descriptors), DISK R/W/s (`rusage` disk bytes), PEAK
