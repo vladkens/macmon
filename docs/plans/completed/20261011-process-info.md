@@ -1,3 +1,5 @@
+Done: 2026-10-11, PR #95
+
 # Process info and reveal in Finder (roadmap items 2 and 3)
 
 For the selected process, `i` lists its working directory, open files and sockets in an overlay
@@ -118,3 +120,9 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
 
 Run the TUI with `HOME` set to a temporary directory: `i` on a shell, a browser helper and `ssh`
 (sockets), `e` on several processes, `i` on a root process (`Not permitted`).
+
+## Result
+
++437 production lines. In review `o` / `open` became `e` / `finder` (`f` reads as a filter key
+elsewhere), `finder` moved to the top border and the selected path left the bottom borders. The
+flat list was reworked in roadmap item 7.

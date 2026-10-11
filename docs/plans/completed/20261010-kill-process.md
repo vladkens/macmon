@@ -1,3 +1,5 @@
+Done: 2026-10-11, PR #89
+
 # Kill the selected process (#84)
 
 `k` in the TUI opens a confirmation popup for the selected process with the buttons Terminate
@@ -42,3 +44,7 @@ shows whether the process is gone, and one that ignores SIGTERM gets `k` then Fo
 
 - [x] `src/app/tui/kill.rs`, wiring in `mod.rs`, the help line, tests; `make check` and `make test`
       pass.
+
+## Result
+
+Shipped as planned. The popup's hint style changed with the cyan keys in #92.
