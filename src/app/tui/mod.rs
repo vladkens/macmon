@@ -1508,8 +1508,10 @@ mod tests {
     let title = proc_row(&buf, 0);
     assert!(title.starts_with("╭─ WindowServer 631 ─ / filter ───"), "{title}");
     assert!(title.ends_with("─ finder ─╮"), "{title}");
-    assert!(proc_row(&buf, 1).starts_with("│ cwd    / "), "{}", proc_row(&buf, 1));
-    assert!(proc_row(&buf, 2).starts_with("│ file   /var/log/system.log "));
+    assert!(proc_row(&buf, 1).starts_with("│ 1 fds  1 files "), "{}", proc_row(&buf, 1));
+    assert!(proc_row(&buf, 3).starts_with(&format!("│ exe       {WINDOW_SERVER} ")));
+    assert!(proc_row(&buf, 4).starts_with("│ cwd       / "), "{}", proc_row(&buf, 4));
+    assert!(proc_row(&buf, 5).starts_with("│ file  r   /var/log/system.log "));
     assert_eq!(proc_row(&buf, 29), format!("╰{}╯", "─".repeat(198)));
 
     // it takes every key, the list's and the global ones (`q` closes it); Ctrl-C still quits
@@ -1523,6 +1525,7 @@ mod tests {
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
     // the wheel moves its selection, not the list's; `e` reveals the selected file, `f` nothing
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
     assert!(app.handle_key(key('f')).is_continue() && fake.0.borrow().revealed.is_empty());
     assert!(app.handle_key(key('e')).is_continue());
     assert_eq!(fake.0.borrow().revealed, ["/var/log/system.log"]);
@@ -1532,7 +1535,9 @@ mod tests {
     let pipe = OpenFile { fd: Some(4), kind: Kind::Pipe, text: String::new(), mode: "" };
     fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().push(pipe);
     put_procs(&mut app, varied_procs());
-    assert!(proc_row(&render_buffer(&mut app, 200, 50), 3).starts_with("│ pipe "));
+    assert!(
+      proc_row(&render_buffer(&mut app, 200, 50), 1).starts_with("│ 2 fds  1 files  1 pipes ")
+    );
     // focus loss ends filter input, Esc then closes it and the list has its keys back
     assert!(app.handle_key(key('/')).is_continue());
     assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue());

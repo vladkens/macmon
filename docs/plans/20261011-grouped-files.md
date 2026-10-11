@@ -73,12 +73,12 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
 
 ### 2. Grouped list
 
-- [ ] `info.rs`: counts line and divider, row order, type and mode columns, `×N`, directory
+- [x] `info.rs`: counts line and divider, row order, type and mode columns, `×N`, directory
       groups, `~` and the component cut, selection by key, `e` on the new rows, the filter on the
       `~` form; roadmap item 7 links this plan.
-- [ ] Tests: grouping and collapse on a Chrome-like fixture, a single file keeps its full path, a
+- [x] Tests: grouping and collapse on a Chrome-like fixture, a single file keeps its full path, a
       filter turning a group into a full-path row, `~`, the component cut at several widths,
       selection by key across a refresh, `e` on a directory row, the counts line with and without
       a filter and hidden at low height, any window size renders without panic.
-- [ ] `make check`, `make test`, `make loc REF=origin/main`; commit
+- [x] `make check`, `make test`, `make loc REF=origin/main`; commit
       `feat: grouped files list in the info overlay`.

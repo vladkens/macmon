@@ -99,6 +99,8 @@ struct un_sockinfo {
 /// What an open file is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
+  /// The executable, which the info overlay adds; `open_files` doesn't list it.
+  Exe,
   Cwd,
   Dir,
   File,
@@ -115,7 +117,8 @@ pub enum Kind {
 impl Kind {
   /// The type column of the info overlay.
   pub fn label(self) -> &'static str {
-    let labels = ["cwd", "dir", "file", "dev", "tcp", "udp", "unix", "other", "pipe", "kqueue"];
+    let labels =
+      ["exe", "cwd", "dir", "file", "dev", "tcp", "udp", "unix", "other", "pipe", "kqueue"];
     labels[self as usize]
   }
 }

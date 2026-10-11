@@ -42,6 +42,7 @@ POWER does today.
       a line above it (`116 fds  8 files  3 dev  96 pipes …`). Second, a process summary line
       above the counts (cpu, mem, power, threads, uptime, parent) and presets on `s` / `S` (`all`,
       `files`, `network`, `home`, `not home`) saved in `~/.config/macmon.json`.
+      Plan (first PR): [docs/plans/20261011-grouped-files.md](plans/20261011-grouped-files.md).
 - [ ] **8. macmon's own cost, before the release.** Measure what the TUI, `pipe` and `serve` cost
       at 1000 ms and 250 ms: CPU time per minute and power (macmon's own POWER, `powermetrics`
       task energy, Activity Monitor's Energy Impact), with the process list shown and hidden.
