@@ -55,8 +55,10 @@ capi: # C library: libmacmon.dylib + include/ in out/capi; libmacmon-$(CAPI_TAG)
 	cp -R include LICENSE $(CAPI)/
 	cp target/capi/libmacmon.dylib $(CAPI)/lib/
 	otool -D $(CAPI)/lib/libmacmon.dylib | grep -qx '@rpath/libmacmon.dylib'
-	tar czf out/libmacmon-$(CAPI_TAG).tar.gz -C $(CAPI) include lib LICENSE
 	strip -S -o out/libmacmon.a target/capi/libmacmon.a
+	@for f in $(CAPI)/lib/libmacmon.dylib out/libmacmon.a; do \
+		test "$$(lipo -archs $$f)" = arm64 || { echo "$$f: not arm64 only" >&2; exit 1; }; done
+	tar czf out/libmacmon-$(CAPI_TAG).tar.gz -C $(CAPI) include lib LICENSE
 
 # the static smoke test links only the modulemap's system libs, without -dead_strip, as Xcode may
 capi-test: capi # MACMON_CAPI_ALLOW_NO_HW=1 accepts missing metric sources (CI VMs only)
