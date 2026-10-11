@@ -165,7 +165,7 @@ mod tests {
 
   /// A file open on `fd` (negative: the cwd).
   fn file(fd: i32, kind: Kind, text: &str) -> OpenFile {
-    OpenFile { fd: (fd >= 0).then_some(fd), kind, text: text.into() }
+    OpenFile { fd: (fd >= 0).then_some(fd), kind, text: text.into(), mode: "" }
   }
 
   const LOG: &str = "/Users/vlad/Library/Application Support/Google/Chrome/Default/IndexedDB/\
@@ -481,6 +481,6 @@ mod tests {
     assert_eq!(LibcSys.identity(pid), started);
     let info = Info::new(&ProcInfo { pid, started, ..proc() }, &LibcSys);
     let cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-    assert_eq!(info.files.unwrap()[0], OpenFile { fd: None, kind: Kind::Cwd, text: cwd });
+    assert_eq!(info.files.unwrap()[0], OpenFile { fd: None, kind: Kind::Cwd, text: cwd, mode: "" });
   }
 }

@@ -22,11 +22,19 @@ const TCP_STATES: [&str; 11] = [
   "closing", "last_ack", "fin_wait_2", "time_wait",
 ];
 
+/// `struct proc_fileinfo`.
+#[repr(C)]
+struct proc_fileinfo {
+  /// `FREAD` (1), `FWRITE` (2) and other `f_flag` bits.
+  fi_openflags: u32,
+  _rest: [u32; 5], // fi_status to fi_guardflags
+}
+
 /// `struct vnode_fdinfowithpath`.
 #[repr(C)]
 struct vnode_fdinfowithpath {
-  _info: [u64; 22], // proc_fileinfo, vnode_info
-  vip_path: [c_char; libc::MAXPATHLEN as usize],
+  pfi: proc_fileinfo,
+  pvip: libc::vnode_info_path,
 }
 
 /// `struct socket_fdinfo`.
@@ -89,22 +97,26 @@ struct un_sockinfo {
 }
 
 /// What an open file is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
   Cwd,
+  Dir,
   File,
+  /// A character device (`/dev/null`, a tty).
+  Dev,
   Tcp,
   Udp,
   Unix,
+  Other,
   Pipe,
   Kqueue,
-  Other,
 }
 
 impl Kind {
   /// The type column of the info overlay.
   pub fn label(self) -> &'static str {
-    ["cwd", "file", "tcp", "udp", "unix", "pipe", "kqueue", "other"][self as usize]
+    let labels = ["cwd", "dir", "file", "dev", "tcp", "udp", "unix", "other", "pipe", "kqueue"];
+    labels[self as usize]
   }
 }
 
@@ -116,6 +128,8 @@ pub struct OpenFile {
   pub kind: Kind,
   /// Path; `local → remote` for TCP (with its state) and UDP sockets; empty when there is none.
   pub text: String,
+  /// `r`, `w` or `rw` for a dir, file or dev descriptor; empty for the rest.
+  pub mode: &'static str,
 }
 
 /// Reads a `T` with `call(buffer, size)`, a libproc call returning the bytes it wrote:
@@ -150,7 +164,7 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
   let mut files = Vec::new();
   if let Some(cwd) = cwd {
     let text = c_chars_to_string(cwd.pvi_cdir.vip_path.as_flattened());
-    files.push(OpenFile { fd: None, kind: Kind::Cwd, text });
+    files.push(OpenFile { fd: None, kind: Kind::Cwd, text, mode: "" });
   }
 
   // With a NULL buffer it returns the bytes needed; 0 after the cwd call succeeded means no fds.
@@ -168,11 +182,18 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
   fds.truncate(bytes.max(0) as usize / entry);
 
   files.extend(fds.iter().filter_map(|fd| {
+    let mut mode = "";
     let (kind, text) = match fd.proc_fdtype as c_int {
       libc::PROX_FDTYPE_VNODE => {
         let info: vnode_fdinfowithpath =
           unsafe { fd_info(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO) }?;
-        (Kind::File, c_chars_to_string(&info.vip_path))
+        mode = ["", "r", "w", "rw"][(info.pfi.fi_openflags & 3) as usize];
+        let kind = match info.pvip.vip_vi.vi_stat.vst_mode & libc::S_IFMT {
+          libc::S_IFDIR => Kind::Dir,
+          libc::S_IFCHR => Kind::Dev,
+          _ => Kind::File,
+        };
+        (kind, c_chars_to_string(info.pvip.vip_path.as_flattened()))
       }
       libc::PROX_FDTYPE_SOCKET => {
         let info: socket_fdinfo = unsafe { fd_info(pid, fd.proc_fd, PROC_PIDFDSOCKETINFO) }?;
@@ -182,7 +203,7 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
       libc::PROX_FDTYPE_KQUEUE => (Kind::Kqueue, String::new()),
       _ => (Kind::Other, String::new()),
     };
-    Some(OpenFile { fd: Some(fd.proc_fd), kind, text })
+    Some(OpenFile { fd: Some(fd.proc_fd), kind, text, mode })
   }));
   Ok(files)
 }
@@ -255,7 +276,9 @@ mod tests {
   fn layout_matches_sdk() {
     assert_eq!(mem::size_of::<libc::proc_fdinfo>(), 8);
     assert_eq!(mem::size_of::<vnode_fdinfowithpath>(), 1200);
-    assert_eq!(mem::offset_of!(vnode_fdinfowithpath, vip_path), 176);
+    assert_eq!(mem::offset_of!(vnode_fdinfowithpath, pfi.fi_openflags), 0);
+    assert_eq!(mem::offset_of!(vnode_fdinfowithpath, pvip.vip_vi.vi_stat.vst_mode), 28);
+    assert_eq!(mem::offset_of!(vnode_fdinfowithpath, pvip.vip_path), 176);
     assert_eq!(mem::size_of::<socket_fdinfo>(), 792);
     assert_eq!(mem::offset_of!(socket_fdinfo, psi), 24);
 
@@ -282,7 +305,7 @@ mod tests {
   fn cwd_comes_first() {
     let cwd = std::env::current_dir().unwrap();
     let text = cwd.to_string_lossy().into_owned();
-    assert_eq!(own_files()[0], OpenFile { fd: None, kind: Kind::Cwd, text });
+    assert_eq!(own_files()[0], OpenFile { fd: None, kind: Kind::Cwd, text, mode: "" });
   }
 
   #[test]
@@ -293,6 +316,28 @@ mod tests {
     let real = fs::canonicalize(&path).unwrap(); // /var is a symlink to /private/var
     fs::remove_file(&path).unwrap();
     assert_eq!(listed, (Kind::File, real.to_string_lossy().into_owned()));
+  }
+
+  #[test]
+  fn tells_dirs_and_devices_and_the_open_mode() {
+    let kind_mode = |fd: &dyn AsRawFd| {
+      let fd = fd.as_raw_fd();
+      let file = own_files().into_iter().find(|file| file.fd == Some(fd)).expect("fd is listed");
+      (file.kind, file.mode)
+    };
+    let null = File::options().read(true).write(true).open("/dev/null").unwrap();
+    assert_eq!(kind_mode(&null), (Kind::Dev, "rw"));
+    let dir = File::open(std::env::temp_dir()).unwrap();
+    assert_eq!(kind_mode(&dir), (Kind::Dir, "r"));
+
+    let path = std::env::temp_dir().join(format!("macmon-fds-mode-{}", std::process::id()));
+    let file = File::options().write(true).create(true).truncate(true).open(&path).unwrap();
+    let listed = kind_mode(&file);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(listed, (Kind::File, "w"));
+    // sockets have no mode
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    assert_eq!(kind_mode(&udp), (Kind::Udp, ""));
   }
 
   #[test]

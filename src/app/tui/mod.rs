@@ -1493,8 +1493,9 @@ mod tests {
   /// `kill_app` with the cwd and a log file open in WindowServer.
   fn info_app() -> (App, FakeSys) {
     let (app, fake) = kill_app();
-    let cwd = OpenFile { fd: None, kind: Kind::Cwd, text: "/".into() };
-    let log = OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into() };
+    let cwd = OpenFile { fd: None, kind: Kind::Cwd, text: "/".into(), mode: "" };
+    let log =
+      OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r" };
     fake.0.borrow_mut().files.insert(631, Ok(vec![cwd, log]));
     (app, fake)
   }
@@ -1528,7 +1529,7 @@ mod tests {
     assert_eq!(app.proc_view.selected_pid(), Some(631));
 
     // each sample reads the files again
-    let pipe = OpenFile { fd: Some(4), kind: Kind::Pipe, text: String::new() };
+    let pipe = OpenFile { fd: Some(4), kind: Kind::Pipe, text: String::new(), mode: "" };
     fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().push(pipe);
     put_procs(&mut app, varied_procs());
     assert!(proc_row(&render_buffer(&mut app, 200, 50), 3).starts_with("│ pipe "));
