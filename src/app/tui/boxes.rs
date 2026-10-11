@@ -470,7 +470,8 @@ impl App {
   fn total_power_box(&self) -> MetricBox<'_> {
     let fans = self.fans.label();
     let fans = (!fans.is_empty()).then(|| text(fans));
-    if self.sys_power.top_value > 0.0 {
+    // the newest sample, not the smoothed `top_value`, so the box switches as soon as it reads 0
+    if self.sys_power.items.first().is_some_and(|&mw| mw > 0) {
       self.power_box("Total", &self.sys_power, fans)
     } else {
       self.power_box("Power", &self.all_power, fans)

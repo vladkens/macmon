@@ -1215,6 +1215,13 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let top = box_top(&app, &buf, Metric::TotalPower);
     assert!(top.starts_with("╭─ Power 6.60W (6.60, 6.60) ───") && top.ends_with("───╮"), "{top}");
+
+    // a sensor that stops reading falls back with its first zero sample
+    let mut app = test_app();
+    app.update_metrics(Metrics { sys_power: 0.0, ..test_metrics() });
+    let buf = render_buffer(&mut app, 200, 50);
+    let top = box_top(&app, &buf, Metric::TotalPower);
+    assert!(top.starts_with("╭─ Power 6.60W (6.60, 6.60) ───"), "{top}");
   }
 
   #[test]
