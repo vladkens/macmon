@@ -410,9 +410,9 @@ impl App {
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit. The help
-  /// overlay takes every key while it is open, then the info overlay and the kill popup; then keys
-  /// of the process panel (only while it is on screen) take precedence, and while a filter is
-  /// typed every key except Ctrl-C goes to it.
+  /// overlay takes every key while it is open, then the info overlay (`?` opens the help over it)
+  /// and the kill popup; then keys of the process panel (only while it is on screen) take
+  /// precedence, and while a filter is typed every key except Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
@@ -429,7 +429,10 @@ impl App {
     }
 
     if let Some(mut info) = self.info.take() {
-      self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
+      // the help opens over it, unless `?` is typed into its filter
+      let help = key.code == KeyCode::Char('?') && !info.typing;
+      self.help = help.then_some(0);
+      self.info = (help || info.handle_key(key, &*self.kill.sys)).then_some(info);
       return ControlFlow::Continue(());
     }
     if self.kill.is_open() {
@@ -477,8 +480,11 @@ impl App {
 
   /// Applies a mouse event at the cells of the last frame to the process list, only while the
   /// mouse is captured (events still on the way when capture turns off are dropped). While an
-  /// overlay is open, they go to it.
+  /// overlay is open, they go to it; under the help to nothing.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
+    if self.help.is_some() {
+      return;
+    }
     if let Some(info) = &mut self.info {
       info.handle_mouse(mouse);
     } else if self.kill.is_open() {
@@ -1586,8 +1592,6 @@ mod tests {
     for c in ['k', 'i', 'p', 's', 'v'] {
       assert!(app.handle_key(key(c)).is_continue(), "{c}");
     }
-    assert!(app.handle_key(key('?')).is_continue());
-    assert!(app.help.is_none(), "help doesn't open over it");
     assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
@@ -1621,6 +1625,29 @@ mod tests {
     assert!(press(&mut app, KeyCode::Up).is_continue() && app.handle_key(key('i')).is_continue());
     render_buffer(&mut app, 60, 12);
     assert!(app.info.is_none());
+  }
+
+  #[test]
+  fn the_help_opens_over_the_info_overlay_and_closes_back_to_it() {
+    let (mut app, _fake) = info_app();
+    assert!(app.handle_key(key('i')).is_continue() && press(&mut app, KeyCode::Down).is_continue());
+    let cwd_selected = |app: &mut App| {
+      let buf = render_buffer(app, 200, 50);
+      buf[(2, PROC_Y + 4)].modifier.contains(Modifier::REVERSED)
+    };
+    assert!(cwd_selected(&mut app));
+
+    // over it the help takes the keys and the wheel; Esc closes the help, not the overlay
+    assert!(app.handle_key(key('?')).is_continue());
+    assert!(render_to_string(&mut app, 200, 50).contains("Info overlay"));
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(app.help.is_none() && app.info.is_some() && cwd_selected(&mut app));
+
+    // typed into its filter `?` is text
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('?')).is_continue());
+    assert!(app.help.is_none());
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 2).starts_with("├─ /?█ "));
   }
 
   #[test]
