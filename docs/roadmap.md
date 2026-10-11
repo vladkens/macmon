@@ -53,9 +53,11 @@ POWER does today.
       draws it), ↑ / ↓ wrapping around at the ends (not the wheel, PgUp / PgDn, Home / End), and
       the full path of a cut row in the info overlay scrolling on its bottom border (a timer
       only while it moves).
-- [ ] **10. Pause.** A key that freezes the process list and the info overlay, so a row can be
-      read and selected without the list jumping (Sloth has it). The metrics keep updating;
-      the title shows that the list is paused.
+- [ ] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
+      a row can be read and selected without the list jumping (Sloth has it). The metrics keep
+      updating; the title shows that the list is paused. And `f` turning the filter off and on
+      again without retyping it, to look outside it for a moment: the filter text stays, faint,
+      while it is off.
 - [ ] **11. Who has a file open.** A view of the open files of all processes with the filter,
       to find who reads or writes a file or holds a port (Sloth's main window, `lsof <path>`).
       Without root libproc reads only the user's own processes; other users' processes are
