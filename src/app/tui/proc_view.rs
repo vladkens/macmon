@@ -2,7 +2,6 @@
 //! driven by keys and the mouse.
 
 use std::cmp::Ordering;
-use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -18,7 +17,7 @@ use super::boxes::{
   Titles, draw_box, draw_scrollbar, hint, join, render_bottom_border, title_text_room,
 };
 use super::store::ratio;
-use super::theme::{self, dim, gradient, heading, text};
+use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
 use crate::procs::ProcInfo;
 
@@ -38,8 +37,6 @@ const FILTER_MIN_WIDTH: u16 = 4;
 const WHEEL_ROWS: usize = 3;
 /// Fewest process rows left below the group totals; with fewer the totals are hidden.
 const GROUPS_MIN_ROWS: u16 = 3;
-/// How long `copied` shows in place of the `copy` hint after a copy.
-const COPIED_FOR: Duration = Duration::from_secs(1);
 
 // MARK: Table
 
@@ -362,14 +359,6 @@ pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'s
   spans
 }
 
-/// The `copy` hint, or `copied` for `COPIED_FOR` after a copy at `copied`.
-pub(super) fn copy_hint(copied: Option<Instant>) -> Vec<Span<'static>> {
-  match copied {
-    Some(at) if at.elapsed() < COPIED_FOR => vec![text("copied")],
-    _ => hint("c", "copy"),
-  }
-}
-
 /// The row of `len` a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from
 /// row `at`, with `page` rows on screen: ↑ / ↓ wrap around at the ends, the others stop there;
 /// `None` for other keys.
@@ -497,8 +486,8 @@ pub(super) struct ProcView {
   /// Rows on screen at the last render, the PgUp / PgDn step.
   page: usize,
   targets: Targets,
-  /// When `c` last copied the selected path.
-  pub(super) copied: Option<Instant>,
+  /// `c` copied the selected path, and no key was pressed since.
+  pub(super) copied: bool,
 }
 
 /// The sort of the default settings.
@@ -523,7 +512,7 @@ impl ProcView {
       offset: 0,
       page: 0,
       targets: Targets::default(),
-      copied: None,
+      copied: false,
     }
   }
 
@@ -788,8 +777,8 @@ impl ProcView {
     }
 
     let titles = filter_titles(name, &self.filter, self.typing, width);
-    let copy = copy_hint(self.copied);
-    let actions = || join([hint("i", "info"), hint("e", "finder"), copy, hint("k", "kill")]);
+    let actions =
+      || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
       true => titles,
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),
@@ -797,12 +786,15 @@ impl ProcView {
     }
   }
 
-  /// Left side of the bottom border of the process box: a dim note that POWER is known for own
-  /// processes only, while the POWER column shows processes without it next to some with it.
+  /// Left side of the bottom border of the process box: a faint `copied` after `c`, else a dim
+  /// note that POWER is known for own processes only, while the POWER column shows processes
+  /// without it next to some with it.
   fn border_text(&self, power_shown: bool) -> Vec<Span<'static>> {
     let procs = self.procs().unwrap_or_default();
     let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
-    if power_shown && power(true) && power(false) {
+    if self.copied {
+      vec![faint("copied")]
+    } else if power_shown && power(true) && power(false) {
       vec![dim("POWER: own processes only")]
     } else {
       vec![]

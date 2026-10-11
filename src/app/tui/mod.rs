@@ -417,6 +417,8 @@ impl App {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
     }
+    // `copied` shows until the next key
+    self.proc_view.copied = false;
 
     if let Some(scroll) = self.help {
       self.help = match key.code {
@@ -462,7 +464,7 @@ impl App {
         ('e', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
         ('c', Some(proc)) if !proc.path.is_empty() => {
           self.kill.sys.copy(&proc.path);
-          self.proc_view.copied = Some(Instant::now());
+          self.proc_view.copied = true;
         }
         _ => {}
       },
@@ -485,6 +487,7 @@ impl App {
     if self.help.is_some() {
       return;
     }
+    self.proc_view.copied = false;
     if let Some(info) = &mut self.info {
       info.handle_mouse(mouse);
     } else if self.kill.is_open() {
@@ -568,7 +571,7 @@ mod tests {
   use std::ops::ControlFlow;
   use std::sync::atomic::AtomicBool;
   use std::sync::{Arc, Mutex, RwLock, mpsc};
-  use std::time::{Duration, Instant};
+  use std::time::Duration;
 
   use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
@@ -1687,13 +1690,15 @@ mod tests {
   #[test]
   fn c_copies_the_path_of_the_selected_process() {
     let (mut app, fake) = info_app();
-    let title = |app: &mut App| proc_row(&render_buffer(app, 200, 50), 0);
+    let bottom = |app: &mut App| row(&render_buffer(app, 200, 50), 49);
     assert!(app.handle_key(key('c')).is_continue());
     assert_eq!(fake.0.borrow().copied, [WINDOW_SERVER]);
-    // `copied` in place of the hint for a second
-    assert!(title(&mut app).ends_with("─ info | finder | copied | kill ─╮"));
-    app.proc_view.copied = Instant::now().checked_sub(Duration::from_secs(1));
-    assert!(title(&mut app).ends_with("─ info | finder | copy | kill ─╮"));
+    // `copied` faint in place of the POWER note until the next key
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 49).starts_with("╰─ copied ─"), "{}", row(&buf, 49));
+    assert_eq!(buf[(3, 49)].modifier, Modifier::DIM);
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(bottom(&mut app).starts_with("╰─ POWER: own processes only ─"));
 
     // typed into the filter it is text; nothing for a process without a readable path
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('c')).is_continue());
@@ -1702,7 +1707,7 @@ mod tests {
     let (kill, fake) = FakeSys::kill(&[]);
     app.kill = kill;
     assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('c')).is_continue());
-    assert!(fake.0.borrow().copied.is_empty());
+    assert!(fake.0.borrow().copied.is_empty() && !bottom(&mut app).contains("copied"));
   }
 
   #[test]

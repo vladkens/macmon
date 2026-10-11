@@ -1,8 +1,6 @@
 //! The info overlay (`i`): the executable, working directory, open files and sockets of the
 //! selected process, under a line counting the descriptors; `e` reveals one.
 
-use std::time::Instant;
-
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -14,7 +12,7 @@ use super::boxes::{
 };
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
-  ELLIPSIS, Filter, copy_hint, cut_middle, filter_title, scroll_offset, step, type_filter,
+  ELLIPSIS, Filter, cut_middle, filter_title, scroll_offset, step, type_filter,
 };
 use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
@@ -100,8 +98,8 @@ pub(super) struct Info {
   page: usize,
   /// `$HOME`, shown as `~`.
   home: String,
-  /// When `c` last copied the selected text.
-  copied: Option<Instant>,
+  /// `c` copied the selected text, and no key was pressed since.
+  copied: bool,
 }
 
 impl Info {
@@ -110,7 +108,7 @@ impl Info {
     let (proc, files, filter) = (proc.clone(), Ok(vec![]), String::new());
     let home = std::env::var("HOME").unwrap_or_default();
     let (typing, index, key, offset, page) = (false, 0, None, 0, 0);
-    let copied = None;
+    let copied = false;
     let mut info = Self { proc, files, filter, typing, index, key, offset, page, home, copied };
     info.refresh(sys);
     info
@@ -191,10 +189,12 @@ impl Info {
   }
 
   /// A key: navigation ends filter input, the filter keys are those of the process list, `e`
-  /// reveals the selected exe, cwd, directory or file, Esc clears the filter; `false` when Esc or
+  /// reveals the selected exe, cwd, directory or file, `c` copies the selected text (`copied`
+  /// shows until the next key), Esc clears the filter; `false` when Esc or
   /// `q` (no modifier, not typed into the filter) closes the overlay, as they close the other
   /// popups.
   pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
+    self.copied = false;
     if let Some(index) = step(key.code, self.index, self.page.max(1), self.rows().len()) {
       self.typing = false;
       self.select(index);
@@ -216,7 +216,7 @@ impl Info {
       KeyCode::Char('c') => {
         if let Some(row) = self.rows().get(self.index) {
           sys.copy(&row.text);
-          self.copied = Some(Instant::now());
+          self.copied = true;
         }
       }
       KeyCode::Esc if !self.filter.is_empty() => {
@@ -238,7 +238,7 @@ impl Info {
       MouseEventKind::ScrollDown => self.index + 1,
       _ => return,
     };
-    self.typing = false;
+    (self.typing, self.copied) = (false, false);
     self.select(index);
   }
 
@@ -288,7 +288,7 @@ impl Info {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
     let titles = Titles::new(name);
-    let actions = || join([copy_hint(self.copied), hint("e", "finder")]);
+    let actions = || join([hint("c", "copy"), hint("e", "finder")]);
     let titles = if self.typing { titles } else { titles.right(actions()) };
     let mut list = draw_box(f, area, titles);
     let rows = self.rows();
@@ -326,9 +326,11 @@ impl Info {
     }
     draw_scrollbar(f, area, list, len, self.offset);
 
-    // help and close, as on the main footer; nothing while typing (the filter keys are above)
+    // help and back as on the main footer, `copied` after `c`; nothing while typing (the filter
+    // keys are on the divider)
     if !self.typing && area.height >= 2 {
-      render_bottom_border(f, area, vec![hint("?", ""), hint("q", "back")], |_| vec![]);
+      let copied = if self.copied { vec![faint("copied")] } else { vec![] };
+      render_bottom_border(f, area, vec![hint("?", ""), hint("q", "back")], |_| copied);
     }
   }
 }
@@ -596,11 +598,23 @@ mod tests {
     (0..3).for_each(|_| assert!(press(&mut info, &fake, KeyCode::Down)));
     assert!(press(&mut info, &fake, KeyCode::Char('c')));
     assert_eq!(fake.0.borrow().copied, [EXE, ROWS[3]]);
-    assert!(rows(&render(&mut info, 80, 8))[0].ends_with("─ copied | finder ─╮"));
+    // `copied` faint on the bottom border until the next key or the wheel
+    let buf = render(&mut info, 80, 8);
+    assert!(rows(&buf)[7].starts_with("╰─ copied ─") && buf[(3, 7)].modifier == Modifier::DIM);
+    let wheel = MouseEvent {
+      kind: MouseEventKind::ScrollDown,
+      column: 0,
+      row: 0,
+      modifiers: KeyModifiers::NONE,
+    };
+    info.handle_mouse(wheel);
+    assert_eq!(rows(&render(&mut info, 80, 8))[7], format!("╰{} ? | q back ─╯", "─".repeat(65)));
+    assert!(press(&mut info, &fake, KeyCode::Char('c')) && press(&mut info, &fake, KeyCode::Up));
+    assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
     // typed, it is text
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "c");
-    assert_eq!((info.filter.as_str(), fake.0.borrow().copied.len()), ("c", 2));
+    assert_eq!((info.filter.as_str(), fake.0.borrow().copied.len()), ("c", 3));
   }
 
   #[test]
