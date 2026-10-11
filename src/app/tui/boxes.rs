@@ -335,7 +335,7 @@ impl App {
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
       }
 
-      // the fans (`✇ 1200 rpm`) right on the bottom border of the total power box
+      // the fans (`1200 rpm`) right on the bottom border of the total power box
       if kind == Metric::TotalPower && !fans.is_empty() && r.height >= 2 {
         render_bottom_border(f, r, vec![vec![text(fans.clone())]], |_| vec![]);
       }

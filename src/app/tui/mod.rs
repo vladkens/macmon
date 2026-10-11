@@ -1214,8 +1214,8 @@ mod tests {
   #[test]
   fn fans_on_the_bottom_border_of_the_total_power_box() {
     let cases: [(&[u32], &str); 3] = [
-      (&[1200], "─ ✇ 1200 rpm ─╯"),
-      (&[1200, 1300], "─ ✇ 1200/1300 rpm ─╯"),
+      (&[1200], "─ 1200 rpm ─╯"),
+      (&[1200, 1300], "─ 1200/1300 rpm ─╯"),
       (&[], "─────────────────────────╯"),
     ];
     for (rpms, end) in cases {
