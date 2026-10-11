@@ -298,7 +298,7 @@ impl Info {
       true => filter_title(&self.filter, self.typing, title_text_room(width, &[])),
       false => hint("/", "filter"),
     };
-    let hints = join([hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")]);
+    let hints = join([hint("Enter", "keep"), hint("Esc", "clear")]);
     if self.typing { Titles::new(filter).right(hints) } else { Titles::new(filter) }
   }
 
@@ -588,7 +588,7 @@ mod tests {
     let shown = rows(&render(&mut info, 80, 8));
     assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(59)));
     let divider =
-      "├─ /tcp, unix█ ─────────────────────────── Enter keep | Esc clear | ↑↓ select ─┤";
+      "├─ /tcp, unix█ ─────────────────────────────────────── Enter keep | Esc clear ─┤";
     assert_eq!(shown[1], divider);
     assert_eq!(shown[7], format!("╰{}╯", "─".repeat(78)));
     assert!(press(&mut info, &fake, KeyCode::Down));

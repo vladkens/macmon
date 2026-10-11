@@ -988,10 +988,14 @@ mod tests {
     let mut app = app_with_procs(varied_procs());
     assert!(app.handle_key(key('/')).is_continue());
 
-    for c in ['q', 'v', 'r', 'p', '+', '-', 's', '?'] {
+    // only the filter keys on the bottom border: the arrows end the input as Enter does
+    let footer = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(footer.ends_with("─ Enter keep | Esc clear ─╯"), "{footer}");
+
+    for c in ['q', 'v', 'r', 'p', '+', '-', 's', '?', 'c'] {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
     }
-    assert_eq!(app.proc_view.filter(), "qvrp+-s?");
+    assert_eq!(app.proc_view.filter(), "qvrp+-s?c");
     assert_eq!((app.cfg.view_type, app.cfg.ratio_mode), (ViewType::Graph, RatioMode::Scaled));
     assert_eq!((app.cfg.interval(), app.cfg.show_procs), (1000, true));
     assert_eq!((app.cfg.proc_sort, app.help), (ProcSort::Cpu, None));

@@ -339,12 +339,12 @@ impl App {
   /// Key hints for the bottom border of the lowest box (see `hint`): the global keys, help first as
   /// a lone `?` (hints drop from the end), with the ratio mode and the interval (`? | quit | procs
   /// | view | freq | -/+  1000ms`; no `procs` while the window is too small for the process list),
-  /// or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`). The mode
+  /// or the filter keys while a filter is typed (`Enter keep | Esc clear`). The mode
   /// and the interval are padded to their widest value, so a toggle doesn't move the hints left of
   /// them.
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
     if self.proc_view.typing() {
-      return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
+      return vec![hint("Enter", "keep"), hint("Esc", "clear")];
     }
 
     let mut hints = vec![hint("?", ""), hint("q", "quit")];
