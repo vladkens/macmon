@@ -48,7 +48,8 @@ remote:
 
 capi: # C library: libmacmon.dylib + include/ in out/capi, libmacmon-$(CAPI_TAG).tar.gz in out
 	MACOSX_DEPLOYMENT_TARGET=11.0 cargo rustc --locked --lib --profile capi --no-default-features \
-		--features capi --crate-type cdylib -- -C link-arg=-Wl,-install_name,@rpath/libmacmon.dylib
+		--features capi --crate-type cdylib,staticlib \
+		-- -C link-arg=-Wl,-install_name,@rpath/libmacmon.dylib
 	rm -rf $(CAPI)
 	mkdir -p $(CAPI)/lib
 	cp -R include LICENSE $(CAPI)/
@@ -61,9 +62,11 @@ capi-test: capi # MACMON_CAPI_ALLOW_NO_HW=1 accepts missing metric sources (CI V
 		-Wl,-rpath,@executable_path/capi/lib -o out/capi_smoke tests/capi_smoke.c
 	out/capi_smoke
 
+# static, so SwiftPM and Xcode link it without rpath or embedding; the modulemap links its system libs
 xcframework: capi # needs Xcode: CMacmon.xcframework-$(CAPI_TAG).zip and its SPM checksum in out
 	rm -rf out/CMacmon.xcframework
-	xcodebuild -create-xcframework -library $(CAPI)/lib/libmacmon.dylib -headers $(CAPI)/include \
+	strip -S -o out/libmacmon.a target/capi/libmacmon.a
+	xcodebuild -create-xcframework -library out/libmacmon.a -headers include \
 		-output out/CMacmon.xcframework
 	ditto -c -k --sequesterRsrc --keepParent out/CMacmon.xcframework $(XCF_ZIP)
 	swift package --scratch-path out/.build compute-checksum $(XCF_ZIP) > $(XCF_ZIP).sha256
