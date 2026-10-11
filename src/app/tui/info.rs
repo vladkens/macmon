@@ -11,7 +11,7 @@ use super::kill::{ProcSys, failure};
 use super::proc_view::{
   Filter, cut_middle, cut_start, filter_titles, scroll_offset, step, type_filter,
 };
-use super::theme::{self, dim, heading, text};
+use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
 use crate::procs::ProcInfo;
 
@@ -125,14 +125,15 @@ impl Info {
     self.page = usize::from(inner.height);
     self.offset = scroll_offset(self.offset, Some(self.index), self.page, self.rows().len());
     if let Err(error) = &self.files {
-      f.render_widget(Line::from(dim(format!(" {error}"))), inner);
+      f.render_widget(Line::from(faint(format!(" {error}"))), inner);
     }
 
-    // a blank cell at both borders and after the type column, as wide as `kqueue`
+    // a blank cell at both borders and after the type column (`kqueue` wide), faint unless selected
     let room = usize::from(inner.width).saturating_sub(9);
     let rows = self.rows().into_iter().enumerate().skip(self.offset);
     for (y, (i, file)) in (inner.y..inner.bottom()).zip(rows) {
-      let kind = dim(format!(" {:6} ", file.kind.label()));
+      let kind = format!(" {:6} ", file.kind.label());
+      let kind = if i == self.index { text(kind) } else { faint(kind) };
       let row = Rect { y, height: 1, ..inner };
       f.render_widget(Line::from(vec![kind, text(cut_middle(&file.text, room))]), row);
       if i == self.index {
@@ -399,8 +400,10 @@ mod tests {
     for (files, started, text) in cases {
       let fake = fake(files);
       let mut info = Info::new(&ProcInfo { started, ..proc() }, &fake);
-      let shown = rows(&render(&mut info, 40, 5));
+      let buf = render(&mut info, 40, 5);
+      let shown = rows(&buf);
       assert_eq!(shown[1], format!("│{text:38}│"));
+      assert_eq!((buf[(2, 1)].fg, buf[(2, 1)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
       assert_eq!(shown[4], format!("╰{}─ open | Esc close ─╯", "─".repeat(18)));
       // nothing to select or reveal
       for code in [KeyCode::Down, KeyCode::End, KeyCode::Char('o')] {
@@ -439,15 +442,16 @@ mod tests {
     ];
     let shown = rows(&buf);
     assert_eq!(shown, overlay);
-    // the type dim, the path in the default color, the selected row reversed from border to
-    // border, the keys of the hints in the default color and the rest dim
+    // the type faint, the path in the default color, the selected row plain text reversed from
+    // border to border, the keys of the hints cyan, their labels faint, the separator dim
     let cell = |x: u16, y: u16| (buf[(x, y)].fg, buf[(x, y)].modifier);
-    let (none, reversed) = (Modifier::empty(), Modifier::REVERSED);
-    assert_eq!([cell(2, 1), cell(9, 1)], [(theme::DIM, none), (theme::TEXT, none)]);
-    assert_eq!([cell(1, 3), cell(2, 3), cell(58, 3)], [(theme::TEXT, reversed); 3]);
-    let open = shown[7].find("open").unwrap();
-    let open = shown[7][..open].chars().count() as u16;
-    assert_eq!([cell(open, 7).0, cell(open + 1, 7).0], [theme::TEXT, theme::DIM]);
+    let (plain, faint) = ((theme::TEXT, Modifier::empty()), (theme::TEXT, Modifier::DIM));
+    assert_eq!([cell(2, 1), cell(7, 1), cell(9, 1)], [faint, faint, plain]);
+    assert_eq!([cell(1, 3), cell(2, 3), cell(58, 3)], [(theme::TEXT, Modifier::REVERSED); 3]);
+    let x = |text| shown[7][..shown[7].find(text).unwrap()].chars().count() as u16;
+    let (key, sep) = ((theme::KEY, Modifier::empty()), (theme::DIM, Modifier::empty()));
+    let hints = [x("open"), x("pen"), x(" | "), x("Esc"), x(" close")].map(|x| cell(x, 7));
+    assert_eq!(hints, [key, faint, sep, key, faint]);
   }
 
   /// The only test with the real calls: the test's own process, and no reveal.
