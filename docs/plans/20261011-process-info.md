@@ -1,22 +1,24 @@
 # Process info and reveal in Finder (roadmap items 2 and 3)
 
 For the selected process, `i` lists its working directory, open files and sockets in an overlay
-over the process list (like Activity Monitor's "Open Files and Ports" and Sloth), and `o` reveals
+over the process list (like Activity Monitor's "Open Files and Ports" and Sloth), and `f` reveals
 its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 production lines
 (`make loc`), stop and report past 450.
 
 ## Behavior
 
-- The process box title shows `info | open | kill` on the right while a process is selected and
+- The process box title shows `info | finder | kill` on the right while a process is selected and
   the filter is not being typed (hint style: keys cyan with `theme::key`, labels faint with
   `theme::faint` (SGR 2), separators dim). The right title drops as a whole when it doesn't fit.
-  `i` / `o` are guarded by `procs_visible()` like `k`.
-- `o` on the process list: `open -R <executable path>`; nothing when the path is empty (inside an
+  `i` / `f` are guarded by `procs_visible()` like `k`. `f` is free everywhere else (the kill
+  popup's `f`, Force kill, only works while it is open). The bottom border no longer shows the
+  selected process (`pid path`): only the POWER note and the key hints.
+- `f` on the process list: `open -R <executable path>`; nothing when the path is empty (inside an
   `.app` this reveals the binary in `Contents/MacOS`).
 - `i` opens the info overlay over the whole process box rect (`Clear` + `draw_box`); while it is
   open every key goes to it (Ctrl-C still quits). It closes when the process list goes hidden.
   - Top border: `<name> <pid>`, then the `/ filter` hint, or the filter text (with the cursor
-    while typing) as in the process box.
+    while typing) as in the process box; `finder` on the right, not while typing.
   - Rows: a type column (`cwd`, `file`, `tcp`, `udp`, `unix`, `pipe`, `kqueue`, `other`), faint,
     and the path or address in the default color. There is always a selected row (clamped),
     starting at the first, reversed as plain text.
@@ -25,11 +27,11 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
     unbound UDP); TCP adds its state (`listen`, `established`, …). Unix sockets show their own
     path, else the peer's.
   - Paths too long for the row are cut in the middle with `…`: the head and the file name stay.
-  - Bottom border: the selected row's full path or address, cut from the start when too long;
-    hints on its right: `Enter keep | Esc clear | ↑↓ select` while typing, else `open | Esc close`.
+  - Bottom border: `Enter keep | Esc clear | ↑↓ select` while typing, else nothing (no path: the
+    row shows it).
   - ↑↓, PgUp/PgDn, Home/End and the wheel move the selection, and end filter input like in the
     process list; `/` filters with the process filter's rules (comma terms, `!` excludes; matched
-    against the type and the path); `o` reveals the selected file or the cwd in Finder, sockets,
+    against the type and the path); `f` reveals the selected file or the cwd in Finder, sockets,
     pipes and the rest do nothing.
   - Esc: while typing it clears the filter and ends input; with a filter set it clears it;
     otherwise it closes. `q` (no modifier) closes it unless the filter is being typed (then it is
@@ -40,8 +42,8 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
     different process reads as `Already exited`.
   - When the process can't be read: `Not permitted` (EPERM, e.g. other users' processes without
     root) or `Already exited` (ESRCH), faint, in place of the rows.
-- Help: `i  open files and sockets of the selected process`, `o  show the selected process in
-  Finder`. Roadmap items 2 and 3 are ticked with the text updated to `i` / `o`.
+- Help: `i  open files and sockets of the selected process`, `f  show the selected process in
+  Finder`. Roadmap items 2 and 3 are ticked with the text updated to `i` / `f`.
 
 ## Decisions
 
@@ -99,19 +101,19 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
 
 ### 2. Info overlay and reveal in Finder
 
-- [x] Remove the `expect(dead_code)` from task 1. Title actions `info | open | kill`, `o` reveal,
+- [x] Remove the `expect(dead_code)` from task 1. Title actions `info | finder | kill`, `f` reveal,
       the info overlay with every behavior above, the footer and help lines, the roadmap ticks.
 - [x] Tests with the fake: actions on the title only with a selection and not while typing (update
-      `kill_is_on_the_process_title_with_a_selection_while_not_typing` for the longer title); `o`
+      `kill_is_on_the_process_title_with_a_selection_while_not_typing` for the longer title); `f`
       reveals the selected process's path and nothing for an empty path; `i` opens the overlay
-      with fake rows; navigation and the wheel, the filter and its hints, `o` on a file and on a
+      with fake rows; navigation and the wheel, the filter and its hints, `f` on a file and on a
       socket, the Esc order, focus loss; refresh keeps the selection on its fd; a reused pid,
-      `Not permitted` and `Already exited`; middle cut and the bottom-border path at a narrow
-      width; any window size renders without panic.
+      `Not permitted` and `Already exited`; middle cut at a narrow width; any window size renders
+      without panic.
 - [x] `make check`, `make test` and `make loc REF=origin/feat/hint-style` (report the delta);
       commit `feat: process info overlay and reveal in Finder`.
 
 ## Manual check (outside the tasks)
 
 Run the TUI with `HOME` set to a temporary directory: `i` on a shell, a browser helper and `ssh`
-(sockets), `o` on several processes, `i` on a root process (`Not permitted`).
+(sockets), `f` on several processes, `i` on a root process (`Not permitted`).

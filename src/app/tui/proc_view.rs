@@ -757,7 +757,7 @@ impl ProcView {
   }
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// the filter as `filter_titles` shows it, then `sort`, and `info | open | kill` on the right
+  /// the filter as `filter_titles` shows it, then `sort`, and `info | finder | kill` on the right
   /// with a process selected (neither while typing: keys are text then).
   fn titles(&self, width: u16) -> Titles<'_> {
     let mut name = vec![heading("proc")];
@@ -771,7 +771,7 @@ impl ProcView {
     }
 
     let titles = filter_titles(name, &self.filter, self.typing, width);
-    let actions = || join([hint("i", "info"), hint("o", "open"), hint("k", "kill")]);
+    let actions = || join([hint("i", "info"), hint("f", "finder"), hint("k", "kill")]);
     match self.typing {
       true => titles,
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),
@@ -779,18 +779,9 @@ impl ProcView {
     }
   }
 
-  /// Left side of the bottom border of the process box in `room` cells: the selected process
-  /// (`631 /System/…/WindowServer`, its path cut from the left; the name when the path isn't
-  /// readable). Without a selection, a dim note that POWER is known for own processes only, while
-  /// the POWER column shows processes without it next to some with it.
-  fn border_text(&self, room: usize, power_shown: bool) -> Vec<Span<'static>> {
-    if let Some(proc) = self.selected() {
-      let pid = proc.pid.to_string();
-      let path = if proc.path.is_empty() { &proc.name } else { &proc.path };
-      let path = cut_start(path, room.saturating_sub(pid.len() + 1));
-      return vec![heading(pid), text(" "), text(path)];
-    }
-
+  /// Left side of the bottom border of the process box: a dim note that POWER is known for own
+  /// processes only, while the POWER column shows processes without it next to some with it.
+  fn border_text(&self, power_shown: bool) -> Vec<Span<'static>> {
     let procs = self.procs().unwrap_or_default();
     let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
     if power_shown && power(true) && power(false) {
@@ -805,7 +796,7 @@ impl ProcView {
 
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
-  /// the process rows, and the selected process and the key hints on the bottom border. Keeps the
+  /// the process rows, and the POWER note and the key hints on the bottom border. Keeps the
   /// cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let inner = draw_box(f, area, self.proc_view.titles(area.width));
@@ -814,7 +805,7 @@ impl App {
     self.proc_view.targets = Targets { area, headers, body };
 
     let view = &self.proc_view;
-    render_bottom_border(f, area, self.footer_hints(), |room| view.border_text(room, power_shown));
+    render_bottom_border(f, area, self.footer_hints(), |_| view.border_text(power_shown));
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the

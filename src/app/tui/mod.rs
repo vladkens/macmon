@@ -453,7 +453,7 @@ impl App {
       KeyCode::Char(c) if self.procs_visible() => match (c, self.proc_view.selected()) {
         ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
         ('k', Some(proc)) => self.kill.open(proc),
-        ('o', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
+        ('f', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
         _ => {}
       },
       _ => {}
@@ -1349,14 +1349,14 @@ mod tests {
   }
 
   #[test]
-  fn info_open_kill_are_on_the_process_title_with_a_selection_while_not_typing() {
+  fn info_finder_kill_are_on_the_process_title_with_a_selection_while_not_typing() {
     let title = |app: &mut App, width| proc_row(&render_buffer(app, width, 50), 0);
     let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
     assert!(!title(&mut app, 200).contains("kill"), "no selection");
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let wide = title(&mut app, 200);
     assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{wide}");
-    assert!(wide.ends_with("─ info | open | kill ─╮"), "{wide}");
+    assert!(wide.ends_with("─ info | finder | kill ─╮"), "{wide}");
     // the count bold and plain, the hint keys cyan, their labels faint, the separators dim
     let buf = render_buffer(&mut app, 200, 50);
     let style = |text| {
@@ -1366,13 +1366,14 @@ mod tests {
     let (bold, plain) = ((theme::TEXT, Modifier::BOLD), (theme::TEXT, Modifier::empty()));
     let (cyan, faint) = ((theme::KEY, Modifier::empty()), (theme::TEXT, Modifier::DIM));
     let sep = (theme::DIM, Modifier::empty());
-    let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | ", "open", "pen"];
+    let cells =
+      ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | ", "finder", "inder"];
     let styles = [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep, cyan, faint];
     assert_eq!(cells.map(style), styles);
     assert_eq!(["| kill", "kill", "ill"].map(style), [sep, cyan, faint]);
     // on a narrow box they go first, all together
-    assert_eq!(title(&mut app, 51), "╭─ proc 3 ─ / filter ─ sort ─ info | open | kill ─╮");
-    assert_eq!(title(&mut app, 50), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(21)));
+    assert_eq!(title(&mut app, 53), "╭─ proc 3 ─ / filter ─ sort ─ info | finder | kill ─╮");
+    assert_eq!(title(&mut app, 52), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(23)));
 
     // typing: keys are text, no hints; then a set filter with the selection in it
     for c in "/saf".chars() {
@@ -1385,7 +1386,7 @@ mod tests {
     let filtered = title(&mut app, 200);
     assert!(
       filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───")
-        && filtered.ends_with(" info | open | kill ─╮")
+        && filtered.ends_with(" info | finder | kill ─╮")
     );
   }
 
@@ -1413,22 +1414,18 @@ mod tests {
   }
 
   #[test]
-  fn selected_process_and_its_path_on_the_bottom_border() {
+  fn the_bottom_border_has_the_power_note_and_not_the_selected_process() {
     let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
     let mut app = app_with_procs(varied_procs()); // [631, 2301, 1]
-    // nothing selected: a note on POWER, as launchd has no reading next to processes with one
+    // a note on POWER, as launchd has no reading next to processes with one
     assert!(bottom(&mut app, 200).starts_with("╰─ POWER: own processes only ─"));
-
-    // the PID and the full path, cut from the left to the room the key hints leave
+    // with a selection too: no PID or path
     assert!(press(&mut app, KeyCode::Down).is_continue());
-    assert!(bottom(&mut app, 200).starts_with(&format!("╰─ 631 {WINDOW_SERVER} ─")));
-    let cut = format!("╰─ 631 …{} ─ ? | quit |", &WINDOW_SERVER[WINDOW_SERVER.len() - 62..]);
-    assert!(bottom(&mut app, 120).starts_with(&cut), "{}", bottom(&mut app, 120));
-
-    // without a readable path: the name
-    let mut app = app_with_procs(test_procs());
-    assert!(press(&mut app, KeyCode::Down).is_continue());
-    assert!(bottom(&mut app, 200).starts_with("╰─ 1 launchd ─"));
+    let shown = bottom(&mut app, 200);
+    assert!(
+      shown.starts_with("╰─ POWER: own processes only ─") && !shown.contains("631"),
+      "{shown}"
+    );
   }
 
   /// `app_with_procs` of `varied_procs` with WindowServer selected, killing through a fake with
@@ -1509,9 +1506,10 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let title = proc_row(&buf, 0);
     assert!(title.starts_with("╭─ WindowServer 631 ─ / filter ───"), "{title}");
+    assert!(title.ends_with("─ finder ─╮"), "{title}");
     assert!(proc_row(&buf, 1).starts_with("│ cwd    / "), "{}", proc_row(&buf, 1));
     assert!(proc_row(&buf, 2).starts_with("│ file   /var/log/system.log "));
-    assert!(proc_row(&buf, 29).starts_with("╰─ / ─") && proc_row(&buf, 29).ends_with(" close ─╯"));
+    assert_eq!(proc_row(&buf, 29), format!("╰{}╯", "─".repeat(198)));
 
     // it takes every key, the list's and the global ones (`q` closes it); Ctrl-C still quits
     for c in ['k', 'i', 'p', 's', 'v'] {
@@ -1522,9 +1520,9 @@ mod tests {
     assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
-    // the wheel moves its selection, not the list's; `o` reveals the selected file
+    // the wheel moves its selection, not the list's; `f` reveals the selected file
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
-    assert!(app.handle_key(key('o')).is_continue());
+    assert!(app.handle_key(key('f')).is_continue());
     assert_eq!(fake.0.borrow().revealed, ["/var/log/system.log"]);
     assert_eq!(app.proc_view.selected_pid(), Some(631));
 
@@ -1565,15 +1563,15 @@ mod tests {
   }
 
   #[test]
-  fn o_shows_the_selected_process_in_finder() {
+  fn f_shows_the_selected_process_in_finder() {
     let (mut app, fake) = info_app();
-    assert!(app.handle_key(key('o')).is_continue());
+    assert!(app.handle_key(key('f')).is_continue());
     assert_eq!(fake.0.borrow().revealed, [WINDOW_SERVER]);
 
-    // typed into the filter it is text; without a selection `i` and `o` do nothing
-    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('o')).is_continue());
-    assert_eq!(app.proc_view.filter(), "o");
-    for code in [KeyCode::Esc, KeyCode::Esc, KeyCode::Char('o'), KeyCode::Char('i')] {
+    // typed into the filter it is text; without a selection `i` and `f` do nothing
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('f')).is_continue());
+    assert_eq!(app.proc_view.filter(), "f");
+    for code in [KeyCode::Esc, KeyCode::Esc, KeyCode::Char('f'), KeyCode::Char('i')] {
       assert!(press(&mut app, code).is_continue());
     }
     assert_eq!((app.proc_view.selected_pid(), app.info.is_none()), (None, true));
@@ -1583,7 +1581,7 @@ mod tests {
     let mut app = app_with_procs(test_procs());
     let (kill, fake) = FakeSys::kill(&[]);
     app.kill = kill;
-    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('o')).is_continue());
+    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('f')).is_continue());
     assert!(fake.0.borrow().revealed.is_empty());
   }
 
