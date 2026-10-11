@@ -372,7 +372,10 @@ impl App {
   fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
-      self.info.iter_mut().for_each(|info| info.refresh(&*self.kill.sys));
+      if let Some(info) = &mut self.info {
+        info.update_proc(self.proc_view.procs().unwrap_or_default());
+        info.refresh(&*self.kill.sys);
+      }
     }
   }
 
@@ -1532,13 +1535,16 @@ mod tests {
     assert_eq!(fake.0.borrow().revealed, ["/var/log/system.log"]);
     assert_eq!(app.proc_view.selected_pid(), Some(631));
 
-    // each sample reads the files again
+    // each sample reads the files again, and the name and path of the process (an exec)
     let pipe = OpenFile { fd: Some(4), kind: Kind::Pipe, text: String::new(), mode: "" };
     fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().push(pipe);
-    put_procs(&mut app, varied_procs());
-    assert!(
-      proc_row(&render_buffer(&mut app, 200, 50), 1).starts_with("│ 2 fds  1 files  1 pipes ")
-    );
+    let mut procs = varied_procs();
+    (procs[1].name, procs[1].path) = ("zsh".into(), "/bin/zsh".into());
+    put_procs(&mut app, procs);
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(proc_row(&buf, 0).starts_with("╭─ zsh 631 ─"), "{}", proc_row(&buf, 0));
+    assert!(proc_row(&buf, 1).starts_with("│ 2 fds  1 files  1 pipes "));
+    assert!(proc_row(&buf, 3).starts_with("│ exe       /bin/zsh "));
     // focus loss ends filter input, Esc then closes it and the list has its keys back
     assert!(app.handle_key(key('/')).is_continue());
     assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue());

@@ -121,6 +121,15 @@ impl Info {
     self.follow();
   }
 
+  /// Takes the name and path of its process from a new sample: an `exec` keeps the pid and the
+  /// start time. A process gone from the sample keeps them; its files tell it exited.
+  pub(super) fn update_proc(&mut self, procs: &[ProcInfo]) {
+    let same = |p: &&ProcInfo| (p.pid, p.started) == (self.proc.pid, self.proc.started);
+    if let Some(proc) = procs.iter().find(same) {
+      (self.proc.name, self.proc.path) = (proc.name.clone(), proc.path.clone());
+    }
+  }
+
   /// `path` with the home directory as `~`.
   fn tilde(&self, path: &str) -> String {
     let home = self.home.trim_end_matches('/');
@@ -767,6 +776,22 @@ mod tests {
     assert_eq!((cell(0, 1).0, cell(3, 1), cell(5, 1)), (theme::BORDER, key, faint));
     let finder = x("finder");
     assert_eq!([0, 3, 4, 5].map(|dx| cell(finder + dx, 0)), [faint, faint, key, faint]);
+  }
+
+  #[test]
+  fn an_exec_brings_the_new_name_and_executable() {
+    let (mut info, fake) = info(Ok(files()));
+    let exec = ProcInfo { name: "zsh".into(), path: "/bin/zsh".into(), ..proc() };
+    // another pid, or the same pid started at another time, is another process
+    let other = [ProcInfo { pid: 632, ..exec.clone() }, ProcInfo { started: None, ..exec.clone() }];
+    info.update_proc(&other);
+    assert_eq!(selected(&info), EXE);
+    info.update_proc(&[exec]);
+    info.refresh(&fake);
+    assert_eq!(selected(&info), "/bin/zsh");
+    assert!(rows(&render(&mut info, 80, 8))[0].starts_with("╭─ zsh 631 ─"));
+    assert!(press(&mut info, &fake, KeyCode::Char('e')));
+    assert_eq!(revealed(&fake), ["/bin/zsh"]);
   }
 
   /// The only test with the real calls: the test's own process, and no reveal.
