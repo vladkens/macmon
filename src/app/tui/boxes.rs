@@ -172,6 +172,14 @@ pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
   inner
 }
 
+/// Draws a divider across box `area` at row `y`, `├──┤` in the border color, with `titles` on it
+/// as on the top border.
+pub(super) fn draw_divider(f: &mut Frame, area: Rect, y: u16, titles: Titles) {
+  let line = format!("├{}┤", "─".repeat(usize::from(area.width.saturating_sub(2))));
+  f.buffer_mut().set_string(area.x, y, line, theme::BORDER);
+  titles.render(Rect { y, height: 1, ..area }, f.buffer_mut(), Style::new().fg(theme::TEXT));
+}
+
 // MARK: Bottom border
 
 /// A key hint: the key in `theme::key`, what it does `theme::faint` around it. A letter key in the
