@@ -396,8 +396,8 @@ The dylib is ad-hoc signed, not notarized: download it with `curl` (no quarantin
 | `macmon_string_free`        | Frees a returned JSON string (`NULL`: no-op)                            |
 | `macmon_last_error_message` | This thread's last error, `NULL` after a success                        |
 
-- **Threading:** a sampler may be used from any thread, one call at a time, never concurrently. As in Rust, sample on a worker thread.
-- **Errors:** functions that return a status (`0` OK, `1` invalid argument, `2` init failed, `3` sample failed, `4` internal error, after which the sampler can only be freed) set `*out` to `NULL` first and, on an error, the message read with `macmon_last_error_message()`.
+- **Threading:** a sampler is not thread-safe: calls on it must not overlap; the caller orders them (a mutex or a serial queue). It may move between threads. Different samplers are independent. As in Rust, sample on a worker thread.
+- **Errors:** functions that return a status (`0` OK, `1` invalid argument, `2` init failed, `3` sample failed, `4` internal error: if it came from a sampler call, the sampler can only be freed) set `*out` to `NULL` first and, on an error, the message read with `macmon_last_error_message()`. A panic's message is also printed to the host app's stderr by Rust's panic hook.
 - **Versioning:** every JSON document carries `"schema"`, equal to `macmon_abi_version()`. Symbols and keys are only added; removing, renaming or retyping one bumps the version. Check it once at start.
 - **JSON:** the [output format](#output-format) of `pipe`, except `timestamp_ms` (Unix milliseconds) instead of the RFC 3339 `timestamp`, no v0.7 aliases (`cpu_usage_pct`, `ecpu_usage`, `pcpu_usage`, `gpu_usage`) and no deprecated `ecpu_*`/`pcpu_*` keys.
 

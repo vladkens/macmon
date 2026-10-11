@@ -132,8 +132,11 @@ jobs:
           MACMON_CAPI_ALLOW_NO_HW: 1 # CI VMs lack the metric sources
 
       - name: Check C library version matches tag
+        env:
+          MACMON_CAPI_ALLOW_NO_HW: 1 # CI VMs lack the metric sources
         run: |
-          test "$(out/capi_smoke | sed -n 1p)" = "macmon_version: ${TAG#v}"
+          out/capi_smoke > capi_smoke.txt
+          test "$(head -1 capi_smoke.txt)" = "macmon_version: ${TAG#v}"
 
       # https://crates.io/docs/trusted-publishing
       - uses: rust-lang/crates-io-auth-action@v1
@@ -155,16 +158,22 @@ jobs:
           XCF="CMacmon.xcframework-${TAG}.zip"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, using its archives and adding missing assets"
-            gh release download "$TAG" --pattern "macmon-${TAG}.tar.gz" --clobber
             EXISTING="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
-            # never replace the XCFramework zip: SPM pins its checksum and ditto zips aren't reproducible
-            if grep -qxF "$XCF" <<< "$EXISTING"; then
-              gh release download "$TAG" --pattern "$XCF" --dir out --clobber
-              swift package --scratch-path out/.build compute-checksum "out/$XCF" > "out/$XCF.sha256"
-            fi
-            for f in "libmacmon-${TAG}.tar.gz" "$XCF" "$XCF.sha256"; do
-              grep -qxF "$f" <<< "$EXISTING" || gh release upload "$TAG" "out/$f"
+            # never replace an archive: Homebrew and SPM pin their checksums, ditto zips aren't reproducible
+            for f in "macmon-${TAG}.tar.gz" "out/libmacmon-${TAG}.tar.gz" "out/$XCF"; do
+              if grep -qxF "$(basename "$f")" <<< "$EXISTING"; then
+                gh release download "$TAG" --pattern "$(basename "$f")" --dir "$(dirname "$f")" --clobber
+              else
+                gh release upload "$TAG" "$f"
+              fi
             done
+            # the checksum of the zip that is published
+            swift package --scratch-path out/.build compute-checksum "out/$XCF" > "out/$XCF.sha256"
+            gh release upload "$TAG" "out/$XCF.sha256" --clobber
+            # a cancelled `gh release create` can leave a draft
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ]; then
+              gh release edit "$TAG" --draft=false
+            fi
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --notes-file release_notes.txt "macmon-${TAG}.tar.gz" \
               "out/libmacmon-${TAG}.tar.gz" "out/$XCF" "out/$XCF.sha256"

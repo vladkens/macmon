@@ -1,4 +1,4 @@
-/* Smoke test of libmacmon.dylib through include/macmon.h: `make capi-test`.
+/* Smoke test of libmacmon.dylib and libmacmon.a through include/macmon.h: `make capi-test`.
    MACMON_CAPI_ALLOW_NO_HW=1 (CI VMs without the metric sources) accepts INIT_FAILED and
    SAMPLE_FAILED with a message; without it any error fails, so real Apple Silicon fails loudly. */
 #include <stdio.h>
@@ -45,7 +45,9 @@ static int ok_or_no_hw(macmon_status_t rs, macmon_status_t no_hw, const char *wh
 static unsigned long long check_json(const char *json, int sample, const char *what) {
   size_t len = json ? strlen(json) : 0;
   CHECK(len > 2 && json[0] == '{' && json[len - 1] == '}', "%s: not a JSON object", what);
-  CHECK(strstr(json, "\"schema\":1") != NULL, "%s: no \"schema\":1", what);
+  const char *schema = strstr(json, "\"schema\":1");
+  char after = schema ? schema[strlen("\"schema\":1")] : '\0';
+  CHECK(after == ',' || after == '}', "%s: no \"schema\":1", what);
   CHECK(strstr(json, "\"ecpu_") == NULL && strstr(json, "\"pcpu_") == NULL,
         "%s: deprecated keys", what);
   if (!sample) return 0;

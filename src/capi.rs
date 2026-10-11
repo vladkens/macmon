@@ -24,6 +24,22 @@ const INIT_FAILED: i32 = 2;
 const SAMPLE_FAILED: i32 = 3;
 const PANIC: i32 = 4;
 
+// Keys deprecated since 0.10.0: `Metrics` (`metrics.rs`) and `SocInfo` (`sources.rs`).
+const DEPRECATED_KEYS: [&str; 12] = [
+  "ecpu_freq_mhz",
+  "ecpu_scaled_ratio",
+  "ecpu_active_ratio",
+  "pcpu_freq_mhz",
+  "pcpu_scaled_ratio",
+  "pcpu_active_ratio",
+  "ecpu_cores",
+  "pcpu_cores",
+  "ecpu_label",
+  "pcpu_label",
+  "ecpu_freqs",
+  "pcpu_freqs",
+];
+
 type Status<T = ()> = Result<T, (i32, String)>;
 
 thread_local! {
@@ -43,7 +59,7 @@ fn guard(f: impl FnOnce() -> Status) -> i32 {
     Ok(()) => (OK, None),
     Err((code, msg)) => (code, CString::new(msg.replace('\0', " ")).ok()),
   };
-  LAST_ERROR.with(|x| *x.borrow_mut() = msg);
+  let _ = LAST_ERROR.try_with(|x| *x.borrow_mut() = msg); // fails only during thread teardown
   code
 }
 
@@ -59,12 +75,12 @@ unsafe fn out_ptr<'a, T>(out: *mut *mut T, name: &str) -> Status<&'a mut *mut T>
   Ok(out)
 }
 
-// `value` without the deprecated `ecpu_*` / `pcpu_*` keys, with `"schema"` and, for a sample,
+// `value` without `DEPRECATED_KEYS`, with `"schema"` and, for a sample,
 // `"timestamp_ms"`.
 fn to_json(value: impl Serialize, timestamp_ms: Option<u64>) -> serde_json::Result<Value> {
   let mut value = serde_json::to_value(value)?;
   if let Value::Object(map) = &mut value {
-    map.retain(|k, _| !k.starts_with("ecpu_") && !k.starts_with("pcpu_"));
+    map.retain(|k, _| !DEPRECATED_KEYS.contains(&k.as_str()));
     map.insert("schema".into(), ABI_VERSION.into());
     if let Some(timestamp_ms) = timestamp_ms {
       map.insert("timestamp_ms".into(), timestamp_ms.into());
@@ -134,15 +150,18 @@ pub unsafe extern "C" fn macmon_sampler_next_json(
       return Err((PANIC, "sampler poisoned by an earlier panic, only free it".into()));
     }
 
-    s.poisoned = true; // stays set if `get_metrics` panics
-    let metrics = s.sampler.get_metrics(interval_ms);
+    s.poisoned = true; // stays set if sampling or serialization panics
+    let json = sample_json(&mut s.sampler, interval_ms);
     s.poisoned = false;
-
-    let metrics = metrics.map_err(|e| (SAMPLE_FAILED, e.to_string()))?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    *out = to_c_json(&metrics, Some(now.as_millis() as u64), SAMPLE_FAILED)?;
+    *out = json?;
     Ok(())
   })
+}
+
+fn sample_json(sampler: &mut Sampler, interval_ms: u32) -> Status<*mut c_char> {
+  let metrics = sampler.get_metrics(interval_ms).map_err(|e| (SAMPLE_FAILED, e.to_string()))?;
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+  to_c_json(&metrics, Some(now.as_millis() as u64), SAMPLE_FAILED)
 }
 
 /// SoC info as a JSON object.
@@ -173,7 +192,8 @@ pub unsafe extern "C" fn macmon_string_free(json: *mut c_char) {
 /// This thread's last error message, NULL after a success; valid until the next call.
 #[unsafe(no_mangle)]
 pub extern "C" fn macmon_last_error_message() -> *const c_char {
-  LAST_ERROR.with(|x| x.borrow().as_ref().map_or(ptr::null(), |x| x.as_ptr()))
+  let msg = LAST_ERROR.try_with(|x| x.borrow().as_ref().map_or(ptr::null(), |x| x.as_ptr()));
+  msg.unwrap_or(ptr::null())
 }
 
 #[cfg(test)]
