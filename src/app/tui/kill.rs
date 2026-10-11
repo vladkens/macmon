@@ -17,7 +17,8 @@ use crate::procs::{self, ProcInfo};
 
 /// A button: its label and the signal it sends (none: it closes the popup). The buttons with a
 /// signal are pressed by the first letter of their label (in lower case), shown as a key when not
-/// selected; Cancel has no letter (Esc closes, as in macOS dialogs); an error has only OK.
+/// selected; Cancel has no letter (Esc and `q` close, as in macOS dialogs and the help); an error
+/// has only OK.
 type Button = (&'static str, Option<i32>);
 const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
@@ -119,19 +120,22 @@ impl Kill {
   }
 
   /// A key while the popup is open: `←` `→` and Tab select, Enter presses the selected button,
-  /// `t` `f` theirs (no modifier, no error), Esc the last one (Cancel, OK); others do nothing.
+  /// `t` `f` theirs (no modifier, no error), Esc and `q` (no modifier) the last one (Cancel, OK),
+  /// as in the help; others do nothing.
   pub(super) fn handle_key(&mut self, key: KeyEvent) {
     let Some(popup) = self.popup.as_mut() else { return };
     let (ok, selected) = (popup.state.is_ok(), popup.selected);
     let buttons = if ok { &CHOICES[..] } else { &OK };
     let letter = |b: &Button, c| b.1.is_some() && b.0.to_lowercase().starts_with(c);
     let shortcut = |c: char| CHOICES.iter().position(|b| ok && letter(b, c));
+    let (plain, close) = (key.modifiers.is_empty(), Some(buttons.len() - 1));
     match key.code {
       KeyCode::Left | KeyCode::BackTab => popup.selected = selected.saturating_sub(1),
       KeyCode::Right | KeyCode::Tab => popup.selected = (selected + 1).min(buttons.len() - 1),
       KeyCode::Enter => self.press(Some(selected)),
-      KeyCode::Esc => self.press(Some(buttons.len() - 1)),
-      KeyCode::Char(c) if key.modifiers.is_empty() => self.press(shortcut(c)),
+      KeyCode::Esc => self.press(close),
+      KeyCode::Char('q') if plain => self.press(close),
+      KeyCode::Char(c) if plain => self.press(shortcut(c)),
       _ => {}
     }
   }
@@ -345,16 +349,19 @@ pub(super) mod tests {
       (vec![code(Right), code(Left), code(Enter)], None, term.clone()),
       // a shortcut presses its button whatever is selected
       (vec![code(Right), code(Right), key('t')], None, term),
-      // no wrap around, Cancel and Esc only close
+      // no wrap around, Cancel, Esc and `q` only close
       (vec![code(Right); 4], Some(2), vec![]),
       (vec![code(Left), code(BackTab)], Some(0), vec![]),
       (vec![code(Right), code(Right), code(Enter)], None, vec![]),
       (vec![code(Right), code(Esc)], None, vec![]),
+      (vec![key('q')], None, vec![]),
+      (vec![code(Right), key('q')], None, vec![]),
       // other keys (Cancel has no letter) and the shortcuts with a modifier do nothing
-      (vec![key('c'), key('C')], Some(0), vec![]),
+      (vec![key('c'), key('C'), key('Q')], Some(0), vec![]),
       (vec![code(Right), code(Right), key('c')], Some(2), vec![]),
-      (vec![key('q'), key('y'), key('k'), key('n'), key('T'), code(Down)], Some(0), vec![]),
+      (vec![key('y'), key('k'), key('n'), key('T'), code(Down)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::CONTROL), chord('f', KeyModifiers::ALT)], Some(0), vec![]),
+      (vec![chord('q', KeyModifiers::CONTROL)], Some(0), vec![]),
       (vec![chord('t', KeyModifiers::SUPER)], Some(0), vec![]),
     ];
     for (keys, selected, sent) in cases {
@@ -369,23 +376,24 @@ pub(super) mod tests {
   #[test]
   fn a_signal_that_fails_shows_why_over_ok() {
     let failing = Some((Some(631), Some(libc::EINVAL)));
-    // 631 at the key (`None`: exited), the key, the error shown, the signals sent
+    let (esc, q) = (code(KeyCode::Esc), key('q'));
+    // 631 at the key (`None`: exited), the key, the error shown, the signals sent, the key closing
     let cases = [
-      (None, key('t'), "Already exited", vec![]),
-      (Some((Some(2000), None)), key('t'), "Already exited", vec![]),
-      (Some((None, None)), key('f'), "Already exited", vec![]),
-      (failing, code(KeyCode::Enter), "Invalid argument", vec![(631, libc::SIGTERM)]),
+      (None, key('t'), "Already exited", vec![], esc),
+      (Some((Some(2000), None)), key('t'), "Already exited", vec![], q),
+      (Some((None, None)), key('f'), "Already exited", vec![], esc),
+      (failing, code(KeyCode::Enter), "Invalid argument", vec![(631, libc::SIGTERM)], q),
     ];
-    for (proc, press, error, sent) in cases {
+    for (proc, press, error, sent, close) in cases {
       let (mut kill, fake) = FakeSys::kill(&[631]);
       kill.open(&window_server(631));
       fake.set(631, proc);
-      // OK selected, the keys of the other buttons do nothing, Esc closes
+      // OK selected, the keys of the other buttons do nothing, Esc and `q` close
       for key in [press, key('t'), key('f'), key('c'), code(KeyCode::Right)] {
         kill.handle_key(key);
         assert_eq!(shown(&kill), Some((Err(error.into()), 0)), "{error}");
       }
-      kill.handle_key(code(KeyCode::Esc));
+      kill.handle_key(close);
       assert_eq!((shown(&kill), fake.calls()), (None, [vec![(631, 0)], sent].concat()), "{error}");
     }
   }

@@ -1438,6 +1438,17 @@ mod tests {
   }
 
   #[test]
+  fn q_closes_the_kill_popup_without_quitting() {
+    let (mut app, fake) = kill_app();
+    assert!(app.handle_key(key('k')).is_continue());
+    assert!(app.handle_key(key('q')).is_continue());
+    assert!(!app.kill.is_open());
+    assert_eq!(fake.calls(), [(631, 0)]);
+    // closed: `q` quits again
+    assert!(app.handle_key(key('q')).is_break());
+  }
+
+  #[test]
   fn the_kill_popup_takes_clicks_on_its_buttons_and_closes_with_the_list() {
     let (mut app, fake) = kill_app();
     assert!(app.handle_key(key('k')).is_continue());
