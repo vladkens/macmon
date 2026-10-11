@@ -8,16 +8,18 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
 ## Behavior
 
 - The process box title shows `info | open | kill` on the right while a process is selected and
-  the filter is not being typed (hint style: key in the default color, rest dim). The right title
-  drops as a whole when it doesn't fit. `i` / `o` are guarded by `procs_visible()` like `k`.
+  the filter is not being typed (hint style: keys cyan with `theme::key`, labels faint with
+  `theme::faint` (SGR 2), separators dim). The right title drops as a whole when it doesn't fit.
+  `i` / `o` are guarded by `procs_visible()` like `k`.
 - `o` on the process list: `open -R <executable path>`; nothing when the path is empty (inside an
   `.app` this reveals the binary in `Contents/MacOS`).
 - `i` opens the info overlay over the whole process box rect (`Clear` + `draw_box`); while it is
   open every key goes to it (Ctrl-C still quits). It closes when the process list goes hidden.
   - Top border: `<name> <pid>`, then the `/ filter` hint, or the filter text (with the cursor
     while typing) as in the process box.
-  - Rows: a type column (`cwd`, `file`, `tcp`, `udp`, `unix`, `pipe`, `kqueue`, `other`) and the
-    path or address. There is always a selected row (clamped), starting at the first.
+  - Rows: a type column (`cwd`, `file`, `tcp`, `udp`, `unix`, `pipe`, `kqueue`, `other`), faint,
+    and the path or address in the default color. There is always a selected row (clamped),
+    starting at the first, reversed as plain text.
   - Sockets: `local → remote` as `std::net::SocketAddr` text (IPv6 bracketed, no DNS), ports
     converted from network byte order; `→ remote` left out when the remote port is 0 (listeners,
     unbound UDP); TCP adds its state (`listen`, `established`, …). Unix sockets show their own
@@ -30,12 +32,14 @@ its executable in Finder. One PR, owner-approved as one feature; aim ≤ 400 pro
     against the type and the path); `o` reveals the selected file or the cwd in Finder, sockets,
     pipes and the rest do nothing.
   - Esc: while typing it clears the filter and ends input; with a filter set it clears it;
-    otherwise it closes. Focus loss ends filter input.
+    otherwise it closes. `q` (no modifier) closes it unless the filter is being typed (then it is
+    text), the filter set or not; it never quits while the overlay is open. Focus loss ends filter
+    input.
   - Refreshed on every process sample while open; the selection stays on its fd (the cwd has its
     own key). Pid reuse: the start time is compared with the sampled one (as kill does); a
     different process reads as `Already exited`.
   - When the process can't be read: `Not permitted` (EPERM, e.g. other users' processes without
-    root) or `Already exited` (ESRCH), in place of the rows.
+    root) or `Already exited` (ESRCH), faint, in place of the rows.
 - Help: `i  open files and sockets of the selected process`, `o  show the selected process in
   Finder`. Roadmap items 2 and 3 are ticked with the text updated to `i` / `o`.
 
