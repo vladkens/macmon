@@ -476,7 +476,7 @@ impl App {
   /// overlay is open, they go to it.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
     if let Some(info) = &mut self.info {
-      info.handle_mouse(mouse, &*self.kill.sys);
+      info.handle_mouse(mouse);
     } else if self.kill.is_open() {
       self.kill.handle_mouse(mouse);
     } else if self.wants_mouse() {

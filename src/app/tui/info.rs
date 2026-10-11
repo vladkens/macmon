@@ -188,7 +188,7 @@ impl Info {
   /// `q` (no modifier, not typed into the filter) closes the overlay, as they close the other
   /// popups.
   pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
-    if let Some(index) = step(key.code, self.index, self.page.max(1)) {
+    if let Some(index) = step(key.code, self.index, self.page.max(1), self.rows().len()) {
       self.typing = false;
       self.select(index);
       return true;
@@ -217,12 +217,16 @@ impl Info {
     true
   }
 
-  /// The wheel moves the selection as ↑ / ↓ do; other mouse events do nothing.
-  pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, sys: &dyn ProcSys) {
-    let up = mouse.kind == MouseEventKind::ScrollUp;
-    if up || mouse.kind == MouseEventKind::ScrollDown {
-      self.handle_key(KeyEvent::from(if up { KeyCode::Up } else { KeyCode::Down }), sys);
-    }
+  /// The wheel moves the selection a row and ends filter input, as ↑ / ↓ do but stopping at the
+  /// ends; other mouse events do nothing.
+  pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+    let index = match mouse.kind {
+      MouseEventKind::ScrollUp => self.index.saturating_sub(1),
+      MouseEventKind::ScrollDown => self.index + 1,
+      _ => return,
+    };
+    self.typing = false;
+    self.select(index);
   }
 
   /// `116 fds  8 files  3 dev …` in `width` cells: the descriptors (`shown/total` with a filter,
@@ -475,20 +479,26 @@ mod tests {
     assert_eq!(texts(&info), ROWS);
     let wheel = |info: &mut Info, kind| {
       let mouse = MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
-      info.handle_mouse(mouse, &fake);
+      info.handle_mouse(mouse);
       info.index
     };
-    // the first row, the exe, selected; a page is the 5 rows on screen below the divider
+    // the first row, the exe, selected; a page is the 5 rows on screen below the divider; ↑ / ↓
+    // wrap around at the ends, PgUp / PgDn and Home / End stop there
     assert_eq!(selected(&info), EXE);
-    let steps = [(Up, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (Down, 6), (PageUp, 1)];
-    for (code, index) in steps.into_iter().chain([(End, 6), (Home, 0)]) {
+    let steps = [(Up, 6), (Down, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (End, 6)];
+    let back = [(PageUp, 1), (PageUp, 0), (PageUp, 0), (End, 6), (Home, 0), (Home, 0)];
+    for (code, index) in steps.into_iter().chain(back) {
       assert!(press(&mut info, &fake, code));
       assert_eq!(info.index, index, "{code:?}");
     }
+    // the wheel stops at the ends too
+    assert_eq!(wheel(&mut info, MouseEventKind::ScrollUp), 0);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 1);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 2);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollUp), 1);
     assert_eq!(wheel(&mut info, MouseEventKind::Moved), 1);
+    assert!(press(&mut info, &fake, End));
+    assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 6);
 
     // the list scrolls to keep the selection on screen
     assert!(press(&mut info, &fake, End));
@@ -541,9 +551,9 @@ mod tests {
     let mut files = files();
     files.push(file(10, Kind::File, "r", ""));
     files.push(file(11, Kind::Dir, "r", "/Users/vlad/Downloads"));
-    let (mut info, fake) = info(Ok(files.clone()));
+    let (mut info, fake) = info(Ok(files));
     // `e` on every row: not the sockets; `f` nothing
-    for _ in 0..files.len() {
+    for _ in 0..info.rows().len() {
       assert!(press(&mut info, &fake, KeyCode::Char('f')));
       assert!(press(&mut info, &fake, KeyCode::Char('e')));
       assert!(press(&mut info, &fake, KeyCode::Down));

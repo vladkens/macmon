@@ -359,16 +359,20 @@ pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'s
   spans
 }
 
-/// The row a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from row `at`,
-/// not clamped, with `page` rows on screen; `None` for other keys.
-pub(super) fn step(code: KeyCode, at: usize, page: usize) -> Option<usize> {
+/// The row of `len` a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from
+/// row `at`, with `page` rows on screen: ↑ / ↓ wrap around at the ends, the others stop there;
+/// `None` for other keys.
+pub(super) fn step(code: KeyCode, at: usize, page: usize, len: usize) -> Option<usize> {
+  let last = len.saturating_sub(1);
   Some(match code {
     KeyCode::Home => 0,
-    KeyCode::End => usize::MAX,
-    KeyCode::Up => at.saturating_sub(1),
+    KeyCode::End => last,
+    KeyCode::Up if at == 0 => last,
+    KeyCode::Up => at - 1,
+    KeyCode::Down if at >= last => 0,
     KeyCode::Down => at + 1,
     KeyCode::PageUp => at.saturating_sub(page),
-    KeyCode::PageDown => at + page,
+    KeyCode::PageDown => (at + page).min(last),
     _ => return None,
   })
 }
@@ -628,9 +632,9 @@ impl ProcView {
     self.offset = offset.min(self.rows.len().saturating_sub(self.page));
   }
 
-  /// Moves the selection for a navigation key (↑ / ↓, PgUp / PgDn, Home / End). Without a
-  /// selection ↑ / ↓ select the top row on screen and the others scroll the table. Returns
-  /// `false` for other keys.
+  /// Moves the selection for a navigation key (↑ / ↓, PgUp / PgDn, Home / End), as `step` does.
+  /// Without a selection ↑ / ↓ select the top row on screen and the others scroll the table.
+  /// Returns `false` for other keys.
   fn navigate(&mut self, code: KeyCode) -> bool {
     let page = self.page.max(1);
     let Some(selected) = self.selected.map(|s| s.index) else {
@@ -645,11 +649,8 @@ impl ProcView {
       return true;
     };
 
-    let Some(index) = step(code, selected, page) else { return false };
-
-    if let Some(last) = self.rows.len().checked_sub(1) {
-      self.select(index.min(last));
-    }
+    let Some(index) = step(code, selected, page, self.rows.len()) else { return false };
+    self.select(index);
     true
   }
 
@@ -1218,8 +1219,9 @@ mod tests {
   #[test]
   fn navigation_ends_filter_input_keeping_the_filter() {
     // Safari selected, then filtered to [2301, 77]
+    // ↑ wraps around to the last row
     for (code, pid) in
-      [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::End, 77), (KeyCode::Up, 2301)]
+      [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::End, 77), (KeyCode::Up, 77)]
     {
       let mut view = view(); // [4410, 631, 2301, 1, 77]
       for _ in 0..3 {
@@ -1332,6 +1334,35 @@ mod tests {
     assert_eq!((view.selected_pid(), view.filter(), view.offset), (None, "", 0));
     assert_eq!(pids(&view).len(), 5);
     assert!(!press(&mut view, KeyCode::Esc), "nothing left to clear: a global key");
+  }
+
+  #[test]
+  fn up_and_down_wrap_around_the_other_keys_and_the_wheel_stop_at_the_ends() {
+    use KeyCode::{Down, End, Home, PageDown, PageUp, Up};
+    let mut view = view(); // [4410, 631, 2301, 1, 77]
+    let page = |view: &mut ProcView| {
+      view.fit(2);
+      view.page_rows().map(|(_, p)| p.pid).collect::<Vec<_>>()
+    };
+    // without a selection ↑ selects the top row on screen, as ↓ does
+    assert!(press(&mut view, Up));
+    assert_eq!(view.selected_pid(), Some(4410));
+    let keys = [(Up, 77), (PageDown, 77), (End, 77), (Down, 4410), (PageUp, 4410), (Home, 4410)];
+    for (code, pid) in keys {
+      assert!(press(&mut view, code));
+      assert_eq!(view.selected_pid(), Some(pid), "{code:?}");
+    }
+    // the table follows a wrap to either end
+    assert!(press(&mut view, Up));
+    assert_eq!(page(&mut view), [1, 77]);
+    assert!(press(&mut view, Down));
+    assert_eq!(page(&mut view), [4410, 631]);
+
+    view.wheel(-3);
+    assert_eq!(view.selected_pid(), Some(4410));
+    assert!(press(&mut view, End));
+    view.wheel(3);
+    assert_eq!(view.selected_pid(), Some(77));
   }
 
   #[test]

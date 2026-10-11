@@ -39,7 +39,7 @@ One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
 - [x] Scrollbar on the process list and the info overlay, with tests: only when the rows
       overflow, the thumb at the top, in the middle and at the bottom, in both boxes; every
       window size renders. Commit `feat: scrollbar on the process list and the info overlay`.
-- [ ] Wrap-around of ↑ / ↓ in both lists, with tests at both ends and none for the wheel, PgDn
+- [x] Wrap-around of ↑ / ↓ in both lists, with tests at both ends and none for the wheel, PgDn
       and End. Commit `feat: up and down wrap around in the lists`.
 - [ ] The marquee and the run loop timer, with tests of its timing (holds, steps, start over,
       restart on a new selection, not on a refresh) and no timer without it; roadmap item 9
