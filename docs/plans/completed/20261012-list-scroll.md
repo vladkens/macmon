@@ -3,8 +3,8 @@ Done: 2026-10-12, PR #98
 # Scrolling in the lists (roadmap item 9)
 
 A scrollbar on the right border of the process list and the info overlay, ↑ / ↓ wrapping around
-at the ends, and the full text of a cut row in the info overlay scrolling on its bottom border.
-One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
+at the ends, and the full path of the selected row within reach: `c` copies it in the list and in
+the overlay. One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
 
 ## Behavior
 
@@ -18,12 +18,17 @@ One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
   last. The wheel, PgUp / PgDn and Home / End stop at the ends. Without a selection in the
   process list ↑ and ↓ both select the top row on screen, as before. ↑ / ↓ still end filter
   input.
-- Marquee: when the selected row of the overlay is cut, its full text (`~` form) goes on the
-  bottom border. When it doesn't fit there either it scrolls: still at its start for 1.5 s, one
-  cell every 67 ms (~15 cells/s), still at its end for 1.5 s, then from the start again. A new
-  selection starts it over; a refresh that keeps the selection doesn't.
-- The run loop waits for the next marquee step with `recv_timeout` only while the overlay is open
-  and its marquee scrolls; otherwise it blocks on `recv()` as before.
+- Copy: `c` copies the selected process's executable path in the list (nothing for an empty
+  path) and the selected row's full text in the overlay (the path, or the socket text). A faint
+  `copied` shows on the left of the bottom border (in place of the POWER note in the list) until
+  the next key press, click or wheel step. Typed into a filter `c` is text. The process title's
+  actions are `info | finder | copy | kill`, the overlay's `copy | finder`.
+- Overlay borders: `? | q back` on the right of the bottom border, as on the main footer;
+  nothing there while the filter is typed. `?` opens the help over the overlay (unless typed into
+  its filter); closing the help returns to the overlay as it was. The help has a short "Info
+  overlay" group.
+- Typing hints: `Enter keep | Esc clear` only, on the process box's bottom border and on the
+  overlay's divider; ↑ / ↓ end the input as Enter does.
 
 ## Decisions
 
@@ -33,8 +38,12 @@ One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
   thumb reaches the bottom at the last offset (with `new(len)` it stops short of it).
 - `step` (shared by both lists) takes the row count and returns the clamped row, wrapping only
   ↑ / ↓. The overlay's wheel moves the selection itself instead of going through ↑ / ↓.
-- The scrollbar ends a row above the bottom border and the marquee keeps a border cell before
-  the corner, so they never overlap.
+- The scrolling path was tried and dropped: the selected path on the overlay's bottom border,
+  first scrolling when cut (hold, scroll, jump back), then as a ticker. It needed a redraw timer
+  (macmon's own CPU over 20 s with the overlay open went from 0.51 s to 0.98 s) and a moving
+  line; copy and finder give the full path without a timer.
+- Copy runs `/usr/bin/pbcopy` through `ProcSys::copy` (stdin piped, written and reaped on a
+  thread, as `reveal`), so tests use the fake. `copied` has no timer: it goes with the next input.
 
 ## Tasks
 
@@ -43,13 +52,12 @@ One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
       window size renders. Commit `feat: scrollbar on the process list and the info overlay`.
 - [x] Wrap-around of ↑ / ↓ in both lists, with tests at both ends and none for the wheel, PgDn
       and End. Commit `feat: up and down wrap around in the lists`.
-- [x] The marquee and the run loop timer, with tests of its timing (holds, steps, start over,
-      restart on a new selection, not on a refresh) and no timer without it; roadmap item 9
-      linked and ticked. Commit `feat: the selected path scrolls on the bottom border`.
+- [x] The scrolling path on the overlay's bottom border (dropped in review).
+- [x] Review: typing hints without `↑↓ select`; `c` copies the selected path with `copied`
+      until the next key; `?` opens the help over the overlay; `? | q back` on its bottom border
+      in place of the scrolling path; tests for each.
 
 ## Result
 
-+94 production lines. Codex review: the marquee measured the path in characters, so paths with
-wide characters didn't scroll far enough; it counts cells now. By hand, macmon's own CPU over
-20 s with the overlay open was 0.51 s with an uncut row selected and 0.98 s while the path
-scrolls.
++97 production lines. In review the scrolling path on the overlay's bottom border was replaced
+by `c` (copy) and `? | q back`, and the help opens over the overlay.

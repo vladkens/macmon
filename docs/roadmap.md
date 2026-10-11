@@ -51,8 +51,8 @@ POWER does today.
 - [x] **9. Scrolling in the lists.** A scrollbar on the right border of the process list and the
       info overlay (ratatui's `Scrollbar`: `↑` / `↓` at the ends, a thumb between, as btop
       draws it), ↑ / ↓ wrapping around at the ends (not the wheel, PgUp / PgDn, Home / End), and
-      the full path of a cut row in the info overlay scrolling on its bottom border (a timer
-      only while it moves).
+      `c` copying the selected path (the executable in the list, the row's full text in the info
+      overlay); `? | q back` on the overlay's bottom border.
       Plan: [docs/plans/completed/20261012-list-scroll.md](plans/completed/20261012-list-scroll.md).
 - [ ] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
       a row can be read and selected without the list jumping (Sloth has it). The metrics keep
