@@ -14,7 +14,8 @@ use super::boxes::{
 };
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
-  ELLIPSIS, Filter, cut_middle, filter_title, head, scroll_offset, step, tail, type_filter,
+  ELLIPSIS, Filter, copy_hint, cut_middle, filter_title, head, scroll_offset, step, tail,
+  type_filter,
 };
 use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
@@ -122,6 +123,8 @@ pub(super) struct Info {
   /// the last render (0: none).
   since: Instant,
   overflow: usize,
+  /// When `c` last copied the selected text.
+  copied: Option<Instant>,
 }
 
 impl Info {
@@ -130,9 +133,9 @@ impl Info {
     let (proc, files, filter) = (proc.clone(), Ok(vec![]), String::new());
     let home = std::env::var("HOME").unwrap_or_default();
     let (typing, index, key, offset, page) = (false, 0, None, 0, 0);
-    let (since, overflow) = (Instant::now(), 0);
+    let (since, overflow, copied) = (Instant::now(), 0, None);
     let mut info =
-      Self { proc, files, filter, typing, index, key, offset, page, home, since, overflow };
+      Self { proc, files, filter, typing, index, key, offset, page, home, since, overflow, copied };
     info.refresh(sys);
     info
   }
@@ -236,6 +239,12 @@ impl Info {
           sys.reveal(&row.text);
         }
       }
+      KeyCode::Char('c') => {
+        if let Some(row) = self.rows().get(self.index) {
+          sys.copy(&row.text);
+          self.copied = Some(Instant::now());
+        }
+      }
       KeyCode::Esc if !self.filter.is_empty() => {
         self.filter.clear();
         self.follow();
@@ -311,7 +320,8 @@ impl Info {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
     let titles = Titles::new(name);
-    let titles = if self.typing { titles } else { titles.right(hint("e", "finder")) };
+    let actions = || join([copy_hint(self.copied), hint("e", "finder")]);
+    let titles = if self.typing { titles } else { titles.right(actions()) };
     let mut list = draw_box(f, area, titles);
     let rows = self.rows();
     if self.files.is_ok() && list.height >= COUNTS_MIN_HEIGHT {
@@ -597,7 +607,7 @@ mod tests {
       (false, "tcp, unix", ROWS[4].into())
     );
     let shown = rows(&render(&mut info, 80, 8));
-    assert!(shown[0].ends_with("─── finder ─╮"), "{}", shown[0]);
+    assert!(shown[0].ends_with("─── copy | finder ─╮"), "{}", shown[0]);
     assert_eq!(shown[1], format!("├─ /tcp, unix {}┤", "─".repeat(65)));
   }
 
@@ -621,6 +631,21 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "e");
     assert_eq!((info.filter.as_str(), revealed(&fake).len()), ("e", 4));
+  }
+
+  #[test]
+  fn c_copies_the_full_text_of_the_selected_row() {
+    let (mut info, fake) = info(Ok(files()));
+    // the exe, then a socket: their own text, not the `~` form or the cut one
+    assert!(press(&mut info, &fake, KeyCode::Char('c')));
+    (0..3).for_each(|_| assert!(press(&mut info, &fake, KeyCode::Down)));
+    assert!(press(&mut info, &fake, KeyCode::Char('c')));
+    assert_eq!(fake.0.borrow().copied, [EXE, ROWS[3]]);
+    assert!(rows(&render(&mut info, 80, 8))[0].ends_with("─ copied | finder ─╮"));
+    // typed, it is text
+    assert!(press(&mut info, &fake, KeyCode::Char('/')));
+    type_str(&mut info, &fake, "c");
+    assert_eq!((info.filter.as_str(), fake.0.borrow().copied.len()), ("c", 2));
   }
 
   #[test]
@@ -730,7 +755,7 @@ mod tests {
     let (mut info, _fake) = chrome();
     let buf = render(&mut info, 100, 16);
     let overlay = [
-      "╭─ Google Chrome Helper (Renderer) 631 ─────────────────────────────────────────────────── finder ─╮",
+      "╭─ Google Chrome Helper (Renderer) 631 ──────────────────────────────────────────── copy | finder ─╮",
       "│ 16 fds  5 files  3 dev  1 tcp  2 unix  4 pipes  1 kqueues                                        │",
       "├─ / filter ───────────────────────────────────────────────────────────────────────────────────────┤",
       "│ exe       /Applications/Google Chrome.app/…/Contents/MacOS/Google Chrome Helper (Renderer)       │",
@@ -823,7 +848,7 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Down));
     let buf = render(&mut info, 60, 8);
     let overlay = [
-      "╭─ WindowServer 631 ────────────────────────────── finder ─╮",
+      "╭─ WindowServer 631 ─────────────────────── copy | finder ─╮",
       "├─ / filter ───────────────────────────────────────────────┤",
       "│ exe       /System/Library/…/Resources/WindowServer       ↑",
       "│ cwd       ~/Code/macmon                                  ┃",

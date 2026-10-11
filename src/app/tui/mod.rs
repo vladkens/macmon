@@ -457,6 +457,10 @@ impl App {
         ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
         ('k', Some(proc)) => self.kill.open(proc),
         ('e', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
+        ('c', Some(proc)) if !proc.path.is_empty() => {
+          self.kill.sys.copy(&proc.path);
+          self.proc_view.copied = Some(Instant::now());
+        }
         _ => {}
       },
       _ => {}
@@ -566,7 +570,7 @@ mod tests {
   use std::ops::ControlFlow;
   use std::sync::atomic::AtomicBool;
   use std::sync::{Arc, Mutex, RwLock, mpsc};
-  use std::time::Duration;
+  use std::time::{Duration, Instant};
 
   use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
@@ -1418,7 +1422,7 @@ mod tests {
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let wide = title(&mut app, 200);
     assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{wide}");
-    assert!(wide.ends_with("─ info | finder | kill ─╮"), "{wide}");
+    assert!(wide.ends_with("─ info | finder | copy | kill ─╮"), "{wide}");
     // the count bold and plain, the hint keys cyan, their labels faint, the separators dim
     let buf = render_buffer(&mut app, 200, 50);
     let style = |text| {
@@ -1431,11 +1435,12 @@ mod tests {
     let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | "];
     assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep]);
     // `e` inside `finder`
-    let cells = ["finder", "er | ", "r | ", "| kill", "kill", "ill"];
-    assert_eq!(cells.map(style), [faint, cyan, faint, sep, cyan, faint]);
+    let cells = ["finder", "er | ", "r | ", "| copy", "copy", "opy", "| kill", "kill", "ill"];
+    assert_eq!(cells.map(style), [faint, cyan, faint, sep, cyan, faint, sep, cyan, faint]);
     // on a narrow box they go first, all together
-    assert_eq!(title(&mut app, 53), "╭─ proc 3 ─ / filter ─ sort ─ info | finder | kill ─╮");
-    assert_eq!(title(&mut app, 52), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(23)));
+    let narrow = "╭─ proc 3 ─ / filter ─ sort ─ info | finder | copy | kill ─╮";
+    assert_eq!(title(&mut app, 60), narrow);
+    assert_eq!(title(&mut app, 59), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(30)));
 
     // typing: keys are text, no hints; then a set filter with the selection in it
     for c in "/saf".chars() {
@@ -1448,7 +1453,7 @@ mod tests {
     let filtered = title(&mut app, 200);
     assert!(
       filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───")
-        && filtered.ends_with(" info | finder | kill ─╮")
+        && filtered.ends_with(" info | finder | copy | kill ─╮")
     );
   }
 
@@ -1569,7 +1574,7 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let title = proc_row(&buf, 0);
     assert!(title.starts_with("╭─ WindowServer 631 ───"), "{title}");
-    assert!(title.ends_with("─ finder ─╮"), "{title}");
+    assert!(title.ends_with("─ copy | finder ─╮"), "{title}");
     assert!(proc_row(&buf, 1).starts_with("│ 1 fds  1 files "), "{}", proc_row(&buf, 1));
     assert!(proc_row(&buf, 2).starts_with("├─ / filter ───"), "{}", proc_row(&buf, 2));
     assert!(proc_row(&buf, 3).starts_with(&format!("│ exe       {WINDOW_SERVER} ")));
@@ -1658,6 +1663,27 @@ mod tests {
     app.kill = kill;
     assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('e')).is_continue());
     assert!(fake.0.borrow().revealed.is_empty());
+  }
+
+  #[test]
+  fn c_copies_the_path_of_the_selected_process() {
+    let (mut app, fake) = info_app();
+    let title = |app: &mut App| proc_row(&render_buffer(app, 200, 50), 0);
+    assert!(app.handle_key(key('c')).is_continue());
+    assert_eq!(fake.0.borrow().copied, [WINDOW_SERVER]);
+    // `copied` in place of the hint for a second
+    assert!(title(&mut app).ends_with("─ info | finder | copied | kill ─╮"));
+    app.proc_view.copied = Instant::now().checked_sub(Duration::from_secs(1));
+    assert!(title(&mut app).ends_with("─ info | finder | copy | kill ─╮"));
+
+    // typed into the filter it is text; nothing for a process without a readable path
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('c')).is_continue());
+    assert_eq!((app.proc_view.filter(), fake.0.borrow().copied.len()), ("c", 1));
+    let mut app = app_with_procs(test_procs());
+    let (kill, fake) = FakeSys::kill(&[]);
+    app.kill = kill;
+    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('c')).is_continue());
+    assert!(fake.0.borrow().copied.is_empty());
   }
 
   #[test]

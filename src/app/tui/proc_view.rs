@@ -2,6 +2,7 @@
 //! driven by keys and the mouse.
 
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -37,6 +38,8 @@ const FILTER_MIN_WIDTH: u16 = 4;
 const WHEEL_ROWS: usize = 3;
 /// Fewest process rows left below the group totals; with fewer the totals are hidden.
 const GROUPS_MIN_ROWS: u16 = 3;
+/// How long `copied` shows in place of the `copy` hint after a copy.
+const COPIED_FOR: Duration = Duration::from_secs(1);
 
 // MARK: Table
 
@@ -359,6 +362,14 @@ pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'s
   spans
 }
 
+/// The `copy` hint, or `copied` for `COPIED_FOR` after a copy at `copied`.
+pub(super) fn copy_hint(copied: Option<Instant>) -> Vec<Span<'static>> {
+  match copied {
+    Some(at) if at.elapsed() < COPIED_FOR => vec![text("copied")],
+    _ => hint("c", "copy"),
+  }
+}
+
 /// The row of `len` a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from
 /// row `at`, with `page` rows on screen: ↑ / ↓ wrap around at the ends, the others stop there;
 /// `None` for other keys.
@@ -486,6 +497,8 @@ pub(super) struct ProcView {
   /// Rows on screen at the last render, the PgUp / PgDn step.
   page: usize,
   targets: Targets,
+  /// When `c` last copied the selected path.
+  pub(super) copied: Option<Instant>,
 }
 
 /// The sort of the default settings.
@@ -510,6 +523,7 @@ impl ProcView {
       offset: 0,
       page: 0,
       targets: Targets::default(),
+      copied: None,
     }
   }
 
@@ -760,8 +774,8 @@ impl ProcView {
   }
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// the filter as `filter_titles` shows it, then `sort`, and `info | finder | kill` on the right
-  /// with a process selected (neither while typing: keys are text then).
+  /// the filter as `filter_titles` shows it, then `sort`, and `info | finder | copy | kill` on the
+  /// right with a process selected (neither while typing: keys are text then).
   fn titles(&self, width: u16) -> Titles<'_> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
@@ -774,7 +788,8 @@ impl ProcView {
     }
 
     let titles = filter_titles(name, &self.filter, self.typing, width);
-    let actions = || join([hint("i", "info"), hint("e", "finder"), hint("k", "kill")]);
+    let copy = copy_hint(self.copied);
+    let actions = || join([hint("i", "info"), hint("e", "finder"), copy, hint("k", "kill")]);
     match self.typing {
       true => titles,
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),

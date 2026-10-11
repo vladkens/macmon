@@ -33,6 +33,7 @@ const HELP: &[Row] = &[
   Key("↑ ↓", "select a process"),
   Key("i", "open files and sockets of the selected process"),
   Key("e", "show the selected process in Finder"),
+  Key("c", "copy the path of the selected process"),
   Key("k", "kill the selected process"),
   Key("Esc", "clear the selection and the filter"),
   Key("?", "show / hide this help"),
