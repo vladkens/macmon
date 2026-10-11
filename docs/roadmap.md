@@ -53,7 +53,7 @@ POWER does today.
       draws it), ↑ / ↓ wrapping around at the ends (not the wheel, PgUp / PgDn, Home / End), and
       the full path of a cut row in the info overlay scrolling on its bottom border (a timer
       only while it moves).
-      Plan: [docs/plans/20261012-list-scroll.md](plans/20261012-list-scroll.md).
+      Plan: [docs/plans/completed/20261012-list-scroll.md](plans/completed/20261012-list-scroll.md).
 - [ ] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
       a row can be read and selected without the list jumping (Sloth has it). The metrics keep
       updating; the title shows that the list is paused. And `f` turning the filter off and on

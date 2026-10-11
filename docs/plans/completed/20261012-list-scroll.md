@@ -1,3 +1,5 @@
+Done: 2026-10-12, PR #98
+
 # Scrolling in the lists (roadmap item 9)
 
 A scrollbar on the right border of the process list and the info overlay, ↑ / ↓ wrapping around
@@ -44,3 +46,10 @@ One PR; aim ≤ 200 production lines (`make loc`), stop and report past that.
 - [x] The marquee and the run loop timer, with tests of its timing (holds, steps, start over,
       restart on a new selection, not on a refresh) and no timer without it; roadmap item 9
       linked and ticked. Commit `feat: the selected path scrolls on the bottom border`.
+
+## Result
+
++94 production lines. Codex review: the marquee measured the path in characters, so paths with
+wide characters didn't scroll far enough; it counts cells now. By hand, macmon's own CPU over
+20 s with the overlay open was 0.51 s with an uncut row selected and 0.98 s while the path
+scrolls.
