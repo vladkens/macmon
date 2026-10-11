@@ -543,7 +543,15 @@ impl App {
     loop {
       term.draw(|f| self.render(f))?;
       mouse = set_mouse_capture(&mut stdout(), mouse, self.wants_mouse())?;
-      if self.handle_event(rx.recv()?, &msec).is_break() {
+      // the info overlay's marquee wakes the loop while it moves, nothing else does
+      let event = match self.info.as_ref().and_then(Info::next_frame) {
+        Some(wait) => match rx.recv_timeout(wait) {
+          Err(mpsc::RecvTimeoutError::Timeout) => Event::Tick,
+          event => event?,
+        },
+        None => rx.recv()?,
+      };
+      if self.handle_event(event, &msec).is_break() {
         break;
       }
     }

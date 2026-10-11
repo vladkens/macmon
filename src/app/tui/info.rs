@@ -1,16 +1,20 @@
 //! The info overlay (`i`): the executable, working directory, open files and sockets of the
 //! selected process, under a line counting the descriptors; `e` reveals one.
 
+use std::time::{Duration, Instant};
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 
-use super::boxes::{Titles, draw_box, draw_divider, draw_scrollbar, hint, join, title_text_room};
+use super::boxes::{
+  Titles, draw_box, draw_divider, draw_scrollbar, hint, join, render_bottom_border, title_text_room,
+};
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
-  ELLIPSIS, Filter, cut_middle, filter_title, scroll_offset, step, type_filter,
+  ELLIPSIS, Filter, cut_middle, filter_title, head, scroll_offset, step, type_filter,
 };
 use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
@@ -27,6 +31,24 @@ const COUNTS: [(Kind, &str); 9] = [
 const COUNTS_MIN_HEIGHT: u16 = 8;
 /// The type and mode columns with their blank cells: ` file  rw  `.
 const COLUMNS: usize = 11;
+
+/// The selected path on the bottom border, when longer: still at its start and end for `HOLD_MS`,
+/// moved a cell each `STEP_MS` in between (~15 cells/s).
+const HOLD_MS: u64 = 1500;
+const STEP_MS: u64 = 67;
+
+/// The cells a marquee `overflow` cells too long is moved `ms` after it started, and the ms until
+/// it moves again.
+fn marquee(ms: u64, overflow: usize) -> (usize, u64) {
+  let (overflow, cycle) = (overflow as u64, 2 * HOLD_MS + overflow as u64 * STEP_MS);
+  let t = ms % cycle;
+  let wait = match t {
+    _ if t < HOLD_MS => HOLD_MS + STEP_MS - t,
+    _ if t < HOLD_MS + overflow * STEP_MS => STEP_MS - (t - HOLD_MS) % STEP_MS,
+    _ => cycle - t,
+  };
+  (((t.saturating_sub(HOLD_MS)) / STEP_MS).min(overflow) as usize, wait)
+}
 
 /// What a row is, so the selection follows it: kind, text and mode.
 type Key = (Kind, String, &'static str);
@@ -96,6 +118,10 @@ pub(super) struct Info {
   page: usize,
   /// `$HOME`, shown as `~`.
   home: String,
+  /// When the selection changed, the start of the marquee, and how many cells it is too long at
+  /// the last render (0: none).
+  since: Instant,
+  overflow: usize,
 }
 
 impl Info {
@@ -103,8 +129,10 @@ impl Info {
   pub(super) fn new(proc: &ProcInfo, sys: &dyn ProcSys) -> Self {
     let (proc, files, filter) = (proc.clone(), Ok(vec![]), String::new());
     let home = std::env::var("HOME").unwrap_or_default();
-    let (index, key, offset, page) = (0, None, 0, 0);
-    let mut info = Self { proc, files, filter, typing: false, index, key, offset, page, home };
+    let (typing, index, key, offset, page) = (false, 0, None, 0, 0);
+    let (since, overflow) = (Instant::now(), 0);
+    let mut info =
+      Self { proc, files, filter, typing, index, key, offset, page, home, since, overflow };
     info.refresh(sys);
     info
   }
@@ -172,8 +200,10 @@ impl Info {
   fn select(&mut self, index: usize) {
     let rows = self.rows();
     self.index = index.min(rows.len().saturating_sub(1));
-    if let Some(row) = rows.get(self.index) {
-      self.key = Some(row.key());
+    if let Some(key) =
+      rows.get(self.index).map(Row::key).filter(|key| self.key.as_ref() != Some(key))
+    {
+      (self.key, self.since) = (Some(key), Instant::now());
     }
   }
 
@@ -255,6 +285,12 @@ impl Info {
     Line::from(spans)
   }
 
+  /// How long until the marquee moves; `None` without one, so no redraw is needed.
+  pub(super) fn next_frame(&self) -> Option<Duration> {
+    let ms = self.since.elapsed().as_millis() as u64;
+    (self.overflow > 0).then(|| Duration::from_millis(marquee(ms, self.overflow).1))
+  }
+
   /// The divider above the list: `/ filter`, or the filter (with the cursor while typing), and
   /// the filter keys on the right while typing.
   fn divider_titles(&self, width: u16) -> Titles<'static> {
@@ -269,7 +305,8 @@ impl Info {
   /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `finder`
   /// (not while typing) on the top border, the counts line when there is room, the divider with
   /// the filter when there is room for a row below it, then the rows (paths cut by components),
-  /// with a scrollbar when they don't fit, or why there are none.
+  /// with a scrollbar when they don't fit, or why there are none, and the selected text on the
+  /// bottom border when it is cut.
   pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
@@ -292,6 +329,7 @@ impl Info {
     let len = rows.len();
     self.offset = scroll_offset(self.offset, Some(self.index), self.page, len);
 
+    let mut full = None;
     let rows = rows.iter().enumerate().skip(self.offset);
     for (y, (i, row)) in (list.y..list.bottom()).zip(rows) {
       // the columns and `×N` faint unless selected, a blank cell at both borders
@@ -299,10 +337,14 @@ impl Info {
       let columns = format!(" {:5} {:2}  ", row.kind.label(), row.mode);
       let count = if row.count > 1 { format!("  ×{}", row.count) } else { String::new() };
       let room = usize::from(list.width).saturating_sub(COLUMNS + 1 + Span::raw(&count).width());
+      let path = self.tilde(&row.text);
       let shown = match row.kind {
-        kind if kind > Kind::File => cut_middle(&self.tilde(&row.text), room), // sockets
-        _ => cut_path(&self.tilde(&row.text), room),
+        kind if kind > Kind::File => cut_middle(&path, room), // sockets
+        _ => cut_path(&path, room),
       };
+      if i == self.index && shown != path {
+        full = Some(path);
+      }
       let line = Rect { y, height: 1, ..list };
       f.render_widget(Line::from(vec![side(columns), text(shown), side(count)]), line);
       if i == self.index {
@@ -310,18 +352,31 @@ impl Info {
       }
     }
     draw_scrollbar(f, area, list, len, self.offset);
+
+    // a marquee: the full text, from where it has scrolled to
+    self.overflow = 0;
+    let ms = self.since.elapsed().as_millis() as u64;
+    if let Some(full) = full {
+      render_bottom_border(f, area, vec![], |room| {
+        self.overflow = full.chars().count().saturating_sub(room);
+        let shown: String = full.chars().skip(marquee(ms, self.overflow).0).collect();
+        vec![text(head(&shown, room).to_string())]
+      });
+    }
   }
 }
 
 #[cfg(test)]
 mod tests {
+  use std::time::{Duration, Instant};
+
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
   use ratatui::style::Modifier;
 
-  use super::{Info, cut_path};
+  use super::{Info, cut_path, marquee};
   use crate::fds::{Kind, OpenFile};
   use crate::procs::{self, ProcInfo};
   use crate::tui::kill::tests::FakeSys;
@@ -689,7 +744,8 @@ mod tests {
       "│                                                                                                  │",
       "│                                                                                                  │",
       "│                                                                                                  │",
-      "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
+      // the selected exe is cut: its full path on the bottom border, from the start
+      "╰─ /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions ─╯",
     ];
     assert_eq!(rows(&buf), overlay);
     // `×N` faint like the type and the mode, the paths plain, the exe selected
@@ -829,6 +885,53 @@ mod tests {
     assert!(rows(&render(&mut info, 80, 8))[0].starts_with("╭─ zsh 631 ─"));
     assert!(press(&mut info, &fake, KeyCode::Char('e')));
     assert_eq!(revealed(&fake), ["/bin/zsh"]);
+  }
+
+  #[test]
+  fn the_marquee_holds_scrolls_holds_and_starts_over() {
+    // 10 cells too long: 1.5 s still, 10 steps of 67 ms, 1.5 s still; the ms to the next move
+    let at = |ms| marquee(ms, 10);
+    assert_eq!([at(0), at(1500), at(1567), at(1600)], [(0, 1567), (0, 67), (1, 67), (1, 34)]);
+    assert_eq!([at(2103), at(2170), at(3669)], [(9, 67), (10, 1500), (10, 1)]);
+    assert_eq!([at(3670), at(3670 + 1902)], [(0, 1567), (6, 67)]);
+  }
+
+  #[test]
+  fn a_cut_selected_path_scrolls_on_the_bottom_border() {
+    let (mut info, fake) = chrome();
+    let bottom = |info: &mut Info, ms| {
+      info.since = Instant::now().checked_sub(Duration::from_millis(ms)).unwrap();
+      rows(&render(info, 60, 12)).pop().unwrap()
+    };
+    // the exe, cut in the list: its start, moved 5 cells, its end
+    let start = "╰─ /Applications/Google Chrome.app/Contents/Frameworks/Go ─╯";
+    assert_eq!(bottom(&mut info, 0), start);
+    assert_eq!(
+      bottom(&mut info, 1500 + 5 * 67),
+      "╰─ ications/Google Chrome.app/Contents/Frameworks/Google  ─╯"
+    );
+    assert_eq!(
+      bottom(&mut info, 12_000),
+      "╰─ er).app/Contents/MacOS/Google Chrome Helper (Renderer) ─╯"
+    );
+    // it wakes the loop while moving
+    assert!(info.next_frame().is_some_and(|wait| wait <= Duration::from_millis(1500)));
+
+    // a refresh keeps it going, a new selection starts it over
+    let moved = bottom(&mut info, 2100);
+    info.refresh(&fake);
+    assert_eq!(rows(&render(&mut info, 60, 12)).pop().unwrap(), moved);
+    assert!(press(&mut info, &fake, KeyCode::Down) && press(&mut info, &fake, KeyCode::Up));
+    assert_eq!(rows(&render(&mut info, 60, 12)).pop().unwrap(), start);
+
+    // beside a scrollbar: the arrow above the bottom border, the marquee on it
+    let shown = rows(&render(&mut info, 60, 10));
+    assert!(shown[8].ends_with(" ↓") && shown[9] == start, "{shown:?}");
+
+    // the cwd isn't cut: a plain border, no wake-ups
+    assert!(press(&mut info, &fake, KeyCode::Down));
+    assert_eq!(rows(&render(&mut info, 60, 12))[11], format!("╰{}╯", "─".repeat(58)));
+    assert_eq!(info.next_frame(), None);
   }
 
   /// The only test with the real calls: the test's own process, and no reveal.
