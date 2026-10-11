@@ -1506,9 +1506,10 @@ mod tests {
     assert!(app.handle_key(key('i')).is_continue());
     let buf = render_buffer(&mut app, 200, 50);
     let title = proc_row(&buf, 0);
-    assert!(title.starts_with("╭─ WindowServer 631 ─ / filter ───"), "{title}");
+    assert!(title.starts_with("╭─ WindowServer 631 ───"), "{title}");
     assert!(title.ends_with("─ finder ─╮"), "{title}");
     assert!(proc_row(&buf, 1).starts_with("│ 1 fds  1 files "), "{}", proc_row(&buf, 1));
+    assert!(proc_row(&buf, 2).starts_with("├─ / filter ───"), "{}", proc_row(&buf, 2));
     assert!(proc_row(&buf, 3).starts_with(&format!("│ exe       {WINDOW_SERVER} ")));
     assert!(proc_row(&buf, 4).starts_with("│ cwd       / "), "{}", proc_row(&buf, 4));
     assert!(proc_row(&buf, 5).starts_with("│ file  r   /var/log/system.log "));
@@ -1555,16 +1556,16 @@ mod tests {
   #[test]
   fn q_closes_the_info_overlay_without_quitting() {
     let (mut app, _fake) = info_app();
-    let title = |app: &mut App| proc_row(&render_buffer(app, 200, 50), 0);
+    let row = |app: &mut App, y| proc_row(&render_buffer(app, 200, 50), y);
     assert!(app.handle_key(key('i')).is_continue());
     // typed into its filter `q` is text
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('q')).is_continue());
     assert!(press(&mut app, KeyCode::Enter).is_continue());
-    assert!(title(&mut app).starts_with("╭─ WindowServer 631 ─ /q ───"), "{}", title(&mut app));
+    assert!(row(&mut app, 2).starts_with("├─ /q ───"), "{}", row(&mut app, 2));
     // then it closes the overlay, with the filter set too
     assert!(app.handle_key(key('q')).is_continue());
     assert!(app.info.is_none());
-    assert!(title(&mut app).starts_with("╭─ proc 3 ─"), "{}", title(&mut app));
+    assert!(row(&mut app, 0).starts_with("╭─ proc 3 ─"), "{}", row(&mut app, 0));
     // closed: `q` quits again
     assert!(app.handle_key(key('q')).is_break());
   }

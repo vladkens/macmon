@@ -340,7 +340,7 @@ pub(super) fn filter_titles(
 }
 
 /// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
-fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'static>> {
+pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'static>> {
   // `/` and the cursor (one cell each) around the filter text
   let text_room = usize::from(room).saturating_sub(1 + usize::from(typing));
 

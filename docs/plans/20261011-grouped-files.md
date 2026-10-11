@@ -8,9 +8,9 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
 ## Behavior
 
 ```
-╭─ Google Chrome Helper (Renderer) 4127 ─ / filter ─────────────────────────────── finder ─╮
+╭─ Google Chrome Helper (Renderer) 4127 ────────────────────────────────────────── finder ─╮
 │ 116 fds  8 files  3 dev  1 tcp  6 unix  96 pipes  3 kqueues                              │
-├──────────────────────────────────────────────────────────────────────────────────────────┤
+├─ / filter ───────────────────────────────────────────────────────────────────────────────┤
 │ exe       /Applications/Google Chrome.app/…/MacOS/Google Chrome Helper (Renderer)        │
 │ cwd       /                                                                              │
 │ file  r   /Applications/Google Chrome.app/…/Resources/chrome_100_percent.pak             │
@@ -22,13 +22,16 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
 ╰──────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-- Counts line, the first line inside the box, then a divider in the border style (`├──┤`):
-  `N fds`, then the count of each kind among the descriptors (not exe / cwd), zero kinds left
+- The top border: `<name> <pid>`, and `finder` on the right while the filter isn't typed.
+- Counts line, the first line inside the box: `N fds`, then the count of each kind among the descriptors (not exe / cwd), zero kinds left
   out, numbers as text, labels faint: files, dirs, dev, tcp, udp, unix, pipes, kqueues, other.
   With a filter set the first pair reads `shown/total fds` (shown: the descriptors behind the
   listed rows), like `proc 12/312`; the kind counts stay totals. Pairs that don't fit drop from the
-  end. Below 8 inner rows the counts line and the divider are hidden. The bottom border keeps only
-  the typing hints.
+  end. Below 8 inner rows the counts line is hidden.
+- A divider above the list in the border style, `├─ / filter ───┤`: the `/ filter` hint, or the
+  filter text (with the cursor while typing, `├─ /tcp█ ───┤`), on its left, and the typing keys
+  (`Enter keep | Esc clear | ↑↓ select`) on its right while typing. It shows whenever there is a
+  list row below it.
 - Rows in this order: `exe` (`ProcInfo.path`, when not empty), `cwd`, `dir` and `file`
   descriptors, then `tcp`, `udp`, `unix`, `other`. Devices (`/dev/null`, ttys), pipes, kqueues and
   rows without text are only counted.
@@ -87,3 +90,9 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
       tests that served the grouping removed; plan and roadmap text updated.
 - [x] `make check`, `make test`, `make loc REF=origin/main`; commit
       `feat: no devices and no directory rows in the files list`.
+
+### 4. Filter on the divider
+
+- [x] `info.rs`: the filter and the typing keys on a divider above the list, the top border with
+      the name and `finder` only; `boxes.rs`: a divider drawn with titles.
+- [x] `make check`, `make test`; commit `feat: filter on the divider of the info overlay`.

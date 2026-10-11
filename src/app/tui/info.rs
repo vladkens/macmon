@@ -7,10 +7,10 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 
-use super::boxes::{draw_box, hint, render_bottom_border};
+use super::boxes::{Titles, draw_box, draw_divider, hint, join, title_text_room};
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
-  ELLIPSIS, Filter, cut_middle, filter_titles, scroll_offset, step, type_filter,
+  ELLIPSIS, Filter, cut_middle, filter_title, scroll_offset, step, type_filter,
 };
 use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
@@ -23,7 +23,7 @@ const COUNTS: [(Kind, &str); 9] = [
   (Kind::Udp, "udp"), (Kind::Unix, "unix"), (Kind::Pipe, "pipes"), (Kind::Kqueue, "kqueues"),
   (Kind::Other, "other"),
 ];
-/// Fewest inner rows with the counts line and its divider; with fewer the list takes them.
+/// Fewest inner rows with the counts line; with fewer the list takes its row.
 const COUNTS_MIN_HEIGHT: u16 = 8;
 /// The type and mode columns with their blank cells: ` file  rw  `.
 const COLUMNS: usize = 11;
@@ -57,7 +57,7 @@ fn split(path: &str) -> (&str, &str) {
 /// around its subdirectories), sockets by text, then the mode.
 fn order(file: &OpenFile) -> (Kind, &str, &str, &'static str) {
   let (dir, name) =
-    if file.kind <= Kind::Dev { split(&file.text) } else { ("", file.text.as_str()) };
+    if file.kind <= Kind::File { split(&file.text) } else { ("", file.text.as_str()) };
   (file.kind, dir, name, file.mode)
 }
 
@@ -242,24 +242,38 @@ impl Info {
     Line::from(spans)
   }
 
-  /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>`, the filter and
-  /// `finder` (not while typing) on the top border, the counts line and a divider when there is
-  /// room, the rows (paths cut by components) or why there are none, and the filter keys on the
-  /// bottom border while typing.
+  /// The divider above the list: `/ filter`, or the filter (with the cursor while typing), and
+  /// the filter keys on the right while typing.
+  fn divider_titles(&self, width: u16) -> Titles<'static> {
+    let filter = match self.typing || !self.filter.is_empty() {
+      true => filter_title(&self.filter, self.typing, title_text_room(width, &[])),
+      false => hint("/", "filter"),
+    };
+    let hints = join([hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")]);
+    if self.typing { Titles::new(filter).right(hints) } else { Titles::new(filter) }
+  }
+
+  /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `finder`
+  /// (not while typing) on the top border, the counts line when there is room, the divider with
+  /// the filter when there is room for a row below it, then the rows (paths cut by components)
+  /// or why there are none.
   pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
-    let titles = filter_titles(name, &self.filter, self.typing, area.width);
+    let titles = Titles::new(name);
     let titles = if self.typing { titles } else { titles.right(hint("e", "finder")) };
     let mut list = draw_box(f, area, titles);
     let rows = self.rows();
+    if self.files.is_ok() && list.height >= COUNTS_MIN_HEIGHT {
+      f.render_widget(self.counts(&rows, usize::from(list.width)), list);
+      (list.y, list.height) = (list.y + 1, list.height - 1);
+    }
+    if list.height >= 2 {
+      draw_divider(f, area, list.y, self.divider_titles(area.width));
+      (list.y, list.height) = (list.y + 1, list.height - 1);
+    }
     if let Err(error) = &self.files {
       f.render_widget(Line::from(faint(format!(" {error}"))), list);
-    } else if list.height >= COUNTS_MIN_HEIGHT {
-      f.render_widget(self.counts(&rows, usize::from(list.width)), list);
-      let divider = format!("├{}┤", "─".repeat(usize::from(area.width.saturating_sub(2))));
-      f.buffer_mut().set_string(area.x, list.y + 1, divider, theme::BORDER);
-      (list.y, list.height) = (list.y + 2, list.height - 2);
     }
     self.page = usize::from(list.height);
     self.offset = scroll_offset(self.offset, Some(self.index), self.page, rows.len());
@@ -272,7 +286,7 @@ impl Info {
       let count = if row.count > 1 { format!("  ×{}", row.count) } else { String::new() };
       let room = usize::from(list.width).saturating_sub(COLUMNS + 1 + Span::raw(&count).width());
       let shown = match row.kind {
-        kind if kind > Kind::Dev => cut_middle(&self.tilde(&row.text), room), // sockets
+        kind if kind > Kind::File => cut_middle(&self.tilde(&row.text), room), // sockets
         _ => cut_path(&self.tilde(&row.text), room),
       };
       let line = Rect { y, height: 1, ..list };
@@ -280,11 +294,6 @@ impl Info {
       if i == self.index {
         f.buffer_mut().set_style(line, theme::SELECTED);
       }
-    }
-
-    if self.typing {
-      let hints = vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
-      render_bottom_border(f, area, hints, |_| vec![]);
     }
   }
 }
@@ -458,9 +467,9 @@ mod tests {
       info.handle_mouse(mouse, &fake);
       info.index
     };
-    // the first row, the exe, selected; a page is the 6 rows on screen
+    // the first row, the exe, selected; a page is the 5 rows on screen below the divider
     assert_eq!(selected(&info), EXE);
-    let steps = [(Up, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (Down, 6), (PageUp, 0)];
+    let steps = [(Up, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (Down, 6), (PageUp, 1)];
     for (code, index) in steps.into_iter().chain([(End, 6), (Home, 0)]) {
       assert!(press(&mut info, &fake, code));
       assert_eq!(info.index, index, "{code:?}");
@@ -473,7 +482,7 @@ mod tests {
     // the list scrolls to keep the selection on screen
     assert!(press(&mut info, &fake, End));
     let shown = rows(&render(&mut info, 80, 8));
-    assert!(shown[1].starts_with("│ cwd       ~/Code/macmon ") && shown[6].starts_with("│ unix "));
+    assert!(shown[2].starts_with("│ file  r   ~/Library/") && shown[6].starts_with("│ unix "));
   }
 
   #[test]
@@ -495,27 +504,24 @@ mod tests {
     assert_eq!(filter("nothing"), Vec::<String>::new());
 
     // the selection, filtered out, goes to the row in its place; while typing no `finder` on top,
-    // the filter keys on the bottom border; ↓ ends the input, `e` and Esc act again
+    // the filter and its keys on the divider; ↓ ends the input, `e` and Esc act again
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "tcp, unix");
     assert_eq!((info.typing, selected(&info)), (true, ROWS[3].into()));
-    let buf = render(&mut info, 80, 8);
-    assert!(rows(&buf)[0].starts_with("╭─ WindowServer 631 ─ /tcp, unix█ ──"), "{}", rows(&buf)[0]);
-    assert!(rows(&buf)[0].ends_with("──╮"), "{}", rows(&buf)[0]);
-    assert!(
-      rows(&buf)[7].ends_with("─ Enter keep | Esc clear | ↑↓ select ─╯"),
-      "{}",
-      rows(&buf)[7]
-    );
+    let shown = rows(&render(&mut info, 80, 8));
+    assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(59)));
+    let divider =
+      "├─ /tcp, unix█ ─────────────────────────── Enter keep | Esc clear | ↑↓ select ─┤";
+    assert_eq!(shown[1], divider);
+    assert_eq!(shown[7], format!("╰{}╯", "─".repeat(78)));
     assert!(press(&mut info, &fake, KeyCode::Down));
     assert_eq!(
       (info.typing, info.filter.as_str(), selected(&info)),
       (false, "tcp, unix", ROWS[4].into())
     );
-    let buf = render(&mut info, 80, 8);
-    assert!(rows(&buf)[0].starts_with("╭─ WindowServer 631 ─ /tcp, unix ──"), "{}", rows(&buf)[0]);
-    assert!(rows(&buf)[0].ends_with("── finder ─╮"), "{}", rows(&buf)[0]);
-    assert_eq!(rows(&buf)[7], format!("╰{}╯", "─".repeat(78)));
+    let shown = rows(&render(&mut info, 80, 8));
+    assert!(shown[0].ends_with("─── finder ─╮"), "{}", shown[0]);
+    assert_eq!(shown[1], format!("├─ /tcp, unix {}┤", "─".repeat(65)));
   }
 
   #[test]
@@ -623,9 +629,10 @@ mod tests {
       let mut info = Info::new(&ProcInfo { started, ..proc() }, &fake);
       let buf = render(&mut info, 40, 12);
       let shown = rows(&buf);
-      assert_eq!(shown[1], format!("│{text:38}│"));
-      assert_eq!((buf[(2, 1)].fg, buf[(2, 1)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
-      assert_eq!(shown[2], format!("│{:38}│", ""), "no counts line");
+      // no counts line, the divider, then the text
+      assert_eq!(shown[1], format!("├─ / filter {}┤", "─".repeat(27)));
+      assert_eq!(shown[2], format!("│{text:38}│"));
+      assert_eq!((buf[(2, 2)].fg, buf[(2, 2)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
       assert_eq!(shown[11], format!("╰{}╯", "─".repeat(38)));
       // nothing to select or reveal
       for code in [KeyCode::Down, KeyCode::End, KeyCode::Char('e')] {
@@ -638,7 +645,7 @@ mod tests {
     let (mut info, fake) = info(Ok(files()));
     fake.0.borrow_mut().files.clear();
     info.refresh(&fake);
-    assert_eq!(rows(&render(&mut info, 40, 5))[1], format!("│{:38}│", " Already exited"));
+    assert_eq!(rows(&render(&mut info, 40, 5))[2], format!("│{:38}│", " Already exited"));
   }
 
   #[test]
@@ -646,9 +653,9 @@ mod tests {
     let (mut info, _fake) = chrome();
     let buf = render(&mut info, 100, 16);
     let overlay = [
-      "╭─ Google Chrome Helper (Renderer) 631 ─ / filter ──────────────────────────────────────── finder ─╮",
+      "╭─ Google Chrome Helper (Renderer) 631 ─────────────────────────────────────────────────── finder ─╮",
       "│ 16 fds  5 files  3 dev  1 tcp  2 unix  4 pipes  1 kqueues                                        │",
-      "├──────────────────────────────────────────────────────────────────────────────────────────────────┤",
+      "├─ / filter ───────────────────────────────────────────────────────────────────────────────────────┤",
       "│ exe       /Applications/Google Chrome.app/…/Contents/MacOS/Google Chrome Helper (Renderer)       │",
       "│ cwd       /                                                                                      │",
       "│ file  r   /Applications/Google Chrome.app/…/131.0.6778.86/Resources/chrome_100_percent.pak       │",
@@ -706,10 +713,11 @@ mod tests {
   #[test]
   fn the_counts_line_shows_with_room_and_drops_pairs_that_dont_fit() {
     let (mut info, _fake) = chrome();
-    // below 8 inner rows the list takes its place
-    assert!(rows(&render(&mut info, 100, 9))[1].starts_with("│ exe "));
+    // below 8 inner rows the list takes its place, below 2 the divider too
+    assert!(rows(&render(&mut info, 100, 9))[2].starts_with("│ exe "));
+    assert!(rows(&render(&mut info, 100, 3))[1].starts_with("│ exe "));
     let shown = rows(&render(&mut info, 100, 10));
-    assert!(shown[1].starts_with("│ 16 fds  5 files ") && shown[2].starts_with("├───"));
+    assert!(shown[1].starts_with("│ 16 fds  5 files ") && shown[2].starts_with("├─ / filter ──"));
     assert!(shown[3].starts_with("│ exe "));
     let shown = rows(&render(&mut info, 41, 10));
     assert_eq!(shown[1], "│ 16 fds  5 files  3 dev  1 tcp  2 unix │");
@@ -733,18 +741,17 @@ mod tests {
     for (width, height) in (1..70).flat_map(|w| (1..12).map(move |h| (w, h))) {
       render(&mut info, width, height);
     }
-    // `finder` on the top border, nothing on the bottom one
-    assert!(press(&mut info, &fake, KeyCode::Down));
+    // `finder` on the top border, `/ filter` on the divider
     assert!(press(&mut info, &fake, KeyCode::Down));
     let buf = render(&mut info, 60, 8);
     let overlay = [
-      "╭─ WindowServer 631 ─ / filter ─────────────────── finder ─╮",
+      "╭─ WindowServer 631 ────────────────────────────── finder ─╮",
+      "├─ / filter ───────────────────────────────────────────────┤",
       "│ exe       /System/Library/…/Resources/WindowServer       │",
       "│ cwd       ~/Code/macmon                                  │",
       "│ file  r   ~/Library/…/000003.log                         │",
       "│ tcp       ….0.0.1:52344 → 140.82.112.4:443 (established) │",
       "│ tcp       [::1]:8080 (listen)                            │",
-      "│ udp       0.0.0.0:5353                                   │",
       "╰──────────────────────────────────────────────────────────╯",
     ];
     let shown = rows(&buf);
@@ -757,6 +764,7 @@ mod tests {
     assert_eq!([cell(1, 3), cell(2, 3), cell(58, 3)], [(theme::TEXT, Modifier::REVERSED); 3]);
     let x = |text| shown[0][..shown[0].find(text).unwrap()].chars().count() as u16;
     let key = (theme::KEY, Modifier::empty());
+    assert_eq!((cell(0, 1).0, cell(3, 1), cell(5, 1)), (theme::BORDER, key, faint));
     let finder = x("finder");
     assert_eq!([0, 3, 4, 5].map(|dx| cell(finder + dx, 0)), [faint, faint, key, faint]);
   }
