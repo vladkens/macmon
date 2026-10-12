@@ -61,7 +61,7 @@ the overlay. One PR; aim ≤ 200 production lines (`make loc`), stop and report 
 
 ## Result
 
-+102 production lines. In review the scrolling path on the overlay's bottom border was replaced
++103 production lines. In review the scrolling path on the overlay's bottom border was replaced
 by `c` (copy) and `? | q back`, and the help opens over the overlay. Codex review: pbcopy gets a
 UTF-8 locale (under `LC_ALL=C` it read the UTF-8 text as MacRoman), and a click clears `copied`
 in the overlay too.

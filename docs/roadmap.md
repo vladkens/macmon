@@ -37,7 +37,7 @@ POWER does today.
       (like htop's F2) saved in `~/.config/macmon.json` under a new field. Released versions
       ignore the field but drop it when they save, so a missing field means the default columns.
 - [ ] **7. A clearer info overlay.** Two PRs. First, the files list: `exe` and `cwd` first, then
-      files sorted by directory, a type and open mode (`r`, `w`, `rw`) on every row, duplicates
+      files sorted by directory, a type and open mode (`r-`, `-w`, `rw`) on every row, duplicates
       as `×N`, devices, pipes, kqueues and unnamed sockets left out of the list and counted in a
       line above it (`116 fds  8 files  3 dev  96 pipes …`). Second, a process summary line
       above the counts (cpu, mem, power, threads, uptime, parent) and presets on `s` / `S` (`all`,
