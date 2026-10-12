@@ -231,14 +231,15 @@ impl Info {
   }
 
   /// The wheel moves the selection a row and ends filter input, as ↑ / ↓ do but stopping at the
-  /// ends; other mouse events do nothing.
+  /// ends; other mouse events only clear `copied`, as every event does.
   pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+    self.copied = false;
     let index = match mouse.kind {
       MouseEventKind::ScrollUp => self.index.saturating_sub(1),
       MouseEventKind::ScrollDown => self.index + 1,
       _ => return,
     };
-    (self.typing, self.copied) = (false, false);
+    self.typing = false;
     self.select(index);
   }
 
@@ -340,7 +341,9 @@ mod tests {
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
-  use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+  use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+  };
   use ratatui::style::Modifier;
 
   use super::{Info, cut_path};
@@ -609,12 +612,16 @@ mod tests {
     };
     info.handle_mouse(wheel);
     assert_eq!(rows(&render(&mut info, 80, 8))[7], format!("╰{} ? | q back ─╯", "─".repeat(65)));
+    // a click too
+    assert!(press(&mut info, &fake, KeyCode::Char('c')));
+    info.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), ..wheel });
+    assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
     assert!(press(&mut info, &fake, KeyCode::Char('c')) && press(&mut info, &fake, KeyCode::Up));
     assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
     // typed, it is text
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "c");
-    assert_eq!((info.filter.as_str(), fake.0.borrow().copied.len()), ("c", 3));
+    assert_eq!((info.filter.as_str(), fake.0.borrow().copied.len()), ("c", 4));
   }
 
   #[test]
