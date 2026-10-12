@@ -42,8 +42,8 @@ the overlay. One PR; aim ≤ 200 production lines (`make loc`), stop and report 
   first scrolling when cut (hold, scroll, jump back), then as a ticker. It needed a redraw timer
   (macmon's own CPU over 20 s with the overlay open went from 0.51 s to 0.98 s) and a moving
   line; copy and finder give the full path without a timer.
-- Copy runs `/usr/bin/pbcopy` through `ProcSys::copy` (stdin piped, written and reaped on a
-  thread, as `reveal`), so tests use the fake. `copied` has no timer: it goes with the next input.
+- Copy runs `/usr/bin/pbcopy` with `LC_ALL=en_US.UTF-8` through `ProcSys::copy` (stdin piped,
+  written and reaped on a thread, as `reveal`), so tests use the fake. `copied` has no timer: it goes with the next input.
 
 ## Tasks
 
@@ -59,5 +59,7 @@ the overlay. One PR; aim ≤ 200 production lines (`make loc`), stop and report 
 
 ## Result
 
-+97 production lines. In review the scrolling path on the overlay's bottom border was replaced
-by `c` (copy) and `? | q back`, and the help opens over the overlay.
++100 production lines. In review the scrolling path on the overlay's bottom border was replaced
+by `c` (copy) and `? | q back`, and the help opens over the overlay. Codex review: pbcopy gets a
+UTF-8 locale (under `LC_ALL=C` it read the UTF-8 text as MacRoman), and a click clears `copied`
+in the overlay too.
