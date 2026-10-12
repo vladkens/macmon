@@ -325,7 +325,7 @@ mod tests {
     ];
     let gauges = |available| {
       let metrics = Metrics {
-        cpu_tiers: vec![CpuTierMetrics { label: "C".into(), ..Default::default() }],
+        cpu_tiers: vec![CpuTierMetrics { label: "_".into(), ..Default::default() }],
         available,
         ..Default::default()
       };

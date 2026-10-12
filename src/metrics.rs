@@ -941,7 +941,7 @@ mod tests {
     assert_eq!(Availability::detect(all, &soc), Availability::default());
 
     // a VM: no channels and no tables; system power comes with each sample
-    let tier = CpuTierInfo { label: "C".into(), cores: 4, freqs: vec![] };
+    let tier = CpuTierInfo { label: "_".into(), cores: 4, freqs: vec![] };
     let vm = SocInfo { cpu_tiers: vec![tier], ..Default::default() };
     let none = Availability { power: false, sys_power: true, cpu_freq: false, gpu_freq: false };
     assert_eq!(Availability::detect(|_| false, &vm), none);
