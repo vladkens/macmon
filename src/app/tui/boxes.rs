@@ -185,7 +185,7 @@ pub(super) fn draw_divider(f: &mut Frame, area: Rect, y: u16, titles: Titles) {
 /// between them on the border line. Fewer than 3 rows leave no room for it.
 pub(super) fn draw_scrollbar(f: &mut Frame, area: Rect, rows: Rect, len: usize, offset: usize) {
   let page = usize::from(rows.height);
-  if len <= page || area.width < 2 {
+  if len <= page || page < 3 || area.width < 2 {
     return;
   }
   let bar = Rect { x: area.right() - 1, width: 1, ..rows };
@@ -531,8 +531,26 @@ mod tests {
   use ratatui::style::{Color, Modifier, Style};
   use ratatui::text::Span;
 
-  use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
+  use super::{
+    Titles, draw_box, draw_scrollbar, fit_titles, hint, place_titles, render_bottom_border,
+  };
   use crate::tui::theme::{self, dim, text};
+
+  #[test]
+  fn a_scrollbar_needs_3_rows() {
+    // 100 rows, 1 to 3 of them on screen: the plain border, then `↑`, a thumb and `↓`
+    for height in 1..=3 {
+      let mut term = Terminal::new(TestBackend::new(10, height + 2)).unwrap();
+      let frame = term.draw(|f| {
+        draw_box(f, f.area(), Titles::default());
+        draw_scrollbar(f, f.area(), Rect::new(1, 1, 8, height), 100, 0);
+      });
+      let buf = frame.unwrap().buffer;
+      let border: String = (1..=height).map(|y| buf[(9, y)].symbol()).collect();
+      let shown = if height < 3 { "│".repeat(height.into()) } else { "↑┃↓".into() };
+      assert_eq!(border, shown, "{height} rows");
+    }
+  }
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
   fn border_with(titles: Titles, width: u16) -> String {
