@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType};
+use ratatui::widgets::{Block, BorderType, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use super::App;
 use super::layout::{LayoutPlan, Metric};
@@ -180,6 +180,28 @@ pub(super) fn draw_divider(f: &mut Frame, area: Rect, y: u16, titles: Titles) {
   titles.render(Rect { y, height: 1, ..area }, f.buffer_mut(), Style::new().fg(theme::TEXT));
 }
 
+/// Draws a scrollbar over the right border of box `area` beside `rows`, the cells of a list of
+/// `len` rows scrolled to `offset`, when they don't fit: `↑` and `↓` at the ends, the thumb
+/// between them on the border line. Fewer than 3 rows leave no room for it.
+pub(super) fn draw_scrollbar(f: &mut Frame, area: Rect, rows: Rect, len: usize, offset: usize) {
+  let page = usize::from(rows.height);
+  if len <= page || page < 3 || area.width < 2 {
+    return;
+  }
+  let bar = Rect { x: area.right() - 1, width: 1, ..rows };
+  // scroll positions, not rows, so the thumb reaches the bottom at the last one
+  let mut state =
+    ScrollbarState::new(len - page + 1).position(offset).viewport_content_length(page);
+  let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(Some("↑"))
+    .end_symbol(Some("↓"))
+    .track_symbol(None)
+    .thumb_symbol("┃")
+    .style(theme::BORDER)
+    .thumb_style(theme::TEXT);
+  f.render_stateful_widget(scrollbar, bar, &mut state);
+}
+
 // MARK: Bottom border
 
 /// A key hint: the key in `theme::key`, what it does `theme::faint` around it. A letter key in the
@@ -317,12 +339,12 @@ impl App {
   /// Key hints for the bottom border of the lowest box (see `hint`): the global keys, help first as
   /// a lone `?` (hints drop from the end), with the ratio mode and the interval (`? | quit | procs
   /// | view | freq | -/+  1000ms`; no `procs` while the window is too small for the process list),
-  /// or the filter keys while a filter is typed (`Enter keep | Esc clear | ↑↓ select`). The mode
+  /// or the filter keys while a filter is typed (`Enter keep | Esc clear`). The mode
   /// and the interval are padded to their widest value, so a toggle doesn't move the hints left of
   /// them.
   pub(super) fn footer_hints(&self) -> Vec<Vec<Span<'static>>> {
     if self.proc_view.typing() {
-      return vec![hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")];
+      return vec![hint("Enter", "keep"), hint("Esc", "clear")];
     }
 
     let mut hints = vec![hint("?", ""), hint("q", "quit")];
@@ -509,8 +531,26 @@ mod tests {
   use ratatui::style::{Color, Modifier, Style};
   use ratatui::text::Span;
 
-  use super::{Titles, fit_titles, hint, place_titles, render_bottom_border};
+  use super::{
+    Titles, draw_box, draw_scrollbar, fit_titles, hint, place_titles, render_bottom_border,
+  };
   use crate::tui::theme::{self, dim, text};
+
+  #[test]
+  fn a_scrollbar_needs_3_rows() {
+    // 100 rows, 1 to 3 of them on screen: the plain border, then `↑`, a thumb and `↓`
+    for height in 1..=3 {
+      let mut term = Terminal::new(TestBackend::new(10, height + 2)).unwrap();
+      let frame = term.draw(|f| {
+        draw_box(f, f.area(), Titles::default());
+        draw_scrollbar(f, f.area(), Rect::new(1, 1, 8, height), 100, 0);
+      });
+      let buf = frame.unwrap().buffer;
+      let border: String = (1..=height).map(|y| buf[(9, y)].symbol()).collect();
+      let shown = if height < 3 { "│".repeat(height.into()) } else { "↑┃↓".into() };
+      assert_eq!(border, shown, "{height} rows");
+    }
+  }
 
   /// Top border of a box `width` cells wide with `titles` drawn on it.
   fn border_with(titles: Titles, width: u16) -> String {

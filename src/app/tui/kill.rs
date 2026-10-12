@@ -2,8 +2,9 @@
 //! Cancel. Only the sampled process gets a signal: a `ps` row (no sampled start time) gets none,
 //! and the start time is read again right before `kill()`; macOS has no identity-bound kill.
 
+use std::fmt;
+use std::io::{self, Write};
 use std::process::{self, Command, Stdio};
-use std::{fmt, io};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -26,7 +27,7 @@ const CHOICES: [Button; 3] =
   [("Terminate", Some(libc::SIGTERM)), ("Force kill", Some(libc::SIGKILL)), ("Cancel", None)];
 const OK: [Button; 1] = [("OK", None)];
 
-/// System calls of the process actions (kill, info, reveal), so tests can use a fake.
+/// System calls of the process actions (kill, info, reveal, copy), so tests can use a fake.
 pub(super) trait ProcSys: fmt::Debug {
   /// `kill(pid, sig)`; the errno when it fails.
   fn signal(&self, pid: i32, sig: i32) -> Result<(), i32>;
@@ -37,6 +38,8 @@ pub(super) trait ProcSys: fmt::Debug {
   fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32>;
   /// `open -R path`: shows it in Finder.
   fn reveal(&self, path: &str);
+  /// Puts `text` on the clipboard (`pbcopy`).
+  fn copy(&self, text: &str);
 }
 
 /// The real system calls.
@@ -64,6 +67,22 @@ impl ProcSys for LibcSys {
     open.args(["-R", path]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Ok(mut child) = open.spawn() {
       std::thread::spawn(move || child.wait());
+    }
+  }
+
+  /// Written and reaped on a thread, as `reveal`. pbcopy reads its input in the locale's
+  /// encoding, so the text, UTF-8, gets a UTF-8 locale whatever macmon was started with.
+  fn copy(&self, text: &str) {
+    let mut pbcopy = Command::new("/usr/bin/pbcopy");
+    pbcopy.env("LC_ALL", "en_US.UTF-8").stdin(Stdio::piped());
+    pbcopy.stdout(Stdio::null()).stderr(Stdio::null());
+    if let Ok(mut child) = pbcopy.spawn() {
+      let (stdin, text) = (child.stdin.take(), text.to_string());
+      std::thread::spawn(move || {
+        // closing stdin ends pbcopy's input
+        stdin.map(|mut stdin| stdin.write_all(text.as_bytes()));
+        child.wait()
+      });
     }
   }
 }
@@ -250,13 +269,14 @@ pub(super) mod tests {
   type FakeProc = (Option<u64>, Option<i32>);
 
   /// The fake processes, `(pid, signal)` of every `signal` call, the open files of each pid (none
-  /// listed: `ESRCH`) and the path of every `reveal` call.
+  /// listed: `ESRCH`), the path of every `reveal` call and the text of every `copy` call.
   #[derive(Debug, Default)]
   pub(crate) struct FakeState {
     procs: HashMap<i32, FakeProc>,
     calls: Vec<(i32, i32)>,
     pub(crate) files: HashMap<i32, Result<Vec<OpenFile>, i32>>,
     pub(crate) revealed: Vec<String>,
+    pub(crate) copied: Vec<String>,
   }
 
   /// Fake system calls: only the processes it is given exist, and every `signal` and `reveal` call
@@ -306,6 +326,10 @@ pub(super) mod tests {
 
     fn reveal(&self, path: &str) {
       self.0.borrow_mut().revealed.push(path.into());
+    }
+
+    fn copy(&self, text: &str) {
+      self.0.borrow_mut().copied.push(text.into());
     }
   }
 

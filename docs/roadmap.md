@@ -37,7 +37,7 @@ POWER does today.
       (like htop's F2) saved in `~/.config/macmon.json` under a new field. Released versions
       ignore the field but drop it when they save, so a missing field means the default columns.
 - [ ] **7. A clearer info overlay.** Two PRs. First, the files list: `exe` and `cwd` first, then
-      files sorted by directory, a type and open mode (`r`, `w`, `rw`) on every row, duplicates
+      files sorted by directory, a type and open mode (`r-`, `-w`, `rw`) on every row, duplicates
       as `×N`, devices, pipes, kqueues and unnamed sockets left out of the list and counted in a
       line above it (`116 fds  8 files  3 dev  96 pipes …`). Second, a process summary line
       above the counts (cpu, mem, power, threads, uptime, parent) and presets on `s` / `S` (`all`,
@@ -48,11 +48,12 @@ POWER does today.
       task energy, Activity Monitor's Energy Impact), with the process list shown and hidden.
       Profile the hot paths (sampling, IORegistry GPU reads, `ps`, rendering) and fix what is
       cheap to fix; report before / after numbers in the PR.
-- [ ] **9. Scrolling in the lists.** A scrollbar on the right border of the process list and the
+- [x] **9. Scrolling in the lists.** A scrollbar on the right border of the process list and the
       info overlay (ratatui's `Scrollbar`: `↑` / `↓` at the ends, a thumb between, as btop
       draws it), ↑ / ↓ wrapping around at the ends (not the wheel, PgUp / PgDn, Home / End), and
-      the full path of a cut row in the info overlay scrolling on its bottom border (a timer
-      only while it moves).
+      `c` copying the selected path (the executable in the list, the row's full text in the info
+      overlay); `? | q back` on the overlay's bottom border.
+      Plan: [docs/plans/completed/20261012-list-scroll.md](plans/completed/20261012-list-scroll.md).
 - [ ] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
       a row can be read and selected without the list jumping (Sloth has it). The metrics keep
       updating; the title shows that the list is paused. And `f` turning the filter off and on

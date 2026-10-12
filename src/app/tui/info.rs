@@ -7,7 +7,9 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 
-use super::boxes::{Titles, draw_box, draw_divider, hint, join, title_text_room};
+use super::boxes::{
+  Titles, draw_box, draw_divider, draw_scrollbar, hint, join, render_bottom_border, title_text_room,
+};
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
   ELLIPSIS, Filter, cut_middle, filter_title, scroll_offset, step, type_filter,
@@ -96,6 +98,8 @@ pub(super) struct Info {
   page: usize,
   /// `$HOME`, shown as `~`.
   home: String,
+  /// `c` copied the selected text, and no key was pressed since.
+  copied: bool,
 }
 
 impl Info {
@@ -103,8 +107,9 @@ impl Info {
   pub(super) fn new(proc: &ProcInfo, sys: &dyn ProcSys) -> Self {
     let (proc, files, filter) = (proc.clone(), Ok(vec![]), String::new());
     let home = std::env::var("HOME").unwrap_or_default();
-    let (index, key, offset, page) = (0, None, 0, 0);
-    let mut info = Self { proc, files, filter, typing: false, index, key, offset, page, home };
+    let (typing, index, key, offset, page) = (false, 0, None, 0, 0);
+    let copied = false;
+    let mut info = Self { proc, files, filter, typing, index, key, offset, page, home, copied };
     info.refresh(sys);
     info
   }
@@ -184,11 +189,13 @@ impl Info {
   }
 
   /// A key: navigation ends filter input, the filter keys are those of the process list, `e`
-  /// reveals the selected exe, cwd, directory or file, Esc clears the filter; `false` when Esc or
+  /// reveals the selected exe, cwd, directory or file, `c` copies the selected text (`copied`
+  /// shows until the next key), Esc clears the filter; `false` when Esc or
   /// `q` (no modifier, not typed into the filter) closes the overlay, as they close the other
   /// popups.
   pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
-    if let Some(index) = step(key.code, self.index, self.page.max(1)) {
+    self.copied = false;
+    if let Some(index) = step(key.code, self.index, self.page.max(1), self.rows().len()) {
       self.typing = false;
       self.select(index);
       return true;
@@ -206,6 +213,12 @@ impl Info {
           sys.reveal(&row.text);
         }
       }
+      KeyCode::Char('c') => {
+        if let Some(row) = self.rows().get(self.index) {
+          sys.copy(&row.text);
+          self.copied = true;
+        }
+      }
       KeyCode::Esc if !self.filter.is_empty() => {
         self.filter.clear();
         self.follow();
@@ -217,12 +230,17 @@ impl Info {
     true
   }
 
-  /// The wheel moves the selection as ↑ / ↓ do; other mouse events do nothing.
-  pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, sys: &dyn ProcSys) {
-    let up = mouse.kind == MouseEventKind::ScrollUp;
-    if up || mouse.kind == MouseEventKind::ScrollDown {
-      self.handle_key(KeyEvent::from(if up { KeyCode::Up } else { KeyCode::Down }), sys);
-    }
+  /// The wheel moves the selection a row and ends filter input, as ↑ / ↓ do but stopping at the
+  /// ends; other mouse events only clear `copied`, as every event does.
+  pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+    self.copied = false;
+    let index = match mouse.kind {
+      MouseEventKind::ScrollUp => self.index.saturating_sub(1),
+      MouseEventKind::ScrollDown => self.index + 1,
+      _ => return,
+    };
+    self.typing = false;
+    self.select(index);
   }
 
   /// `116 fds  8 files  3 dev …` in `width` cells: the descriptors (`shown/total` with a filter,
@@ -258,21 +276,24 @@ impl Info {
       true => filter_title(&self.filter, self.typing, title_text_room(width, &[])),
       false => hint("/", "filter"),
     };
-    let hints = join([hint("Enter", "keep"), hint("Esc", "clear"), hint("↑↓", "select")]);
+    let hints = join([hint("Enter", "keep"), hint("Esc", "clear")]);
     if self.typing { Titles::new(filter).right(hints) } else { Titles::new(filter) }
   }
 
-  /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `finder`
-  /// (not while typing) on the top border, the counts line when there is room, the divider with
-  /// the filter when there is room for a row below it, then the rows (paths cut by components)
-  /// or why there are none.
+  /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `copy |
+  /// finder` (with a row, not while typing) on the top border, the counts line when there is
+  /// room, the divider with
+  /// the filter when there is room for a row below it, then the rows (paths cut by components),
+  /// with a scrollbar when they don't fit, or why there are none, and `? | q back` on the bottom
+  /// border (not while typing).
   pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
     let titles = Titles::new(name);
-    let titles = if self.typing { titles } else { titles.right(hint("e", "finder")) };
-    let mut list = draw_box(f, area, titles);
     let rows = self.rows();
+    let actions = || join([hint("c", "copy"), hint("e", "finder")]);
+    let titles = if self.typing || rows.is_empty() { titles } else { titles.right(actions()) };
+    let mut list = draw_box(f, area, titles);
     if self.files.is_ok() && list.height >= COUNTS_MIN_HEIGHT {
       f.render_widget(self.counts(&rows, usize::from(list.width)), list);
       (list.y, list.height) = (list.y + 1, list.height - 1);
@@ -285,7 +306,8 @@ impl Info {
       f.render_widget(Line::from(faint(format!(" {error}"))), list);
     }
     self.page = usize::from(list.height);
-    self.offset = scroll_offset(self.offset, Some(self.index), self.page, rows.len());
+    let len = rows.len();
+    self.offset = scroll_offset(self.offset, Some(self.index), self.page, len);
 
     let rows = rows.iter().enumerate().skip(self.offset);
     for (y, (i, row)) in (list.y..list.bottom()).zip(rows) {
@@ -304,6 +326,14 @@ impl Info {
         f.buffer_mut().set_style(line, theme::SELECTED);
       }
     }
+    draw_scrollbar(f, area, list, len, self.offset);
+
+    // help and back as on the main footer, `copied` after `c`; nothing while typing (the filter
+    // keys are on the divider)
+    if !self.typing && area.height >= 2 {
+      let copied = if self.copied { vec![faint("copied")] } else { vec![] };
+      render_bottom_border(f, area, vec![hint("?", ""), hint("q", "back")], |_| copied);
+    }
   }
 }
 
@@ -312,7 +342,9 @@ mod tests {
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
-  use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+  use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+  };
   use ratatui::style::Modifier;
 
   use super::{Info, cut_path};
@@ -335,7 +367,7 @@ mod tests {
     vec![
       file(-1, Kind::Cwd, "", "/Users/vlad/Code/macmon"),
       file(0, Kind::Dev, "rw", "/dev/ttys004"),
-      file(3, Kind::File, "r", LOG),
+      file(3, Kind::File, "r-", LOG),
       file(4, Kind::Tcp, "", "127.0.0.1:52344 → 140.82.112.4:443 (established)"),
       file(5, Kind::Tcp, "", "[::1]:8080 (listen)"),
       file(6, Kind::Udp, "", "0.0.0.0:5353"),
@@ -368,12 +400,12 @@ mod tests {
       file(0, Kind::Dev, "rw", "/dev/null"),
       file(1, Kind::Dev, "rw", "/dev/null"),
       file(2, Kind::Dev, "rw", "/dev/null"),
-      file(3, Kind::File, "r", &format!("{CHROME}/Resources/icudtl.dat")),
-      file(4, Kind::File, "r", rules),
+      file(3, Kind::File, "r-", &format!("{CHROME}/Resources/icudtl.dat")),
+      file(4, Kind::File, "r-", rules),
       file(5, Kind::Kqueue, "", ""),
-      file(6, Kind::File, "r", &format!("{CHROME}/Resources/chrome_100_percent.pak")),
+      file(6, Kind::File, "r-", &format!("{CHROME}/Resources/chrome_100_percent.pak")),
       file(7, Kind::Unix, "", "/var/run/mDNSResponder"),
-      file(8, Kind::File, "r", rules),
+      file(8, Kind::File, "r-", rules),
       file(
         9,
         Kind::File,
@@ -473,25 +505,31 @@ mod tests {
     assert_eq!(texts(&info), ROWS);
     let wheel = |info: &mut Info, kind| {
       let mouse = MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE };
-      info.handle_mouse(mouse, &fake);
+      info.handle_mouse(mouse);
       info.index
     };
-    // the first row, the exe, selected; a page is the 5 rows on screen below the divider
+    // the first row, the exe, selected; a page is the 5 rows on screen below the divider; ↑ / ↓
+    // wrap around at the ends, PgUp / PgDn and Home / End stop there
     assert_eq!(selected(&info), EXE);
-    let steps = [(Up, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (Down, 6), (PageUp, 1)];
-    for (code, index) in steps.into_iter().chain([(End, 6), (Home, 0)]) {
+    let steps = [(Up, 6), (Down, 0), (Down, 1), (PageDown, 6), (PageDown, 6), (End, 6)];
+    let back = [(PageUp, 1), (PageUp, 0), (PageUp, 0), (End, 6), (Home, 0), (Home, 0)];
+    for (code, index) in steps.into_iter().chain(back) {
       assert!(press(&mut info, &fake, code));
       assert_eq!(info.index, index, "{code:?}");
     }
+    // the wheel stops at the ends too
+    assert_eq!(wheel(&mut info, MouseEventKind::ScrollUp), 0);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 1);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 2);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollUp), 1);
     assert_eq!(wheel(&mut info, MouseEventKind::Moved), 1);
+    assert!(press(&mut info, &fake, End));
+    assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 6);
 
     // the list scrolls to keep the selection on screen
     assert!(press(&mut info, &fake, End));
     let shown = rows(&render(&mut info, 80, 8));
-    assert!(shown[2].starts_with("│ file  r   ~/Library/") && shown[6].starts_with("│ unix "));
+    assert!(shown[2].starts_with("│ file  r-  ~/Library/") && shown[6].starts_with("│ unix "));
   }
 
   #[test]
@@ -520,8 +558,9 @@ mod tests {
     let shown = rows(&render(&mut info, 80, 8));
     assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(59)));
     let divider =
-      "├─ /tcp, unix█ ─────────────────────────── Enter keep | Esc clear | ↑↓ select ─┤";
+      "├─ /tcp, unix█ ─────────────────────────────────────── Enter keep | Esc clear ─┤";
     assert_eq!(shown[1], divider);
+    // nothing on the bottom border while typing
     assert_eq!(shown[7], format!("╰{}╯", "─".repeat(78)));
     assert!(press(&mut info, &fake, KeyCode::Down));
     assert_eq!(
@@ -529,7 +568,7 @@ mod tests {
       (false, "tcp, unix", ROWS[4].into())
     );
     let shown = rows(&render(&mut info, 80, 8));
-    assert!(shown[0].ends_with("─── finder ─╮"), "{}", shown[0]);
+    assert!(shown[0].ends_with("─── copy | finder ─╮"), "{}", shown[0]);
     assert_eq!(shown[1], format!("├─ /tcp, unix {}┤", "─".repeat(65)));
   }
 
@@ -537,11 +576,11 @@ mod tests {
   fn e_reveals_the_exe_the_cwd_dirs_and_files_only() {
     // a file the kernel gives no path for isn't listed
     let mut files = files();
-    files.push(file(10, Kind::File, "r", ""));
-    files.push(file(11, Kind::Dir, "r", "/Users/vlad/Downloads"));
-    let (mut info, fake) = info(Ok(files.clone()));
+    files.push(file(10, Kind::File, "r-", ""));
+    files.push(file(11, Kind::Dir, "r-", "/Users/vlad/Downloads"));
+    let (mut info, fake) = info(Ok(files));
     // `e` on every row: not the sockets; `f` nothing
-    for _ in 0..files.len() {
+    for _ in 0..info.rows().len() {
       assert!(press(&mut info, &fake, KeyCode::Char('f')));
       assert!(press(&mut info, &fake, KeyCode::Char('e')));
       assert!(press(&mut info, &fake, KeyCode::Down));
@@ -553,6 +592,37 @@ mod tests {
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "e");
     assert_eq!((info.filter.as_str(), revealed(&fake).len()), ("e", 4));
+  }
+
+  #[test]
+  fn c_copies_the_full_text_of_the_selected_row() {
+    let (mut info, fake) = info(Ok(files()));
+    // the exe, then a socket: their own text, not the `~` form or the cut one
+    assert!(press(&mut info, &fake, KeyCode::Char('c')));
+    (0..3).for_each(|_| assert!(press(&mut info, &fake, KeyCode::Down)));
+    assert!(press(&mut info, &fake, KeyCode::Char('c')));
+    assert_eq!(fake.0.borrow().copied, [EXE, ROWS[3]]);
+    // `copied` faint on the bottom border until the next key or the wheel
+    let buf = render(&mut info, 80, 8);
+    assert!(rows(&buf)[7].starts_with("╰─ copied ─") && buf[(3, 7)].modifier == Modifier::DIM);
+    let wheel = MouseEvent {
+      kind: MouseEventKind::ScrollDown,
+      column: 0,
+      row: 0,
+      modifiers: KeyModifiers::NONE,
+    };
+    info.handle_mouse(wheel);
+    assert_eq!(rows(&render(&mut info, 80, 8))[7], format!("╰{} ? | q back ─╯", "─".repeat(65)));
+    // a click too
+    assert!(press(&mut info, &fake, KeyCode::Char('c')));
+    info.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), ..wheel });
+    assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
+    assert!(press(&mut info, &fake, KeyCode::Char('c')) && press(&mut info, &fake, KeyCode::Up));
+    assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
+    // typed, it is text
+    assert!(press(&mut info, &fake, KeyCode::Char('/')));
+    type_str(&mut info, &fake, "c");
+    assert_eq!((info.filter.as_str(), fake.0.borrow().copied.len()), ("c", 4));
   }
 
   #[test]
@@ -638,11 +708,12 @@ mod tests {
       let mut info = Info::new(&ProcInfo { started, ..proc() }, &fake);
       let buf = render(&mut info, 40, 12);
       let shown = rows(&buf);
-      // no counts line, the divider, then the text
+      // no `copy | finder`, no counts line, the divider, then the text
+      assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(19)));
       assert_eq!(shown[1], format!("├─ / filter {}┤", "─".repeat(27)));
       assert_eq!(shown[2], format!("│{text:38}│"));
       assert_eq!((buf[(2, 2)].fg, buf[(2, 2)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
-      assert_eq!(shown[11], format!("╰{}╯", "─".repeat(38)));
+      assert_eq!(shown[11], format!("╰{} ? | q back ─╯", "─".repeat(25)));
       // nothing to select or reveal
       for code in [KeyCode::Down, KeyCode::End, KeyCode::Char('e')] {
         assert!(press(&mut info, &fake, code));
@@ -655,6 +726,16 @@ mod tests {
     fake.0.borrow_mut().files.clear();
     info.refresh(&fake);
     assert_eq!(rows(&render(&mut info, 40, 5))[2], format!("│{:38}│", " Already exited"));
+
+    // a filter that matches nothing: no `copy | finder` either, back with a row
+    let (mut info, fake) = self::info(Ok(files()));
+    let title = |info: &mut Info| rows(&render(info, 40, 5)).swap_remove(0);
+    assert!(press(&mut info, &fake, KeyCode::Char('/')));
+    type_str(&mut info, &fake, "nothing");
+    assert!(press(&mut info, &fake, KeyCode::Enter));
+    assert_eq!(title(&mut info), format!("╭─ WindowServer 631 {}╮", "─".repeat(19)));
+    assert!(press(&mut info, &fake, KeyCode::Esc));
+    assert!(title(&mut info).ends_with(" copy | finder ─╮"));
   }
 
   #[test]
@@ -662,22 +743,22 @@ mod tests {
     let (mut info, _fake) = chrome();
     let buf = render(&mut info, 100, 16);
     let overlay = [
-      "╭─ Google Chrome Helper (Renderer) 631 ─────────────────────────────────────────────────── finder ─╮",
+      "╭─ Google Chrome Helper (Renderer) 631 ──────────────────────────────────────────── copy | finder ─╮",
       "│ 16 fds  5 files  3 dev  1 tcp  2 unix  4 pipes  1 kqueues                                        │",
       "├─ / filter ───────────────────────────────────────────────────────────────────────────────────────┤",
       "│ exe       /Applications/Google Chrome.app/…/Contents/MacOS/Google Chrome Helper (Renderer)       │",
       "│ cwd       /                                                                                      │",
-      "│ file  r   /Applications/Google Chrome.app/…/131.0.6778.86/Resources/chrome_100_percent.pak       │",
-      "│ file  r   /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/icudtl.dat          │",
+      "│ file  r-  /Applications/Google Chrome.app/…/131.0.6778.86/Resources/chrome_100_percent.pak       │",
+      "│ file  r-  /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/icudtl.dat          │",
       "│ file  rw  ~/Library/Application Support/Google/Chrome/Default/Shared Dictionary/db               │",
-      "│ file  r   ~/Library/…/Google/Chrome/Subresource Filter/Indexed Rules/37/9.57.0/Ruleset Data  ×2  │",
+      "│ file  r-  ~/Library/…/Google/Chrome/Subresource Filter/Indexed Rules/37/9.57.0/Ruleset Data  ×2  │",
       "│ tcp       192.168.1.20:50122 → 140.82.112.4:443 (established)                                    │",
       "│ unix      /var/run/mDNSResponder                                                                 │",
       "│                                                                                                  │",
       "│                                                                                                  │",
       "│                                                                                                  │",
       "│                                                                                                  │",
-      "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
+      "╰───────────────────────────────────────────────────────────────────────────────────── ? | q back ─╯",
     ];
     assert_eq!(rows(&buf), overlay);
     // `×N` faint like the type and the mode, the paths plain, the exe selected
@@ -750,18 +831,18 @@ mod tests {
     for (width, height) in (1..70).flat_map(|w| (1..12).map(move |h| (w, h))) {
       render(&mut info, width, height);
     }
-    // `finder` on the top border, `/ filter` on the divider
+    // `finder` on the top border, `/ filter` on the divider, 5 of the 7 rows beside a scrollbar
     assert!(press(&mut info, &fake, KeyCode::Down));
     let buf = render(&mut info, 60, 8);
     let overlay = [
-      "╭─ WindowServer 631 ────────────────────────────── finder ─╮",
+      "╭─ WindowServer 631 ─────────────────────── copy | finder ─╮",
       "├─ / filter ───────────────────────────────────────────────┤",
-      "│ exe       /System/Library/…/Resources/WindowServer       │",
-      "│ cwd       ~/Code/macmon                                  │",
-      "│ file  r   ~/Library/…/000003.log                         │",
+      "│ exe       /System/Library/…/Resources/WindowServer       ↑",
+      "│ cwd       ~/Code/macmon                                  ┃",
+      "│ file  r-  ~/Library/…/000003.log                         ┃",
       "│ tcp       ….0.0.1:52344 → 140.82.112.4:443 (established) │",
-      "│ tcp       [::1]:8080 (listen)                            │",
-      "╰──────────────────────────────────────────────────────────╯",
+      "│ tcp       [::1]:8080 (listen)                            ↓",
+      "╰───────────────────────────────────────────── ? | q back ─╯",
     ];
     let shown = rows(&buf);
     assert_eq!(shown, overlay);
@@ -776,6 +857,34 @@ mod tests {
     assert_eq!((cell(0, 1).0, cell(3, 1), cell(5, 1)), (theme::BORDER, key, faint));
     let finder = x("finder");
     assert_eq!([0, 3, 4, 5].map(|dx| cell(finder + dx, 0)), [faint, faint, key, faint]);
+    // `? | q back` on the bottom border as on the main footer
+    let at = |text| shown[7][..shown[7].find(text).unwrap()].chars().count() as u16;
+    assert_eq!([cell(at("?"), 7), cell(at("q "), 7), cell(at("back"), 7)], [key, key, faint]);
+  }
+
+  #[test]
+  fn a_scrollbar_on_the_right_border_shows_where_the_rows_on_screen_are() {
+    // the exe and 30 files, 8 rows on screen at 60x12
+    let files = (0..30).map(|fd| file(fd, Kind::File, "r-", &format!("/tmp/{fd:02}"))).collect();
+    let (mut info, fake) = info(Ok(files));
+    let border = |info: &mut Info| {
+      let buf = render(info, 60, 12);
+      (0..12).map(|y| buf[(59, y)].symbol().to_string()).collect::<String>()
+    };
+    // beside the list below the divider: `↑`, a track of 6 cells with a thumb of 2, `↓`
+    assert_eq!(border(&mut info), "╮│┤↑┃┃││││↓╯");
+    // row 19 selected: rows 12 to 19 on screen, then the end
+    (0..19).for_each(|_| assert!(press(&mut info, &fake, KeyCode::Down)));
+    assert_eq!(border(&mut info), "╮│┤↑││┃┃││↓╯");
+    assert!(press(&mut info, &fake, KeyCode::End));
+    assert_eq!(border(&mut info), "╮│┤↑││││┃┃↓╯");
+    let buf = render(&mut info, 60, 12);
+    let fg = |y: u16| buf[(59, y)].fg;
+    assert_eq!([fg(3), fg(8), fg(10)], [theme::BORDER, theme::TEXT, theme::BORDER]);
+
+    // the 7 rows of `files()` fit
+    let (mut info, _) = self::info(Ok(self::files()));
+    assert_eq!(border(&mut info), format!("╮│┤{}╯", "│".repeat(8)));
   }
 
   #[test]

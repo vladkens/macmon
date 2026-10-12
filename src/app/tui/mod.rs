@@ -410,13 +410,15 @@ impl App {
   }
 
   /// Applies a key press to the app state. Returns `Break` when the app should quit. The help
-  /// overlay takes every key while it is open, then the info overlay and the kill popup; then keys
-  /// of the process panel (only while it is on screen) take precedence, and while a filter is
-  /// typed every key except Ctrl-C goes to it.
+  /// overlay takes every key while it is open, then the info overlay (`?` opens the help over it)
+  /// and the kill popup; then keys of the process panel (only while it is on screen) take
+  /// precedence, and while a filter is typed every key except Ctrl-C goes to it.
   fn handle_key(&mut self, key: KeyEvent) -> ControlFlow<()> {
     if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
       return ControlFlow::Break(());
     }
+    // `copied` shows until the next key
+    self.proc_view.copied = false;
 
     if let Some(scroll) = self.help {
       self.help = match key.code {
@@ -429,6 +431,10 @@ impl App {
     }
 
     if let Some(mut info) = self.info.take() {
+      // the help opens over it, unless `?` is typed into its filter; the overlay sees the key
+      // too (it clears `copied`)
+      let help = key.code == KeyCode::Char('?') && !info.typing;
+      self.help = help.then_some(0);
       self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
       return ControlFlow::Continue(());
     }
@@ -457,6 +463,10 @@ impl App {
         ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
         ('k', Some(proc)) => self.kill.open(proc),
         ('e', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
+        ('c', Some(proc)) if !proc.path.is_empty() => {
+          self.kill.sys.copy(&proc.path);
+          self.proc_view.copied = true;
+        }
         _ => {}
       },
       _ => {}
@@ -473,10 +483,14 @@ impl App {
 
   /// Applies a mouse event at the cells of the last frame to the process list, only while the
   /// mouse is captured (events still on the way when capture turns off are dropped). While an
-  /// overlay is open, they go to it.
+  /// overlay is open, they go to it; under the help to nothing.
   fn handle_mouse(&mut self, mouse: MouseEvent) {
+    if self.help.is_some() {
+      return;
+    }
+    self.proc_view.copied = false;
     if let Some(info) = &mut self.info {
-      info.handle_mouse(mouse, &*self.kill.sys);
+      info.handle_mouse(mouse);
     } else if self.kill.is_open() {
       self.kill.handle_mouse(mouse);
     } else if self.wants_mouse() {
@@ -980,10 +994,14 @@ mod tests {
     let mut app = app_with_procs(varied_procs());
     assert!(app.handle_key(key('/')).is_continue());
 
-    for c in ['q', 'v', 'r', 'p', '+', '-', 's', '?'] {
+    // only the filter keys on the bottom border: the arrows end the input as Enter does
+    let footer = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(footer.ends_with("─ Enter keep | Esc clear ─╯"), "{footer}");
+
+    for c in ['q', 'v', 'r', 'p', '+', '-', 's', '?', 'c'] {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
     }
-    assert_eq!(app.proc_view.filter(), "qvrp+-s?");
+    assert_eq!(app.proc_view.filter(), "qvrp+-s?c");
     assert_eq!((app.cfg.view_type, app.cfg.ratio_mode), (ViewType::Graph, RatioMode::Scaled));
     assert_eq!((app.cfg.interval(), app.cfg.show_procs), (1000, true));
     assert_eq!((app.cfg.proc_sort, app.help), (ProcSort::Cpu, None));
@@ -1094,6 +1112,53 @@ mod tests {
     // the wheel over the metrics box doesn't move the list
     app.handle_mouse(mouse(ScrollUp, 100, 3));
     assert_eq!(app.proc_view.selected_pid(), Some(1006));
+  }
+
+  #[test]
+  fn a_scrollbar_on_the_right_border_shows_where_the_rows_on_screen_are() {
+    // the right border from the header to the corner: beside the 27 rows of 100 processes `↑`, a
+    // track of 25 cells with a thumb of 7 (27 / 100 of it), `↓`
+    let mut app = hundred_procs_app();
+    let border = |app: &mut App| {
+      let buf = render_buffer(app, 200, 50);
+      (PROC_Y + 1..50).map(|y| buf[(199, y)].symbol().to_string()).collect::<String>()
+    };
+    let bar = |above: usize, below: usize| {
+      format!("│↑{}{}{}↓╯", "│".repeat(above), "┃".repeat(7), "│".repeat(below))
+    };
+    assert_eq!(border(&mut app), bar(0, 18));
+    // scrolled to row 36 of the 73 it can start at, then to the end
+    for _ in 0..12 {
+      app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10));
+    }
+    assert_eq!(border(&mut app), bar(9, 9));
+    assert!(press(&mut app, KeyCode::End).is_continue());
+    assert_eq!(border(&mut app), bar(18, 0));
+    // the arrows in the border color, the thumb in the text color
+    let buf = render_buffer(&mut app, 200, 50);
+    let fg = |y: u16| buf[(199, PROC_Y + y)].fg;
+    assert_eq!([fg(2), fg(27), fg(28)], [theme::BORDER, theme::TEXT, theme::BORDER]);
+
+    // the 11 rows of `proc9` fit: the plain border
+    for c in "/proc9".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert_eq!(border(&mut app), format!("{}╯", "│".repeat(28)));
+
+    // in any window the box keeps its corners
+    let widths = [1, 2, 3, 5, 10, 20, 40, 60, 80, 100, 119];
+    for (width, height) in widths.into_iter().flat_map(|w| (1..40).map(move |h| (w, h))) {
+      let mut app = hundred_procs_app();
+      let buf = render_buffer(&mut app, width, height);
+      let Some(r) = app.layout(buf.area).proc.filter(|r| r.width >= 2 && r.height >= 2) else {
+        continue;
+      };
+      let (right, bottom) = (r.right() - 1, r.bottom() - 1);
+      let corners = [(right, r.y, "╮"), (right, bottom, "╯")];
+      for (x, y, corner) in corners {
+        assert_eq!(buf[(x, y)].symbol(), corner, "{width}x{height}");
+      }
+    }
   }
 
   #[test]
@@ -1359,7 +1424,7 @@ mod tests {
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let wide = title(&mut app, 200);
     assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{wide}");
-    assert!(wide.ends_with("─ info | finder | kill ─╮"), "{wide}");
+    assert!(wide.ends_with("─ info | finder | copy | kill ─╮"), "{wide}");
     // the count bold and plain, the hint keys cyan, their labels faint, the separators dim
     let buf = render_buffer(&mut app, 200, 50);
     let style = |text| {
@@ -1372,11 +1437,12 @@ mod tests {
     let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | "];
     assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep]);
     // `e` inside `finder`
-    let cells = ["finder", "er | ", "r | ", "| kill", "kill", "ill"];
-    assert_eq!(cells.map(style), [faint, cyan, faint, sep, cyan, faint]);
+    let cells = ["finder", "er | ", "r | ", "| copy", "copy", "opy", "| kill", "kill", "ill"];
+    assert_eq!(cells.map(style), [faint, cyan, faint, sep, cyan, faint, sep, cyan, faint]);
     // on a narrow box they go first, all together
-    assert_eq!(title(&mut app, 53), "╭─ proc 3 ─ / filter ─ sort ─ info | finder | kill ─╮");
-    assert_eq!(title(&mut app, 52), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(23)));
+    let narrow = "╭─ proc 3 ─ / filter ─ sort ─ info | finder | copy | kill ─╮";
+    assert_eq!(title(&mut app, 60), narrow);
+    assert_eq!(title(&mut app, 59), format!("╭─ proc 3 ─ / filter ─ sort {}╮", "─".repeat(30)));
 
     // typing: keys are text, no hints; then a set filter with the selection in it
     for c in "/saf".chars() {
@@ -1389,7 +1455,7 @@ mod tests {
     let filtered = title(&mut app, 200);
     assert!(
       filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───")
-        && filtered.ends_with(" info | finder | kill ─╮")
+        && filtered.ends_with(" info | finder | copy | kill ─╮")
     );
   }
 
@@ -1498,7 +1564,7 @@ mod tests {
     let (app, fake) = kill_app();
     let cwd = OpenFile { fd: None, kind: Kind::Cwd, text: "/".into(), mode: "" };
     let log =
-      OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r" };
+      OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r-" };
     fake.0.borrow_mut().files.insert(631, Ok(vec![cwd, log]));
     (app, fake)
   }
@@ -1510,20 +1576,18 @@ mod tests {
     let buf = render_buffer(&mut app, 200, 50);
     let title = proc_row(&buf, 0);
     assert!(title.starts_with("╭─ WindowServer 631 ───"), "{title}");
-    assert!(title.ends_with("─ finder ─╮"), "{title}");
+    assert!(title.ends_with("─ copy | finder ─╮"), "{title}");
     assert!(proc_row(&buf, 1).starts_with("│ 1 fds  1 files "), "{}", proc_row(&buf, 1));
     assert!(proc_row(&buf, 2).starts_with("├─ / filter ───"), "{}", proc_row(&buf, 2));
     assert!(proc_row(&buf, 3).starts_with(&format!("│ exe       {WINDOW_SERVER} ")));
     assert!(proc_row(&buf, 4).starts_with("│ cwd       / "), "{}", proc_row(&buf, 4));
-    assert!(proc_row(&buf, 5).starts_with("│ file  r   /var/log/system.log "));
-    assert_eq!(proc_row(&buf, 29), format!("╰{}╯", "─".repeat(198)));
+    assert!(proc_row(&buf, 5).starts_with("│ file  r-  /var/log/system.log "));
+    assert_eq!(proc_row(&buf, 29), format!("╰{} ? | q back ─╯", "─".repeat(185)));
 
     // it takes every key, the list's and the global ones (`q` closes it); Ctrl-C still quits
     for c in ['k', 'i', 'p', 's', 'v'] {
       assert!(app.handle_key(key(c)).is_continue(), "{c}");
     }
-    assert!(app.handle_key(key('?')).is_continue());
-    assert!(app.help.is_none(), "help doesn't open over it");
     assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
@@ -1557,6 +1621,33 @@ mod tests {
     assert!(press(&mut app, KeyCode::Up).is_continue() && app.handle_key(key('i')).is_continue());
     render_buffer(&mut app, 60, 12);
     assert!(app.info.is_none());
+  }
+
+  #[test]
+  fn the_help_opens_over_the_info_overlay_and_closes_back_to_it() {
+    let (mut app, _fake) = info_app();
+    assert!(app.handle_key(key('i')).is_continue() && press(&mut app, KeyCode::Down).is_continue());
+    let cwd_selected = |app: &mut App| {
+      let buf = render_buffer(app, 200, 50);
+      buf[(2, PROC_Y + 4)].modifier.contains(Modifier::REVERSED)
+    };
+    assert!(cwd_selected(&mut app));
+
+    // over it the help takes the keys and the wheel; Esc closes the help, not the overlay, and
+    // `copied` went with the `?`
+    assert!(app.handle_key(key('c')).is_continue());
+    assert!(row(&render_buffer(&mut app, 200, 50), 49).starts_with("╰─ copied ─"));
+    assert!(app.handle_key(key('?')).is_continue());
+    assert!(render_to_string(&mut app, 200, 50).contains("Info overlay"));
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(app.help.is_none() && app.info.is_some() && cwd_selected(&mut app));
+    assert!(!row(&render_buffer(&mut app, 200, 50), 49).contains("copied"));
+
+    // typed into its filter `?` is text
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('?')).is_continue());
+    assert!(app.help.is_none());
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 2).starts_with("├─ /?█ "));
   }
 
   #[test]
@@ -1599,6 +1690,29 @@ mod tests {
     app.kill = kill;
     assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('e')).is_continue());
     assert!(fake.0.borrow().revealed.is_empty());
+  }
+
+  #[test]
+  fn c_copies_the_path_of_the_selected_process() {
+    let (mut app, fake) = info_app();
+    let bottom = |app: &mut App| row(&render_buffer(app, 200, 50), 49);
+    assert!(app.handle_key(key('c')).is_continue());
+    assert_eq!(fake.0.borrow().copied, [WINDOW_SERVER]);
+    // `copied` faint in place of the POWER note until the next key
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 49).starts_with("╰─ copied ─"), "{}", row(&buf, 49));
+    assert_eq!(buf[(3, 49)].modifier, Modifier::DIM);
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(bottom(&mut app).starts_with("╰─ POWER: own processes only ─"));
+
+    // typed into the filter it is text; nothing for a process without a readable path
+    assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('c')).is_continue());
+    assert_eq!((app.proc_view.filter(), fake.0.borrow().copied.len()), ("c", 1));
+    let mut app = app_with_procs(test_procs());
+    let (kill, fake) = FakeSys::kill(&[]);
+    app.kill = kill;
+    assert!(press(&mut app, KeyCode::Down).is_continue() && app.handle_key(key('c')).is_continue());
+    assert!(fake.0.borrow().copied.is_empty() && !bottom(&mut app).contains("copied"));
   }
 
   #[test]

@@ -131,7 +131,8 @@ pub struct OpenFile {
   pub kind: Kind,
   /// Path; `local → remote` for TCP (with its state) and UDP sockets; empty when there is none.
   pub text: String,
-  /// `r`, `w` or `rw` for a dir, file or dev descriptor; empty for the rest.
+  /// `r-`, `-w` or `rw` (as `ls` aligns them) for a dir, file or dev descriptor; empty for the
+  /// rest.
   pub mode: &'static str,
 }
 
@@ -190,7 +191,7 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
       libc::PROX_FDTYPE_VNODE => {
         let info: vnode_fdinfowithpath =
           unsafe { fd_info(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO) }?;
-        mode = ["", "r", "w", "rw"][(info.pfi.fi_openflags & 3) as usize];
+        mode = ["", "r-", "-w", "rw"][(info.pfi.fi_openflags & 3) as usize];
         let kind = match info.pvip.vip_vi.vi_stat.vst_mode & libc::S_IFMT {
           libc::S_IFDIR => Kind::Dir,
           libc::S_IFCHR => Kind::Dev,
@@ -331,13 +332,13 @@ mod tests {
     let null = File::options().read(true).write(true).open("/dev/null").unwrap();
     assert_eq!(kind_mode(&null), (Kind::Dev, "rw"));
     let dir = File::open(std::env::temp_dir()).unwrap();
-    assert_eq!(kind_mode(&dir), (Kind::Dir, "r"));
+    assert_eq!(kind_mode(&dir), (Kind::Dir, "r-"));
 
     let path = std::env::temp_dir().join(format!("macmon-fds-mode-{}", std::process::id()));
     let file = File::options().write(true).create(true).truncate(true).open(&path).unwrap();
     let listed = kind_mode(&file);
     fs::remove_file(&path).unwrap();
-    assert_eq!(listed, (Kind::File, "w"));
+    assert_eq!(listed, (Kind::File, "-w"));
     // sockets have no mode
     let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
     assert_eq!(kind_mode(&udp), (Kind::Udp, ""));

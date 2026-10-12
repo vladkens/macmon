@@ -13,9 +13,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::App;
-use super::boxes::{Titles, draw_box, hint, join, render_bottom_border, title_text_room};
+use super::boxes::{
+  Titles, draw_box, draw_scrollbar, hint, join, render_bottom_border, title_text_room,
+};
 use super::store::ratio;
-use super::theme::{self, dim, gradient, heading, text};
+use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
 use crate::procs::ProcInfo;
 
@@ -357,16 +359,20 @@ pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'s
   spans
 }
 
-/// The row a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from row `at`,
-/// not clamped, with `page` rows on screen; `None` for other keys.
-pub(super) fn step(code: KeyCode, at: usize, page: usize) -> Option<usize> {
+/// The row of `len` a navigation key (↑ / ↓, PgUp / PgDn, Home / End) moves the selection to from
+/// row `at`, with `page` rows on screen: ↑ / ↓ wrap around at the ends, the others stop there;
+/// `None` for other keys.
+pub(super) fn step(code: KeyCode, at: usize, page: usize, len: usize) -> Option<usize> {
+  let last = len.saturating_sub(1);
   Some(match code {
     KeyCode::Home => 0,
-    KeyCode::End => usize::MAX,
-    KeyCode::Up => at.saturating_sub(1),
+    KeyCode::End => last,
+    KeyCode::Up if at == 0 => last,
+    KeyCode::Up => at - 1,
+    KeyCode::Down if at >= last => 0,
     KeyCode::Down => at + 1,
     KeyCode::PageUp => at.saturating_sub(page),
-    KeyCode::PageDown => at + page,
+    KeyCode::PageDown => (at + page).min(last),
     _ => return None,
   })
 }
@@ -480,6 +486,8 @@ pub(super) struct ProcView {
   /// Rows on screen at the last render, the PgUp / PgDn step.
   page: usize,
   targets: Targets,
+  /// `c` copied the selected path, and no key was pressed since.
+  pub(super) copied: bool,
 }
 
 /// The sort of the default settings.
@@ -504,6 +512,7 @@ impl ProcView {
       offset: 0,
       page: 0,
       targets: Targets::default(),
+      copied: false,
     }
   }
 
@@ -626,9 +635,9 @@ impl ProcView {
     self.offset = offset.min(self.rows.len().saturating_sub(self.page));
   }
 
-  /// Moves the selection for a navigation key (↑ / ↓, PgUp / PgDn, Home / End). Without a
-  /// selection ↑ / ↓ select the top row on screen and the others scroll the table. Returns
-  /// `false` for other keys.
+  /// Moves the selection for a navigation key (↑ / ↓, PgUp / PgDn, Home / End), as `step` does.
+  /// Without a selection ↑ / ↓ select the top row on screen and the others scroll the table.
+  /// Returns `false` for other keys.
   fn navigate(&mut self, code: KeyCode) -> bool {
     let page = self.page.max(1);
     let Some(selected) = self.selected.map(|s| s.index) else {
@@ -643,11 +652,8 @@ impl ProcView {
       return true;
     };
 
-    let Some(index) = step(code, selected, page) else { return false };
-
-    if let Some(last) = self.rows.len().checked_sub(1) {
-      self.select(index.min(last));
-    }
+    let Some(index) = step(code, selected, page, self.rows.len()) else { return false };
+    self.select(index);
     true
   }
 
@@ -757,8 +763,8 @@ impl ProcView {
   }
 
   /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// the filter as `filter_titles` shows it, then `sort`, and `info | finder | kill` on the right
-  /// with a process selected (neither while typing: keys are text then).
+  /// the filter as `filter_titles` shows it, then `sort`, and `info | finder | copy | kill` on the
+  /// right with a process selected (neither while typing: keys are text then).
   fn titles(&self, width: u16) -> Titles<'_> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
@@ -771,7 +777,8 @@ impl ProcView {
     }
 
     let titles = filter_titles(name, &self.filter, self.typing, width);
-    let actions = || join([hint("i", "info"), hint("e", "finder"), hint("k", "kill")]);
+    let actions =
+      || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
       true => titles,
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),
@@ -779,12 +786,15 @@ impl ProcView {
     }
   }
 
-  /// Left side of the bottom border of the process box: a dim note that POWER is known for own
-  /// processes only, while the POWER column shows processes without it next to some with it.
+  /// Left side of the bottom border of the process box: a faint `copied` after `c`, else a dim
+  /// note that POWER is known for own processes only, while the POWER column shows processes
+  /// without it next to some with it.
   fn border_text(&self, power_shown: bool) -> Vec<Span<'static>> {
     let procs = self.procs().unwrap_or_default();
     let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
-    if power_shown && power(true) && power(false) {
+    if self.copied {
+      vec![faint("copied")]
+    } else if power_shown && power(true) && power(false) {
       vec![dim("POWER: own processes only")]
     } else {
       vec![]
@@ -796,8 +806,8 @@ impl ProcView {
 
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
-  /// the process rows, and the POWER note and the key hints on the bottom border. Keeps the
-  /// cells that react to the mouse for `ProcView::handle_mouse`.
+  /// the process rows with a scrollbar when they don't fit, and the POWER note and the key hints
+  /// on the bottom border. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let inner = draw_box(f, area, self.proc_view.titles(area.width));
     let (headers, body) = self.render_proc_table(f, inner);
@@ -805,6 +815,7 @@ impl App {
     self.proc_view.targets = Targets { area, headers, body };
 
     let view = &self.proc_view;
+    draw_scrollbar(f, area, body, view.row_count(), view.offset);
     render_bottom_border(f, area, self.footer_hints(), |_| view.border_text(power_shown));
   }
 
@@ -1215,8 +1226,9 @@ mod tests {
   #[test]
   fn navigation_ends_filter_input_keeping_the_filter() {
     // Safari selected, then filtered to [2301, 77]
+    // ↑ wraps around to the last row
     for (code, pid) in
-      [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::End, 77), (KeyCode::Up, 2301)]
+      [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::End, 77), (KeyCode::Up, 77)]
     {
       let mut view = view(); // [4410, 631, 2301, 1, 77]
       for _ in 0..3 {
@@ -1329,6 +1341,35 @@ mod tests {
     assert_eq!((view.selected_pid(), view.filter(), view.offset), (None, "", 0));
     assert_eq!(pids(&view).len(), 5);
     assert!(!press(&mut view, KeyCode::Esc), "nothing left to clear: a global key");
+  }
+
+  #[test]
+  fn up_and_down_wrap_around_the_other_keys_and_the_wheel_stop_at_the_ends() {
+    use KeyCode::{Down, End, Home, PageDown, PageUp, Up};
+    let mut view = view(); // [4410, 631, 2301, 1, 77]
+    let page = |view: &mut ProcView| {
+      view.fit(2);
+      view.page_rows().map(|(_, p)| p.pid).collect::<Vec<_>>()
+    };
+    // without a selection ↑ selects the top row on screen, as ↓ does
+    assert!(press(&mut view, Up));
+    assert_eq!(view.selected_pid(), Some(4410));
+    let keys = [(Up, 77), (PageDown, 77), (End, 77), (Down, 4410), (PageUp, 4410), (Home, 4410)];
+    for (code, pid) in keys {
+      assert!(press(&mut view, code));
+      assert_eq!(view.selected_pid(), Some(pid), "{code:?}");
+    }
+    // the table follows a wrap to either end
+    assert!(press(&mut view, Up));
+    assert_eq!(page(&mut view), [1, 77]);
+    assert!(press(&mut view, Down));
+    assert_eq!(page(&mut view), [4410, 631]);
+
+    view.wheel(-3);
+    assert_eq!(view.selected_pid(), Some(4410));
+    assert!(press(&mut view, End));
+    view.wheel(3);
+    assert_eq!(view.selected_pid(), Some(77));
   }
 
   #[test]
