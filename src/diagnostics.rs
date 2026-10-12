@@ -103,9 +103,11 @@ pub fn print_debug() -> WithError<()> {
     Ok(types) => println!("{:<18} {}", "cluster-type", cluster_type_counts(&types)),
     Err(err) => println!("{:<18} error={err}", "cluster-type"),
   }
+  // "proc 8:0:4:4", or a VM's core count
+  let procs = report.as_ref().ok().map(|x| &x["SPHardwareDataType"][0]["number_processors"]);
   let procs =
-    report.as_ref().ok().and_then(|x| x["SPHardwareDataType"][0]["number_processors"].as_str());
-  println!("{:<18} {}", "number_processors", procs.unwrap_or("-"));
+    procs.filter(|x| !x.is_null()).map(|x| x.as_str().map_or(x.to_string(), String::from));
+  println!("{:<18} {}", "number_processors", procs.as_deref().unwrap_or("-"));
 
   print_divider("Memory");
   match libc_ram() {
@@ -118,8 +120,27 @@ pub fn print_debug() -> WithError<()> {
   }
 
   print_divider("AppleARMIODevice");
+  print_section(print_pmgr());
+  print_divider("IOReport");
+  print_section(print_ioreport());
+  print_section(print_smc());
+  print_divider("IOHID");
+  print_section(print_hid());
+  Ok(())
+}
+
+/// The error of a section that failed; the report goes on with the next one.
+fn print_section(result: WithError<()>) {
+  if let Err(err) = result {
+    println!("error={err}");
+  }
+}
+
+fn print_pmgr() -> WithError<()> {
+  let mut found = false;
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if is_pmgr_node(&name) {
+      found = true;
       println!("[{name}]");
       let item = cfio_get_props(entry, name)?;
       let mut keys = cfdict_keys(item);
@@ -149,10 +170,15 @@ pub fn print_debug() -> WithError<()> {
       unsafe { CFRelease(item as _) }
     }
   }
+  if !found {
+    println!("no pmgr node");
+  }
+  Ok(())
+}
 
-  print_divider("IOReport");
+fn print_ioreport() -> WithError<()> {
   let dur = 100;
-  let ior = IOReport::with_filter(Some(debug_channels))?;
+  let ior = IOReport::with_filter(Some(debug_channels))?.ok_or("no channels")?;
   for x in ior.get_sample(dur) {
     let subscribed = ioreport_channels_filter(&x.group, &x.subgroup, &x.channel, &x.unit);
     let msg = format!(
@@ -177,9 +203,12 @@ pub fn print_debug() -> WithError<()> {
       }
     }
   }
+  Ok(())
+}
 
-  let mut smc = SMC::new()?;
+fn print_smc() -> WithError<()> {
   print_divider("SMC system sensors");
+  let mut smc = SMC::new()?;
   match smc.read_float_val("PSTR") {
     Ok(watts) => println!("PSTR={watts:.2}W"),
     Err(err) => println!("PSTR error={err}"),
@@ -222,13 +251,14 @@ pub fn print_debug() -> WithError<()> {
     let val = val.unwrap();
     println!("{} type={} size={} bytes={:?}", key, val.unit, ki.data_size, val.data);
   }
+  Ok(())
+}
 
-  print_divider("IOHID");
+fn print_hid() -> WithError<()> {
   let hid = IOHIDSensors::new()?;
   for (key, val) in hid.get_metrics() {
     println!("{:>32}: {:6.2}", key, val);
   }
-
   Ok(())
 }
 

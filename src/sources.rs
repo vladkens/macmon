@@ -378,6 +378,41 @@ impl Iterator for IOReportIterator {
   }
 }
 
+// MARK: CPU ticks
+
+/// User, system, idle and nice ticks of each CPU (`cpuN` order), from
+/// `host_processor_info(PROCESSOR_CPU_LOAD_INFO)`.
+pub(crate) fn cpu_load_ticks() -> Option<Vec<[u32; 4]>> {
+  let (mut count, mut info, mut info_count) = (0, null_mut(), 0);
+  // todo: https://github.com/JohnTitor/mach2/issues/34
+  #[allow(deprecated)]
+  let rc = unsafe {
+    let host = libc::mach_host_self();
+    libc::host_processor_info(
+      host,
+      libc::PROCESSOR_CPU_LOAD_INFO,
+      &mut count,
+      &mut info,
+      &mut info_count,
+    )
+  };
+  if rc != 0 {
+    return None;
+  }
+
+  let ticks = unsafe { std::slice::from_raw_parts(info as *const u32, info_count as usize) };
+  let cpus = ticks.as_chunks::<4>().0.iter().take(count as usize).copied().collect();
+  #[allow(deprecated)]
+  unsafe {
+    libc::vm_deallocate(
+      libc::mach_task_self(),
+      info as usize,
+      info_count as usize * size_of::<u32>(),
+    )
+  };
+  Some(cpus)
+}
+
 // MARK: RAM
 
 /// Read used and total RAM in bytes via libc/mach APIs.
@@ -477,7 +512,8 @@ pub struct SocInfo {
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
   /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `E`, `S` on M5,
-  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6.
+  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6, `_` when the core type is unknown, e.g. the
+  /// single tier of a macOS VM.
   pub cpu_tiers: Vec<CpuTierInfo>,
   /// Number of cores of the lowest CPU tier.
   #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
@@ -506,7 +542,8 @@ pub struct SocInfo {
 /// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuTierInfo {
-  /// Tier label: `E`, `P` or `S`.
+  /// Tier label: `E`, `P` or `S`, or `_` when the core type is unknown, e.g. the single tier of a
+  /// macOS VM (not a letter, so it can't collide with a future Apple core type).
   pub label: String,
   /// Number of cores.
   pub cores: u8,
@@ -697,7 +734,8 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 // Super / Efficiency on the base M5. Without names (macOS 12.1 has none), the labels follow the
 // chip: E/P on M1-M4, P/S on M5 Pro/Max, E/P/S for the three tiers of M6, which runs 2 Super +
 // 4 Performance + 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2,
-// M x4, E x6 in exelban/stats#3668). Its perflevel names haven't been seen yet.
+// M x4, E x6 in exelban/stats#3668). Its perflevel names haven't been seen yet. A macOS VM has
+// one perflevel, "Standard", of no known core type: a single tier `_`, the core type unknown.
 pub(crate) fn tiers_from_perflevels(
   perflevel_cores: &[u32],
   perflevel_names: &[Option<String>],
@@ -705,6 +743,7 @@ pub(crate) fn tiers_from_perflevels(
 ) -> Option<CpuTiers> {
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
   let tiers = match *perflevel_cores {
+    [cores] => return Some(vec![(cores as u8, "_")]),
     [hi, lo] if is_legacy => vec![(lo as u8, "E"), (hi as u8, "P")],
     [hi, lo] => vec![(lo as u8, "P"), (hi as u8, "S")],
     [hi, mid, lo] => vec![(lo as u8, "E"), (mid as u8, "P"), (hi as u8, "S")],
@@ -859,11 +898,13 @@ fn load_soc_info() -> WithError<SocInfo> {
   let cpu_scale = cpu_freq_scale(&hw.chip_name);
   let gpu_scale: u32 = 1000 * 1000; // MHz
   let (mut ecpu_freqs, mut pcpu_freqs, mut gpu_freqs) = (Vec::new(), Vec::new(), Vec::new());
+  let mut has_pmgr = false;
 
   // CPU/GPU frequencies always come from IOKit directly, regardless of how the
   // rest of the hardware descriptor above was sourced.
   for (entry, name) in IOServiceIterator::new("AppleARMIODevice")? {
     if is_pmgr_node(&name) {
+      has_pmgr = true;
       let item = cfio_get_props(entry, name)?;
       // 1) `strings /usr/bin/powermetrics | grep voltage-states` uses non-sram keys but their
       //    values are zero, so sram used here; it looks valid.
@@ -890,9 +931,18 @@ fn load_soc_info() -> WithError<SocInfo> {
     }
   }
 
-  if ecpu_freqs.is_empty() || pcpu_freqs.is_empty() {
+  let freqs = has_pmgr.then_some((ecpu_freqs, pcpu_freqs, gpu_freqs));
+  soc_info_from(hw, freqs)
+}
+
+/// SoC info of `hw` with the (lowest CPU tier, CPU tiers above it, GPU) frequency tables of the
+/// `pmgr` nodes, or None without a `pmgr` node: a VM has none and no tables. A `pmgr` node without
+/// CPU tables is a chip that keeps them elsewhere and needs support, so it fails.
+fn soc_info_from(hw: HwInfo, freqs: Option<(Vec<u32>, Vec<u32>, Vec<u32>)>) -> WithError<SocInfo> {
+  if freqs.as_ref().is_some_and(|(ecpu, pcpu, _)| ecpu.is_empty() || pcpu.is_empty()) {
     return Err("No CPU frequencies found".into());
   }
+  let (ecpu_freqs, pcpu_freqs, gpu_freqs) = freqs.unwrap_or_default();
 
   let info = SocInfo {
     cpu_tiers: cpu_tier_infos(&hw.cpu_tiers, &ecpu_freqs, &pcpu_freqs),
@@ -1112,10 +1162,14 @@ impl IOReport {
     Ok(Self { subs, chan, prev: None })
   }
 
-  fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Self> {
+  /// Subscription to the channels `filter` selects, or None when it selects none (a VM).
+  fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Option<Self>> {
     let channels = cfio_get_chan(filter)?;
+    if unsafe { CFArrayGetCount(channels.selected) } == 0 {
+      return Ok(None);
+    }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    Ok(Self { subs, chan, prev: None })
+    Ok(Some(Self { subs, chan, prev: None }))
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -1123,14 +1177,19 @@ impl IOReport {
     let filter = |group: &str, subgroup: &str, _channel: &str, _unit: &str| {
       cfio_channel_matches(&channels, group, subgroup)
     };
-    Self::from_filter(Some(&filter))
+    Self::from_filter(Some(&filter))?.ok_or_else(|| "No IOReport channels found".into())
   }
 
-  pub(crate) fn with_filter(filter: Option<ChannelFilter>) -> WithError<Self> {
+  pub(crate) fn with_filter(filter: Option<ChannelFilter>) -> WithError<Option<Self>> {
     match filter {
       Some(filter) => Self::from_filter(Some(&filter)),
       None => Self::from_filter(None),
     }
+  }
+
+  /// Whether a subscribed channel is in `group`.
+  pub(crate) fn has_group(&self, group: &str) -> bool {
+    cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group)
   }
 
   /// Collect one delta sample over `duration` milliseconds.
@@ -1444,6 +1503,11 @@ pub struct SMC {
 impl SMC {
   /// Open an SMC connection.
   pub fn new() -> WithError<Self> {
+    Self::open()?.ok_or_else(|| "AppleSMC not found".into())
+  }
+
+  /// Open an SMC connection, or None without an SMC service (a VM).
+  pub(crate) fn open() -> WithError<Option<Self>> {
     let mut conn = 0;
 
     for (device, name) in IOServiceIterator::new("AppleSMC")? {
@@ -1455,7 +1519,7 @@ impl SMC {
       }
     }
 
-    Ok(Self { conn, keys: HashMap::new() })
+    Ok((conn != 0).then(|| Self { conn, keys: HashMap::new() }))
   }
 
   fn read(&self, input: &KeyData) -> WithError<KeyData> {
@@ -1710,7 +1774,7 @@ mod tests {
       (&[6, 12], &["Super", "Performance"], "Apple M5 Max", Some(vec![(12, "P"), (6, "S")])), // #47
       (&[4, 6], &["Super", "Efficiency"], "Apple M5", Some(vec![(6, "E"), (4, "S")])), /* macOS 27.0.1 */
       (&[2, 4, 6], &[], "Apple M6", Some(vec![(6, "E"), (4, "P"), (2, "S")])), /* issue #80, names unseen */
-      (&[8], &[], "Apple M1", None),
+      (&[4], &["Standard"], "Apple M2 (Virtual)", Some(vec![(4, "_")])),       // macOS 27 VM
       (&[], &[], "Apple M1", None),
     ] {
       let names = names.iter().map(|x| Some(x.to_string())).collect::<Vec<_>>();
@@ -1720,6 +1784,32 @@ mod tests {
     // without names (macOS 12.1 has none) the labels follow the chip, as on the base M5 before
     let names = [None, None];
     assert_eq!(tiers_from_perflevels(&[4, 6], &names, "Apple M5"), Some(vec![(6, "P"), (4, "S")]));
+  }
+
+  #[test]
+  fn soc_info_without_pmgr_has_no_frequency_tables() {
+    let hw = |cpu_tiers| HwInfo {
+      chip_name: "Apple M2 (Virtual)".into(),
+      mac_model: "VirtualMac2,1".into(),
+      memory_gb: 8,
+      cpu_tiers,
+      gpu_cores: 0,
+    };
+    let soc = soc_info_from(hw(vec![(4, "_")]), None).unwrap();
+    let tiers = soc.cpu_tiers.iter().map(|x| (x.label.as_str(), x.cores, x.freqs.len()));
+    assert_eq!(tiers.collect::<Vec<_>>(), [("_", 4, 0)]);
+    assert!(soc.gpu_freqs.is_empty());
+
+    // a pmgr node without CPU tables stays an error
+    let m2 = || hw(vec![(4, "E"), (4, "P")]);
+    for freqs in
+      [(vec![], vec![], vec![]), (vec![600], vec![], vec![]), (vec![], vec![660], vec![])]
+    {
+      assert!(soc_info_from(m2(), Some(freqs)).is_err());
+    }
+    let soc = soc_info_from(m2(), Some((vec![600, 912], vec![660, 3504], vec![444]))).unwrap();
+    let freqs = soc.cpu_tiers.iter().map(|x| x.freqs.clone()).collect::<Vec<_>>();
+    assert_eq!((freqs, soc.gpu_freqs), (vec![vec![600, 912], vec![660, 3504]], vec![444]));
   }
 
   #[test]
