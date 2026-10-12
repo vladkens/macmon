@@ -342,7 +342,12 @@ impl App {
   }
 
   fn update_metrics(&mut self, data: Metrics) {
+    let lost_power = self.available.power && !data.available.power;
     self.available = data.available;
+    // a process sample taken before the first metrics sample still has its power readings
+    if lost_power && let Some(procs) = self.proc_view.procs().map(<[_]>::to_vec) {
+      self.proc_view.set_procs(self.proc_power(procs));
+    }
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
@@ -358,6 +363,15 @@ impl App {
     self.fans.push(data.fans);
 
     self.mem.push(data.memory);
+  }
+
+  /// `procs`, without power readings when the Mac has no power counters (a VM): process energy
+  /// doesn't move there.
+  fn proc_power(&self, mut procs: Vec<ProcInfo>) -> Vec<ProcInfo> {
+    if !self.available.power {
+      procs.iter_mut().for_each(|proc| proc.power_w = None);
+    }
+    procs
   }
 
   fn procs_visible(&self) -> bool {
@@ -378,14 +392,10 @@ impl App {
 
   /// Stores a process sample started in the panel's `showing`. Only one of the current showing
   /// gets in: one still in flight when the panel got hidden is dropped, also when the panel is
-  /// back by now, so a re-shown panel reads "collecting…" until its own first sample. Without power
-  /// counters (a VM) no process has a power reading: their energy doesn't move there.
-  fn update_procs(&mut self, showing: u64, mut procs: Vec<ProcInfo>) {
-    if !self.available.power {
-      procs.iter_mut().for_each(|proc| proc.power_w = None);
-    }
+  /// back by now, so a re-shown panel reads "collecting…" until its own first sample.
+  fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
     if self.procs_shown.showing() == Some(showing) {
-      self.proc_view.set_procs(procs);
+      self.proc_view.set_procs(self.proc_power(procs));
       if let Some(info) = &mut self.info {
         info.update_proc(self.proc_view.procs().unwrap_or_default());
         info.refresh(&*self.kill.sys);
@@ -1353,6 +1363,23 @@ mod tests {
       assert_eq!(words[words.len() - 3], "-", "{words:?}");
     }
     assert!(!row(&buf, 49).contains("POWER"), "{}", row(&buf, 49));
+  }
+
+  #[test]
+  fn processes_sampled_before_the_first_metrics_lose_power_without_counters() {
+    // the process sample comes first: power readings and the note while every source is assumed
+    let app = &mut with_procs(App::from_parts(test_soc(), Config::default()), varied_procs());
+    let power = |app: &mut App| {
+      let buf = render_buffer(app, 200, 50);
+      let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
+      (words[6].clone(), row(&buf, 49).contains("POWER: own processes only"))
+    };
+    assert_eq!(power(app), ("1.50W".to_string(), true));
+
+    // the first metrics sample has no power counters: the stored list loses them at once
+    let none = Availability { power: false, sys_power: false, cpu_freq: false, gpu_freq: false };
+    app.update_metrics(Metrics { available: none, ..test_metrics() });
+    assert_eq!(power(app), ("-".to_string(), false));
   }
 
   #[test]
