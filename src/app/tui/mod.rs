@@ -109,6 +109,8 @@ fn set_mouse_capture(out: &mut impl Write, on: bool, want: bool) -> io::Result<b
 
 enum Event {
   Update(Box<Metrics>),
+  /// The sampler failed: the app ends with this error.
+  Failed(String),
   /// A process sample with the number of the panel showing it was started in.
   Procs {
     showing: u64,
@@ -173,18 +175,23 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
 }
 
 /// Sends metrics: the first sample after 100 ms, then one per interval; stops once the app is
-/// gone.
+/// gone or after an error.
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   thread::spawn(move || {
-    let mut sampler = Sampler::new().unwrap();
-    let mut window = 100;
+    let sample = || -> WithError<()> {
+      let mut sampler = Sampler::new()?;
+      let mut window = 100;
 
-    loop {
-      let metrics = sampler.get_metrics(window).unwrap();
-      if tx.send(Event::Update(Box::new(metrics))).is_err() {
-        return;
+      loop {
+        let metrics = sampler.get_metrics(window)?;
+        if tx.send(Event::Update(Box::new(metrics))).is_err() {
+          return Ok(());
+        }
+        window = msec.read().map_or(TUI_MIN_MS, |x| *x).max(TUI_MIN_MS);
       }
-      window = (*msec.read().unwrap()).max(TUI_MIN_MS);
+    };
+    if let Err(err) = sample() {
+      let _ = tx.send(Event::Failed(err.to_string()));
     }
   });
 }
@@ -403,6 +410,7 @@ impl App {
         return ControlFlow::Continue(());
       }
       Event::Tick => return ControlFlow::Continue(()),
+      Event::Failed(_) => return ControlFlow::Break(()),
     };
 
     *msec.write().unwrap() = self.cfg.interval();
@@ -543,7 +551,11 @@ impl App {
     loop {
       term.draw(|f| self.render(f))?;
       mouse = set_mouse_capture(&mut stdout(), mouse, self.wants_mouse())?;
-      if self.handle_event(rx.recv()?, &msec).is_break() {
+      let event = rx.recv()?;
+      if let Event::Failed(err) = event {
+        return Err(err.into());
+      }
+      if self.handle_event(event, &msec).is_break() {
         break;
       }
     }
@@ -1224,6 +1236,29 @@ mod tests {
     for title in ["E-CPU 71% @ 2940 MHz", "P-CPU 25% @ 2394 MHz", "S-CPU 50% @ 4776 MHz"] {
       assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
     }
+  }
+
+  #[test]
+  fn renders_a_single_cpu_tier_without_frequencies() {
+    // a macOS VM: one perflevel, no frequency tables, no GPU cores
+    let tier = CpuTierInfo { label: "C".into(), cores: 4, freqs: vec![] };
+    let soc = SocInfo {
+      chip_name: "Apple M2 (Virtual)".to_string(),
+      memory_gb: 8,
+      cpu_tiers: vec![tier],
+      ..Default::default()
+    };
+    let mut app = App::from_parts(soc, Config::default());
+    let metrics = Metrics { cpu_tiers: vec![cpu_tier("C", 0, 0.63, 0.63)], ..Default::default() };
+    app.update_metrics(Metrics { memory: test_metrics().memory, ..metrics });
+
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 0).starts_with("╭─ Apple M2 (Virtual) (4C 8GB) ─"), "{}", row(&buf, 0));
+    let screen = screen_text(&buf);
+    for title in ["CPU 63% ─", "GPU 0% ─"] {
+      assert!(screen.contains(&format!("╭─ {title}")), "missing {title}");
+    }
+    assert!(!screen.contains("MHz") && !screen.contains("C-CPU"));
   }
 
   #[test]

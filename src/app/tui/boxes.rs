@@ -404,7 +404,12 @@ impl App {
     match metric {
       Metric::Cluster(i) => {
         let cluster = &self.clusters.items[i];
-        self.freq_box(format!("{}-CPU", cluster.label), &cluster.freq)
+        // a single tier (a VM) is just the CPU
+        let label = match self.clusters.items.len() {
+          1 => "CPU".to_string(),
+          _ => format!("{}-CPU", cluster.label),
+        };
+        self.freq_box(label, &cluster.freq)
       }
       Metric::Gpu => self.freq_box("GPU".to_string(), &self.igpu_freq),
       Metric::Ram => self.ram_box(),
@@ -416,12 +421,14 @@ impl App {
   }
 
   /// `E-CPU 42% @ 1800 MHz` (the percent colored by load), or `E-CPU 42%` when the frequency
-  /// doesn't fit, over the usage history scaled to 100 %, or a gauge.
+  /// doesn't fit or is 0 (none read), over the usage history scaled to 100 %, or a gauge.
   fn freq_box<'a>(&self, label: String, freq: &'a FreqStore) -> MetricBox<'a> {
     let series = freq.ratio(self.cfg.ratio_mode);
     let short = vec![heading(label), text(" "), self.percent(series.ratio, 0)];
     let mut full = short.clone();
-    full.push(text(format!(" @ {} MHz", freq.freq_mhz)));
+    if freq.freq_mhz > 0 {
+      full.push(text(format!(" @ {} MHz", freq.freq_mhz)));
+    }
 
     MetricBox {
       titles: vec![Titles::new(full), Titles::new(short)],
