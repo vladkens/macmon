@@ -20,7 +20,8 @@ fn describe(root: &Path) -> Option<String> {
 
   // in a worktree HEAD is in its own git dir, refs and packed-refs in the common one
   let watch = [dirs[1].join("HEAD"), dirs[2].join("refs"), dirs[2].join("packed-refs")];
-  for path in watch.iter().chain([&root.join("src"), &root.join("Cargo.toml")]) {
+  let sources = ["src", "Cargo.toml", "Cargo.lock"].map(|x| root.join(x));
+  for path in watch.iter().chain(&sources) {
     if path.exists() {
       println!("cargo:rerun-if-changed={}", path.display());
     }
