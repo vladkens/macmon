@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, BorderType};
 use super::App;
 use super::layout::{LayoutPlan, Metric};
 use super::proc_view::{ELLIPSIS, head};
-use super::store::{FreqStore, PowerStore, ratio};
+use super::store::{ClusterStore, FreqStore, PowerStore, ratio};
 use super::theme::{self, dim, faint, gradient, heading, text};
 use super::widgets::{Gauge, Graph};
 use crate::config::{RatioMode, TUI_MAX_MS, ViewType};
@@ -376,8 +376,12 @@ impl App {
   /// CPU clusters, so a third tier shows up as `6E+4P+2S`.
   fn chip_title(&self) -> Line<'static> {
     let soc = &self.soc;
-    let mut units: Vec<String> =
-      self.clusters.items.iter().map(|c| format!("{}{}", c.count, c.label)).collect();
+    // the single tier `_` of a chip with one core type (a VM) reads `4CPU`, like `18GPU`
+    let unit = |c: &ClusterStore| match c.label.as_str() {
+      "_" => format!("{}CPU", c.count),
+      label => format!("{}{label}", c.count),
+    };
+    let mut units: Vec<String> = self.clusters.items.iter().map(unit).collect();
     if soc.gpu_cores > 0 {
       units.push(format!("{}GPU", soc.gpu_cores));
     }

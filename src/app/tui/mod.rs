@@ -1241,7 +1241,7 @@ mod tests {
   #[test]
   fn renders_a_single_cpu_tier_without_frequencies() {
     // a macOS VM: one perflevel, no frequency tables, no GPU cores
-    let tier = CpuTierInfo { label: "C".into(), cores: 4, freqs: vec![] };
+    let tier = CpuTierInfo { label: "_".into(), cores: 4, freqs: vec![] };
     let soc = SocInfo {
       chip_name: "Apple M2 (Virtual)".to_string(),
       memory_gb: 8,
@@ -1249,16 +1249,16 @@ mod tests {
       ..Default::default()
     };
     let mut app = App::from_parts(soc, Config::default());
-    let metrics = Metrics { cpu_tiers: vec![cpu_tier("C", 0, 0.63, 0.63)], ..Default::default() };
+    let metrics = Metrics { cpu_tiers: vec![cpu_tier("_", 0, 0.63, 0.63)], ..Default::default() };
     app.update_metrics(Metrics { memory: test_metrics().memory, ..metrics });
 
     let buf = render_buffer(&mut app, 200, 50);
-    assert!(row(&buf, 0).starts_with("╭─ Apple M2 (Virtual) (4C 8GB) ─"), "{}", row(&buf, 0));
+    assert!(row(&buf, 0).starts_with("╭─ Apple M2 (Virtual) (4CPU 8GB) ─"), "{}", row(&buf, 0));
     let screen = screen_text(&buf);
     for title in ["CPU 63% ─", "GPU 0% ─"] {
       assert!(screen.contains(&format!("╭─ {title}")), "missing {title}");
     }
-    assert!(!screen.contains("MHz") && !screen.contains("C-CPU"));
+    assert!(!screen.contains("MHz") && !screen.contains("_-CPU"));
   }
 
   #[test]

@@ -106,8 +106,8 @@ pub struct CpuCoreMetrics {
 /// Metrics for one CPU tier (core type) of [`Metrics::cpu_tiers`].
 #[derive(Debug, Default, Serialize)]
 pub struct CpuTierMetrics {
-  /// Tier label: `E`, `P` or `S`, or `C` for the single tier of a chip with one core type (a VM),
-  /// as in [`SocInfo::cpu_tiers`].
+  /// Tier label: `E`, `P` or `S`, or `_` for the single tier of a chip with one core type, e.g. a
+  /// macOS VM, as in [`SocInfo::cpu_tiers`].
   pub label: String,
   /// Tier frequency in MHz.
   pub freq_mhz: u32,
@@ -869,9 +869,9 @@ mod tests {
     assert_eq!(cpu_cores_from_ticks(&prev, &cur[..1]).len(), 1);
   }
 
-  /// Sampler without IOReport and SMC, as in a VM: one `C` tier of `cores` and no frequencies.
+  /// Sampler without IOReport and SMC, as in a VM: one `_` tier of `cores` and no frequencies.
   fn sampler_without_sources(cores: u8, force_clpc: bool) -> Sampler {
-    let tier = CpuTierInfo { label: "C".into(), cores, freqs: vec![] };
+    let tier = CpuTierInfo { label: "_".into(), cores, freqs: vec![] };
     Sampler {
       force_clpc,
       soc: SocInfo { cpu_tiers: vec![tier], ..Default::default() },
@@ -889,7 +889,7 @@ mod tests {
   #[test]
   fn cpu_ticks_only_for_a_single_tier_without_cpu_stats_or_tables() {
     let vm = SocInfo {
-      cpu_tiers: vec![CpuTierInfo { label: "C".into(), cores: 4, freqs: vec![] }],
+      cpu_tiers: vec![CpuTierInfo { label: "_".into(), cores: 4, freqs: vec![] }],
       ..Default::default()
     };
     assert!(uses_cpu_ticks(&vm, false) && uses_cpu_ticks(&vm, true));
@@ -921,7 +921,7 @@ mod tests {
     assert!(sampler.cpu_ticks.is_some());
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
     assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
-    assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("C", 0));
+    assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("_", 0));
     assert_eq!((rs.ecpu_cores.len(), rs.pcpu_cores.len()), (cpus, cpus));
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);

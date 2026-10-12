@@ -512,8 +512,8 @@ pub struct SocInfo {
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
   /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `E`, `S` on M5,
-  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6, a single `C` on a chip with one core type (a
-  /// macOS VM).
+  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6, a single `_` on a chip with one core type, e.g.
+  /// a macOS VM.
   pub cpu_tiers: Vec<CpuTierInfo>,
   /// Number of cores of the lowest CPU tier.
   #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
@@ -542,7 +542,8 @@ pub struct SocInfo {
 /// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuTierInfo {
-  /// Tier label: `E`, `P` or `S`, or `C` for the single tier of a chip with one core type (a VM).
+  /// Tier label: `E`, `P` or `S`, or `_` for the single tier of a chip with one core type, e.g. a
+  /// macOS VM (not a letter, so it can't collide with a future Apple core type).
   pub label: String,
   /// Number of cores.
   pub cores: u8,
@@ -734,7 +735,7 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 // chip: E/P on M1-M4, P/S on M5 Pro/Max, E/P/S for the three tiers of M6, which runs 2 Super +
 // 4 Performance + 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2,
 // M x4, E x6 in exelban/stats#3668). Its perflevel names haven't been seen yet. A macOS VM has
-// one perflevel ("Standard"), a single `C` tier.
+// one perflevel ("Standard"), a single `_` tier.
 pub(crate) fn tiers_from_perflevels(
   perflevel_cores: &[u32],
   perflevel_names: &[Option<String>],
@@ -742,7 +743,7 @@ pub(crate) fn tiers_from_perflevels(
 ) -> Option<CpuTiers> {
   let is_legacy = ["M1", "M2", "M3", "M4", "A1"].iter().any(|x| chip_name.contains(x));
   let tiers = match *perflevel_cores {
-    [cores] => return Some(vec![(cores as u8, "C")]),
+    [cores] => return Some(vec![(cores as u8, "_")]),
     [hi, lo] if is_legacy => vec![(lo as u8, "E"), (hi as u8, "P")],
     [hi, lo] => vec![(lo as u8, "P"), (hi as u8, "S")],
     [hi, mid, lo] => vec![(lo as u8, "E"), (mid as u8, "P"), (hi as u8, "S")],
@@ -833,7 +834,7 @@ pub(crate) fn hw_from_profiler_report(out: &serde_json::Value) -> HwInfo {
   let (ecpu_cores, pcpu_cores, has_mcpu) =
     parse_cpu_cores(number_processors.as_str().unwrap_or(""));
   let cpu_tiers = match (number_processors.as_u64(), has_mcpu) {
-    (Some(cores), _) => vec![(cores as u8, "C")],
+    (Some(cores), _) => vec![(cores as u8, "_")],
     (None, true) => vec![(ecpu_cores as u8, "P"), (pcpu_cores as u8, "S")],
     (None, false) => vec![(ecpu_cores as u8, "E"), (pcpu_cores as u8, "P")],
   };
@@ -1771,7 +1772,7 @@ mod tests {
       (&[6, 12], &["Super", "Performance"], "Apple M5 Max", Some(vec![(12, "P"), (6, "S")])), // #47
       (&[4, 6], &["Super", "Efficiency"], "Apple M5", Some(vec![(6, "E"), (4, "S")])), /* macOS 27.0.1 */
       (&[2, 4, 6], &[], "Apple M6", Some(vec![(6, "E"), (4, "P"), (2, "S")])), /* issue #80, names unseen */
-      (&[4], &["Standard"], "Apple M2 (Virtual)", Some(vec![(4, "C")])),       // macOS 27 VM
+      (&[4], &["Standard"], "Apple M2 (Virtual)", Some(vec![(4, "_")])),       // macOS 27 VM
       (&[], &[], "Apple M1", None),
     ] {
       let names = names.iter().map(|x| Some(x.to_string())).collect::<Vec<_>>();
@@ -1787,7 +1788,7 @@ mod tests {
   fn profiler_core_count_of_a_vm_is_one_tier() {
     let report = |procs| serde_json::json!({"SPHardwareDataType": [{"number_processors": procs}]});
     let tiers = |procs| hw_from_profiler_report(&report(procs)).cpu_tiers;
-    assert_eq!(tiers(serde_json::json!(4)), [(4, "C")]); // macOS 27 VM
+    assert_eq!(tiers(serde_json::json!(4)), [(4, "_")]); // macOS 27 VM
     assert_eq!(tiers(serde_json::json!("proc 8:0:4:4")), [(4, "E"), (4, "P")]);
     assert_eq!(tiers(serde_json::json!("proc 18:6:0:12")), [(12, "P"), (6, "S")]);
   }
@@ -1802,10 +1803,10 @@ mod tests {
       cpu_tiers,
       gpu_cores: 0,
     };
-    let soc = soc_info_from(hw(vec![(4, "C")]), None).unwrap();
+    let soc = soc_info_from(hw(vec![(4, "_")]), None).unwrap();
     let tiers = soc.cpu_tiers.iter().map(|x| (x.label.as_str(), x.cores, x.freqs.len()));
-    assert_eq!(tiers.collect::<Vec<_>>(), [("C", 4, 0)]);
-    assert_eq!((soc.ecpu_label.as_str(), soc.pcpu_label.as_str()), ("C", "C"));
+    assert_eq!(tiers.collect::<Vec<_>>(), [("_", 4, 0)]);
+    assert_eq!((soc.ecpu_label.as_str(), soc.pcpu_label.as_str()), ("_", "_"));
     assert_eq!((soc.ecpu_cores, soc.pcpu_cores), (4, 4));
     assert!(soc.gpu_freqs.is_empty());
 
