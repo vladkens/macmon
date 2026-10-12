@@ -152,7 +152,8 @@ impl Availability {
       power: ["Energy Model", "CLPC", "PMP"].into_iter().any(&has_group),
       sys_power: true,
       cpu_freq: has_group("CPU Stats") && cpu_tables,
-      gpu_freq: has_group("GPU Stats") && !soc.gpu_freqs.is_empty(),
+      // entry 0 of the GPU table is OFF, as `GPUPH` is read
+      gpu_freq: has_group("GPU Stats") && soc.gpu_freqs.len() > 1,
     }
   }
 }
@@ -952,6 +953,9 @@ mod tests {
     let mut one_table = soc.clone();
     one_table.cpu_tiers[0].freqs.clear();
     assert!(!Availability::detect(all, &one_table).cpu_freq);
+    // a GPU table with only its OFF entry: no GPU frequency
+    let off_only = SocInfo { gpu_freqs: vec![0], ..soc.clone() };
+    assert!(!Availability::detect(all, &off_only).gpu_freq);
 
     // each energy group alone gives power: CLPC on macOS 27, Energy Model before it
     for group in ["Energy Model", "CLPC", "PMP"] {
