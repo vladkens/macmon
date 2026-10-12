@@ -525,7 +525,9 @@ pub struct Sampler {
   force_clpc: bool,
   soc: SocInfo,
   ior: Option<IOReport>,
-  /// CPU ticks at the last sample, when CPU usage comes from them.
+  /// CPU usage comes from the CPU ticks, see `uses_cpu_ticks`.
+  use_cpu_ticks: bool,
+  /// CPU ticks at the end of the last sample; the first sample takes its own baseline.
   cpu_ticks: Option<Vec<[u32; 4]>>,
   hid: IOHIDSensors,
   smc: Option<SMC>,
@@ -543,13 +545,14 @@ impl Sampler {
     let smc_sensors = init_smc()?;
 
     let cpu_stats = ior.as_ref().is_some_and(|x| x.has_group("CPU Stats"));
-    let cpu_ticks = if uses_cpu_ticks(&soc, cpu_stats) { cpu_load_ticks() } else { None };
+    let use_cpu_ticks = uses_cpu_ticks(&soc, cpu_stats);
 
     Ok(Sampler {
       force_clpc: false,
       soc,
       ior,
-      cpu_ticks,
+      use_cpu_ticks,
+      cpu_ticks: None,
       hid,
       smc: smc_sensors.smc,
       smc_cpu_keys: smc_sensors.cpu_keys,
@@ -743,6 +746,8 @@ impl Sampler {
     //           and include cluster/core separators (e.g. "DIE_0_PCPU1_CPU0").
 
     let duration = Duration::from_millis(duration as u64);
+    // like the IOReport baseline, taken when the first interval begins
+    let ticks = self.cpu_ticks.take().or_else(|| self.use_cpu_ticks.then(cpu_load_ticks).flatten());
     let mut rs = match self.ior.as_mut() {
       Some(ior) => {
         let (sample, elapsed) = ior.get_sample_interval(duration);
@@ -754,11 +759,11 @@ impl Sampler {
       }
     };
 
-    if let Some(prev) = &self.cpu_ticks
+    if let Some(prev) = ticks
       && let Some(cur) = cpu_load_ticks()
     {
       if let Some(tier) = rs.cpu_tiers.first_mut() {
-        tier.cores = cpu_cores_from_ticks(prev, &cur);
+        tier.cores = cpu_cores_from_ticks(&prev, &cur);
       }
       self.cpu_ticks = Some(cur);
     }
@@ -863,7 +868,8 @@ mod tests {
       force_clpc,
       soc: SocInfo { cpu_tiers: vec![tier], ..Default::default() },
       ior: None,
-      cpu_ticks: cpu_load_ticks(),
+      use_cpu_ticks: true,
+      cpu_ticks: None,
       hid: IOHIDSensors::new().unwrap(),
       smc: None,
       smc_cpu_keys: vec![],
@@ -899,7 +905,12 @@ mod tests {
   #[allow(deprecated)]
   fn samples_without_ioreport_and_smc() {
     let cpus = cpu_load_ticks().unwrap().len();
-    let rs = sampler_without_sources(cpus as u8, false).get_metrics(10).unwrap();
+    let mut sampler = sampler_without_sources(cpus as u8, false);
+    // the first call takes its own baseline (the sampler has none), so a delay before it doesn't
+    // count; the cores below come from that call alone
+    assert!(sampler.cpu_ticks.is_none());
+    let rs = sampler.get_metrics(10).unwrap();
+    assert!(sampler.cpu_ticks.is_some());
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
     assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
     assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("C", 0));
