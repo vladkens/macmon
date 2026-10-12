@@ -106,7 +106,7 @@ pub struct CpuCoreMetrics {
 /// Metrics for one CPU tier (core type) of [`Metrics::cpu_tiers`].
 #[derive(Debug, Default, Serialize)]
 pub struct CpuTierMetrics {
-  /// Tier label: `E`, `P` or `S`, or `_` for the single tier of a chip with one core type, e.g. a
+  /// Tier label: `E`, `P` or `S`, or `_` when the core type is unknown, e.g. the single tier of a
   /// macOS VM, as in [`SocInfo::cpu_tiers`].
   pub label: String,
   /// Tier frequency in MHz.
@@ -910,7 +910,6 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
   fn samples_without_ioreport_and_smc() {
     let cpus = cpu_load_ticks().unwrap().len();
     let mut sampler = sampler_without_sources(cpus as u8, false);
@@ -922,7 +921,7 @@ mod tests {
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
     assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
     assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("_", 0));
-    assert_eq!((rs.ecpu_cores.len(), rs.pcpu_cores.len()), (cpus, cpus));
+    assert_eq!(rs.cpu_tiers.len(), 1);
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
 

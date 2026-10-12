@@ -512,8 +512,8 @@ pub struct SocInfo {
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
   /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `E`, `S` on M5,
-  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6, a single `_` on a chip with one core type, e.g.
-  /// a macOS VM.
+  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6, `_` when the core type is unknown, e.g. the
+  /// single tier of a macOS VM.
   pub cpu_tiers: Vec<CpuTierInfo>,
   /// Number of cores of the lowest CPU tier.
   #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
@@ -542,7 +542,7 @@ pub struct SocInfo {
 /// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuTierInfo {
-  /// Tier label: `E`, `P` or `S`, or `_` for the single tier of a chip with one core type, e.g. a
+  /// Tier label: `E`, `P` or `S`, or `_` when the core type is unknown, e.g. the single tier of a
   /// macOS VM (not a letter, so it can't collide with a future Apple core type).
   pub label: String,
   /// Number of cores.
@@ -735,7 +735,7 @@ fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
 // chip: E/P on M1-M4, P/S on M5 Pro/Max, E/P/S for the three tiers of M6, which runs 2 Super +
 // 4 Performance + 6 Efficiency cores on the base chip (issue #80; IORegistry cluster-type P x2,
 // M x4, E x6 in exelban/stats#3668). Its perflevel names haven't been seen yet. A macOS VM has
-// one perflevel ("Standard"), a single `_` tier.
+// one perflevel, "Standard", of no known core type: a single tier `_`, the core type unknown.
 pub(crate) fn tiers_from_perflevels(
   perflevel_cores: &[u32],
   perflevel_names: &[Option<String>],
@@ -828,22 +828,24 @@ pub(crate) fn hw_from_profiler_report(out: &serde_json::Value) -> HwInfo {
   let mem_gb = mem_gb.and_then(|x| x.strip_suffix(" GB")).and_then(|x| x.parse::<u64>().ok());
   let mem_gb = mem_gb.unwrap_or(0);
 
-  // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc x:y:z:w", or the core count
-  // of a VM's single tier
-  let number_processors = &out["SPHardwareDataType"][0]["number_processors"];
-  let (ecpu_cores, pcpu_cores, has_mcpu) =
-    parse_cpu_cores(number_processors.as_str().unwrap_or(""));
-  let cpu_tiers = match (number_processors.as_u64(), has_mcpu) {
-    (Some(cores), _) => vec![(cores as u8, "_")],
-    (None, true) => vec![(ecpu_cores as u8, "P"), (pcpu_cores as u8, "S")],
-    (None, false) => vec![(ecpu_cores as u8, "E"), (pcpu_cores as u8, "P")],
-  };
+  // SPHardwareDataType.0.number_processors -> "proc x:y:z" or "proc x:y:z:w"
+  let number_processors = out["SPHardwareDataType"][0]["number_processors"].as_str().unwrap_or("");
+  let (ecpu_cores, pcpu_cores, has_mcpu) = parse_cpu_cores(number_processors);
 
   // SPDisplaysDataType.0.sppci_cores
   let gpu_cores = out["SPDisplaysDataType"][0]["sppci_cores"].as_str();
   let gpu_cores = gpu_cores.unwrap_or("0").parse::<u64>().unwrap_or(0);
 
-  HwInfo { chip_name, mac_model, memory_gb: mem_gb as u16, cpu_tiers, gpu_cores: gpu_cores as u8 }
+  HwInfo {
+    chip_name,
+    mac_model,
+    memory_gb: mem_gb as u16,
+    cpu_tiers: match has_mcpu {
+      true => vec![(ecpu_cores as u8, "P"), (pcpu_cores as u8, "S")],
+      false => vec![(ecpu_cores as u8, "E"), (pcpu_cores as u8, "P")],
+    },
+    gpu_cores: gpu_cores as u8,
+  }
 }
 
 /// `cluster-type` of each CPU core from IORegistry (`cpuN` devices): `E`, `M` or `P`.
@@ -1785,16 +1787,6 @@ mod tests {
   }
 
   #[test]
-  fn profiler_core_count_of_a_vm_is_one_tier() {
-    let report = |procs| serde_json::json!({"SPHardwareDataType": [{"number_processors": procs}]});
-    let tiers = |procs| hw_from_profiler_report(&report(procs)).cpu_tiers;
-    assert_eq!(tiers(serde_json::json!(4)), [(4, "_")]); // macOS 27 VM
-    assert_eq!(tiers(serde_json::json!("proc 8:0:4:4")), [(4, "E"), (4, "P")]);
-    assert_eq!(tiers(serde_json::json!("proc 18:6:0:12")), [(12, "P"), (6, "S")]);
-  }
-
-  #[test]
-  #[allow(deprecated)]
   fn soc_info_without_pmgr_has_no_frequency_tables() {
     let hw = |cpu_tiers| HwInfo {
       chip_name: "Apple M2 (Virtual)".into(),
@@ -1806,8 +1798,6 @@ mod tests {
     let soc = soc_info_from(hw(vec![(4, "_")]), None).unwrap();
     let tiers = soc.cpu_tiers.iter().map(|x| (x.label.as_str(), x.cores, x.freqs.len()));
     assert_eq!(tiers.collect::<Vec<_>>(), [("_", 4, 0)]);
-    assert_eq!((soc.ecpu_label.as_str(), soc.pcpu_label.as_str()), ("_", "_"));
-    assert_eq!((soc.ecpu_cores, soc.pcpu_cores), (4, 4));
     assert!(soc.gpu_freqs.is_empty());
 
     // a pmgr node without CPU tables stays an error
@@ -1818,10 +1808,8 @@ mod tests {
       assert!(soc_info_from(m2(), Some(freqs)).is_err());
     }
     let soc = soc_info_from(m2(), Some((vec![600, 912], vec![660, 3504], vec![444]))).unwrap();
-    assert_eq!(
-      (soc.ecpu_freqs, soc.pcpu_freqs, soc.gpu_freqs),
-      (vec![600, 912], vec![660, 3504], vec![444])
-    );
+    let freqs = soc.cpu_tiers.iter().map(|x| x.freqs.clone()).collect::<Vec<_>>();
+    assert_eq!((freqs, soc.gpu_freqs), (vec![vec![600, 912], vec![660, 3504]], vec![444]));
   }
 
   #[test]

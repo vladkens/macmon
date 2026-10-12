@@ -376,7 +376,7 @@ impl App {
   /// CPU clusters, so a third tier shows up as `6E+4P+2S`.
   fn chip_title(&self) -> Line<'static> {
     let soc = &self.soc;
-    // the single tier `_` of a chip with one core type (a VM) reads `4CPU`, like `18GPU`
+    // a tier of unknown core type `_` (a VM's single tier) reads `4CPU`, like `18GPU`
     let unit = |c: &ClusterStore| match c.label.as_str() {
       "_" => format!("{}CPU", c.count),
       label => format!("{}{label}", c.count),
