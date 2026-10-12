@@ -280,8 +280,9 @@ impl Info {
     if self.typing { Titles::new(filter).right(hints) } else { Titles::new(filter) }
   }
 
-  /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `finder`
-  /// (not while typing) on the top border, the counts line when there is room, the divider with
+  /// Draws the overlay over `area` (the process box, never empty): `<name> <pid>` and `copy |
+  /// finder` (with a row, not while typing) on the top border, the counts line when there is
+  /// room, the divider with
   /// the filter when there is room for a row below it, then the rows (paths cut by components),
   /// with a scrollbar when they don't fit, or why there are none, and `? | q back` on the bottom
   /// border (not while typing).
@@ -289,10 +290,10 @@ impl Info {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
     let titles = Titles::new(name);
-    let actions = || join([hint("c", "copy"), hint("e", "finder")]);
-    let titles = if self.typing { titles } else { titles.right(actions()) };
-    let mut list = draw_box(f, area, titles);
     let rows = self.rows();
+    let actions = || join([hint("c", "copy"), hint("e", "finder")]);
+    let titles = if self.typing || rows.is_empty() { titles } else { titles.right(actions()) };
+    let mut list = draw_box(f, area, titles);
     if self.files.is_ok() && list.height >= COUNTS_MIN_HEIGHT {
       f.render_widget(self.counts(&rows, usize::from(list.width)), list);
       (list.y, list.height) = (list.y + 1, list.height - 1);
@@ -707,7 +708,8 @@ mod tests {
       let mut info = Info::new(&ProcInfo { started, ..proc() }, &fake);
       let buf = render(&mut info, 40, 12);
       let shown = rows(&buf);
-      // no counts line, the divider, then the text
+      // no `copy | finder`, no counts line, the divider, then the text
+      assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(19)));
       assert_eq!(shown[1], format!("├─ / filter {}┤", "─".repeat(27)));
       assert_eq!(shown[2], format!("│{text:38}│"));
       assert_eq!((buf[(2, 2)].fg, buf[(2, 2)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
@@ -724,6 +726,16 @@ mod tests {
     fake.0.borrow_mut().files.clear();
     info.refresh(&fake);
     assert_eq!(rows(&render(&mut info, 40, 5))[2], format!("│{:38}│", " Already exited"));
+
+    // a filter that matches nothing: no `copy | finder` either, back with a row
+    let (mut info, fake) = self::info(Ok(files()));
+    let title = |info: &mut Info| rows(&render(info, 40, 5)).swap_remove(0);
+    assert!(press(&mut info, &fake, KeyCode::Char('/')));
+    type_str(&mut info, &fake, "nothing");
+    assert!(press(&mut info, &fake, KeyCode::Enter));
+    assert_eq!(title(&mut info), format!("╭─ WindowServer 631 {}╮", "─".repeat(19)));
+    assert!(press(&mut info, &fake, KeyCode::Esc));
+    assert!(title(&mut info).ends_with(" copy | finder ─╮"));
   }
 
   #[test]
