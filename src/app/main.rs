@@ -348,6 +348,13 @@ mod tests {
   }
 
   #[test]
+  fn version_is_the_build_version() {
+    // `0.9.0-12-g3672a1b` between releases (build.rs), so clap's default would differ
+    let expected = format!("macmon {}\n", env!("MACMON_VERSION"));
+    assert_eq!(Cli::command().render_version(), expected);
+  }
+
+  #[test]
   fn pulse_requires_all_and_zero_duration_skips_load() {
     assert!(run_stress(StressMode::Cpu, None, Some(0), Some(2)).is_err());
     run_stress(StressMode::All, None, Some(0), Some(2)).unwrap();
