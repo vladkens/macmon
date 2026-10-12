@@ -431,10 +431,11 @@ impl App {
     }
 
     if let Some(mut info) = self.info.take() {
-      // the help opens over it, unless `?` is typed into its filter
+      // the help opens over it, unless `?` is typed into its filter; the overlay sees the key
+      // too (it clears `copied`)
       let help = key.code == KeyCode::Char('?') && !info.typing;
       self.help = help.then_some(0);
-      self.info = (help || info.handle_key(key, &*self.kill.sys)).then_some(info);
+      self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
       return ControlFlow::Continue(());
     }
     if self.kill.is_open() {
@@ -1632,12 +1633,16 @@ mod tests {
     };
     assert!(cwd_selected(&mut app));
 
-    // over it the help takes the keys and the wheel; Esc closes the help, not the overlay
+    // over it the help takes the keys and the wheel; Esc closes the help, not the overlay, and
+    // `copied` went with the `?`
+    assert!(app.handle_key(key('c')).is_continue());
+    assert!(row(&render_buffer(&mut app, 200, 50), 49).starts_with("╰─ copied ─"));
     assert!(app.handle_key(key('?')).is_continue());
     assert!(render_to_string(&mut app, 200, 50).contains("Info overlay"));
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 5));
     assert!(press(&mut app, KeyCode::Esc).is_continue());
     assert!(app.help.is_none() && app.info.is_some() && cwd_selected(&mut app));
+    assert!(!row(&render_buffer(&mut app, 200, 50), 49).contains("copied"));
 
     // typed into its filter `?` is text
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('?')).is_continue());
