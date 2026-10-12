@@ -71,28 +71,44 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
-  gauge!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
+  // gauges of a source the Mac doesn't have (a VM) are left out, not 0
+  let a = m.available;
+  if a.cpu_freq {
+    gauge!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
+  }
   gauge!(out, "ecpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Lowest CPU tier frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
   gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.ecpu_scaled_ratio);
   gauge!(out, "ecpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Lowest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
-  gauge!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
+  if a.cpu_freq {
+    gauge!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
+  }
   gauge!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
   gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
   gauge!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
-  tier_gauge!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
+  if a.cpu_freq {
+    tier_gauge!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
+  }
   tier_gauge!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
   tier_gauge!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
-  gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
+  if a.gpu_freq {
+    gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
+  }
   gauge!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
   gauge!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
   gauge!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
-  gauge!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
-  gauge!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
-  gauge!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
-  gauge!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
-  gauge!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-  gauge!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  if a.power {
+    gauge!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
+    gauge!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
+    gauge!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
+    gauge!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  }
+  if a.sys_power {
+    gauge!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
+  }
+  if a.power {
+    gauge!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
+    gauge!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  }
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -277,7 +293,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-  use macmon::{CpuTierMetrics, Metrics, SocInfo};
+  use macmon::{Availability, CpuTierMetrics, Metrics, SocInfo};
 
   use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
 
@@ -289,6 +305,55 @@ mod tests {
     assert!(output.contains("macmon_cpu_temp_celsius{chip=\"\"} 45"));
     assert!(!output.contains("macmon_gpu_temp_celsius"));
     assert!(output.contains("macmon_gpu_freq_mhz"));
+  }
+
+  #[test]
+  fn unavailable_power_and_frequencies_have_no_prometheus_gauges() {
+    // the gauges of each source: power, sys_power, cpu_freq, gpu_freq
+    let groups: [&[&str]; 4] = [
+      &["cpu_power", "gpu_power", "ane_power", "all_power", "ram_power", "gpu_ram_power"],
+      &["sys_power"],
+      &["ecpu_freq", "pcpu_freq", "cpu_tier_freq"],
+      &["gpu_freq"],
+    ];
+    let none = Availability { power: false, sys_power: false, cpu_freq: false, gpu_freq: false };
+    let only = [
+      Availability { power: true, ..none },
+      Availability { sys_power: true, ..none },
+      Availability { cpu_freq: true, ..none },
+      Availability { gpu_freq: true, ..none },
+    ];
+    let gauges = |available| {
+      let metrics = Metrics {
+        cpu_tiers: vec![CpuTierMetrics { label: "C".into(), ..Default::default() }],
+        available,
+        ..Default::default()
+      };
+      let output = to_prometheus(&metrics, &SocInfo::default());
+      let has = |name: &str| {
+        ["watts", "mhz"]
+          .iter()
+          .any(|unit| output.contains(&format!("# TYPE macmon_{name}_{unit} gauge")))
+      };
+      (groups.map(|names| names.iter().map(|&x| has(x)).collect::<Vec<_>>()), output)
+    };
+
+    // every source (real hardware): every gauge
+    let (all, _) = gauges(Availability::default());
+    assert!(all.iter().flatten().all(|&x| x), "{all:?}");
+    // a VM: none of them, the usage gauges stay
+    let (vm, output) = gauges(none);
+    assert!(vm.iter().flatten().all(|&x| !x), "{vm:?}");
+    for name in ["cpu_scaled_ratio", "cpu_tier_active_ratio", "gpu_active_ratio"] {
+      assert!(output.contains(&format!("# TYPE macmon_{name} gauge")), "{name}");
+    }
+    // each source on its own
+    for (i, available) in only.into_iter().enumerate() {
+      let (one, _) = gauges(available);
+      for (j, group) in one.iter().enumerate() {
+        assert!(group.iter().all(|&x| x == (i == j)), "{available:?}: {one:?}");
+      }
+    }
   }
 
   #[test]

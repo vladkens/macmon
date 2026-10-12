@@ -177,7 +177,7 @@ macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="E"} 0.18
 macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="P"} 0.04
 ```
 
-`macmon_ecpu_*` and `macmon_pcpu_*` are still exported for the lowest and the highest tier.
+`macmon_ecpu_*` and `macmon_pcpu_*` are still exported for the lowest and the highest tier. Gauges without a source on the Mac (temperatures, power and frequencies in a VM) are left out.
 
 </details>
 
