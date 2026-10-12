@@ -464,6 +464,14 @@ fn cpu_cores_from_ticks(prev: &[[u32; 4]], cur: &[[u32; 4]]) -> Vec<CpuCoreMetri
   prev.iter().zip(cur).enumerate().map(core).collect()
 }
 
+/// Whether CPU usage comes from the CPU ticks: without CPU Stats channels or frequency tables (a
+/// VM), and only for a single tier, since ticks don't tell the tier of a CPU and the cpuN order
+/// differs by chip (M6: E, S, P).
+fn uses_cpu_ticks(soc: &SocInfo, cpu_stats: bool) -> bool {
+  let freqs = soc.cpu_tiers.iter().all(|x| !x.freqs.is_empty());
+  soc.cpu_tiers.len() == 1 && !(cpu_stats && freqs)
+}
+
 fn init_smc() -> WithError<SmcSensors> {
   let Some(mut smc) = SMC::open()? else { return Ok(SmcSensors::default()) };
 
@@ -534,10 +542,8 @@ impl Sampler {
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
-    // Without CPU Stats channels or frequency tables (a VM) usage comes from the CPU ticks.
     let cpu_stats = ior.as_ref().is_some_and(|x| x.has_group("CPU Stats"));
-    let freqs = soc.cpu_tiers.iter().all(|x| !x.freqs.is_empty());
-    let cpu_ticks = if cpu_stats && freqs { None } else { cpu_load_ticks() };
+    let cpu_ticks = if uses_cpu_ticks(&soc, cpu_stats) { cpu_load_ticks() } else { None };
 
     Ok(Sampler {
       force_clpc: false,
@@ -751,11 +757,8 @@ impl Sampler {
     if let Some(prev) = &self.cpu_ticks
       && let Some(cur) = cpu_load_ticks()
     {
-      // cpuN order, lowest tier first
-      let mut cores = cpu_cores_from_ticks(prev, &cur).into_iter();
-      for (tier, info) in rs.cpu_tiers.iter_mut().zip(&self.soc.cpu_tiers) {
-        let core = |(core_id, core)| CpuCoreMetrics { core_id, ..core };
-        tier.cores = cores.by_ref().take(info.cores as usize).enumerate().map(core).collect();
+      if let Some(tier) = rs.cpu_tiers.first_mut() {
+        tier.cores = cpu_cores_from_ticks(prev, &cur);
       }
       self.cpu_ticks = Some(cur);
     }
@@ -787,6 +790,7 @@ mod tests {
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
     TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
     cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value, temperature_average,
+    uses_cpu_ticks,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, SocInfo, cpu_load_ticks, cpu_tier_infos, tiers_from_perflevels,
@@ -869,13 +873,37 @@ mod tests {
   }
 
   #[test]
+  fn cpu_ticks_only_for_a_single_tier_without_cpu_stats_or_tables() {
+    let vm = SocInfo {
+      cpu_tiers: vec![CpuTierInfo { label: "C".into(), cores: 4, freqs: vec![] }],
+      ..Default::default()
+    };
+    assert!(uses_cpu_ticks(&vm, false) && uses_cpu_ticks(&vm, true));
+    // with tables and CPU Stats channels the residencies give usage and frequency
+    let tier = CpuTierInfo { freqs: vec![600, 3504], ..vm.cpu_tiers[0].clone() };
+    let one = SocInfo { cpu_tiers: vec![tier], ..Default::default() };
+    assert!(!uses_cpu_ticks(&one, true) && uses_cpu_ticks(&one, false));
+    // several tiers never: the M6 lists its cpus as E, S, P (cluster-type EEEEEEPPMMMM)
+    let m6 = SocInfo {
+      cpu_tiers: m6_soc()
+        .cpu_tiers
+        .into_iter()
+        .map(|x| CpuTierInfo { freqs: vec![], ..x })
+        .collect(),
+      ..Default::default()
+    };
+    assert!(!uses_cpu_ticks(&m6, false) && !uses_cpu_ticks(&soc_info(4, 4), false));
+  }
+
+  #[test]
   #[allow(deprecated)]
   fn samples_without_ioreport_and_smc() {
-    let rs = sampler_without_sources(2, false).get_metrics(10).unwrap();
+    let cpus = cpu_load_ticks().unwrap().len();
+    let rs = sampler_without_sources(cpus as u8, false).get_metrics(10).unwrap();
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
-    assert_eq!(cores.collect::<Vec<_>>(), [(0, 0), (1, 0)]);
+    assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
     assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("C", 0));
-    assert_eq!((rs.ecpu_cores.len(), rs.pcpu_cores.len()), (2, 2));
+    assert_eq!((rs.ecpu_cores.len(), rs.pcpu_cores.len()), (cpus, cpus));
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
 
