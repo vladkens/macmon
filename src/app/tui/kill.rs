@@ -70,10 +70,12 @@ impl ProcSys for LibcSys {
     }
   }
 
-  /// Written and reaped on a thread, as `reveal`.
+  /// Written and reaped on a thread, as `reveal`. pbcopy reads its input in the locale's
+  /// encoding, so the text, UTF-8, gets a UTF-8 locale whatever macmon was started with.
   fn copy(&self, text: &str) {
     let mut pbcopy = Command::new("/usr/bin/pbcopy");
-    pbcopy.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    pbcopy.env("LC_ALL", "en_US.UTF-8").stdin(Stdio::piped());
+    pbcopy.stdout(Stdio::null()).stderr(Stdio::null());
     if let Ok(mut child) = pbcopy.spawn() {
       let (stdin, text) = (child.stdin.take(), text.to_string());
       std::thread::spawn(move || {
