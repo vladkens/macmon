@@ -380,6 +380,8 @@ Creating `Sampler` inside the worker keeps its low-level macOS handles on that t
 
 All contributions are welcome! Feel free to open an issue or submit a pull request.
 
+Builds from `main` (local builds and the [dev pre-release](https://github.com/vladkens/macmon/releases/tag/dev)) show their git version in `macmon -V` and the TUI title, e.g. `macmon 0.9.0-12-g3672a1b`; mention it when reporting an issue.
+
 ## 📝 License
 
 Distributed under the [MIT License](LICENSE).

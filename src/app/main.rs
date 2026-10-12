@@ -124,7 +124,7 @@ enum Commands {
 /// Sudoless performance monitoring CLI tool for Apple Silicon processors
 /// https://github.com/vladkens/macmon
 #[derive(Debug, Parser)]
-#[command(version, verbatim_doc_comment)]
+#[command(version = env!("MACMON_VERSION"), verbatim_doc_comment)]
 struct Cli {
   #[command(subcommand)]
   command: Option<Commands>,

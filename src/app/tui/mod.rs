@@ -1335,7 +1335,7 @@ mod tests {
       assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
     }
     // the chip with its core counts left on the metrics box, the version right
-    let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
+    let version = format!("─ macmon v{} ─╮", env!("MACMON_VERSION"));
     let top = row(&buf, 0);
     assert!(top.starts_with("╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ─") && top.ends_with(&version));
     // whole-degree temperatures right on the CPU / GPU power boxes, none for ANE
