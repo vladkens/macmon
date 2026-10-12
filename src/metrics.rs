@@ -10,8 +10,8 @@ use crate::shared::{
   ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, zero_div,
 };
 use crate::sources::{
-  IOHIDSensors, IOReport, SMC, SocInfo, cfio_get_residencies, cfio_watts, get_soc_info, libc_ram,
-  libc_swap,
+  IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, cfio_get_residencies, cfio_watts,
+  cpu_load_ticks, get_soc_info, libc_ram, libc_swap,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -118,8 +118,9 @@ pub struct CpuTierMetrics {
   pub cores: Vec<CpuCoreMetrics>,
 }
 
+#[derive(Default)]
 struct SmcSensors {
-  smc: SMC,
+  smc: Option<SMC>,
   cpu_keys: Vec<String>,
   gpu_keys: Vec<String>,
   fan_keys: Vec<String>,
@@ -451,8 +452,20 @@ fn collect_cpu_core_metrics(metrics: HashMap<CpuCoreKey, FreqMetrics>) -> Vec<Cp
     .collect()
 }
 
+/// Per-core usage from the `[user, system, idle, nice]` ticks of each CPU at the start (`prev`)
+/// and the end (`cur`) of an interval, for chips without CPU Stats channels or frequency tables:
+/// no frequency, the scaled ratio is the active one. Counters wrap.
+fn cpu_cores_from_ticks(prev: &[[u32; 4]], cur: &[[u32; 4]]) -> Vec<CpuCoreMetrics> {
+  let core = |(core_id, (prev, cur)): (usize, (&[u32; 4], &[u32; 4]))| {
+    let [user, system, idle, nice] = [0, 1, 2, 3].map(|i| cur[i].wrapping_sub(prev[i]) as f64);
+    let active_ratio = zero_div(user + system + nice, user + system + idle + nice) as f32;
+    CpuCoreMetrics { die_id: 0, core_id, freq_mhz: 0, scaled_ratio: active_ratio, active_ratio }
+  };
+  prev.iter().zip(cur).enumerate().map(core).collect()
+}
+
 fn init_smc() -> WithError<SmcSensors> {
-  let mut smc = SMC::new()?;
+  let Some(mut smc) = SMC::open()? else { return Ok(SmcSensors::default()) };
 
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
@@ -489,7 +502,8 @@ fn init_smc() -> WithError<SmcSensors> {
   fan_sensors.dedup();
 
   // println!("{} {}", cpu_sensors.len(), gpu_sensors.len());
-  Ok(SmcSensors { smc, cpu_keys: cpu_sensors, gpu_keys: gpu_sensors, fan_keys: fan_sensors })
+  let (cpu_keys, gpu_keys, fan_keys) = (cpu_sensors, gpu_sensors, fan_sensors);
+  Ok(SmcSensors { smc: Some(smc), cpu_keys, gpu_keys, fan_keys })
 }
 
 // MARK: Sampler
@@ -502,9 +516,11 @@ fn init_smc() -> WithError<SmcSensors> {
 pub struct Sampler {
   force_clpc: bool,
   soc: SocInfo,
-  ior: IOReport,
+  ior: Option<IOReport>,
+  /// CPU ticks at the last sample, when CPU usage comes from them.
+  cpu_ticks: Option<Vec<[u32; 4]>>,
   hid: IOHIDSensors,
-  smc: SMC,
+  smc: Option<SMC>,
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
@@ -518,10 +534,16 @@ impl Sampler {
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
+    // Without CPU Stats channels or frequency tables (a VM) usage comes from the CPU ticks.
+    let cpu_stats = ior.as_ref().is_some_and(|x| x.has_group("CPU Stats"));
+    let freqs = soc.cpu_tiers.iter().all(|x| !x.freqs.is_empty());
+    let cpu_ticks = if cpu_stats && freqs { None } else { cpu_load_ticks() };
+
     Ok(Sampler {
       force_clpc: false,
       soc,
       ior,
+      cpu_ticks,
       hid,
       smc: smc_sensors.smc,
       smc_cpu_keys: smc_sensors.cpu_keys,
@@ -539,14 +561,15 @@ impl Sampler {
   }
 
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
+    let smc = self.smc.as_mut().ok_or("SMC unavailable")?;
     let mut cpu_metrics = Vec::new();
     for sensor in &self.smc_cpu_keys {
-      cpu_metrics.push(self.smc.read_float_val(sensor)?);
+      cpu_metrics.push(smc.read_float_val(sensor)?);
     }
 
     let mut gpu_metrics = Vec::new();
     for sensor in &self.smc_gpu_keys {
-      gpu_metrics.push(self.smc.read_float_val(sensor)?);
+      gpu_metrics.push(smc.read_float_val(sensor)?);
     }
 
     let cpu_temp_avg = temperature_average(&cpu_metrics);
@@ -592,13 +615,12 @@ impl Sampler {
 
   fn get_fans(&mut self) -> Vec<FanMetric> {
     let mut fans = Vec::new();
+    let Some(smc) = self.smc.as_mut() else { return fans };
     for (i, key) in self.smc_fan_keys.iter().enumerate() {
-      let Some(rpm) = read_smc_numeric_u32(&mut self.smc, key) else { continue };
+      let Some(rpm) = read_smc_numeric_u32(smc, key) else { continue };
       let name = format!("fan{i}");
       let max_rpm = match key.strip_suffix("Ac") {
-        Some(prefix) => {
-          read_smc_numeric_u32(&mut self.smc, &format!("{prefix}Mx")).filter(|rpm| *rpm > 0)
-        }
+        Some(prefix) => read_smc_numeric_u32(smc, &format!("{prefix}Mx")).filter(|rpm| *rpm > 0),
         None => None,
       };
       fans.push(FanMetric { name, rpm, max_rpm });
@@ -613,12 +635,12 @@ impl Sampler {
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
-    self.smc.read_float_val("PSTR")
+    self.smc.as_mut().ok_or("SMC unavailable")?.read_float_val("PSTR")
   }
 
   fn get_ioreport_metrics(
     &self,
-    sample: crate::sources::IOReportIterator,
+    sample: impl IntoIterator<Item = IOReportIteratorItem>,
     dt: Duration,
   ) -> WithError<Metrics> {
     let mut cpu_cores = CpuTierCores::new(&self.soc);
@@ -715,8 +737,29 @@ impl Sampler {
     //           and include cluster/core separators (e.g. "DIE_0_PCPU1_CPU0").
 
     let duration = Duration::from_millis(duration as u64);
-    let (sample, elapsed) = self.ior.get_sample_interval(duration);
-    let mut rs = aggregate_ioreport_metrics(self.get_ioreport_metrics(sample, elapsed)?, &self.soc);
+    let mut rs = match self.ior.as_mut() {
+      Some(ior) => {
+        let (sample, elapsed) = ior.get_sample_interval(duration);
+        self.get_ioreport_metrics(sample, elapsed)?
+      }
+      None => {
+        std::thread::sleep(duration);
+        self.get_ioreport_metrics([], duration)?
+      }
+    };
+
+    if let Some(prev) = &self.cpu_ticks
+      && let Some(cur) = cpu_load_ticks()
+    {
+      // cpuN order, lowest tier first
+      let mut cores = cpu_cores_from_ticks(prev, &cur).into_iter();
+      for (tier, info) in rs.cpu_tiers.iter_mut().zip(&self.soc.cpu_tiers) {
+        let core = |(core_id, core)| CpuCoreMetrics { core_id, ..core };
+        tier.cores = cores.by_ref().take(info.cores as usize).enumerate().map(core).collect();
+      }
+      self.cpu_ticks = Some(cur);
+    }
+    let mut rs = aggregate_ioreport_metrics(rs, &self.soc);
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -741,11 +784,13 @@ mod tests {
   use std::collections::{HashMap, HashSet};
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, TempMetrics,
-    aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
-    parse_cpu_core_channel, smc_numeric_value, temperature_average,
+    CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
+    TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
+    cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value, temperature_average,
   };
-  use crate::sources::{CpuTierInfo, SocInfo, cpu_tier_infos, tiers_from_perflevels};
+  use crate::sources::{
+    CpuTierInfo, IOHIDSensors, SocInfo, cpu_load_ticks, cpu_tier_infos, tiers_from_perflevels,
+  };
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
@@ -793,6 +838,49 @@ mod tests {
       }
       assert_eq!(power.watts(true), watts.filter(|x| x.is_finite() && *x >= 0.0));
     }
+  }
+
+  #[test]
+  fn cpu_usage_from_ticks() {
+    // [user, system, idle, nice]: busy is user + system + nice; the second core's counters wrap
+    let prev = [[100, 50, 1000, 0], [u32::MAX - 9, 0, u32::MAX - 19, 0], [5, 5, 5, 5]];
+    let cur = [[160, 70, 1020, 0], [10, 0, 10, 0], [5, 5, 5, 5]];
+    let cores = cpu_cores_from_ticks(&prev, &cur);
+    let usage = cores.iter().map(|x| (x.core_id, x.freq_mhz, x.active_ratio, x.scaled_ratio));
+    assert_eq!(usage.collect::<Vec<_>>(), [(0, 0, 0.8, 0.8), (1, 0, 0.4, 0.4), (2, 0, 0.0, 0.0)]);
+    // a CPU that is gone at the end of the interval is left out
+    assert_eq!(cpu_cores_from_ticks(&prev, &cur[..1]).len(), 1);
+  }
+
+  /// Sampler without IOReport and SMC, as in a VM: one `C` tier of `cores` and no frequencies.
+  fn sampler_without_sources(cores: u8, force_clpc: bool) -> Sampler {
+    let tier = CpuTierInfo { label: "C".into(), cores, freqs: vec![] };
+    Sampler {
+      force_clpc,
+      soc: SocInfo { cpu_tiers: vec![tier], ..Default::default() },
+      ior: None,
+      cpu_ticks: cpu_load_ticks(),
+      hid: IOHIDSensors::new().unwrap(),
+      smc: None,
+      smc_cpu_keys: vec![],
+      smc_gpu_keys: vec![],
+      smc_fan_keys: vec![],
+    }
+  }
+
+  #[test]
+  #[allow(deprecated)]
+  fn samples_without_ioreport_and_smc() {
+    let rs = sampler_without_sources(2, false).get_metrics(10).unwrap();
+    let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
+    assert_eq!(cores.collect::<Vec<_>>(), [(0, 0), (1, 0)]);
+    assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("C", 0));
+    assert_eq!((rs.ecpu_cores.len(), rs.pcpu_cores.len()), (2, 2));
+    assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
+    assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
+
+    // CLPC counters are required whether IOReport has channels or not
+    assert!(sampler_without_sources(2, true).get_metrics(10).is_err());
   }
 
   #[test]

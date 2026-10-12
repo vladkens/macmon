@@ -378,6 +378,41 @@ impl Iterator for IOReportIterator {
   }
 }
 
+// MARK: CPU ticks
+
+/// User, system, idle and nice ticks of each CPU (`cpuN` order), from
+/// `host_processor_info(PROCESSOR_CPU_LOAD_INFO)`.
+pub(crate) fn cpu_load_ticks() -> Option<Vec<[u32; 4]>> {
+  let (mut count, mut info, mut info_count) = (0, null_mut(), 0);
+  // todo: https://github.com/JohnTitor/mach2/issues/34
+  #[allow(deprecated)]
+  let rc = unsafe {
+    let host = libc::mach_host_self();
+    libc::host_processor_info(
+      host,
+      libc::PROCESSOR_CPU_LOAD_INFO,
+      &mut count,
+      &mut info,
+      &mut info_count,
+    )
+  };
+  if rc != 0 {
+    return None;
+  }
+
+  let ticks = unsafe { std::slice::from_raw_parts(info as *const u32, info_count as usize) };
+  let cpus = ticks.as_chunks::<4>().0.iter().take(count as usize).copied().collect();
+  #[allow(deprecated)]
+  unsafe {
+    libc::vm_deallocate(
+      libc::mach_task_self(),
+      info as usize,
+      info_count as usize * size_of::<u32>(),
+    )
+  };
+  Some(cpus)
+}
+
 // MARK: RAM
 
 /// Read used and total RAM in bytes via libc/mach APIs.
@@ -1123,10 +1158,14 @@ impl IOReport {
     Ok(Self { subs, chan, prev: None })
   }
 
-  fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Self> {
+  /// Subscription to the channels `filter` selects, or None when it selects none (a VM).
+  fn from_filter(filter: Option<ChannelFilterRef<'_>>) -> WithError<Option<Self>> {
     let channels = cfio_get_chan(filter)?;
+    if unsafe { CFArrayGetCount(channels.selected) } == 0 {
+      return Ok(None);
+    }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    Ok(Self { subs, chan, prev: None })
+    Ok(Some(Self { subs, chan, prev: None }))
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -1134,14 +1173,19 @@ impl IOReport {
     let filter = |group: &str, subgroup: &str, _channel: &str, _unit: &str| {
       cfio_channel_matches(&channels, group, subgroup)
     };
-    Self::from_filter(Some(&filter))
+    Self::from_filter(Some(&filter))?.ok_or_else(|| "No IOReport channels found".into())
   }
 
-  pub(crate) fn with_filter(filter: Option<ChannelFilter>) -> WithError<Self> {
+  pub(crate) fn with_filter(filter: Option<ChannelFilter>) -> WithError<Option<Self>> {
     match filter {
       Some(filter) => Self::from_filter(Some(&filter)),
       None => Self::from_filter(None),
     }
+  }
+
+  /// Whether a subscribed channel is in `group`.
+  pub(crate) fn has_group(&self, group: &str) -> bool {
+    cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group)
   }
 
   /// Collect one delta sample over `duration` milliseconds.
@@ -1455,6 +1499,11 @@ pub struct SMC {
 impl SMC {
   /// Open an SMC connection.
   pub fn new() -> WithError<Self> {
+    Self::open()?.ok_or_else(|| "AppleSMC not found".into())
+  }
+
+  /// Open an SMC connection, or None without an SMC service (a VM).
+  pub(crate) fn open() -> WithError<Option<Self>> {
     let mut conn = 0;
 
     for (device, name) in IOServiceIterator::new("AppleSMC")? {
@@ -1466,7 +1515,7 @@ impl SMC {
       }
     }
 
-    Ok(Self { conn, keys: HashMap::new() })
+    Ok((conn != 0).then(|| Self { conn, keys: HashMap::new() }))
   }
 
   fn read(&self, input: &KeyData) -> WithError<KeyData> {
