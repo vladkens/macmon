@@ -119,6 +119,44 @@ pub struct CpuTierMetrics {
   pub cores: Vec<CpuCoreMetrics>,
 }
 
+/// Metric sources the Mac has, detected per source (a VM has none of them). Values of a missing
+/// source read 0.
+///
+/// The default is every source available, as on real hardware, so a [`Metrics`] built by hand
+/// keeps its meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Availability {
+  /// CPU, GPU and ANE power, with `all_power`, `ram_power` and `gpu_ram_power`: IOReport energy
+  /// counters.
+  pub power: bool,
+  /// System power (`sys_power`): the SMC power sensor read in this sample.
+  pub sys_power: bool,
+  /// CPU frequencies: CPU residency counters and a frequency table for every tier.
+  pub cpu_freq: bool,
+  /// GPU frequency: GPU residency counters and the GPU frequency table.
+  pub gpu_freq: bool,
+}
+
+impl Default for Availability {
+  fn default() -> Self {
+    Self { power: true, sys_power: true, cpu_freq: true, gpu_freq: true }
+  }
+}
+
+impl Availability {
+  /// Sources of the subscribed IOReport channel groups (`has_group`) and the tables of `soc`;
+  /// `sys_power` is set by each sample.
+  fn detect(has_group: impl Fn(&str) -> bool, soc: &SocInfo) -> Self {
+    let cpu_tables = !soc.cpu_tiers.is_empty() && soc.cpu_tiers.iter().all(|x| !x.freqs.is_empty());
+    Self {
+      power: ["Energy Model", "CLPC", "PMP"].into_iter().any(&has_group),
+      sys_power: true,
+      cpu_freq: has_group("CPU Stats") && cpu_tables,
+      gpu_freq: has_group("GPU Stats") && !soc.gpu_freqs.is_empty(),
+    }
+  }
+}
+
 #[derive(Default)]
 struct SmcSensors {
   smc: Option<SMC>,
@@ -202,6 +240,8 @@ pub struct Metrics {
   pub ram_power: f32,
   /// GPU SRAM power in Watts.
   pub gpu_ram_power: f32,
+  /// Which of the values above the Mac has a source for; the others read 0.
+  pub available: Availability,
 }
 
 // MARK: Helpers
@@ -535,6 +575,7 @@ pub struct Sampler {
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
+  available: Availability,
 }
 
 impl Sampler {
@@ -547,6 +588,8 @@ impl Sampler {
 
     let cpu_stats = ior.as_ref().is_some_and(|x| x.has_group("CPU Stats"));
     let use_cpu_ticks = uses_cpu_ticks(&soc, cpu_stats);
+    let available =
+      Availability::detect(|x| ior.as_ref().is_some_and(|ior| ior.has_group(x)), &soc);
 
     Ok(Sampler {
       force_clpc: false,
@@ -559,6 +602,7 @@ impl Sampler {
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
+      available,
     })
   }
 
@@ -775,7 +819,9 @@ impl Sampler {
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
-    rs.sys_power = match self.get_sys_power() {
+    let sys_power = self.get_sys_power();
+    rs.available = Availability { sys_power: sys_power.is_ok(), ..self.available };
+    rs.sys_power = match sys_power {
       Ok(val) => val.max(rs.all_power),
       Err(_) => 0.0,
     };
@@ -799,10 +845,10 @@ mod tests {
   use core_foundation::string::CFString;
 
   use super::{
-    CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
-    TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
-    cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value, temperature_average,
-    uses_cpu_ticks,
+    Availability, CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources,
+    Sampler, TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies,
+    collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value,
+    temperature_average, uses_cpu_ticks,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
@@ -872,9 +918,11 @@ mod tests {
   /// Sampler without IOReport and SMC, as in a VM: one `_` tier of `cores` and no frequencies.
   fn sampler_without_sources(cores: u8, force_clpc: bool) -> Sampler {
     let tier = CpuTierInfo { label: "_".into(), cores, freqs: vec![] };
+    let soc = SocInfo { cpu_tiers: vec![tier], ..Default::default() };
     Sampler {
       force_clpc,
-      soc: SocInfo { cpu_tiers: vec![tier], ..Default::default() },
+      available: Availability::detect(|_| false, &soc),
+      soc,
       ior: None,
       use_cpu_ticks: true,
       cpu_ticks: None,
@@ -883,6 +931,31 @@ mod tests {
       smc_cpu_keys: vec![],
       smc_gpu_keys: vec![],
       smc_fan_keys: vec![],
+    }
+  }
+
+  #[test]
+  fn detects_sources_per_channel_group_and_table() {
+    let all = |x: &str| ["Energy Model", "CLPC", "PMP", "CPU Stats", "GPU Stats"].contains(&x);
+    let soc = SocInfo { gpu_freqs: vec![0, 444, 1398], ..soc_info(4, 4) };
+    assert_eq!(Availability::detect(all, &soc), Availability::default());
+
+    // a VM: no channels and no tables; system power comes with each sample
+    let tier = CpuTierInfo { label: "C".into(), cores: 4, freqs: vec![] };
+    let vm = SocInfo { cpu_tiers: vec![tier], ..Default::default() };
+    let none = Availability { power: false, sys_power: true, cpu_freq: false, gpu_freq: false };
+    assert_eq!(Availability::detect(|_| false, &vm), none);
+    // channels without tables, tables without channels
+    assert_eq!(Availability::detect(all, &vm), Availability { power: true, ..none });
+    assert_eq!(Availability::detect(|x| x == "PMP", &soc), Availability { power: true, ..none });
+    // a tier without a table: no CPU frequencies
+    let mut one_table = soc.clone();
+    one_table.cpu_tiers[0].freqs.clear();
+    assert!(!Availability::detect(all, &one_table).cpu_freq);
+
+    // each energy group alone gives power: CLPC on macOS 27, Energy Model before it
+    for group in ["Energy Model", "CLPC", "PMP"] {
+      assert!(Availability::detect(|x| x == group, &vm).power, "{group}");
     }
   }
 
@@ -924,6 +997,14 @@ mod tests {
     assert_eq!(rs.cpu_tiers.len(), 1);
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
+    let none = Availability { power: false, sys_power: false, cpu_freq: false, gpu_freq: false };
+    assert_eq!(rs.available, none);
+    // JSON gets one more key with the sources
+    let json = serde_json::to_value(&rs).unwrap();
+    let available = serde_json::json!({
+      "power": false, "sys_power": false, "cpu_freq": false, "gpu_freq": false
+    });
+    assert_eq!(json["available"], available);
 
     // CLPC counters are required whether IOReport has channels or not
     assert!(sampler_without_sources(2, true).get_metrics(10).is_err());

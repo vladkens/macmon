@@ -273,6 +273,12 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
   "sys_power": 5.876533, // Watts
   "ram_power": 0.11635789, // Watts
   "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "available": { // Sources this Mac has; values without one read 0 (a VM has none)
+    "power": true, // CPU, GPU, ANE, RAM and GPU SRAM power
+    "sys_power": true,
+    "cpu_freq": true, // CPU frequencies
+    "gpu_freq": true,
+  },
 }
 ```
 
