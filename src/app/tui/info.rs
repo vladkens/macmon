@@ -367,7 +367,7 @@ mod tests {
     vec![
       file(-1, Kind::Cwd, "", "/Users/vlad/Code/macmon"),
       file(0, Kind::Dev, "rw", "/dev/ttys004"),
-      file(3, Kind::File, "r", LOG),
+      file(3, Kind::File, "r-", LOG),
       file(4, Kind::Tcp, "", "127.0.0.1:52344 → 140.82.112.4:443 (established)"),
       file(5, Kind::Tcp, "", "[::1]:8080 (listen)"),
       file(6, Kind::Udp, "", "0.0.0.0:5353"),
@@ -400,12 +400,12 @@ mod tests {
       file(0, Kind::Dev, "rw", "/dev/null"),
       file(1, Kind::Dev, "rw", "/dev/null"),
       file(2, Kind::Dev, "rw", "/dev/null"),
-      file(3, Kind::File, "r", &format!("{CHROME}/Resources/icudtl.dat")),
-      file(4, Kind::File, "r", rules),
+      file(3, Kind::File, "r-", &format!("{CHROME}/Resources/icudtl.dat")),
+      file(4, Kind::File, "r-", rules),
       file(5, Kind::Kqueue, "", ""),
-      file(6, Kind::File, "r", &format!("{CHROME}/Resources/chrome_100_percent.pak")),
+      file(6, Kind::File, "r-", &format!("{CHROME}/Resources/chrome_100_percent.pak")),
       file(7, Kind::Unix, "", "/var/run/mDNSResponder"),
-      file(8, Kind::File, "r", rules),
+      file(8, Kind::File, "r-", rules),
       file(
         9,
         Kind::File,
@@ -529,7 +529,7 @@ mod tests {
     // the list scrolls to keep the selection on screen
     assert!(press(&mut info, &fake, End));
     let shown = rows(&render(&mut info, 80, 8));
-    assert!(shown[2].starts_with("│ file  r   ~/Library/") && shown[6].starts_with("│ unix "));
+    assert!(shown[2].starts_with("│ file  r-  ~/Library/") && shown[6].starts_with("│ unix "));
   }
 
   #[test]
@@ -576,8 +576,8 @@ mod tests {
   fn e_reveals_the_exe_the_cwd_dirs_and_files_only() {
     // a file the kernel gives no path for isn't listed
     let mut files = files();
-    files.push(file(10, Kind::File, "r", ""));
-    files.push(file(11, Kind::Dir, "r", "/Users/vlad/Downloads"));
+    files.push(file(10, Kind::File, "r-", ""));
+    files.push(file(11, Kind::Dir, "r-", "/Users/vlad/Downloads"));
     let (mut info, fake) = info(Ok(files));
     // `e` on every row: not the sockets; `f` nothing
     for _ in 0..info.rows().len() {
@@ -748,10 +748,10 @@ mod tests {
       "├─ / filter ───────────────────────────────────────────────────────────────────────────────────────┤",
       "│ exe       /Applications/Google Chrome.app/…/Contents/MacOS/Google Chrome Helper (Renderer)       │",
       "│ cwd       /                                                                                      │",
-      "│ file  r   /Applications/Google Chrome.app/…/131.0.6778.86/Resources/chrome_100_percent.pak       │",
-      "│ file  r   /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/icudtl.dat          │",
+      "│ file  r-  /Applications/Google Chrome.app/…/131.0.6778.86/Resources/chrome_100_percent.pak       │",
+      "│ file  r-  /Applications/Google Chrome.app/…/Versions/131.0.6778.86/Resources/icudtl.dat          │",
       "│ file  rw  ~/Library/Application Support/Google/Chrome/Default/Shared Dictionary/db               │",
-      "│ file  r   ~/Library/…/Google/Chrome/Subresource Filter/Indexed Rules/37/9.57.0/Ruleset Data  ×2  │",
+      "│ file  r-  ~/Library/…/Google/Chrome/Subresource Filter/Indexed Rules/37/9.57.0/Ruleset Data  ×2  │",
       "│ tcp       192.168.1.20:50122 → 140.82.112.4:443 (established)                                    │",
       "│ unix      /var/run/mDNSResponder                                                                 │",
       "│                                                                                                  │",
@@ -839,7 +839,7 @@ mod tests {
       "├─ / filter ───────────────────────────────────────────────┤",
       "│ exe       /System/Library/…/Resources/WindowServer       ↑",
       "│ cwd       ~/Code/macmon                                  ┃",
-      "│ file  r   ~/Library/…/000003.log                         ┃",
+      "│ file  r-  ~/Library/…/000003.log                         ┃",
       "│ tcp       ….0.0.1:52344 → 140.82.112.4:443 (established) │",
       "│ tcp       [::1]:8080 (listen)                            ↓",
       "╰───────────────────────────────────────────── ? | q back ─╯",
@@ -865,7 +865,7 @@ mod tests {
   #[test]
   fn a_scrollbar_on_the_right_border_shows_where_the_rows_on_screen_are() {
     // the exe and 30 files, 8 rows on screen at 60x12
-    let files = (0..30).map(|fd| file(fd, Kind::File, "r", &format!("/tmp/{fd:02}"))).collect();
+    let files = (0..30).map(|fd| file(fd, Kind::File, "r-", &format!("/tmp/{fd:02}"))).collect();
     let (mut info, fake) = info(Ok(files));
     let border = |info: &mut Info| {
       let buf = render(info, 60, 12);

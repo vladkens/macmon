@@ -1564,7 +1564,7 @@ mod tests {
     let (app, fake) = kill_app();
     let cwd = OpenFile { fd: None, kind: Kind::Cwd, text: "/".into(), mode: "" };
     let log =
-      OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r" };
+      OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r-" };
     fake.0.borrow_mut().files.insert(631, Ok(vec![cwd, log]));
     (app, fake)
   }
@@ -1581,7 +1581,7 @@ mod tests {
     assert!(proc_row(&buf, 2).starts_with("├─ / filter ───"), "{}", proc_row(&buf, 2));
     assert!(proc_row(&buf, 3).starts_with(&format!("│ exe       {WINDOW_SERVER} ")));
     assert!(proc_row(&buf, 4).starts_with("│ cwd       / "), "{}", proc_row(&buf, 4));
-    assert!(proc_row(&buf, 5).starts_with("│ file  r   /var/log/system.log "));
+    assert!(proc_row(&buf, 5).starts_with("│ file  r-  /var/log/system.log "));
     assert_eq!(proc_row(&buf, 29), format!("╰{} ? | q back ─╯", "─".repeat(185)));
 
     // it takes every key, the list's and the global ones (`q` closes it); Ctrl-C still quits
