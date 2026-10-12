@@ -669,7 +669,8 @@ impl Sampler {
 
       if x.group == "GPU Stats" && x.subgroup == GPU_FREQ_DICE_SUBG {
         match x.channel.as_str() {
-          "GPUPH" => {
+          // no table without a pmgr node (a VM); [0] is the OFF state
+          "GPUPH" if self.soc.gpu_freqs.len() > 1 => {
             let (freq, scaled_ratio, active_ratio) = calc_freq(x.item, &self.soc.gpu_freqs[1..]);
             rs.gpu_freq_mhz = freq;
             rs.gpu_scaled_ratio = scaled_ratio;
@@ -790,6 +791,11 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
   use std::collections::{HashMap, HashSet};
+  use std::time::Duration;
+
+  use core_foundation::base::TCFType;
+  use core_foundation::dictionary::CFDictionary;
+  use core_foundation::string::CFString;
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
@@ -798,7 +804,8 @@ mod tests {
     uses_cpu_ticks,
   };
   use crate::sources::{
-    CpuTierInfo, IOHIDSensors, SocInfo, cpu_load_ticks, cpu_tier_infos, tiers_from_perflevels,
+    CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
+    tiers_from_perflevels,
   };
 
   #[test]
@@ -920,6 +927,24 @@ mod tests {
 
     // CLPC counters are required whether IOReport has channels or not
     assert!(sampler_without_sources(2, true).get_metrics(10).is_err());
+  }
+
+  #[test]
+  fn gpu_states_without_a_frequency_table_are_skipped() {
+    let item = CFDictionary::<CFString, CFString>::from_CFType_pairs(&[]);
+    let gpuph = || IOReportIteratorItem {
+      group: "GPU Stats".into(),
+      subgroup: "GPU Performance States".into(),
+      channel: "GPUPH".into(),
+      unit: "24Mticks".into(),
+      item: item.as_concrete_TypeRef(),
+    };
+    for gpu_freqs in [vec![], vec![0]] {
+      let mut sampler = sampler_without_sources(4, false);
+      sampler.soc.gpu_freqs = gpu_freqs;
+      let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1)).unwrap();
+      assert_eq!((rs.gpu_freq_mhz, rs.gpu_active_ratio), (0, 0.0));
+    }
   }
 
   #[test]
