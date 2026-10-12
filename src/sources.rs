@@ -512,7 +512,8 @@ pub struct SocInfo {
   /// Installed unified memory size in GiB.
   pub memory_gb: u16,
   /// CPU tiers (core types) from the lowest to the highest: `E`, `P` on M1-M4, `E`, `S` on M5,
-  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6.
+  /// `P`, `S` on M5 Pro/Max, `E`, `P`, `S` on M6, a single `C` on a chip with one core type (a
+  /// macOS VM).
   pub cpu_tiers: Vec<CpuTierInfo>,
   /// Number of cores of the lowest CPU tier.
   #[deprecated(since = "0.10.0", note = "use `cpu_tiers`")]
@@ -541,7 +542,7 @@ pub struct SocInfo {
 /// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CpuTierInfo {
-  /// Tier label: `E`, `P` or `S`.
+  /// Tier label: `E`, `P` or `S`, or `C` for the single tier of a chip with one core type (a VM).
   pub label: String,
   /// Number of cores.
   pub cores: u8,

@@ -106,7 +106,8 @@ pub struct CpuCoreMetrics {
 /// Metrics for one CPU tier (core type) of [`Metrics::cpu_tiers`].
 #[derive(Debug, Default, Serialize)]
 pub struct CpuTierMetrics {
-  /// Tier label: `E`, `P` or `S`, as in [`SocInfo::cpu_tiers`].
+  /// Tier label: `E`, `P` or `S`, or `C` for the single tier of a chip with one core type (a VM),
+  /// as in [`SocInfo::cpu_tiers`].
   pub label: String,
   /// Tier frequency in MHz.
   pub freq_mhz: u32,
