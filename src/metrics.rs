@@ -293,6 +293,22 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
 }
 
 impl Metrics {
+  // Frequencies read 0 without their source, as `available` says, also where a CPU table alone
+  // gave a tier its minimum frequency or a tier without a table left the others with theirs.
+  fn without_unavailable_freqs(mut self, available: Availability) -> Self {
+    if !available.gpu_freq {
+      self.gpu_freq_mhz = 0;
+    }
+    if available.cpu_freq {
+      return self;
+    }
+    for tier in &mut self.cpu_tiers {
+      tier.freq_mhz = 0;
+      tier.cores.iter_mut().for_each(|core| core.freq_mhz = 0);
+    }
+    self.with_deprecated_tiers()
+  }
+
   // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
   #[allow(deprecated)]
   fn with_deprecated_tiers(mut self) -> Self {
@@ -814,7 +830,8 @@ impl Sampler {
       }
       self.cpu_ticks = Some(cur);
     }
-    let mut rs = aggregate_ioreport_metrics(rs, &self.soc);
+    let mut rs =
+      aggregate_ioreport_metrics(rs, &self.soc).without_unavailable_freqs(self.available);
 
     rs.memory = self.get_mem()?;
     rs.temp = self.get_temp()?;
@@ -1167,6 +1184,30 @@ mod tests {
 
     assert_eq!(rs.ecpu_freq_mhz, 800);
     assert_eq!(rs.pcpu_freq_mhz, 1800);
+  }
+
+  #[test]
+  #[allow(deprecated)]
+  fn unavailable_frequencies_read_zero() {
+    // the table floor of one tier and a read core frequency of the other, and a GPU frequency
+    let metrics = || {
+      let tiers = cpu_tiers(vec![core(0, 0, 0, 0.0, 0.0)], vec![core(0, 0, 3000, 0.5, 0.5)]);
+      let rs = Metrics { cpu_tiers: tiers, gpu_freq_mhz: 900, ..Default::default() };
+      aggregate_ioreport_metrics(rs, &soc_info(1, 1))
+    };
+    let freqs = |rs: &Metrics| {
+      let tiers = rs.cpu_tiers.iter().map(|x| (x.freq_mhz, x.cores[0].freq_mhz));
+      let cores = [&rs.ecpu_cores, &rs.pcpu_cores].map(|x| x[0].freq_mhz);
+      (tiers.collect::<Vec<_>>(), (rs.ecpu_freq_mhz, rs.pcpu_freq_mhz), cores, rs.gpu_freq_mhz)
+    };
+
+    let all = metrics().without_unavailable_freqs(Availability::default());
+    assert_eq!(freqs(&all), (vec![(800, 0), (3000, 3000)], (800, 3000), [0, 3000], 900));
+    let none = Availability { cpu_freq: false, gpu_freq: false, ..Default::default() };
+    let rs = metrics().without_unavailable_freqs(none);
+    assert_eq!(freqs(&rs), (vec![(0, 0), (0, 0)], (0, 0), [0, 0], 0));
+    // usage stays
+    assert_eq!((rs.pcpu_scaled_ratio, rs.cpu_tiers[1].cores[0].active_ratio), (0.5, 0.5));
   }
 
   #[test]
