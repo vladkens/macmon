@@ -177,7 +177,7 @@ macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="E"} 0.18
 macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="P"} 0.04
 ```
 
-`macmon_ecpu_*` and `macmon_pcpu_*` are still exported for the lowest and the highest tier. Gauges without a source on the Mac (temperatures, power and frequencies in a VM) are left out.
+`macmon_ecpu_*` and `macmon_pcpu_*` are still exported for the lowest and the highest tier. In a macOS VM the power and frequency gauges are left out.
 
 </details>
 
@@ -208,7 +208,7 @@ Both the CLI and the Rust library use known CLPC counters automatically, and `Sa
 
 ### Output format
 
-The `pipe` command and the HTTP `/json` endpoint return the same metrics:
+The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a macOS VM (`"virtual_machine": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
 
 <details>
 <summary>JSON example</summary>
@@ -273,12 +273,6 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics:
   "sys_power": 5.876533, // Watts
   "ram_power": 0.11635789, // Watts
   "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
-  "available": { // Sources this Mac has; values without one read 0 (a VM has none)
-    "power": true, // CPU, GPU, ANE, RAM and GPU SRAM power
-    "sys_power": true,
-    "cpu_freq": true, // CPU frequencies
-    "gpu_freq": true,
-  },
 }
 ```
 

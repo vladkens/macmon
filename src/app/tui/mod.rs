@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use info::Info;
 use kill::Kill;
 use layout::{LayoutPlan, compute_layout};
-use macmon::{Availability, Metrics, Sampler, SocInfo};
+use macmon::{Metrics, Sampler, SocInfo};
 use proc_view::ProcView;
 use ratatui::crossterm::event::{
   self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, KeyCode,
@@ -295,8 +295,6 @@ pub struct App {
   soc: SocInfo,
   mem: MemoryStore,
 
-  /// Sources of the latest sample; every one until the first sample.
-  available: Availability,
   cpu_power: PowerStore,
   gpu_power: PowerStore,
   ane_power: PowerStore,
@@ -342,12 +340,6 @@ impl App {
   }
 
   fn update_metrics(&mut self, data: Metrics) {
-    let lost_power = self.available.power && !data.available.power;
-    self.available = data.available;
-    // a process sample taken before the first metrics sample still has its power readings
-    if lost_power && let Some(procs) = self.proc_view.procs().map(<[_]>::to_vec) {
-      self.proc_view.set_procs(self.proc_power(procs));
-    }
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
@@ -363,15 +355,6 @@ impl App {
     self.fans.push(data.fans);
 
     self.mem.push(data.memory);
-  }
-
-  /// `procs`, without power readings when the Mac has no power counters (a VM): process energy
-  /// doesn't move there.
-  fn proc_power(&self, mut procs: Vec<ProcInfo>) -> Vec<ProcInfo> {
-    if !self.available.power {
-      procs.iter_mut().for_each(|proc| proc.power_w = None);
-    }
-    procs
   }
 
   fn procs_visible(&self) -> bool {
@@ -392,10 +375,14 @@ impl App {
 
   /// Stores a process sample started in the panel's `showing`. Only one of the current showing
   /// gets in: one still in flight when the panel got hidden is dropped, also when the panel is
-  /// back by now, so a re-shown panel reads "collecting…" until its own first sample.
-  fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
+  /// back by now, so a re-shown panel reads "collecting…" until its own first sample. In a VM no
+  /// process has a power reading: process energy doesn't move there.
+  fn update_procs(&mut self, showing: u64, mut procs: Vec<ProcInfo>) {
+    if self.soc.virtual_machine {
+      procs.iter_mut().for_each(|proc| proc.power_w = None);
+    }
     if self.procs_shown.showing() == Some(showing) {
-      self.proc_view.set_procs(self.proc_power(procs));
+      self.proc_view.set_procs(procs);
       if let Some(info) = &mut self.info {
         info.update_proc(self.proc_view.procs().unwrap_or_default());
         info.refresh(&*self.kill.sys);
@@ -535,8 +522,8 @@ impl App {
 
   /// Screen layout for the current settings and metrics.
   fn layout(&self, area: Rect) -> LayoutPlan {
-    let power = self.available.power || self.available.sys_power;
-    compute_layout(area, self.cfg.show_procs, self.clusters.items.len(), power)
+    let (procs, clusters) = (self.cfg.show_procs, self.clusters.items.len());
+    compute_layout(area, procs, clusters, !self.soc.virtual_machine)
   }
 
   /// Layout of a frame for the window `area`, with the state that follows the window updated
@@ -604,9 +591,7 @@ mod tests {
   use std::sync::{Arc, Mutex, RwLock, mpsc};
   use std::time::Duration;
 
-  use macmon::{
-    Availability, CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics,
-  };
+  use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::{Buffer, CellDiffOption};
@@ -1331,14 +1316,11 @@ mod tests {
       chip_name: "Apple M2 (Virtual)".to_string(),
       memory_gb: 8,
       cpu_tiers: vec![tier],
+      virtual_machine: true,
       ..Default::default()
     };
     let mut app = App::from_parts(soc, Config::default());
-    // and no power counters, system power sensor or frequency tables
-    let available =
-      Availability { power: false, sys_power: false, cpu_freq: false, gpu_freq: false };
-    let metrics =
-      Metrics { cpu_tiers: vec![cpu_tier("_", 0, 0.63, 0.63)], available, ..Default::default() };
+    let metrics = Metrics { cpu_tiers: vec![cpu_tier("_", 0, 0.63, 0.63)], ..Default::default() };
     app.update_metrics(Metrics { memory: test_metrics().memory, ..metrics });
     // own processes have an energy counter, but it does not move in a VM; launchd has none
     let app = &mut with_procs(app, varied_procs());
@@ -1366,38 +1348,17 @@ mod tests {
   }
 
   #[test]
-  fn processes_sampled_before_the_first_metrics_lose_power_without_counters() {
-    // the process sample comes first: power readings and the note while every source is assumed
-    let app = &mut with_procs(App::from_parts(test_soc(), Config::default()), varied_procs());
-    let power = |app: &mut App| {
+  fn only_a_vm_drops_the_power_row_and_process_power() {
+    // processes sampled before the first metrics sample: the chip already tells a VM
+    for (virtual_machine, boxes, power, note) in [(false, 8, "1.50W", true), (true, 4, "-", false)]
+    {
+      let soc = SocInfo { virtual_machine, ..test_soc() };
+      let app = &mut with_procs(App::from_parts(soc, Config::default()), varied_procs());
       let buf = render_buffer(app, 200, 50);
+      assert_eq!(app.layout(buf.area).boxes.len(), boxes, "vm {virtual_machine}");
       let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-      (words[6].clone(), row(&buf, 49).contains("POWER: own processes only"))
-    };
-    assert_eq!(power(app), ("1.50W".to_string(), true));
-
-    // the first metrics sample has no power counters: the stored list loses them at once
-    let none = Availability { power: false, sys_power: false, cpu_freq: false, gpu_freq: false };
-    app.update_metrics(Metrics { available: none, ..test_metrics() });
-    assert_eq!(power(app), ("-".to_string(), false));
-  }
-
-  #[test]
-  fn the_power_row_stays_with_any_power_source() {
-    // every source (a Mac; the other tests), the counters or the system sensor alone
-    let none = Availability { power: false, sys_power: false, cpu_freq: false, gpu_freq: false };
-    let cases = [
-      (Availability::default(), 8, "1.50W"),
-      (Availability { power: true, ..none }, 8, "1.50W"),
-      (Availability { sys_power: true, ..none }, 8, "-"),
-      (none, 4, "-"),
-    ];
-    for (available, boxes, power) in cases {
-      let app = &mut with_procs(test_app_with(|m| m.available = available), varied_procs());
-      let buf = render_buffer(app, 200, 50);
-      assert_eq!(app.layout(buf.area).boxes.len(), boxes, "{available:?}");
-      let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-      assert_eq!((words[2].as_str(), words[6].as_str()), ("WindowServer", power), "{available:?}");
+      assert_eq!((words[2].as_str(), words[6].as_str()), ("WindowServer", power));
+      assert_eq!(row(&buf, 49).contains("POWER: own processes only"), note);
     }
   }
 
