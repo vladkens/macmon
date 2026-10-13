@@ -1823,9 +1823,9 @@ mod tests {
 
   #[test]
   fn virtual_machine_flag_follows_kern_hv_vmm_present() {
-    // 0 on a Mac, 1 in a VM; CI runners are VMs, so the value itself isn't asserted
+    // 0 or absent on a Mac, 1 in a VM; CI runners are VMs, so the value itself isn't asserted
     let present = sysctl_u32("kern.hv_vmm_present");
-    assert!(matches!(present, Some(0 | 1)), "{present:?}");
+    assert!(matches!(present, None | Some(0 | 1)), "{present:?}");
     assert_eq!(in_virtual_machine(), present == Some(1));
     // JSON: one more key in the soc object
     let json = serde_json::to_value(SocInfo { virtual_machine: true, ..Default::default() });
