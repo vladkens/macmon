@@ -45,6 +45,14 @@ jobs:
             ~/.cargo/git/db/
 
       - run: rustup update --no-self-update stable && rustup default stable
+
+      # the package version (Cargo.toml and Cargo.lock) from the last release tag, e.g. 0.9.0-12-g3672a1b
+      - name: Set version from git describe
+        run: |
+          VERSION=$(git describe --tags --match 'v[0-9]*')
+          sed -i '' "/^name = \"macmon\"$/{n;s/^version = .*/version = \"${VERSION#v}\"/;}" Cargo.toml Cargo.lock
+          grep -x "version = \"${VERSION#v}\"" Cargo.toml
+
       - run: make build
 
       - name: Archive binary
@@ -75,8 +83,6 @@ jobs:
     permissions:
       contents: write
       id-token: write
-    env:
-      MACMON_RELEASE: 1 # plain version, not git describe (the tag is created after the build)
     steps:
       - uses: actions/checkout@v7
         with:

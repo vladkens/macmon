@@ -74,9 +74,7 @@ fn acc_clusters_text(data: &[u8]) -> (String, String) {
 pub fn print_debug() -> WithError<()> {
   let os_ver = sysctl_str("kern.osproductversion").unwrap_or("Unknown".into());
   let os_build = sysctl_str("kern.osversion").unwrap_or("Unknown".into());
-  // the app's version from build.rs (`app` feature), the crate version for the library alone
-  let version = option_env!("MACMON_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-  println!("macmon {version} | OS: macOS {os_ver} ({os_build})");
+  println!("macmon {} | OS: macOS {os_ver} ({os_build})", env!("CARGO_PKG_VERSION"));
 
   print_divider("Hardware");
   let report = profiler_report();

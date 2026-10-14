@@ -390,7 +390,7 @@ impl App {
   /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, `macmon vX` right; the
   /// version gives way to the chip.
   fn metrics_titles(&self) -> Titles<'static> {
-    let version = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("MACMON_VERSION"));
+    let version = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     Titles::new(self.chip_title()).right(text(version))
   }
 

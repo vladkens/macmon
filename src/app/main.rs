@@ -124,7 +124,7 @@ enum Commands {
 /// Sudoless performance monitoring CLI tool for Apple Silicon processors
 /// https://github.com/vladkens/macmon
 #[derive(Debug, Parser)]
-#[command(version = env!("MACMON_VERSION"), verbatim_doc_comment)]
+#[command(version, verbatim_doc_comment)]
 struct Cli {
   #[command(subcommand)]
   command: Option<Commands>,
@@ -345,13 +345,6 @@ mod tests {
     for value in ["0", "-1", "nope"] {
       assert!(Cli::try_parse_from(["macmon", "stress", "all", "--pulse", value]).is_err());
     }
-  }
-
-  #[test]
-  fn version_is_the_build_version() {
-    // `0.9.0-12-g3672a1b` between releases (build.rs), so clap's default would differ
-    let expected = format!("macmon {}\n", env!("MACMON_VERSION"));
-    assert_eq!(Cli::command().render_version(), expected);
   }
 
   #[test]
