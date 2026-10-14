@@ -1468,7 +1468,7 @@ mod tests {
       words(2),
       ["│", "631", "WindowServer", "vlad", "2d05h", "25.0", "300M", "40.0", "1.50W", "│"]
     );
-    let safari = ["│", "2301", "Safari", "vlad", "12:34", "12.0", "1.5G", "5.0", "0.80W", "│"];
+    let safari = ["│", "2301", "Safari", "vlad", "12:34.00", "12.0", "1.5G", "5.0", "0.80W", "│"];
     assert_eq!(words(3), safari);
     let launchd = ["│", "1", "launchd", "root", "3:25:07", "0.0", "20M", "0.0", "-", "│"];
     assert_eq!(words(4), launchd);

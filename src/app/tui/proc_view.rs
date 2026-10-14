@@ -176,13 +176,13 @@ fn format_mem(bytes: u64) -> String {
   }
 }
 
-/// CPU time in whole seconds, 8 cells up to 9999 days: `M:SS` under an hour, `H:MM:SS` under a
-/// day, then days and hours (`2d03h`).
+/// CPU time, cut and 8 cells up to 9999 days, as htop's TIME+: `M:SS.hh` (hundredths) under an
+/// hour, `H:MM:SS` under a day, then days and hours (`2d03h`).
 fn format_time(ns: u64) -> String {
-  let secs = ns / 1_000_000_000;
+  let (secs, hundredths) = (ns / 1_000_000_000, ns / 10_000_000 % 100);
   let (days, hours, mins, secs) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
   match (days, hours) {
-    (0, 0) => format!("{mins}:{secs:02}"),
+    (0, 0) => format!("{mins}:{secs:02}.{hundredths:02}"),
     (0, _) => format!("{hours}:{mins:02}:{secs:02}"),
     _ => format!("{days}d{hours:02}h"),
   }
@@ -956,9 +956,9 @@ fn pct_cell(pct: f32) -> Span<'static> {
   load_cell(pct, pct / 100.0, format!("{pct:.1}"))
 }
 
-/// CPU time, dim under a second (`0:00`).
+/// CPU time; zero is dim.
 fn time_cell(ns: u64) -> Span<'static> {
-  if ns < 1_000_000_000 { dim(format_time(ns)) } else { text(format_time(ns)) }
+  if ns == 0 { dim(format_time(ns)) } else { text(format_time(ns)) }
 }
 
 /// Power in watts, `≥` before a lower bound; a dim `-` without a reading.
@@ -1463,10 +1463,11 @@ mod tests {
   fn cpu_time_reads_like_top() {
     let sec = |s: u64| s * 1_000_000_000;
     let cases = [
-      (0, "0:00"),
-      (sec(1) - 1, "0:00"), // whole seconds, cut
-      (sec(59), "0:59"),
-      (sec(3599), "59:59"),
+      (0, "0:00.00"),
+      (9_999_999, "0:00.00"), // cut to hundredths
+      (sec(1) + 970_000_000, "0:01.97"),
+      (sec(59), "0:59.00"),
+      (sec(3600) - 1, "59:59.99"),
       (sec(3600), "1:00:00"),
       (sec(86_399), "23:59:59"),
       (sec(86_400), "1d00h"),
