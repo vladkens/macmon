@@ -57,6 +57,23 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
+  // A VM has no power counters and frequency tables: their gauges are left out there, not 0.
+  let hw = !soc.vm;
+  macro_rules! hw_gauge {
+    ($($args:tt)*) => {
+      if hw {
+        gauge!($($args)*);
+      }
+    };
+  }
+  macro_rules! hw_tier_gauge {
+    ($($args:tt)*) => {
+      if hw {
+        tier_gauge!($($args)*);
+      }
+    };
+  }
+
   let mut out = String::new();
   if let Some(value) = m.temp.cpu_temp_avg {
     gauge!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
@@ -71,40 +88,28 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
-  // a VM has no power counters and frequency tables: their gauges are left out, not 0
-  let hw = !soc.virtual_machine;
-  if hw {
-    gauge!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
-  }
+  hw_gauge!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
   gauge!(out, "ecpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Lowest CPU tier frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
   gauge!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.ecpu_scaled_ratio);
   gauge!(out, "ecpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Lowest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
-  if hw {
-    gauge!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
-  }
+  hw_gauge!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
   gauge!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
   gauge!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
   gauge!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
-  if hw {
-    tier_gauge!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
-  }
+  hw_tier_gauge!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
   tier_gauge!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
   tier_gauge!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
-  if hw {
-    gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
-  }
+  hw_gauge!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
   gauge!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
   gauge!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
   gauge!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
-  if hw {
-    gauge!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
-    gauge!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
-    gauge!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-    gauge!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
-    gauge!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
-    gauge!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-    gauge!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
-  }
+  hw_gauge!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
+  hw_gauge!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
+  hw_gauge!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
+  hw_gauge!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  hw_gauge!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
+  hw_gauge!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
+  hw_gauge!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -307,8 +312,8 @@ mod tests {
   fn a_vm_has_no_power_and_frequency_gauges() {
     let tier = CpuTierMetrics { label: "_".into(), ..Default::default() };
     let metrics = Metrics { cpu_tiers: vec![tier], ..Default::default() };
-    let types = |virtual_machine| {
-      let soc = SocInfo { virtual_machine, ..Default::default() };
+    let types = |vm| {
+      let soc = SocInfo { vm, ..Default::default() };
       let output = to_prometheus(&metrics, &soc);
       let types = output.lines().filter_map(|x| x.strip_prefix("# TYPE macmon_"));
       types.map(|x| x.trim_end_matches(" gauge").to_string()).collect::<Vec<_>>()

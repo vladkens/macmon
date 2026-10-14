@@ -540,7 +540,7 @@ pub struct SocInfo {
   /// The machine is a virtual machine (sysctl `kern.hv_vmm_present`), such as a macOS VM under
   /// Apple Virtualization. A VM has no power counters, frequency tables, temperature sensors or
   /// fans: power and frequencies read 0, temperatures None, and fans are empty.
-  pub virtual_machine: bool,
+  pub vm: bool,
 }
 
 /// One CPU tier (core type) of [`SocInfo::cpu_tiers`].
@@ -936,11 +936,11 @@ fn load_soc_info() -> WithError<SocInfo> {
   }
 
   let freqs = has_pmgr.then_some((ecpu_freqs, pcpu_freqs, gpu_freqs));
-  Ok(SocInfo { virtual_machine: in_virtual_machine(), ..soc_info_from(hw, freqs)? })
+  Ok(SocInfo { vm: in_vm(), ..soc_info_from(hw, freqs)? })
 }
 
 /// Whether macOS runs in a virtual machine: `kern.hv_vmm_present` is 1 there, 0 or absent on a Mac.
-fn in_virtual_machine() -> bool {
+fn in_vm() -> bool {
   sysctl_u32("kern.hv_vmm_present").is_some_and(|x| x != 0)
 }
 
@@ -1822,14 +1822,14 @@ mod tests {
   }
 
   #[test]
-  fn virtual_machine_flag_follows_kern_hv_vmm_present() {
+  fn vm_flag_follows_kern_hv_vmm_present() {
     // 0 or absent on a Mac, 1 in a VM; CI runners are VMs, so the value itself isn't asserted
     let present = sysctl_u32("kern.hv_vmm_present");
     assert!(matches!(present, None | Some(0 | 1)), "{present:?}");
-    assert_eq!(in_virtual_machine(), present == Some(1));
+    assert_eq!(in_vm(), present == Some(1));
     // JSON: one more key in the soc object
-    let json = serde_json::to_value(SocInfo { virtual_machine: true, ..Default::default() });
-    assert_eq!(json.unwrap()["virtual_machine"], true);
+    let json = serde_json::to_value(SocInfo { vm: true, ..Default::default() });
+    assert_eq!(json.unwrap()["vm"], true);
   }
 
   #[test]

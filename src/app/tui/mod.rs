@@ -378,7 +378,7 @@ impl App {
   /// back by now, so a re-shown panel reads "collecting…" until its own first sample. In a VM no
   /// process has a power reading: process energy doesn't move there.
   fn update_procs(&mut self, showing: u64, mut procs: Vec<ProcInfo>) {
-    if self.soc.virtual_machine {
+    if self.soc.vm {
       procs.iter_mut().for_each(|proc| proc.power_w = None);
     }
     if self.procs_shown.showing() == Some(showing) {
@@ -523,7 +523,7 @@ impl App {
   /// Screen layout for the current settings and metrics.
   fn layout(&self, area: Rect) -> LayoutPlan {
     let (procs, clusters) = (self.cfg.show_procs, self.clusters.items.len());
-    compute_layout(area, procs, clusters, !self.soc.virtual_machine)
+    compute_layout(area, procs, clusters, !self.soc.vm)
   }
 
   /// Layout of a frame for the window `area`, with the state that follows the window updated
@@ -1316,7 +1316,7 @@ mod tests {
       chip_name: "Apple M2 (Virtual)".to_string(),
       memory_gb: 8,
       cpu_tiers: vec![tier],
-      virtual_machine: true,
+      vm: true,
       ..Default::default()
     };
     let mut app = App::from_parts(soc, Config::default());
@@ -1350,12 +1350,11 @@ mod tests {
   #[test]
   fn only_a_vm_drops_the_power_row_and_process_power() {
     // processes sampled before the first metrics sample: the chip already tells a VM
-    for (virtual_machine, boxes, power, note) in [(false, 8, "1.50W", true), (true, 4, "-", false)]
-    {
-      let soc = SocInfo { virtual_machine, ..test_soc() };
+    for (vm, boxes, power, note) in [(false, 8, "1.50W", true), (true, 4, "-", false)] {
+      let soc = SocInfo { vm, ..test_soc() };
       let app = &mut with_procs(App::from_parts(soc, Config::default()), varied_procs());
       let buf = render_buffer(app, 200, 50);
-      assert_eq!(app.layout(buf.area).boxes.len(), boxes, "vm {virtual_machine}");
+      assert_eq!(app.layout(buf.area).boxes.len(), boxes, "vm {vm}");
       let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
       assert_eq!((words[2].as_str(), words[6].as_str()), ("WindowServer", power));
       assert_eq!(row(&buf, 49).contains("POWER: own processes only"), note);
