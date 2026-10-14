@@ -378,16 +378,28 @@ impl Iterator for IOReportIterator {
   }
 }
 
+// MARK: Mach Bindings
+
+// Exported by libSystem; libc deprecates its declarations of these and 1.0 drops them.
+unsafe extern "C" {
+  fn mach_host_self() -> libc::mach_port_t;
+  static mach_task_self_: libc::mach_port_t;
+}
+
+/// The task port cached by libSystem, as the C `mach_task_self()` macro reads it: the function of
+/// that name is a trap that adds a send right reference on every call.
+fn mach_task_self() -> libc::mach_port_t {
+  unsafe { mach_task_self_ }
+}
+
 // MARK: CPU ticks
 
 /// User, system, idle and nice ticks of each CPU (`cpuN` order), from
 /// `host_processor_info(PROCESSOR_CPU_LOAD_INFO)`.
 pub(crate) fn cpu_load_ticks() -> Option<Vec<[u32; 4]>> {
   let (mut count, mut info, mut info_count) = (0, null_mut(), 0);
-  // todo: https://github.com/JohnTitor/mach2/issues/34
-  #[allow(deprecated)]
   let rc = unsafe {
-    let host = libc::mach_host_self();
+    let host = mach_host_self();
     libc::host_processor_info(
       host,
       libc::PROCESSOR_CPU_LOAD_INFO,
@@ -402,13 +414,8 @@ pub(crate) fn cpu_load_ticks() -> Option<Vec<[u32; 4]>> {
 
   let ticks = unsafe { std::slice::from_raw_parts(info as *const u32, info_count as usize) };
   let cpus = ticks.as_chunks::<4>().0.iter().take(count as usize).copied().collect();
-  #[allow(deprecated)]
   unsafe {
-    libc::vm_deallocate(
-      libc::mach_task_self(),
-      info as usize,
-      info_count as usize * size_of::<u32>(),
-    )
+    libc::vm_deallocate(mach_task_self(), info as usize, info_count as usize * size_of::<u32>())
   };
   Some(cpus)
 }
@@ -440,10 +447,8 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
     let mut count: u32 = libc::HOST_VM_INFO64_COUNT as _;
     let mut stats = std::mem::zeroed::<libc::vm_statistics64>();
 
-    // todo: https://github.com/JohnTitor/mach2/issues/34
-    #[allow(deprecated)]
     let ret_code = libc::host_statistics64(
-      libc::mach_host_self(),
+      mach_host_self(),
       libc::HOST_VM_INFO64,
       &mut stats as *mut _ as *mut _,
       &mut count,
@@ -1408,7 +1413,6 @@ impl Drop for IOHIDSensors {
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
-  fn mach_task_self() -> u32;
   fn IOServiceOpen(device: u32, a: u32, b: u32, c: *mut u32) -> i32;
   fn IOServiceClose(conn: u32) -> i32;
   fn IOConnectCallStructMethod(
@@ -1849,6 +1853,17 @@ mod tests {
         ("S".into(), 2, vec![1440, 4788]),
       ]
     );
+  }
+
+  #[test]
+  fn mach_host_calls_read_this_machine() {
+    let ticks = cpu_load_ticks().unwrap();
+    assert_eq!(ticks.len() as u32, sysctl_u32("hw.ncpu").unwrap());
+    assert!(ticks.iter().any(|x| x.iter().any(|&t| t > 0)));
+
+    let (usage, total) = libc_ram().unwrap();
+    assert_eq!(total, sysctl_u64("hw.memsize").unwrap());
+    assert!(usage > 0 && usage <= total, "{usage} / {total}");
   }
 
   #[test]
