@@ -46,11 +46,11 @@ const COLUMNS: [ProcSort; 8] = [
   ProcSort::Pid,
   ProcSort::Name,
   ProcSort::User,
-  ProcSort::Cpu,
   ProcSort::Time,
+  ProcSort::Cpu,
   ProcSort::Mem,
-  ProcSort::Power,
   ProcSort::Gpu,
+  ProcSort::Power,
 ];
 
 /// Columns dropped (in this order) when the table is too narrow, each while NAME would get fewer
@@ -104,14 +104,15 @@ impl ProcSort {
     !matches!(self, Self::Pid | Self::Name | Self::User)
   }
 
-  /// Next column in the `s` cycle: CPU → TIME → MEM → POWER → GPU → PID → NAME → USER → CPU.
+  /// Next column in the `s` cycle: the load columns as on screen, then TIME and the text columns:
+  /// CPU → MEM → GPU → POWER → TIME → PID → NAME → USER → CPU.
   fn next(self) -> Self {
     match self {
-      Self::Cpu => Self::Time,
-      Self::Time => Self::Mem,
-      Self::Mem => Self::Power,
-      Self::Power => Self::Gpu,
-      Self::Gpu => Self::Pid,
+      Self::Cpu => Self::Mem,
+      Self::Mem => Self::Gpu,
+      Self::Gpu => Self::Power,
+      Self::Power => Self::Time,
+      Self::Time => Self::Pid,
       Self::Pid => Self::Name,
       Self::Name => Self::User,
       Self::User => Self::Cpu,
@@ -1100,10 +1101,10 @@ mod tests {
       sorts.push((view.sort, view.sort_desc));
     }
     let expected = [
-      (Time, true),
       (Mem, true),
-      (Power, true),
       (Gpu, true),
+      (Power, true),
+      (Time, true),
       (Pid, false),
       (Name, false),
       (User, false),
@@ -1274,7 +1275,7 @@ mod tests {
 
       // keys are shortcuts again
       assert!(press(&mut view, KeyCode::Char('s')));
-      assert_eq!((view.filter(), view.sort), ("saf", ProcSort::Time), "{code:?}");
+      assert_eq!((view.filter(), view.sort), ("saf", ProcSort::Mem), "{code:?}");
     }
   }
 
@@ -1436,16 +1437,16 @@ mod tests {
 
     // NAME takes the room the others leave
     let all =
-      [(Pid, 5), (Name, 145), (User, 10), (Cpu, 6), (Time, 8), (Mem, 6), (Power, 7), (Gpu, 6)];
+      [(Pid, 5), (Name, 145), (User, 10), (Time, 8), (Cpu, 6), (Mem, 6), (Gpu, 6), (Power, 7)];
     assert_eq!(fit_columns(200, Pid), all);
     // all of them in an 80 cells window (76 inside the box)
     assert_eq!(fit_columns(76, Pid)[1], (Name, 21));
-    // TIME, then USER go before NAME gets fewer than 16 cells, the others before it gets fewer
-    // than 8
-    assert_eq!(names(71, Pid), [Pid, Name, User, Cpu, Time, Mem, Power, Gpu]);
-    assert_eq!(names(70, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(62, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
-    assert_eq!(names(61, Pid), [Pid, Name, Cpu, Mem, Power, Gpu]);
+    // TIME, then USER go before NAME gets fewer than 16 cells, the others (from the right) before
+    // it gets fewer than 8
+    assert_eq!(names(71, Pid), [Pid, Name, User, Time, Cpu, Mem, Gpu, Power]);
+    assert_eq!(names(70, Pid), [Pid, Name, User, Cpu, Mem, Gpu, Power]);
+    assert_eq!(names(62, Pid), [Pid, Name, User, Cpu, Mem, Gpu, Power]);
+    assert_eq!(names(61, Pid), [Pid, Name, Cpu, Mem, Gpu, Power]);
     assert_eq!(names(42, Pid), [Pid, Name, Cpu, Mem, Gpu]);
     assert_eq!(names(34, Pid), [Pid, Name, Cpu, Mem]);
     assert_eq!(names(27, Pid), [Pid, Name, Cpu]);
@@ -1455,7 +1456,7 @@ mod tests {
     assert_eq!(names(40, User), [Pid, Name, User, Cpu, Mem]);
     assert_eq!(names(30, Power), [Pid, Name, Cpu, Power]);
     assert_eq!(names(14, Mem), [Pid, Name, Mem]);
-    assert_eq!(names(30, Time), [Pid, Name, Cpu, Time]);
+    assert_eq!(names(30, Time), [Pid, Name, Time, Cpu]);
   }
 
   #[test]

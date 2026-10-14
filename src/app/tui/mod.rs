@@ -1333,7 +1333,7 @@ mod tests {
     // POWER reads `-` for every process, without the note on own processes
     for y in [2, 3, 4] {
       let words = proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-      assert_eq!(words[words.len() - 3], "-", "{words:?}");
+      assert_eq!(words[words.len() - 2], "-", "{words:?}");
     }
     assert!(!row(&buf, 49).contains("POWER"), "{}", row(&buf, 49));
   }
@@ -1347,7 +1347,7 @@ mod tests {
       let buf = render_buffer(app, 200, 50);
       assert_eq!(app.layout(buf.area).boxes.len(), boxes, "vm {vm}");
       let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-      assert_eq!((words[2].as_str(), words[7].as_str()), ("WindowServer", power));
+      assert_eq!((words[2].as_str(), words[8].as_str()), ("WindowServer", power));
       assert_eq!(row(&buf, 49).contains("POWER: own processes only"), note);
     }
   }
@@ -1460,20 +1460,20 @@ mod tests {
     assert!(title.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{title}");
     let header = proc_row(&buf, 1);
     assert!(header.starts_with("│   PID NAME "), "{header}");
-    assert!(header.ends_with(" CPU% ↓     TIME    MEM   POWER   GPU% │"), "{header}");
+    assert!(header.ends_with(" TIME CPU% ↓    MEM   GPU%   POWER │"), "{header}");
 
     // sorted by CPU, descending; numbers right-aligned, a dash for a missing power reading
     let words = |y| proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
     assert_eq!(
       words(2),
-      ["│", "631", "WindowServer", "vlad", "25.0", "2d05h", "300M", "1.50W", "40.0", "│"]
+      ["│", "631", "WindowServer", "vlad", "2d05h", "25.0", "300M", "40.0", "1.50W", "│"]
     );
-    let safari = ["│", "2301", "Safari", "vlad", "12.0", "12:34", "1.5G", "0.80W", "5.0", "│"];
+    let safari = ["│", "2301", "Safari", "vlad", "12:34", "12.0", "1.5G", "5.0", "0.80W", "│"];
     assert_eq!(words(3), safari);
-    let launchd = ["│", "1", "launchd", "root", "0.0", "3:25:07", "20M", "-", "0.0", "│"];
+    let launchd = ["│", "1", "launchd", "root", "3:25:07", "0.0", "20M", "0.0", "-", "│"];
     assert_eq!(words(4), launchd);
     let window_server = proc_row(&buf, 2);
-    assert!(window_server.ends_with("  25.0    2d05h   300M   1.50W   40.0 │"), "{window_server}");
+    assert!(window_server.ends_with("   2d05h   25.0   300M   40.0   1.50W │"), "{window_server}");
 
     // load values on the gradient
     let cpu = x_of(&proc_row(&buf, 2), "25.0");
@@ -1534,8 +1534,8 @@ mod tests {
 
     // sorted by CPU like the processes; `a`: Safari and launchd, whose missing power reading
     // makes the sum a lower bound
-    assert_eq!(words(2), ["│", "×1", "w", "25.0", "2d05h", "300M", "1.50W", "40.0", "│"]);
-    assert_eq!(words(3), ["│", "×2", "a", "12.0", "3:37:41", "1.5G", "≥0.80W", "5.0", "│"]);
+    assert_eq!(words(2), ["│", "×1", "w", "2d05h", "25.0", "300M", "40.0", "1.50W", "│"]);
+    assert_eq!(words(3), ["│", "×2", "a", "3:37:41", "12.0", "1.5G", "5.0", "≥0.80W", "│"]);
     assert!(proc_row(&buf, 4).starts_with("│ ────"), "{}", proc_row(&buf, 4));
     assert_eq!(words(5)[1..3], ["631", "WindowServer"]);
     let total = x_of(&proc_row(&buf, 3), "×2");
