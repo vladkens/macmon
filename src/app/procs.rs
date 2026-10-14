@@ -326,6 +326,11 @@ fn parse_ps_time(s: &str) -> Option<u64> {
   total.checked_mul(1_000_000_000)?.checked_add(frac_ns)
 }
 
+/// A uid as `ps` prints it: signed, so `nobody` (4294967294) reads `-2`.
+fn parse_uid(s: &str) -> Option<u32> {
+  s.parse::<i32>().map(|uid| uid as u32).or_else(|_| s.parse()).ok()
+}
+
 /// One line of `ps -o pid=,uid=,rss=,time=,comm=`; the command is the rest of the line.
 fn parse_ps_line(line: &str) -> Option<Raw> {
   let mut rest = line.trim();
@@ -336,7 +341,7 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
   };
 
   let pid = field()?.parse().ok()?;
-  let uid = field()?.parse().ok()?;
+  let uid = parse_uid(field()?)?;
   let rss_kib = digits(field()?)?;
   let cpu_ns = parse_ps_time(field()?)?;
   let comm = rest.to_string();
@@ -847,17 +852,22 @@ mod tests {
     assert!(raw.ps);
     let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurityd\n").expect("valid");
     assert_eq!((raw.pid, raw.uid, raw.fallback.as_str()), (574, 0, "endpointsecurityd"));
+    // `nobody` is printed signed; its uid has the name
+    let raw = parse_ps_line("  343    -2    192   0:00.03 /usr/libexec/dhcp6d").expect("valid");
+    assert_eq!((raw.pid, raw.uid, user_name(raw.uid).as_str()), (343, 4294967294, "nobody"));
+    assert_eq!(parse_ps_line("1 4294967294 1 0:00.01 cmd").map(|raw| raw.uid), Some(4294967294));
 
     let bad = [
       "",
       "garbage",
-      "1 0 100 0:00.01",       // no command
-      "x 0 100 0:00.01 cmd",   // pid
-      "1 -1 100 0:00.01 cmd",  // uid
-      "1 0 -100 0:00.01 cmd",  // rss
-      "1 0 100 0:61.00 cmd",   // time
-      "1 0 100 cmd",           // missing column
-      "PID UID RSS TIME COMM", // header
+      "1 0 100 0:00.01",             // no command
+      "x 0 100 0:00.01 cmd",         // pid
+      "1 x 100 0:00.01 cmd",         // uid
+      "1 -2147483649 1 0:00.01 cmd", // uid out of range
+      "1 0 -100 0:00.01 cmd",        // rss
+      "1 0 100 0:61.00 cmd",         // time
+      "1 0 100 cmd",                 // missing column
+      "PID UID RSS TIME COMM",       // header
     ];
     for line in bad {
       assert_eq!(parse_ps_line(line), None, "{line:?}");
