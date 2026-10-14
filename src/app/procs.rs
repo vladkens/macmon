@@ -4,7 +4,7 @@
 //! has CPU time and RSS but no energy counter. GPU time of every process comes from the GPU's user
 //! clients in the IORegistry.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem;
 use std::process::{Command, Stdio};
@@ -357,9 +357,48 @@ fn parse_ps(out: &str) -> Vec<Raw> {
   out.lines().filter_map(parse_ps_line).collect()
 }
 
-/// Processes of all users from `/bin/ps`, without the `ps` process itself.
-fn run_ps() -> Vec<Raw> {
-  ps_rows(Command::new("/bin/ps").args(["-A", "-o", PS_COLUMNS]))
+/// Real user id of a process; readable for processes of any user.
+fn real_uid(pid: i32) -> Option<u32> {
+  let mut info: libc::proc_bsdshortinfo = unsafe { mem::zeroed() };
+  let size = mem::size_of::<libc::proc_bsdshortinfo>() as c_int;
+  let ptr = &mut info as *mut libc::proc_bsdshortinfo as *mut c_void;
+  let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDT_SHORTBSDINFO, 0, ptr, size) };
+  (read == size).then_some(info.pbsi_ruid)
+}
+
+/// `ps` options selecting the processes `(pid, real uid)` libproc can't read. Most go by the name
+/// of their real user (`-U`): `ps` then reads only the processes of these users, for a third of
+/// the CPU of `ps -A`. The rest go by pid (`-p`, which costs more per process): those of the real
+/// user `own` (the setuid `login` of each terminal tab), whose other processes libproc reads, and
+/// those of a user without a name (`name` gives the uid then), as `-U` takes only known users.
+fn ps_selection(
+  procs: &[(i32, u32)],
+  own: u32,
+  mut name: impl FnMut(u32) -> String,
+) -> Vec<String> {
+  let (mut users, mut pids) = (BTreeSet::new(), Vec::new());
+  for &(pid, ruid) in procs {
+    let user = name(ruid);
+    if ruid == own || user.bytes().all(|b| b.is_ascii_digit()) || user.contains(',') {
+      pids.push(pid.to_string());
+    } else {
+      users.insert(user);
+    }
+  }
+
+  let mut select = Vec::new();
+  if !users.is_empty() {
+    select.extend(["-U".to_string(), Vec::from_iter(users).join(",")]);
+  }
+  if !pids.is_empty() {
+    select.extend(["-p".to_string(), pids.join(",")]);
+  }
+  select
+}
+
+/// Processes `select`ed from `/bin/ps`, without the `ps` process itself.
+fn run_ps(select: &[String]) -> Vec<Raw> {
+  ps_rows(Command::new("/bin/ps").args(select).args(["-o", PS_COLUMNS]))
 }
 
 /// Rows `cmd` prints in the `ps` format, without its own process; none when it can't run.
@@ -626,16 +665,18 @@ impl ProcSampler {
 
     list_pids(&mut self.pids);
     let mut rows = Vec::with_capacity(self.pids.len());
-    let mut unreadable = false;
+    let mut unreadable = Vec::new();
     for &pid in &self.pids {
       match read_libproc(pid, self.flavor, self.timebase) {
         Some(raw) => rows.push(raw),
-        None => unreadable = true,
+        None => unreadable.extend(real_uid(pid).map(|ruid| (pid, ruid))),
       }
     }
 
-    if unreadable {
-      rows = merge(rows, run_ps());
+    if !unreadable.is_empty() {
+      let users = &mut self.users;
+      let name = |uid| users.entry(uid).or_insert_with(|| user_name(uid)).clone();
+      rows = merge(rows, run_ps(&ps_selection(&unreadable, unsafe { libc::getuid() }, name)));
     }
     for raw in &mut rows {
       raw.counters.gpu_ns = gpu.get(&raw.pid).copied();
@@ -839,6 +880,20 @@ mod tests {
 
   fn ps_row(pid: i32, cpu_ns: u64, comm: &str) -> Raw {
     Raw { ps: true, ..row(pid, cpu_ns, None, comm) }
+  }
+
+  #[test]
+  fn ps_selects_other_users_by_name_and_the_rest_by_pid() {
+    let names = HashMap::from([(0, "root"), (88, "_windowserver"), (501, "me"), (7, "a,b")]);
+    let name = |uid: u32| names.get(&uid).map_or(uid.to_string(), |name| name.to_string());
+    // 501 is the own real user: its setuid `login` is unreadable, its other processes aren't
+    let procs = [(1, 0), (427, 88), (431, 0), (83402, 501), (600, 12345), (601, 7), (602, 88)];
+    let select = ps_selection(&procs, 501, name);
+    assert_eq!(select, ["-U", "_windowserver,root", "-p", "83402,600,601"]);
+
+    assert_eq!(ps_selection(&[(1, 0)], 501, name), ["-U", "root"]);
+    assert_eq!(ps_selection(&[(83402, 501)], 501, name), ["-p", "83402"]);
+    assert!(ps_selection(&[], 501, name).is_empty());
   }
 
   #[test]
