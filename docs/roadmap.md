@@ -48,7 +48,7 @@ POWER does today.
       task energy, Activity Monitor's Energy Impact), with the process list shown and hidden.
       Profile the hot paths (sampling, IORegistry GPU reads, `ps`, rendering) and fix what is
       cheap to fix; report before / after numbers in the PR.
-      Plan: [docs/plans/20261014-own-cost.md](plans/20261014-own-cost.md).
+      Plan: [docs/plans/completed/20261014-own-cost.md](plans/completed/20261014-own-cost.md).
 - [x] **9. Scrolling in the lists.** A scrollbar on the right border of the process list and the
       info overlay (ratatui's `Scrollbar`: `↑` / `↓` at the ends, a thumb between, as btop
       draws it), ↑ / ↓ wrapping around at the ends (not the wheel, PgUp / PgDn, Home / End), and
