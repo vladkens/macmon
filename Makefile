@@ -18,7 +18,7 @@ test:
 
 build:
 	cargo build $(CARGO_FLAGS)
-	ls -lh target/release/$(shell basename $(CURDIR))
+	ls -lh target/release/macmon
 
 update:
 	cargo upgrade -i
@@ -28,8 +28,7 @@ update:
 loc: # production lines, tests excluded; REF=origin/main compares with a git ref
 	@python3 scripts/loc.py $(REF)
 
-dist: # the release archive for CI (vladkens/actions/rust-build)
-	cargo build $(CARGO_FLAGS)
+dist: build # the release archive for CI (vladkens/actions/rust-build)
 	mkdir -p target/distrib
 	tar czf target/distrib/macmon-dev.tar.gz readme.md LICENSE -C target/release macmon
 
