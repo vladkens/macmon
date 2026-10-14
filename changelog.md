@@ -1,3 +1,37 @@
+## v0.10.0 – 2026-10-15
+
+### Breaking Changes
+
+- Added `cpu_tiers` to `SocInfo` and `Metrics` and `vm` to `SocInfo` in the Rust library, so code that builds these structs or matches them exhaustively needs updating; the `ecpu_*` and `pcpu_*` fields are deprecated in favor of `cpu_tiers` (#85, #100)
+
+### Features
+
+- Added support for the three CPU tiers of M6 Macs, with per-tier CPU metrics in JSON (`cpu_tiers`) and Prometheus (`macmon_cpu_tier_*`) (#85)
+- Added an info overlay (`i`) with the working directory, open files and sockets of the selected process, grouped by type and filterable (#95, #97)
+- Added killing the selected process with `k`, with Terminate and Force kill (#89)
+- Added revealing the selected process or file in Finder with `e` and copying its path with `c` (#95, #98)
+- Added several terms to the process filter, `!` to exclude matches, and a total row for each term (#86)
+- Added a sortable CPU time column (`TIME`) to the process list (#104, #105)
+- Added a total power box with fan speed to the power row (#94, by @NicholasClooney)
+- Added scrollbars to the process list, the info overlay and the help (#98, #104)
+- Added support for running in a macOS virtual machine, where unavailable power and frequency readings are hidden; the `soc` JSON object gains `vm` (#99, #100)
+
+### Fixes
+
+- Fixed processes of the `nobody` user missing from the process list (#104)
+- Fixed the base M5 Efficiency cores being labeled `P` instead of `E` (#85)
+- Fixed CPU core counts in `macmon debug` on macOS 27 (#85)
+
+### Improvements
+
+- Reduced the TUI's own CPU usage by about half with the process list shown (#103)
+- Made key hints easier to read in both light and dark terminal themes (#92)
+- Updated the Grafana dashboard to plot per-tier CPU metrics; it needs this version's exporter (#85)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.9.0...v0.10.0
+
+---
+
 ## v0.9.0 – 2026-10-07
 
 ### Features
