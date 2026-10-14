@@ -28,8 +28,10 @@ update:
 loc: # production lines, tests excluded; REF=origin/main compares with a git ref
 	@python3 scripts/loc.py $(REF)
 
-dist: # the release archive in target/distrib, for CI's rust-build
-	@sh scripts/dist.sh
+dist: # the release archive for CI (vladkens/actions/rust-build)
+	cargo build $(CARGO_FLAGS)
+	mkdir -p target/distrib
+	tar czf target/distrib/macmon-dev.tar.gz readme.md LICENSE -C target/release macmon
 
 bench: # compare startup time
 	cargo build $(CARGO_FLAGS)

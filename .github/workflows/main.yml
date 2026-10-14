@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 
-# Main runs queue instead, so a dev release is never cut off; a release commit gets its own group.
+# Main runs queue, so a dev release is never cut off; a release commit gets its own group.
 concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
   cancel-in-progress: false
@@ -31,24 +31,21 @@ jobs:
       - run: make check
       - run: make test
 
-  # The shared release steps (vladkens/actions): `build` runs `make dist` read-only, beside `test`;
-  # on main `publish` puts the archive up as the `dev` pre-release, and a `release: vX.Y.Z (#N)`
-  # commit publishes the crate and the same archive as macmon-vX.Y.Z.tar.gz. `publish` never
-  # compiles. Users check an archive with `gh attestation verify FILE -R vladkens/macmon`.
+  # vladkens/actions: build makes the archive; publish ships the dev pre-release, or the crate and release on a release: commit
   build:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest # macmon links IOKit: the build and the crates dry run need a Mac
+    runs-on: macos-latest # IOKit: the build and the crates dry run need a Mac
     steps:
       - uses: actions/checkout@v7
       - run: rustup update --no-self-update stable && rustup default stable
-      # Outside release commits it builds with the `git describe` version, e.g. 0.9.0-12-g3672a1b.
+      # builds outside release commits as the `git describe` version, e.g. 0.9.0-12-g3672a1b
       - uses: vladkens/actions/rust-build@v1
         with:
           dist: make dist
 
   publish:
     needs: [test, build]
-    runs-on: ubuntu-latest # no build here, and Linux runners start faster
+    runs-on: ubuntu-latest # never compiles
     permissions:
       attestations: write
       contents: write
