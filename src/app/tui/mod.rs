@@ -375,8 +375,12 @@ impl App {
 
   /// Stores a process sample started in the panel's `showing`. Only one of the current showing
   /// gets in: one still in flight when the panel got hidden is dropped, also when the panel is
-  /// back by now, so a re-shown panel reads "collecting…" until its own first sample.
-  fn update_procs(&mut self, showing: u64, procs: Vec<ProcInfo>) {
+  /// back by now, so a re-shown panel reads "collecting…" until its own first sample. In a VM no
+  /// process has a power reading: process energy doesn't move there.
+  fn update_procs(&mut self, showing: u64, mut procs: Vec<ProcInfo>) {
+    if self.soc.vm {
+      procs.iter_mut().for_each(|proc| proc.power_w = None);
+    }
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
       if let Some(info) = &mut self.info {
@@ -518,7 +522,8 @@ impl App {
 
   /// Screen layout for the current settings and metrics.
   fn layout(&self, area: Rect) -> LayoutPlan {
-    compute_layout(area, self.cfg.show_procs, self.clusters.items.len())
+    let (procs, clusters) = (self.cfg.show_procs, self.clusters.items.len());
+    compute_layout(area, procs, clusters, !self.soc.vm)
   }
 
   /// Layout of a frame for the window `area`, with the state that follows the window updated
@@ -1311,19 +1316,49 @@ mod tests {
       chip_name: "Apple M2 (Virtual)".to_string(),
       memory_gb: 8,
       cpu_tiers: vec![tier],
+      vm: true,
       ..Default::default()
     };
     let mut app = App::from_parts(soc, Config::default());
     let metrics = Metrics { cpu_tiers: vec![cpu_tier("_", 0, 0.63, 0.63)], ..Default::default() };
     app.update_metrics(Metrics { memory: test_metrics().memory, ..metrics });
+    // own processes have an energy counter, but it does not move in a VM; launchd has none
+    let app = &mut with_procs(app, varied_procs());
 
-    let buf = render_buffer(&mut app, 200, 50);
+    let buf = render_buffer(app, 200, 50);
     assert!(row(&buf, 0).starts_with("╭─ Apple M2 (Virtual) (4CPU 8GB) ─"), "{}", row(&buf, 0));
     let screen = screen_text(&buf);
     for title in ["CPU 63% ─", "GPU 0% ─"] {
       assert!(screen.contains(&format!("╭─ {title}")), "missing {title}");
     }
     assert!(!screen.contains("MHz") && !screen.contains("_-CPU"));
+
+    // no power row: CPU, GPU and RAM take the whole metrics box, the process box stays
+    let boxes = app.layout(buf.area).boxes;
+    let rows = boxes.iter().map(|(m, r)| (*m, r.y, r.height)).collect::<Vec<_>>();
+    assert_eq!(rows, [(Metric::Cluster(0), 1, 18), (Metric::Gpu, 1, 18), (Metric::Ram, 1, 18)]);
+    assert!(!screen.contains("0.00W") && !screen.contains("ANE"), "{screen}");
+    assert!(proc_row(&buf, 0).starts_with("╭─ proc 3 "), "{}", proc_row(&buf, 0));
+    // POWER reads `-` for every process, without the note on own processes
+    for y in [2, 3, 4] {
+      let words = proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
+      assert_eq!(words[words.len() - 3], "-", "{words:?}");
+    }
+    assert!(!row(&buf, 49).contains("POWER"), "{}", row(&buf, 49));
+  }
+
+  #[test]
+  fn only_a_vm_drops_the_power_row_and_process_power() {
+    // processes sampled before the first metrics sample: the chip already tells a VM
+    for (vm, boxes, power, note) in [(false, 8, "1.50W", true), (true, 4, "-", false)] {
+      let soc = SocInfo { vm, ..test_soc() };
+      let app = &mut with_procs(App::from_parts(soc, Config::default()), varied_procs());
+      let buf = render_buffer(app, 200, 50);
+      assert_eq!(app.layout(buf.area).boxes.len(), boxes, "vm {vm}");
+      let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
+      assert_eq!((words[2].as_str(), words[6].as_str()), ("WindowServer", power));
+      assert_eq!(row(&buf, 49).contains("POWER: own processes only"), note);
+    }
   }
 
   #[test]

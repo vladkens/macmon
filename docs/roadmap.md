@@ -67,9 +67,10 @@ POWER does today.
 - [ ] **12. Run in a VM.** macmon in a macOS VM (Apple Virtualization, UTM), where IOReport,
       the SMC and the frequency tables are missing. Three PRs: start without IOReport hardware
       counters, with CPU usage from `host_processor_info`; hide unavailable power, with
-      availability flags in the JSON and the Prometheus gauges left out; GPU usage from the
+      a VM flag in the SoC info and the Prometheus gauges left out; GPU usage from the
       IOAccelerator client time.
       Plan (first PR): [docs/plans/completed/20261012-vm-start.md](plans/completed/20261012-vm-start.md).
+      Plan (second PR): [docs/plans/completed/20261012-vm-power.md](plans/completed/20261012-vm-power.md).
 
 Later, only on request: automatic grouping of an app's processes (filter terms with totals
 cover the known-app case), per-process network (only `nettop` has it without root), history
