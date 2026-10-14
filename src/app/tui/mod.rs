@@ -120,12 +120,11 @@ enum Event {
   Mouse(MouseEvent),
   /// The terminal window lost focus.
   FocusLost,
-  /// Redraw: the periodic tick, and a resize, so the mouse targets follow the new layout at once.
-  Tick,
+  /// A resize: a redraw, so the mouse targets follow the new layout at once.
+  Resize,
 }
 
-/// App event of a terminal event: keys, left clicks and the wheel, focus loss, and a resize as a
-/// redraw.
+/// App event of a terminal event: keys, left clicks and the wheel, focus loss, and a resize.
 /// Mouse capture reports every move too; moves, drags and releases are dropped here, so they
 /// don't cost a frame each.
 fn input_event(event: event::Event) -> Option<Event> {
@@ -141,7 +140,7 @@ fn input_event(event: event::Event) -> Option<Event> {
       action.then_some(Event::Mouse(mouse))
     }
     event::Event::FocusLost => Some(Event::FocusLost),
-    event::Event::Resize(..) => Some(Event::Tick),
+    event::Event::Resize(..) => Some(Event::Resize),
     _ => None,
   }
 }
@@ -149,26 +148,15 @@ fn input_event(event: event::Event) -> Option<Event> {
 /// Window of the first process sample after the panel shows up, so the list fills in quickly.
 const PROCS_WARMUP: Duration = Duration::from_millis(TUI_MIN_MS as u64);
 
-/// Sends input events and a `Tick` every `tick` ms; stops once the app is gone.
-fn run_inputs_thread(tx: mpsc::Sender<Event>, tick: u64) {
-  let tick_rate = Duration::from_millis(tick);
-
+/// Sends input events; stops once the app is gone. Nothing redraws on a timer: every frame
+/// follows an event (a sample, an input, a resize), as nothing on screen changes without one.
+fn run_inputs_thread(tx: mpsc::Sender<Event>) {
   thread::spawn(move || {
-    let mut last_tick = Instant::now();
-
     loop {
-      if event::poll(tick_rate).unwrap()
-        && let Some(event) = input_event(event::read().unwrap())
+      if let Some(event) = input_event(event::read().unwrap())
         && tx.send(event).is_err()
       {
         return;
-      }
-
-      if last_tick.elapsed() >= tick_rate {
-        if tx.send(Event::Tick).is_err() {
-          return;
-        }
-        last_tick = Instant::now();
       }
     }
   });
@@ -413,7 +401,7 @@ impl App {
         self.info.iter_mut().for_each(|info| info.typing = false);
         return ControlFlow::Continue(());
       }
-      Event::Tick => return ControlFlow::Continue(()),
+      Event::Resize => return ControlFlow::Continue(()),
       Event::Failed(_) => return ControlFlow::Break(()),
     };
 
@@ -563,7 +551,7 @@ impl App {
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
-    run_inputs_thread(tx.clone(), 250);
+    run_inputs_thread(tx.clone());
     self.three_level_bars = theme::detect_three_level_bars();
 
     let mut mouse = false;
