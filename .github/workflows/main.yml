@@ -3,9 +3,15 @@ name: main
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# Main runs queue instead, so a dev release is never cut off; a release commit gets its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -25,140 +31,69 @@ jobs:
       - run: make check
       - run: make test
 
-  dev:
-    runs-on: macos-latest
-    needs: test
-    permissions:
-      contents: write
-    concurrency:
-      group: dev-release
+  # The shared release steps (vladkens/actions): `build` runs `make dist` read-only, beside `test`;
+  # on main `publish` puts the archive up as the `dev` pre-release, and a `release: vX.Y.Z (#N)`
+  # commit publishes the crate and the same archive as macmon-vX.Y.Z.tar.gz. `publish` never
+  # compiles. Users check an archive with `gh attestation verify FILE -R vladkens/macmon`.
+  build:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest # macmon links IOKit: the build and the crates dry run need a Mac
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache@v6
         with:
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-
+          fetch-depth: 0 # tags for the dev version, e.g. 0.9.0-12-g3672a1b
       - run: rustup update --no-self-update stable && rustup default stable
-      - run: make build
 
-      - name: Archive binary
-        run: tar czf macmon-dev.tar.gz readme.md LICENSE -C target/release macmon
-
-      - name: Update dev pre-release
+      # A dev build gets the package version (Cargo.toml and Cargo.lock) from the last release tag,
+      # e.g. 0.9.0-12-g3672a1b. A release commit keeps its version: release-check compares it with
+      # the title, and the release archive is this build renamed.
+      - name: Set version from git describe
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          if [ "$(git ls-remote origin refs/heads/main | cut -f1)" != "$GITHUB_SHA" ]; then
-            echo "main has moved past $GITHUB_SHA, skipping"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$MESSAGE" == release:* ]]; then
+            echo "release commit: keeping the Cargo.toml version"
             exit 0
           fi
-          NOTES="Latest build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
-          git tag -f dev
-          git push -f origin refs/tags/dev
-          if gh release view dev >/dev/null 2>&1; then
-            gh release upload dev macmon-dev.tar.gz --clobber
-            gh release edit dev --title "Dev build" --notes "$NOTES"
-          else
-            gh release create dev macmon-dev.tar.gz --prerelease --title "Dev build" --notes "$NOTES"
-          fi
+          VERSION=$(git describe --tags --match 'v[0-9]*')
+          sed -i '' "/^name = \"macmon\"$/{n;s/^version = .*/version = \"${VERSION#v}\"/;}" Cargo.toml Cargo.lock
+          grep -x "version = \"${VERSION#v}\"" Cargo.toml
 
-  release:
-    if: ${{ startsWith(github.event.head_commit.message, 'release:') }}
-    runs-on: macos-latest
-    needs: test
+      - uses: vladkens/actions/rust-build@v1
+        with:
+          dist: make dist
+
+  publish:
+    needs: [test, build]
+    runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
+      attestations: write
       contents: write
-      id-token: write
+      id-token: write # crates.io Trusted Publishing and attestations
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/cache@v6
-        with:
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-
-      - name: Check release commit matches Cargo.toml version
-        env:
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          TITLE="${COMMIT_MESSAGE%%$'\n'*}"
-          TAG="v$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
-          if [ "$TITLE" != "release: $TAG" ]; then
-            echo "Error: expected commit title 'release: $TAG', got '$TITLE'"
-            exit 1
-          fi
-          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null &&
-            [ "$(git rev-parse "refs/tags/$TAG^{commit}")" != "$GITHUB_SHA" ]; then
-            echo "Error: tag $TAG already points to another commit"
-            exit 1
-          fi
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-
-      - name: Extract changelog entry
-        run: |
-          awk -v tag="$TAG" '/^## / { found = ($2 == tag); next } found && $0 != "---"' changelog.md > release_notes.txt
-          if ! grep -q '^- [^[:space:]]' release_notes.txt; then
-            echo "Error: no changes listed in changelog for $TAG"
-            exit 1
-          fi
-
-      - run: rustup update --no-self-update stable && rustup default stable
-      - run: make build
-
-      - name: Check binary version matches tag
-        run: test "$(./target/release/macmon -V)" = "macmon ${TAG#v}"
-
-      - name: Archive binary
-        run: |
-          tar czf "macmon-${TAG}.tar.gz" readme.md LICENSE -C target/release macmon
-          ls -lah "macmon-${TAG}.tar.gz"
-
-      # https://crates.io/docs/trusted-publishing
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-      - name: Publish crate
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: |
-          if curl -fsS -o /dev/null -A "macmon-ci (github.com/${GITHUB_REPOSITORY})" "https://crates.io/api/v1/crates/macmon/${TAG#v}"; then
-            echo "macmon ${TAG#v} already published"
-          else
-            cargo publish --locked
-          fi
-
-      - name: Create tag and GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, using its archive"
-            gh release download "$TAG" --pattern "macmon-${TAG}.tar.gz" --clobber
-          else
-            gh release create "$TAG" --target "$GITHUB_SHA" --notes-file release_notes.txt "macmon-${TAG}.tar.gz"
-          fi
+      - id: release
+        uses: vladkens/actions/rust-publish@v1
 
       - name: Bump Homebrew formula
+        if: steps.release.outputs.tag != ''
         env:
+          TAG: ${{ steps.release.outputs.tag }}
+          FILE: ${{ steps.release.outputs.files }}
           HOMEBREW_REPO_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
         run: |
-          TARBALL="macmon-${TAG}.tar.gz"
-          SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${TARBALL}"
+          if [ "$(basename "$FILE")" != "macmon-${TAG}.tar.gz" ]; then
+            echo "Error: expected the single file macmon-${TAG}.tar.gz, got '$FILE'"
+            exit 1
+          fi
+          SHA256=$(sha256sum "$FILE" | cut -d' ' -f1)
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/macmon-${TAG}.tar.gz"
 
           git clone "https://x-access-token:${HOMEBREW_REPO_TOKEN}@github.com/vladkens/homebrew-tap.git" tap
           cd tap
-          sed -i '' "s|version \".*\"|version \"${TAG#v}\"|" macmon.rb
-          sed -i '' "s|url \".*\"|url \"${URL}\"|" macmon.rb
-          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" macmon.rb
+          sed -i "s|version \".*\"|version \"${TAG#v}\"|" macmon.rb
+          sed -i "s|url \".*\"|url \"${URL}\"|" macmon.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" macmon.rb
           if git diff --quiet; then
             echo "Formula already at ${TAG}"
             exit 0
