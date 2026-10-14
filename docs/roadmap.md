@@ -73,6 +73,13 @@ POWER does today.
       IOAccelerator client time.
       Plan (first PR): [docs/plans/completed/20261012-vm-start.md](plans/completed/20261012-vm-start.md).
       Plan (second PR): [docs/plans/completed/20261012-vm-power.md](plans/completed/20261012-vm-power.md).
+- [ ] **13. Social preview card.** The repository still shows GitHub's template image. A
+      1280×640 card from a real TUI screenshot of the current release (HTML rendered to PNG),
+      uploaded by hand in the repository settings.
+
+Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
+PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
+small and self-contained, good for an outside contributor.
 
 Later, only on request: automatic grouping of an app's processes (filter terms with totals
 cover the known-app case), per-process network (only `nettop` has it without root), history
