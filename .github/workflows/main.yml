@@ -40,26 +40,10 @@ jobs:
     runs-on: macos-latest # macmon links IOKit: the build and the crates dry run need a Mac
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # tags for the dev version, e.g. 0.9.0-12-g3672a1b
       - run: rustup update --no-self-update stable && rustup default stable
-
-      # A dev build gets the package version (Cargo.toml and Cargo.lock) from the last release tag,
-      # e.g. 0.9.0-12-g3672a1b. A release commit keeps its version: release-check compares it with
-      # the title, and the release archive is this build renamed.
-      - name: Set version from git describe
-        env:
-          MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = push ] && [[ "$MESSAGE" == release:* ]]; then
-            echo "release commit: keeping the Cargo.toml version"
-            exit 0
-          fi
-          VERSION=$(git describe --tags --match 'v[0-9]*')
-          sed -i '' "/^name = \"macmon\"$/{n;s/^version = .*/version = \"${VERSION#v}\"/;}" Cargo.toml Cargo.lock
-          grep -x "version = \"${VERSION#v}\"" Cargo.toml
-
-      - uses: vladkens/actions/rust-build@v1
+      # Outside release commits it builds with the `git describe` version, e.g. 0.9.0-12-g3672a1b.
+      # TODO: back to @v1 once it includes dev-version
+      - uses: vladkens/actions/rust-build@37f752bc0ff5f90a4ee8f30e297ee2dc969e4d97
         with:
           dist: make dist
 

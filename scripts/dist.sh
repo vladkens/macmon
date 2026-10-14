@@ -6,7 +6,8 @@ set -eu
 
 cargo build --release --locked
 
-version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+# The version cargo built, stamped by rust-build outside release commits (e.g. 0.9.0-12-g3672a1b)
+version=$(cargo pkgid | sed 's/.*[#@]//')
 actual=$(target/release/macmon -V)
 if [ "$actual" != "macmon $version" ]; then
   echo "expected 'macmon $version' from macmon -V, got '$actual'" >&2
