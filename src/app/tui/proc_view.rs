@@ -42,11 +42,12 @@ const GROUPS_MIN_ROWS: u16 = 3;
 
 /// Columns of the process table in display order: one per sort key, so each header sorts by its
 /// own column.
-const COLUMNS: [ProcSort; 7] = [
+const COLUMNS: [ProcSort; 8] = [
   ProcSort::Pid,
   ProcSort::Name,
   ProcSort::User,
   ProcSort::Cpu,
+  ProcSort::Time,
   ProcSort::Mem,
   ProcSort::Power,
   ProcSort::Gpu,
@@ -54,7 +55,8 @@ const COLUMNS: [ProcSort; 7] = [
 
 /// Columns dropped (in this order) when the table is too narrow, each while NAME would get fewer
 /// cells than the given width; PID, NAME and the sorted column always stay.
-const DROP_ORDER: [(ProcSort, u16); 5] = [
+const DROP_ORDER: [(ProcSort, u16); 6] = [
+  (ProcSort::Time, NAME_USER_WIDTH),
   (ProcSort::User, NAME_USER_WIDTH),
   (ProcSort::Power, NAME_MIN_WIDTH),
   (ProcSort::Gpu, NAME_MIN_WIDTH),
@@ -70,6 +72,7 @@ impl ProcSort {
       Self::Name => "NAME",
       Self::User => "USER",
       Self::Cpu => "CPU%",
+      Self::Time => "TIME",
       Self::Mem => "MEM",
       Self::Power => "POWER",
       Self::Gpu => "GPU%",
@@ -84,6 +87,7 @@ impl ProcSort {
       Self::Name => NAME_MIN_WIDTH,
       Self::User => 10,
       Self::Cpu => 6,
+      Self::Time => 8,
       Self::Mem => 6,
       Self::Power => 7,
       Self::Gpu => 6,
@@ -100,10 +104,11 @@ impl ProcSort {
     !matches!(self, Self::Pid | Self::Name | Self::User)
   }
 
-  /// Next column in the `s` cycle: CPU → MEM → POWER → GPU → PID → NAME → USER → CPU.
+  /// Next column in the `s` cycle: CPU → TIME → MEM → POWER → GPU → PID → NAME → USER → CPU.
   fn next(self) -> Self {
     match self {
-      Self::Cpu => Self::Mem,
+      Self::Cpu => Self::Time,
+      Self::Time => Self::Mem,
       Self::Mem => Self::Power,
       Self::Power => Self::Gpu,
       Self::Gpu => Self::Pid,
@@ -170,6 +175,18 @@ fn format_mem(bytes: u64) -> String {
   }
 }
 
+/// CPU time in whole seconds, 8 cells up to 9999 days: `M:SS` under an hour, `H:MM:SS` under a
+/// day, then days and hours (`2d03h`).
+fn format_time(ns: u64) -> String {
+  let secs = ns / 1_000_000_000;
+  let (days, hours, mins, secs) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
+  match (days, hours) {
+    (0, 0) => format!("{mins}:{secs:02}"),
+    (0, _) => format!("{hours}:{mins:02}:{secs:02}"),
+    _ => format!("{days}d{hours:02}h"),
+  }
+}
+
 /// Order of `a` and `b` by the value of `sort`, ascending.
 fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
   fn lower(text: &str) -> impl Iterator<Item = char> + '_ {
@@ -178,6 +195,7 @@ fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
 
   match sort {
     ProcSort::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
+    ProcSort::Time => a.cpu_time_ns.cmp(&b.cpu_time_ns),
     ProcSort::Mem => a.mem_bytes.cmp(&b.mem_bytes),
     ProcSort::Power => a.power_w.unwrap_or(0.0).total_cmp(&b.power_w.unwrap_or(0.0)),
     ProcSort::Gpu => a.gpu_pct.total_cmp(&b.gpu_pct),
@@ -205,6 +223,7 @@ fn sort_groups(groups: &mut [Group], sort: ProcSort, desc: bool) {
   groups.sort_by(|a, b| {
     let ord = match sort {
       ProcSort::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
+      ProcSort::Time => a.cpu_time_ns.cmp(&b.cpu_time_ns),
       ProcSort::Mem => a.mem_bytes.cmp(&b.mem_bytes),
       ProcSort::Power => a.power_w.unwrap_or(0.0).total_cmp(&b.power_w.unwrap_or(0.0)),
       ProcSort::Gpu => a.gpu_pct.total_cmp(&b.gpu_pct),
@@ -259,6 +278,7 @@ pub(super) struct Group {
   term: String,
   count: usize,
   cpu_pct: f32,
+  cpu_time_ns: u64,
   mem_bytes: u64,
   /// Sum of the known readings; `None` when no process has one.
   power_w: Option<f32>,
@@ -273,6 +293,7 @@ impl Group {
     for proc in procs {
       group.count += 1;
       group.cpu_pct += proc.cpu_pct;
+      group.cpu_time_ns += proc.cpu_time_ns;
       group.mem_bytes += proc.mem_bytes;
       group.gpu_pct += proc.gpu_pct;
       match proc.power_w {
@@ -895,6 +916,7 @@ impl App {
       ProcSort::Name => text(proc.name.clone()),
       ProcSort::User => text(proc.user.clone()),
       ProcSort::Cpu => pct_cell(proc.cpu_pct),
+      ProcSort::Time => time_cell(proc.cpu_time_ns),
       ProcSort::Mem => self.mem_cell(proc.mem_bytes),
       ProcSort::Power => power_cell(proc.power_w, false),
       ProcSort::Gpu => pct_cell(proc.gpu_pct),
@@ -909,6 +931,7 @@ impl App {
       ProcSort::Name => text(group.term.clone()),
       ProcSort::User => text(""),
       ProcSort::Cpu => pct_cell(group.cpu_pct),
+      ProcSort::Time => time_cell(group.cpu_time_ns),
       ProcSort::Mem => self.mem_cell(group.mem_bytes),
       ProcSort::Power => power_cell(group.power_w, group.power_partial),
       ProcSort::Gpu => pct_cell(group.gpu_pct),
@@ -930,6 +953,11 @@ fn load_cell(value: f64, ratio: f64, text: String) -> Span<'static> {
 fn pct_cell(pct: f32) -> Span<'static> {
   let pct = f64::from(pct);
   load_cell(pct, pct / 100.0, format!("{pct:.1}"))
+}
+
+/// CPU time, dim under a second (`0:00`).
+fn time_cell(ns: u64) -> Span<'static> {
+  if ns < 1_000_000_000 { dim(format_time(ns)) } else { text(format_time(ns)) }
 }
 
 /// Power in watts, `≥` before a lower bound; a dim `-` without a reading.
@@ -981,7 +1009,7 @@ mod tests {
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
 
-  use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns};
+  use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time};
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
 
@@ -994,6 +1022,8 @@ mod tests {
       path: format!("/usr/bin/{name}"),
       user: "user".to_string(),
       cpu_pct: cpu,
+      // an order of its own: the last two digits of the pid in seconds
+      cpu_time_ns: (pid % 100) as u64 * 1_000_000_000,
       mem_bytes: mem_mb * MIB,
       power_w: power,
       gpu_pct: gpu,
@@ -1035,6 +1065,8 @@ mod tests {
   fn sorts_by_each_key_and_direction() {
     let cases = [
       (ProcSort::Cpu, [4410, 631, 2301, 1, 77], [77, 1, 2301, 631, 4410]),
+      // 77, 31, 10, 1 and 1 seconds
+      (ProcSort::Time, [77, 631, 4410, 1, 2301], [1, 2301, 4410, 631, 77]),
       (ProcSort::Mem, [2301, 631, 4410, 1, 77], [77, 1, 4410, 631, 2301]),
       // no power reading goes last in both directions
       (ProcSort::Power, [4410, 631, 2301, 77, 1], [77, 2301, 631, 4410, 1]),
@@ -1063,11 +1095,12 @@ mod tests {
     // PIDs and text from the start
     let mut view = view();
     let mut sorts = vec![];
-    for _ in 0..7 {
+    for _ in 0..8 {
       assert!(press(&mut view, KeyCode::Char('s')));
       sorts.push((view.sort, view.sort_desc));
     }
     let expected = [
+      (Time, true),
       (Mem, true),
       (Power, true),
       (Gpu, true),
@@ -1085,7 +1118,7 @@ mod tests {
     assert!(view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::SHIFT)));
     assert_eq!((view.sort, view.sort_desc), (Cpu, true));
 
-    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER and POWER are left out
+    // [PID, NAME, CPU%, MEM, GPU%] on screen: USER, TIME and POWER are left out
     view.targets.headers = column_areas(Rect::new(2, 1, 36, 1), &fit_columns(36, Cpu));
     let mut sorts = vec![];
     for _ in 0..5 {
@@ -1241,7 +1274,7 @@ mod tests {
 
       // keys are shortcuts again
       assert!(press(&mut view, KeyCode::Char('s')));
-      assert_eq!((view.filter(), view.sort), ("saf", ProcSort::Mem), "{code:?}");
+      assert_eq!((view.filter(), view.sort), ("saf", ProcSort::Time), "{code:?}");
     }
   }
 
@@ -1402,9 +1435,15 @@ mod tests {
       |width, sort| fit_columns(width, sort).into_iter().map(|(c, _)| c).collect::<Vec<ProcSort>>();
 
     // NAME takes the room the others leave
-    let all = [(Pid, 5), (Name, 154), (User, 10), (Cpu, 6), (Mem, 6), (Power, 7), (Gpu, 6)];
+    let all =
+      [(Pid, 5), (Name, 145), (User, 10), (Cpu, 6), (Time, 8), (Mem, 6), (Power, 7), (Gpu, 6)];
     assert_eq!(fit_columns(200, Pid), all);
-    // USER goes before NAME gets fewer than 16 cells, the others before it gets fewer than 8
+    // all of them in an 80 cells window (76 inside the box)
+    assert_eq!(fit_columns(76, Pid)[1], (Name, 21));
+    // TIME, then USER go before NAME gets fewer than 16 cells, the others before it gets fewer
+    // than 8
+    assert_eq!(names(71, Pid), [Pid, Name, User, Cpu, Time, Mem, Power, Gpu]);
+    assert_eq!(names(70, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
     assert_eq!(names(62, Pid), [Pid, Name, User, Cpu, Mem, Power, Gpu]);
     assert_eq!(names(61, Pid), [Pid, Name, Cpu, Mem, Power, Gpu]);
     assert_eq!(names(42, Pid), [Pid, Name, Cpu, Mem, Gpu]);
@@ -1416,6 +1455,26 @@ mod tests {
     assert_eq!(names(40, User), [Pid, Name, User, Cpu, Mem]);
     assert_eq!(names(30, Power), [Pid, Name, Cpu, Power]);
     assert_eq!(names(14, Mem), [Pid, Name, Mem]);
+    assert_eq!(names(30, Time), [Pid, Name, Cpu, Time]);
+  }
+
+  #[test]
+  fn cpu_time_reads_like_top() {
+    let sec = |s: u64| s * 1_000_000_000;
+    let cases = [
+      (0, "0:00"),
+      (sec(1) - 1, "0:00"), // whole seconds, cut
+      (sec(59), "0:59"),
+      (sec(3599), "59:59"),
+      (sec(3600), "1:00:00"),
+      (sec(86_399), "23:59:59"),
+      (sec(86_400), "1d00h"),
+      (sec(2 * 86_400 + 3 * 3600 + 59), "2d03h"),
+      (u64::MAX, "213503d23h"), // no overflow
+    ];
+    for (ns, shown) in cases {
+      assert_eq!(format_time(ns), shown, "{ns}");
+    }
   }
 
   #[test]

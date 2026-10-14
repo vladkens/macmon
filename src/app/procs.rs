@@ -118,6 +118,8 @@ pub struct ProcInfo {
   pub user: String,
   /// 100% = one fully busy core, as in Activity Monitor.
   pub cpu_pct: f32,
+  /// User + system CPU time since the process started; in 10 ms steps for other users' processes.
+  pub cpu_time_ns: u64,
   /// Physical footprint (Activity Monitor's "Memory") of the current user's processes. Other
   /// users' processes come from `ps`, which has only the resident size: it counts shared pages and
   /// leaves out compressed memory, so the two compare only roughly.
@@ -725,6 +727,7 @@ impl ProcSampler {
         path: path.clone(),
         user,
         cpu_pct: usage.cpu_pct,
+        cpu_time_ns: raw.counters.cpu_ns,
         mem_bytes: raw.mem_bytes,
         power_w: usage.power_w,
         gpu_pct: usage.gpu_pct,
@@ -922,6 +925,7 @@ mod tests {
     let second = sampler.update(vec![row(A, 2 * SEC, None, "a"), row(B, SEC, Some(SEC), "b")], SEC);
     assert_eq!((second[0].cpu_pct, second[0].power_w), (100.0, None)); // no energy counter
     assert_eq!((second[1].cpu_pct, second[1].power_w), (100.0, Some(1.0)));
+    assert_eq!((second[0].cpu_time_ns, second[1].cpu_time_ns), (2 * SEC, SEC)); // the totals
 
     // A new command under the same pid is a new process: no spike, fresh name.
     let third = sampler.update(vec![row(A, 9 * SEC, None, "c")], SEC);
@@ -1021,6 +1025,7 @@ mod tests {
     let second = sampler.sample();
     let me = second.iter().find(|p| p.pid == pid).expect("own process is sampled");
     assert!(me.cpu_pct > 0.0, "cpu_pct = {}", me.cpu_pct);
+    assert!(me.cpu_time_ns > 0);
     assert!(me.power_w.is_none_or(|w| w >= 0.0));
     assert!(second.iter().all(|p| (0.0..=100.0).contains(&p.gpu_pct)));
   }

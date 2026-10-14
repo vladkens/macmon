@@ -43,6 +43,8 @@ impl RatioMode {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub enum ProcSort {
   Cpu,
+  /// CPU time since the process started; released versions read it as a bad value.
+  Time,
   Mem,
   Power,
   Gpu,
@@ -351,6 +353,15 @@ mod tests {
     assert_eq!((cfg.show_procs, cfg.view_type), (false, ViewType::Gauge));
     assert_eq!((cfg.ratio_mode, cfg.interval), (RatioMode::Active, 1250));
     assert_eq!((cfg.proc_sort, cfg.proc_sort_desc), (ProcSort::Name, false));
+  }
+
+  #[test]
+  fn time_sort_is_saved_and_loaded() {
+    let file = TempConfig::new("time_sort_is_saved_and_loaded");
+    let mut cfg = Config::load_from(Some(file.path()));
+    cfg.set_proc_sort(ProcSort::Time, true);
+    assert_eq!(file.saved()["proc_sort"], "Time");
+    assert_eq!(Config::load_from(Some(file.path())).proc_sort, ProcSort::Time);
   }
 
   #[test]

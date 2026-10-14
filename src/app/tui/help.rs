@@ -46,6 +46,7 @@ const HELP: &[Row] = &[
   Term("click", "a column header to sort, a row to select"),
   Section("Notes"),
   Term("CPU%", "100% is one fully busy core"),
+  Term("TIME", "CPU time used since the process started"),
   Term("freq", "usage weighted by frequency; raw: share of time busy"),
   Term("POWER -", "not available for other users' processes"),
 ];
