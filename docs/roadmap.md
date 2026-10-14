@@ -43,11 +43,12 @@ POWER does today.
       above the counts (cpu, mem, power, threads, uptime, parent) and presets on `s` / `S` (`all`,
       `files`, `network`, `home`, `not home`) saved in `~/.config/macmon.json`.
       Plan (first PR): [docs/plans/20261011-grouped-files.md](plans/20261011-grouped-files.md).
-- [ ] **8. macmon's own cost, before the release.** Measure what the TUI, `pipe` and `serve` cost
+- [x] **8. macmon's own cost, before the release.** Measure what the TUI, `pipe` and `serve` cost
       at 1000 ms and 250 ms: CPU time per minute and power (macmon's own POWER, `powermetrics`
       task energy, Activity Monitor's Energy Impact), with the process list shown and hidden.
       Profile the hot paths (sampling, IORegistry GPU reads, `ps`, rendering) and fix what is
       cheap to fix; report before / after numbers in the PR.
+      Plan: [docs/plans/completed/20261014-own-cost.md](plans/completed/20261014-own-cost.md).
 - [x] **9. Scrolling in the lists.** A scrollbar on the right border of the process list and the
       info overlay (ratatui's `Scrollbar`: `↑` / `↓` at the ends, a thumb between, as btop
       draws it), ↑ / ↓ wrapping around at the ends (not the wheel, PgUp / PgDn, Home / End), and
