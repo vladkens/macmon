@@ -34,8 +34,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
-  // `gauge_all!`: a gauge every Mac and VM has.
-  macro_rules! gauge_all {
+  // `gauge_any!`: a gauge every Mac and VM has.
+  macro_rules! gauge_any {
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
       gauge_head!($out, $name, $help);
       let name = metric_name!($name);
@@ -43,8 +43,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
-  // `tiers_all!`: a per-tier gauge (`tier="E"` etc.) every Mac and VM has; none without tiers.
-  macro_rules! tiers_all {
+  // `tiers_any!`: a per-tier gauge (`tier="E"` etc.) every Mac and VM has; none without tiers.
+  macro_rules! tiers_any {
     ($out:expr, $name:literal, $help:literal, $field:ident) => {
       if !m.cpu_tiers.is_empty() {
         gauge_head!($out, $name, $help);
@@ -58,59 +58,59 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
-  // `gauge_hw_!`: a gauge only real hardware has (power counters, frequency tables); left out in a VM.
-  macro_rules! gauge_hw_ {
+  // `gauge_mac!`: a gauge only a real Mac has (power counters, frequency tables); left out in a VM.
+  macro_rules! gauge_mac {
     ($($args:tt)*) => {
       if !soc.vm {
-        gauge_all!($($args)*);
+        gauge_any!($($args)*);
       }
     };
   }
-  // `tiers_hw_!`: a per-tier gauge only real hardware has (frequency tables); left out in a VM.
-  macro_rules! tiers_hw_ {
+  // `tiers_mac!`: a per-tier gauge only a real Mac has (frequency tables); left out in a VM.
+  macro_rules! tiers_mac {
     ($($args:tt)*) => {
       if !soc.vm {
-        tiers_all!($($args)*);
+        tiers_any!($($args)*);
       }
     };
   }
 
   let mut out = String::new();
   if let Some(value) = m.temp.cpu_temp_avg {
-    gauge_all!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
+    gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
   }
   if let Some(value) = m.temp.gpu_temp_avg {
-    gauge_all!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", value);
+    gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", value);
   }
-  gauge_all!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
-  gauge_all!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
-  gauge_all!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
-  gauge_all!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
-  gauge_all!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
-  gauge_all!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
-  gauge_all!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
-  gauge_hw_!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
-  gauge_all!(out, "ecpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Lowest CPU tier frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
-  gauge_all!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.ecpu_scaled_ratio);
-  gauge_all!(out, "ecpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Lowest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
-  gauge_hw_!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
-  gauge_all!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
-  gauge_all!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
-  gauge_all!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
-  tiers_hw_!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
-  tiers_all!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
-  tiers_all!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
-  gauge_hw_!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
-  gauge_all!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
-  gauge_all!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
-  gauge_all!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
-  gauge_hw_!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
-  gauge_hw_!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
-  gauge_hw_!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_hw_!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
-  gauge_hw_!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
-  gauge_hw_!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-  gauge_hw_!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_any!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
+  gauge_any!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
+  gauge_any!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
+  gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
+  gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
+  gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
+  gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
+  gauge_mac!(out, "ecpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Lowest CPU tier frequency in MHz", m.ecpu_freq_mhz);
+  gauge_any!(out, "ecpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Lowest CPU tier frequency-scaled ratio (0–1)", m.ecpu_scaled_ratio);
+  gauge_any!(out, "ecpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.ecpu_scaled_ratio);
+  gauge_any!(out, "ecpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Lowest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.ecpu_active_ratio);
+  gauge_mac!(out, "pcpu_freq_mhz", "DEPRECATED: use macmon_cpu_tier_freq_mhz. Highest CPU tier frequency in MHz", m.pcpu_freq_mhz);
+  gauge_any!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
+  gauge_any!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
+  gauge_any!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
+  tiers_mac!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
+  tiers_any!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
+  tiers_any!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
+  gauge_mac!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
+  gauge_any!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
+  gauge_any!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
+  gauge_any!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
+  gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
+  gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
+  gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
+  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
+  gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
+  gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
