@@ -55,7 +55,7 @@ jobs:
       - id: release
         uses: vladkens/actions/rust-publish@v1
 
-      - uses: vladkens/actions/homebrew-bump@c958286db3eeae568e959de8bee8c24bb927fb52
+      - uses: vladkens/actions/homebrew-bump@v1
         with:
           tag: ${{ steps.release.outputs.tag }}
           file: ${{ steps.release.outputs.files }}
