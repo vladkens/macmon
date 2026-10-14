@@ -383,7 +383,13 @@ impl Iterator for IOReportIterator {
 // Exported by libSystem; libc deprecates its declarations of these and 1.0 drops them.
 unsafe extern "C" {
   fn mach_host_self() -> libc::mach_port_t;
-  fn mach_task_self() -> libc::mach_port_t;
+  static mach_task_self_: libc::mach_port_t;
+}
+
+/// The task port cached by libSystem, as the C `mach_task_self()` macro reads it: the function of
+/// that name is a trap that adds a send right reference on every call.
+fn mach_task_self() -> libc::mach_port_t {
+  unsafe { mach_task_self_ }
 }
 
 // MARK: CPU ticks
