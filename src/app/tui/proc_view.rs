@@ -176,13 +176,13 @@ fn format_mem(bytes: u64) -> String {
   }
 }
 
-/// CPU time in whole seconds, 8 cells up to 9999 days: `M:SS` under an hour, `H:MM:SS` under a
-/// day, then days and hours (`2d03h`).
+/// CPU time, cut and 8 cells up to 9999 days, as htop's TIME+: `M:SS.hh` (hundredths) under an
+/// hour, `H:MM:SS` under a day, then days and hours (`2d03h`).
 fn format_time(ns: u64) -> String {
-  let secs = ns / 1_000_000_000;
+  let (secs, hundredths) = (ns / 1_000_000_000, ns / 10_000_000 % 100);
   let (days, hours, mins, secs) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
   match (days, hours) {
-    (0, 0) => format!("{mins}:{secs:02}"),
+    (0, 0) => format!("{mins}:{secs:02}.{hundredths:02}"),
     (0, _) => format!("{hours}:{mins:02}:{secs:02}"),
     _ => format!("{days}d{hours:02}h"),
   }
@@ -784,16 +784,19 @@ impl ProcView {
     self.select(index);
   }
 
-  /// Titles of a process box `width` cells wide: `proc 412` (`proc 12/412` with a filter), then
-  /// the filter as `filter_titles` shows it, then `sort`, and `info | finder | copy | kill` on the
+  /// Titles of a process box `width` cells wide: `proc 412` (`proc  12/412` with a filter or while
+  /// one is typed, the count padded to the digits of the total), then the filter as
+  /// `filter_titles` shows it, then `sort`, and `info | finder | copy | kill` on the
   /// right with a process selected (neither while typing: keys are text then).
   fn titles(&self, width: u16) -> Titles<'_> {
     let mut name = vec![heading("proc")];
     if let Some(procs) = self.procs() {
-      let count = if self.filter.is_empty() {
-        format!(" {}", procs.len())
+      let total = procs.len().to_string();
+      // padded to the digits of the total, so the filter after it stays put while it is typed
+      let count = if self.filter.is_empty() && !self.typing {
+        format!(" {total}")
       } else {
-        format!(" {}/{}", self.row_count(), procs.len())
+        format!(" {:>width$}/{total}", self.row_count(), width = total.len())
       };
       name.push(text(count));
     }
@@ -956,9 +959,9 @@ fn pct_cell(pct: f32) -> Span<'static> {
   load_cell(pct, pct / 100.0, format!("{pct:.1}"))
 }
 
-/// CPU time, dim under a second (`0:00`).
+/// CPU time; zero is dim.
 fn time_cell(ns: u64) -> Span<'static> {
-  if ns < 1_000_000_000 { dim(format_time(ns)) } else { text(format_time(ns)) }
+  if ns == 0 { dim(format_time(ns)) } else { text(format_time(ns)) }
 }
 
 /// Power in watts, `≥` before a lower bound; a dim `-` without a reading.
@@ -1007,12 +1010,15 @@ fn draw_row<'a>(
 
 #[cfg(test)]
 mod tests {
+  use ratatui::Terminal;
+  use ratatui::backend::TestBackend;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
 
   use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time};
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
+  use crate::tui::boxes::draw_box;
 
   const MIB: u64 = 1 << 20;
 
@@ -1460,13 +1466,48 @@ mod tests {
   }
 
   #[test]
+  fn the_filter_keeps_its_place_in_the_title_as_the_count_changes() {
+    // 1 `one`, 29 `two` and 294 `three` of 324 processes
+    let names = [("one", 1), ("two", 29), ("three", 294)];
+    let procs = names.iter().flat_map(|&(name, n)| (0..n).map(move |_| name));
+    let procs = procs.enumerate().map(|(i, name)| proc(i as i32 + 1, name, 0.0, 1, None, 0.0));
+    let mut view = ProcView::default();
+    view.set_procs(procs.collect());
+
+    // the top border of a box 80 cells wide, and the cell where the filter starts
+    let title = |view: &ProcView| {
+      let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+      term.draw(|f| _ = draw_box(f, f.area(), view.titles(80))).unwrap();
+      let buf = term.backend().buffer();
+      let row: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+      let at = row.find("─ /").map(|i| row[..i].chars().count());
+      (row, at)
+    };
+
+    assert!(title(&view).0.starts_with("╭─ proc 324 ─ / filter ─ sort ─"));
+    assert!(press(&mut view, KeyCode::Char('/')));
+    let (row, open) = title(&view);
+    assert!(row.starts_with("╭─ proc 324/324 ─ /█ ─"), "{row}");
+    for (name, n) in names {
+      type_str(&mut view, name);
+      let (row, at) = title(&view);
+      assert!(row.starts_with(&format!("╭─ proc {n:>3}/324 ─ /{name}█ ─")), "{row}");
+      assert_eq!(at, open, "{row}");
+      for _ in name.chars() {
+        assert!(press(&mut view, KeyCode::Backspace));
+      }
+    }
+  }
+
+  #[test]
   fn cpu_time_reads_like_top() {
     let sec = |s: u64| s * 1_000_000_000;
     let cases = [
-      (0, "0:00"),
-      (sec(1) - 1, "0:00"), // whole seconds, cut
-      (sec(59), "0:59"),
-      (sec(3599), "59:59"),
+      (0, "0:00.00"),
+      (9_999_999, "0:00.00"), // cut to hundredths
+      (sec(1) + 970_000_000, "0:01.97"),
+      (sec(59), "0:59.00"),
+      (sec(3600) - 1, "59:59.99"),
       (sec(3600), "1:00:00"),
       (sec(86_399), "23:59:59"),
       (sec(86_400), "1d00h"),
