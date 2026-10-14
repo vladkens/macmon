@@ -55,31 +55,9 @@ jobs:
       - id: release
         uses: vladkens/actions/rust-publish@v1
 
-      - name: Bump Homebrew formula
-        if: steps.release.outputs.tag != ''
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-          FILE: ${{ steps.release.outputs.files }}
-          HOMEBREW_REPO_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN }}
-        run: |
-          if [ "$(basename "$FILE")" != "macmon-${TAG}.tar.gz" ]; then
-            echo "Error: expected the single file macmon-${TAG}.tar.gz, got '$FILE'"
-            exit 1
-          fi
-          SHA256=$(sha256sum "$FILE" | cut -d' ' -f1)
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/macmon-${TAG}.tar.gz"
-
-          git clone "https://x-access-token:${HOMEBREW_REPO_TOKEN}@github.com/vladkens/homebrew-tap.git" tap
-          cd tap
-          sed -i "s|version \".*\"|version \"${TAG#v}\"|" macmon.rb
-          sed -i "s|url \".*\"|url \"${URL}\"|" macmon.rb
-          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" macmon.rb
-          if git diff --quiet; then
-            echo "Formula already at ${TAG}"
-            exit 0
-          fi
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add macmon.rb
-          git commit -m "macmon ${TAG}"
-          git push
+      - uses: vladkens/actions/homebrew-bump@c958286db3eeae568e959de8bee8c24bb927fb52
+        with:
+          tag: ${{ steps.release.outputs.tag }}
+          file: ${{ steps.release.outputs.files }}
+          tap: vladkens/homebrew-tap
+          token: ${{ secrets.HOMEBREW_REPO_TOKEN }}
