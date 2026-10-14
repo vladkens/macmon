@@ -32,7 +32,8 @@ POWER does today.
       `ri_pkg_idle_wkups`), FDS (open file descriptors), DISK R/W/s (`rusage` disk bytes), PEAK
       MEM (`ri_lifetime_max_phys_footprint`). Fixed set, no configuration: new columns go into
       `DROP_ORDER`, so a narrow window drops them first. Decision point before the plan: which of
-      them earn a place in an 80-column window.
+      them earn a place in an 80-column window. Done: CPU TIME (`TIME`, before `CPU%`).
+      Plan: [docs/plans/completed/20261014-cpu-time.md](plans/completed/20261014-cpu-time.md).
 - [ ] **6. Column picker.** Only if item 5 leaves too many columns: an overlay with checkboxes
       (like htop's F2) saved in `~/.config/macmon.json` under a new field. Released versions
       ignore the field but drop it when they save, so a missing field means the default columns.

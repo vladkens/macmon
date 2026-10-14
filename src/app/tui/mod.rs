@@ -716,6 +716,7 @@ mod tests {
       path: String::new(),
       user: "root".to_string(),
       cpu_pct: 12.5,
+      cpu_time_ns: 0,
       mem_bytes: 64 << 20,
       power_w: Some(0.5),
       gpu_pct: 3.0,
@@ -736,21 +737,22 @@ mod tests {
       "WindowServer" => WINDOW_SERVER.to_string(),
       _ => format!("/Applications/{name}.app/Contents/MacOS/{name}"),
     };
-    let proc = |pid: i32, name: &str, cpu, mem_mb: u64, power_w, gpu_pct| ProcInfo {
+    let proc = |pid: i32, name: &str, cpu, secs: u64, mem_mb: u64, power_w, gpu_pct| ProcInfo {
       pid,
       name: name.to_string(),
       path: path(name),
       user: if pid < 100 { "root" } else { "vlad" }.to_string(),
       cpu_pct: cpu,
+      cpu_time_ns: secs * 1_000_000_000,
       mem_bytes: mem_mb << 20,
       power_w,
       gpu_pct,
       started: (pid >= 100).then_some((pid as u64, 0)),
     };
     vec![
-      proc(1, "launchd", 0.0, 20, None, 0.0),
-      proc(631, "WindowServer", 25.0, 300, Some(1.5), 40.0),
-      proc(2301, "Safari", 12.0, 1536, Some(0.8), 5.0),
+      proc(1, "launchd", 0.0, 3 * 3600 + 25 * 60 + 7, 20, None, 0.0),
+      proc(631, "WindowServer", 25.0, 2 * 86_400 + 5 * 3600, 300, Some(1.5), 40.0),
+      proc(2301, "Safari", 12.0, 754, 1536, Some(0.8), 5.0),
     ]
   }
 
@@ -1056,6 +1058,7 @@ mod tests {
     // first, PIDs and text from the start
     let cases = [
       ("MEM", Mem, true, [2301, 631, 1], [1, 631, 2301]),
+      ("TIME", Time, true, [631, 1, 2301], [2301, 1, 631]),
       ("PID", Pid, false, [1, 631, 2301], [2301, 631, 1]),
     ];
     for (column, sort, desc, first, reversed) in cases {
@@ -1330,7 +1333,7 @@ mod tests {
     // POWER reads `-` for every process, without the note on own processes
     for y in [2, 3, 4] {
       let words = proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-      assert_eq!(words[words.len() - 3], "-", "{words:?}");
+      assert_eq!(words[words.len() - 2], "-", "{words:?}");
     }
     assert!(!row(&buf, 49).contains("POWER"), "{}", row(&buf, 49));
   }
@@ -1344,7 +1347,7 @@ mod tests {
       let buf = render_buffer(app, 200, 50);
       assert_eq!(app.layout(buf.area).boxes.len(), boxes, "vm {vm}");
       let words = proc_row(&buf, 2).split_whitespace().map(str::to_string).collect::<Vec<_>>();
-      assert_eq!((words[2].as_str(), words[6].as_str()), ("WindowServer", power));
+      assert_eq!((words[2].as_str(), words[8].as_str()), ("WindowServer", power));
       assert_eq!(row(&buf, 49).contains("POWER: own processes only"), note);
     }
   }
@@ -1457,17 +1460,20 @@ mod tests {
     assert!(title.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{title}");
     let header = proc_row(&buf, 1);
     assert!(header.starts_with("│   PID NAME "), "{header}");
-    assert!(header.ends_with(" CPU% ↓    MEM   POWER   GPU% │"), "{header}");
+    assert!(header.ends_with(" TIME CPU% ↓    MEM   GPU%   POWER │"), "{header}");
 
     // sorted by CPU, descending; numbers right-aligned, a dash for a missing power reading
     let words = |y| proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
     assert_eq!(
       words(2),
-      ["│", "631", "WindowServer", "vlad", "25.0", "300M", "1.50W", "40.0", "│"]
+      ["│", "631", "WindowServer", "vlad", "2d05h", "25.0", "300M", "40.0", "1.50W", "│"]
     );
-    assert_eq!(words(3), ["│", "2301", "Safari", "vlad", "12.0", "1.5G", "0.80W", "5.0", "│"]);
-    assert_eq!(words(4), ["│", "1", "launchd", "root", "0.0", "20M", "-", "0.0", "│"]);
-    assert!(proc_row(&buf, 2).ends_with("  25.0   300M   1.50W   40.0 │"), "{}", proc_row(&buf, 2));
+    let safari = ["│", "2301", "Safari", "vlad", "12:34", "12.0", "1.5G", "5.0", "0.80W", "│"];
+    assert_eq!(words(3), safari);
+    let launchd = ["│", "1", "launchd", "root", "3:25:07", "0.0", "20M", "0.0", "-", "│"];
+    assert_eq!(words(4), launchd);
+    let window_server = proc_row(&buf, 2);
+    assert!(window_server.ends_with("   2d05h   25.0   300M   40.0   1.50W │"), "{window_server}");
 
     // load values on the gradient
     let cpu = x_of(&proc_row(&buf, 2), "25.0");
@@ -1528,8 +1534,8 @@ mod tests {
 
     // sorted by CPU like the processes; `a`: Safari and launchd, whose missing power reading
     // makes the sum a lower bound
-    assert_eq!(words(2), ["│", "×1", "w", "25.0", "300M", "1.50W", "40.0", "│"]);
-    assert_eq!(words(3), ["│", "×2", "a", "12.0", "1.5G", "≥0.80W", "5.0", "│"]);
+    assert_eq!(words(2), ["│", "×1", "w", "2d05h", "25.0", "300M", "40.0", "1.50W", "│"]);
+    assert_eq!(words(3), ["│", "×2", "a", "3:37:41", "12.0", "1.5G", "5.0", "≥0.80W", "│"]);
     assert!(proc_row(&buf, 4).starts_with("│ ────"), "{}", proc_row(&buf, 4));
     assert_eq!(words(5)[1..3], ["631", "WindowServer"]);
     let total = x_of(&proc_row(&buf, 3), "×2");

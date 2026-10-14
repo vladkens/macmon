@@ -435,6 +435,7 @@ mod tests {
       path: EXE.into(),
       user: "vlad".into(),
       cpu_pct: 0.0,
+      cpu_time_ns: 0,
       mem_bytes: 0,
       power_w: None,
       gpu_pct: 0.0,

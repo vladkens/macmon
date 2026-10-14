@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 
-use super::boxes::{Titles, cells, draw_box, hint};
+use super::boxes::{Titles, cells, draw_box, draw_scrollbar, hint};
 use super::theme::{self, faint, heading, link, text};
 
 /// One line of the help.
@@ -46,6 +46,7 @@ const HELP: &[Row] = &[
   Term("click", "a column header to sort, a row to select"),
   Section("Notes"),
   Term("CPU%", "100% is one fully busy core"),
+  Term("TIME", "CPU time used since the process started"),
   Term("freq", "usage weighted by frequency; raw: share of time busy"),
   Term("POWER -", "not available for other users' processes"),
 ];
@@ -104,8 +105,8 @@ fn hyperlink(buf: &mut Buffer, x: u16, y: u16, width: u16, url: &str) {
 }
 
 /// Draws the help in a box centered over `area`, from line `scroll` on (in a window too short for
-/// all of it, ↑ / ↓ scroll it), clamped so the box is never left half empty. Returns the clamped
-/// scroll.
+/// all of it, ↑ / ↓ scroll it, with a scrollbar on the right border), clamped so the box is never
+/// left half empty. Returns the clamped scroll.
 pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
   let lines = lines();
   // the text with a blank column on both sides, and the borders
@@ -142,6 +143,7 @@ pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
     let y = inner.y + cells(support - scroll);
     hyperlink(buf, support_x + prefix, y, link_width, SUPPORT_URL);
   }
+  draw_scrollbar(f, rect, inner, lines.len(), scroll);
   scroll
 }
 
@@ -181,5 +183,27 @@ mod tests {
     assert_eq!(style("a row to select", "click"), [bold; 5]);
     assert_eq!(style("fully busy core", "CPU%"), [bold; 4]);
     assert_eq!(style("other users'", "POWER -"), [bold; 7]);
+  }
+
+  #[test]
+  fn a_scrollbar_shows_when_the_lines_dont_fit() {
+    // the right border of the box, corner to corner, in an 80 cells window `height` rows high
+    let border = |height: u16, scroll: usize| {
+      let mut term = Terminal::new(TestBackend::new(80, height)).unwrap();
+      term.draw(|f| _ = render(f, f.area(), scroll)).unwrap();
+      let buf = term.backend().buffer();
+      let at = |corner| buf.content.iter().position(|c| c.symbol() == corner).unwrap() as u16;
+      let (top, bottom) = (at("╮"), at("╯"));
+      assert_eq!(top % 80, bottom % 80);
+      (top / 80..=bottom / 80).map(|y| buf[(top % 80, y)].symbol()).collect::<String>()
+    };
+
+    // the thumb at the top, then (scrolled to the end) at the bottom; the corners stay
+    let (top, end) = (border(12, 0), border(12, usize::MAX));
+    assert!(top.starts_with("╮↑┃") && top.ends_with("│↓╯"), "{top}");
+    assert!(end.starts_with("╮↑│") && end.ends_with("┃↓╯"), "{end}");
+    // all of it on screen: the plain border
+    let tall = border(40, 0);
+    assert_eq!(tall, format!("╮{}╯", "│".repeat(tall.chars().count() - 2)));
   }
 }
