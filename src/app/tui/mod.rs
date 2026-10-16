@@ -1004,6 +1004,23 @@ mod tests {
   }
 
   #[test]
+  fn disabling_a_saved_filter_does_not_report_no_match_for_an_empty_sample() {
+    let mut app = app_with_procs(varied_procs());
+    for c in "/nothing-matches".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(press(&mut app, KeyCode::Enter).is_continue());
+    assert!(screen_text(&render_buffer(&mut app, 200, 50)).contains("no process matches"));
+    assert!(app.handle_key(key('f')).is_continue());
+    app.proc_view.set_procs(vec![]);
+    let screen = screen_text(&render_buffer(&mut app, 200, 50));
+    assert!(!screen.contains("no process matches"));
+    assert!(screen.contains("proc 0 ─ /nothing-matches"));
+    assert!(app.handle_key(key('f')).is_continue());
+    assert!(screen_text(&render_buffer(&mut app, 200, 50)).contains("no process matches"));
+  }
+
+  #[test]
   fn typing_filter_ignores_global_keys() {
     let mut app = app_with_procs(varied_procs());
     assert!(app.handle_key(key('/')).is_continue());

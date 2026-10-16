@@ -351,6 +351,7 @@ pub(super) fn filter_titles(
   name: Vec<Span<'static>>,
   filter: &str,
   typing: bool,
+  enabled: bool,
   width: u16,
   paused: bool,
 ) -> Titles<'static> {
@@ -359,16 +360,21 @@ pub(super) fn filter_titles(
   }
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
-    Titles::new(name).left(filter_title(filter, typing, beside))
+    Titles::new(name).left(filter_title(filter, typing, enabled, beside))
   } else if paused {
     Titles::new(name)
   } else {
-    Titles::new(filter_title(filter, typing, title_text_room(width, &[])))
+    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[])))
   }
 }
 
 /// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
-pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'static>> {
+pub(super) fn filter_title(
+  filter: &str,
+  typing: bool,
+  enabled: bool,
+  room: u16,
+) -> Vec<Span<'static>> {
   // `/` and the cursor (one cell each) around the filter text
   let text_room = usize::from(room).saturating_sub(1 + usize::from(typing));
 
@@ -381,6 +387,11 @@ pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'s
   }
   if typing {
     spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
+  }
+  if !enabled {
+    for span in &mut spans {
+      *span = faint(span.content.clone());
+    }
   }
   spans
 }
@@ -509,6 +520,7 @@ pub(super) struct ProcView {
   pub(super) sort: ProcSort,
   pub(super) sort_desc: bool,
   filter: String,
+  filter_enabled: bool,
   /// Filter input mode: keys edit the filter instead of acting as shortcuts.
   typing: bool,
   /// Latest sample, sorted; `None` until the first one arrives.
@@ -544,6 +556,7 @@ impl ProcView {
       sort,
       sort_desc,
       filter: String::new(),
+      filter_enabled: true,
       typing: false,
       procs: None,
       rows: vec![],
@@ -672,7 +685,7 @@ impl ProcView {
       sort_procs(procs, self.sort, self.sort_desc);
     }
 
-    let filter = Filter::parse(&self.filter);
+    let filter = Filter::parse(if self.filter_enabled { &self.filter } else { "" });
     self.rows = (0..procs.len()).filter(|&i| filter.matches(|t| hit(&procs[i], t))).collect();
     let groups = filter
       .any
@@ -764,7 +777,16 @@ impl ProcView {
         }
       }
       KeyCode::Char(' ') => self.toggle_pause(),
-      KeyCode::Char('/') => self.typing = true,
+      KeyCode::Char('/') => {
+        self.filter_enabled = true;
+        self.typing = true;
+        self.refresh();
+      }
+      KeyCode::Char('f') if !self.filter.is_empty() => {
+        self.filter_enabled = !self.filter_enabled;
+        self.refresh();
+      }
+      KeyCode::Char('f') => {}
       KeyCode::Char('S') => self.reverse_sort(),
       KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => self.reverse_sort(),
       KeyCode::Char('s') => self.next_sort(),
@@ -863,7 +885,7 @@ impl ProcView {
     if let Some(procs) = self.procs() {
       let total = procs.len().to_string();
       // padded to the digits of the total, so the filter after it stays put while it is typed
-      let count = if self.filter.is_empty() && !self.typing {
+      let count = if (self.filter.is_empty() || !self.filter_enabled) && !self.typing {
         format!(" {total}")
       } else {
         format!(" {:>width$}/{total}", self.row_count(), width = total.len())
@@ -874,7 +896,7 @@ impl ProcView {
     if self.paused {
       name.splice(0..0, [heading("paused"), text(" · ")]);
     }
-    let titles = filter_titles(name, &self.filter, self.typing, width, self.paused);
+    let titles = filter_titles(name, &self.filter, self.typing, self.filter_enabled, width, self.paused);
     let actions =
       || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
@@ -947,7 +969,7 @@ impl App {
     let columns = fit_columns(table.width, self.proc_view.sort);
 
     let filter = self.proc_view.filter();
-    if self.proc_view.row_count() == 0 && !filter.is_empty() {
+    if self.proc_view.row_count() == 0 && self.proc_view.filter_enabled && !filter.is_empty() {
       let row = body.centered_vertically(Constraint::Length(1));
       let message = format!("no process matches \"{filter}\"");
       f.render_widget(Line::from(dim(message)).centered(), row);
@@ -1324,6 +1346,69 @@ mod tests {
     }
     type_str(&mut view, "1");
     assert_eq!(pids(&view), [4410, 631, 2301, 1]);
+  }
+
+  #[test]
+  fn toggling_a_saved_filter_restores_rows_totals_and_selection_rules() {
+    let mut view = view();
+    assert!(press(&mut view, KeyCode::Char('f')));
+    assert!(view.filter_enabled);
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "saf, cargo, !bookmark");
+    assert!(press(&mut view, KeyCode::Enter));
+    view.select(1);
+    assert_eq!(view.selected_pid(), Some(2301));
+    assert_eq!(pids(&view), [4410, 2301]);
+    assert_eq!(view.groups().len(), 2);
+
+    assert!(press(&mut view, KeyCode::Char('f')));
+    assert_eq!(view.filter(), "saf, cargo, !bookmark");
+    assert_eq!(pids(&view), [4410, 631, 2301, 1, 77]);
+    assert!(view.groups().is_empty());
+    assert_eq!(view.selected_pid(), Some(2301));
+    view.set_procs(sample());
+    assert_eq!(view.row_count(), 5, "new samples keep the filter disabled");
+    assert!(press(&mut view, KeyCode::Char('f')));
+    assert_eq!(pids(&view), [4410, 2301]);
+    assert_eq!(view.groups().len(), 2);
+    assert_eq!(view.selected_pid(), Some(2301));
+
+    assert!(press(&mut view, KeyCode::Char('f')));
+    view.select(1); // WindowServer is outside the saved filter
+    assert!(press(&mut view, KeyCode::Char('/')));
+    assert!(view.filter_enabled && view.typing());
+    assert_eq!(view.selected_pid(), None);
+    type_str(&mut view, "f");
+    assert_eq!(view.filter(), "saf, cargo, !bookmarkf");
+    assert!(view.filter_enabled, "f is text while editing");
+  }
+
+  #[test]
+  fn disabled_filter_titles_keep_the_text_faint_and_the_count_unfiltered() {
+    use ratatui::style::Modifier;
+
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    type_str(&mut view, "a-long-filter-with-no-matches");
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Char('f'));
+    for width in [12, 80] {
+      let mut term = Terminal::new(TestBackend::new(width, 3)).unwrap();
+      term.draw(|f| _ = draw_box(f, f.area(), view.titles(width))).unwrap();
+      let buf = term.backend().buffer();
+      let line: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+      assert!(line.contains(if width == 12 { "ches" } else { "matches" }), "{line}");
+      assert!(line.contains("/…") || line.contains("/a-long"), "{line}");
+      if width == 80 {
+        assert!(line.contains("proc 5 ─"), "{line}");
+        assert!(!line.contains("5/5"));
+      }
+      let slash = (0..width).find(|&x| buf[(x, 0)].symbol() == "/").unwrap();
+      let cells = if width == 12 { 6 } else { 1 + view.filter.len() as u16 };
+      for x in slash..slash + cells {
+        assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
+      }
+    }
   }
 
   #[test]
