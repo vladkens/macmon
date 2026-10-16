@@ -286,9 +286,12 @@ impl Info {
   /// the filter when there is room for a row below it, then the rows (paths cut by components),
   /// with a scrollbar when they don't fit, or why there are none, and `? | q back` on the bottom
   /// border (not while typing).
-  pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
+  pub(super) fn render(&mut self, f: &mut Frame, area: Rect, paused: bool) {
     f.render_widget(Clear, area);
-    let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
+    let mut name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
+    if paused {
+      name.splice(0..0, [heading("paused"), text(" · ")]);
+    }
     let titles = Titles::new(name);
     let rows = self.rows();
     let actions = || join([hint("c", "copy"), hint("e", "finder")]);
@@ -486,7 +489,7 @@ mod tests {
 
   fn render(info: &mut Info, width: u16, height: u16) -> Buffer {
     let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
-    term.draw(|f| info.render(f, f.area())).unwrap();
+    term.draw(|f| info.render(f, f.area(), false)).unwrap();
     term.backend().buffer().clone()
   }
 

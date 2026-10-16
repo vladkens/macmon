@@ -1,7 +1,8 @@
-//! Process panel: a process table with sorting, filtering and a selection that follows its pid,
+//! Process panel: a process table with sorting, filtering and identity-aware selection,
 //! driven by keys and the mouse.
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -351,6 +352,7 @@ pub(super) fn filter_titles(
   filter: &str,
   typing: bool,
   width: u16,
+  paused: bool,
 ) -> Titles<'static> {
   if !typing && filter.is_empty() {
     return Titles::new(name).left(hint("/", "filter"));
@@ -358,6 +360,8 @@ pub(super) fn filter_titles(
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
     Titles::new(name).left(filter_title(filter, typing, beside))
+  } else if paused {
+    Titles::new(name)
   } else {
     Titles::new(filter_title(filter, typing, title_text_room(width, &[])))
   }
@@ -469,10 +473,18 @@ fn tail(text: &str, max: usize) -> &str {
 
 // MARK: State
 
-/// Selected process: its pid and its row.
+type Identity = (i32, Option<(u64, u64)>);
+
+fn identity(proc: &ProcInfo) -> Identity {
+  // shortcut: ps rows only have PIDs; detect their reuse when the sampler supplies start times.
+  (proc.pid, proc.started)
+}
+
+/// Selected process: its identity and its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Selection {
   pid: i32,
+  started: Option<(u64, u64)>,
   index: usize,
 }
 
@@ -491,6 +503,9 @@ struct Targets {
 /// State of the process panel.
 #[derive(Debug)]
 pub(super) struct ProcView {
+  pub(super) paused: bool,
+  new: HashSet<Identity>,
+  exited: HashSet<Identity>,
   pub(super) sort: ProcSort,
   pub(super) sort_desc: bool,
   filter: String,
@@ -523,6 +538,9 @@ impl Default for ProcView {
 impl ProcView {
   pub(super) fn new(sort: ProcSort, sort_desc: bool) -> Self {
     Self {
+      paused: false,
+      new: HashSet::new(),
+      exited: HashSet::new(),
       sort,
       sort_desc,
       filter: String::new(),
@@ -596,9 +614,41 @@ impl ProcView {
     }
   }
 
-  /// Replaces the process list; the selection follows its pid.
+  pub(super) fn exited(&self, proc: &ProcInfo) -> bool {
+    self.exited.contains(&identity(proc))
+  }
+
+  pub(super) fn toggle_pause(&mut self) {
+    self.paused = !self.paused;
+    if !self.paused {
+      if let Some(procs) = &mut self.procs {
+        procs.retain(|p| !self.exited.contains(&identity(p)));
+      }
+      self.new.clear();
+      self.exited.clear();
+    }
+    self.refresh();
+  }
+
+  /// Updates live values without moving paused rows; otherwise replaces the sample.
   pub(super) fn set_procs(&mut self, procs: Vec<ProcInfo>) {
-    self.procs = Some(procs);
+    if self.paused {
+      let held = self.procs.get_or_insert_default();
+      let indices: HashMap<_, _> = held.iter().enumerate().map(|(i, p)| (identity(p), i)).collect();
+      self.exited = indices.keys().copied().collect();
+      for proc in procs {
+        let key = identity(&proc);
+        self.exited.remove(&key);
+        if let Some(&i) = indices.get(&key) {
+          held[i] = proc;
+        } else {
+          self.new.insert(key);
+          held.push(proc);
+        }
+      }
+    } else {
+      self.procs = Some(procs);
+    }
     self.refresh();
   }
 
@@ -606,28 +656,43 @@ impl ProcView {
   /// filter and sort stay.
   pub(super) fn clear(&mut self) {
     self.procs = None;
+    self.paused = false;
+    self.new.clear();
+    self.exited.clear();
     self.typing = false;
     self.targets = Targets::default();
     self.refresh();
   }
 
-  /// Re-sorts and re-filters the list. The selection stays on its pid, and is dropped when that
+  /// Re-filters and, unless paused, re-sorts. Selection follows identity, and is dropped when that
   /// process is gone or filtered out.
   fn refresh(&mut self) {
     let procs = self.procs.as_deref_mut().unwrap_or_default();
-    sort_procs(procs, self.sort, self.sort_desc);
+    if !self.paused {
+      sort_procs(procs, self.sort, self.sort_desc);
+    }
 
     let filter = Filter::parse(&self.filter);
     self.rows = (0..procs.len()).filter(|&i| filter.matches(|t| hit(&procs[i], t))).collect();
-    let groups =
-      filter.any.iter().map(|term| Group::sum(term, self.rows().filter(|p| hit(p, term))));
-    self.groups = groups.collect();
-    sort_groups(&mut self.groups, self.sort, self.sort_desc);
+    let groups = filter
+      .any
+      .iter()
+      .map(|term| Group::sum(term, self.rows().filter(|p| !self.exited(p) && hit(p, term))));
+    let mut groups: Vec<_> = groups.collect();
+    if self.paused {
+      groups.sort_by_key(|g| {
+        self.groups.iter().position(|old| old.term == g.term).unwrap_or(usize::MAX)
+      });
+    }
+    self.groups = groups;
+    if !self.paused {
+      sort_groups(&mut self.groups, self.sort, self.sort_desc);
+    }
 
     let procs = self.procs.as_deref().unwrap_or_default();
     let rows = &self.rows;
     self.selected = self.selected.and_then(|sel| {
-      let index = rows.iter().position(|&i| procs[i].pid == sel.pid)?;
+      let index = rows.iter().position(|&i| identity(&procs[i]) == (sel.pid, sel.started))?;
       Some(Selection { index, ..sel })
     });
   }
@@ -649,7 +714,11 @@ impl ProcView {
 
   fn select(&mut self, index: usize) {
     let procs = self.procs.as_deref().unwrap_or_default();
-    self.selected = self.rows.get(index).map(|&i| Selection { pid: procs[i].pid, index });
+    self.selected = self.rows.get(index).map(|&i| Selection {
+      pid: procs[i].pid,
+      started: procs[i].started,
+      index,
+    });
   }
 
   /// Scrolls the table to show row `offset` first, without blank rows below the last process.
@@ -694,6 +763,7 @@ impl ProcView {
           self.refresh();
         }
       }
+      KeyCode::Char(' ') => self.toggle_pause(),
       KeyCode::Char('/') => self.typing = true,
       KeyCode::Char('S') => self.reverse_sort(),
       KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => self.reverse_sort(),
@@ -801,11 +871,17 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let titles = filter_titles(name, &self.filter, self.typing, width);
+    if self.paused {
+      name.splice(0..0, [heading("paused"), text(" · ")]);
+    }
+    let titles = filter_titles(name, &self.filter, self.typing, width, self.paused);
     let actions =
       || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
       true => titles,
+      false if self.selected().is_some_and(|p| self.exited(p)) => {
+        titles.left(hint("s", "sort")).right(join([hint("e", "finder"), hint("c", "copy")]))
+      }
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),
       false => titles.left(hint("s", "sort")),
     }
@@ -915,9 +991,23 @@ impl App {
   /// Text of one table cell. Load values are colored by the gradient, zeros are dim and missing
   /// values show as a dim `-`.
   fn proc_cell(&self, column: ProcSort, proc: &ProcInfo) -> Span<'static> {
+    if self.proc_view.exited(proc)
+      && !matches!(column, ProcSort::Pid | ProcSort::Name | ProcSort::User)
+    {
+      return dim("-");
+    }
     match column {
       ProcSort::Pid => text(proc.pid.to_string()),
-      ProcSort::Name => text(proc.name.clone()),
+      ProcSort::Name => {
+        let prefix = if self.proc_view.exited(proc) {
+          "(exited) "
+        } else if self.proc_view.new.contains(&identity(proc)) {
+          "(new) "
+        } else {
+          ""
+        };
+        text(format!("{prefix}{}", proc.name))
+      }
       ProcSort::User => text(proc.user.clone()),
       ProcSort::Cpu => pct_cell(proc.cpu_pct),
       ProcSort::Time => time_cell(proc.cpu_time_ns),
@@ -1066,6 +1156,91 @@ mod tests {
     for c in text.chars() {
       assert!(press(view, KeyCode::Char(c)), "{c:?} not used");
     }
+  }
+
+  #[test]
+  fn pause_keeps_slots_live_values_and_selection_until_resume() {
+    let mut view = view();
+    view.fit(3);
+    press(&mut view, KeyCode::Down);
+    press(&mut view, KeyCode::Down);
+    let selected = view.selected().unwrap().pid;
+    let before = pids(&view);
+    let offset = view.offset;
+    press(&mut view, KeyCode::Char(' '));
+    let mut next = sample();
+    next.retain(|p| p.pid != selected);
+    next[0].cpu_pct = 99.0;
+    next.push(proc(9000, "added", 100.0, 10, None, 0.0));
+    view.set_procs(next);
+    assert_eq!(pids(&view), [before, vec![9000]].concat());
+    assert_eq!(view.selected_pid(), Some(selected));
+    assert!(view.exited(view.selected().unwrap()));
+    assert_eq!(view.offset, offset);
+    assert_eq!(view.rows().find(|p| p.pid == 1).unwrap().cpu_pct, 99.0);
+    assert!(view.new.contains(&(9000, None)));
+    let held = pids(&view);
+    press(&mut view, KeyCode::Char('S'));
+    assert_eq!(pids(&view), held);
+    view.set_procs(sample());
+    assert!(view.exited(view.rows().last().unwrap()));
+    press(&mut view, KeyCode::Char(' '));
+    assert!(!view.paused && view.new.is_empty() && view.exited.is_empty());
+    assert_eq!(pids(&view), [77, 1, 2301, 631, 4410]);
+    assert_eq!(view.selected_pid(), Some(selected));
+  }
+
+  #[test]
+  fn pause_distinguishes_reused_pids_and_excludes_exited_totals() {
+    let mut view = ProcView::default();
+    let mut old = proc(123, "worker", 25.0, 10, None, 0.0);
+    old.started = Some((1, 0));
+    view.set_procs(vec![old.clone()]);
+    type_str(&mut view, "/worker");
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Down);
+    press(&mut view, KeyCode::Char(' '));
+    let mut new = old;
+    new.started = Some((2, 0));
+    new.cpu_pct = 50.0;
+    view.set_procs(vec![new.clone()]);
+    assert_eq!(pids(&view), [123, 123]);
+    assert_eq!(view.selected().unwrap().started, Some((1, 0)));
+    assert!(view.exited(view.selected().unwrap()));
+    assert_eq!((view.groups[0].count, view.groups[0].cpu_pct), (1, 50.0));
+    press(&mut view, KeyCode::Char(' '));
+    assert_eq!(view.selected(), None, "PID reuse must not steal selection");
+    assert_eq!(view.procs(), Some([new].as_slice()));
+    press(&mut view, KeyCode::Char(' '));
+    view.clear();
+    assert!(!view.paused && view.procs().is_none());
+  }
+
+  #[test]
+  fn pause_before_first_sample_and_group_order_are_stable() {
+    let mut view = ProcView::default();
+    press(&mut view, KeyCode::Char(' '));
+    view.set_procs(sample());
+    assert_eq!(pids(&view), [1, 631, 2301, 4410, 77]);
+    assert_eq!(view.new.len(), 5);
+    press(&mut view, KeyCode::Char(' '));
+    type_str(&mut view, "/safari, cargo");
+    press(&mut view, KeyCode::Enter);
+    assert_eq!(
+      view.groups.iter().map(|g| g.term.as_str()).collect::<Vec<_>>(),
+      ["cargo", "safari"]
+    );
+    press(&mut view, KeyCode::Char(' '));
+    let mut next = sample();
+    next[2].cpu_pct = 100.0;
+    view.set_procs(next);
+    assert_eq!(
+      view.groups.iter().map(|g| g.term.as_str()).collect::<Vec<_>>(),
+      ["cargo", "safari"]
+    );
+    assert_eq!(view.groups[1].cpu_pct, 100.0);
+    press(&mut view, KeyCode::Char(' '));
+    assert_eq!(view.groups[0].term, "safari");
   }
 
   #[test]

@@ -56,11 +56,12 @@ POWER does today.
       `c` copying the selected path (the executable in the list, the row's full text in the info
       overlay); `? | q back` on the overlay's bottom border.
       Plan: [docs/plans/completed/20261012-list-scroll.md](plans/completed/20261012-list-scroll.md).
-- [ ] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
-      a row can be read and selected without the list jumping (Sloth has it). The metrics keep
-      updating; the title shows that the list is paused. And `f` turning the filter off and on
-      again without retyping it, to look outside it for a moment: the filter text stays, faint,
-      while it is off.
+- [ ] **10. Pause and filter off.** Space holds process row order while process and system
+      values keep updating. Exited rows stay marked `(exited)` and new rows append as `(new)`;
+      the title shows `paused`. The info overlay holds its files/socket snapshot. Sloth has a
+      pause feature. Separately, `f` should turn the filter off and on while preserving its text.
+      Plan (pause ordering with live process metrics; first PR):
+      [docs/plans/completed/20261016-pause-order.md](plans/completed/20261016-pause-order.md).
 - [ ] **11. Who has a file open.** A view of the open files of all processes with the filter,
       to find who reads or writes a file or holds a port (Sloth's main window, `lsof <path>`).
       Without root libproc reads only the user's own processes; other users' processes are

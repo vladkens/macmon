@@ -371,7 +371,9 @@ impl App {
     }
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
-      if let Some(info) = &mut self.info {
+      if let Some(info) = &mut self.info
+        && !self.proc_view.paused
+      {
         info.update_proc(self.proc_view.procs().unwrap_or_default());
         info.refresh(&*self.kill.sys);
       }
@@ -433,6 +435,9 @@ impl App {
     if let Some(mut info) = self.info.take() {
       // the help opens over it, unless `?` is typed into its filter; the overlay sees the key
       // too (it clears `copied`)
+      if key.code == KeyCode::Char(' ') && !info.typing {
+        self.proc_view.toggle_pause();
+      }
       let help = key.code == KeyCode::Char('?') && !info.typing;
       self.help = help.then_some(0);
       self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
@@ -460,8 +465,10 @@ impl App {
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
       // the last `Char` arm: it takes every character left while the list is on screen
       KeyCode::Char(c) if self.procs_visible() => match (c, self.proc_view.selected()) {
-        ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
-        ('k', Some(proc)) => self.kill.open(proc),
+        ('i', Some(proc)) if !self.proc_view.exited(proc) => {
+          self.info = Some(Info::new(proc, &*self.kill.sys))
+        }
+        ('k', Some(proc)) if !self.proc_view.exited(proc) => self.kill.open(proc),
         ('e', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
         ('c', Some(proc)) if !proc.path.is_empty() => {
           self.kill.sys.copy(&proc.path);
@@ -530,7 +537,7 @@ impl App {
     self.render_metrics_box(f, &plan);
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
-      self.info.iter_mut().for_each(|info| info.render(f, r));
+      self.info.iter_mut().for_each(|info| info.render(f, r, self.proc_view.paused));
       self.kill.render(f, r);
     }
     if let Some(scroll) = self.help {
@@ -1631,6 +1638,76 @@ mod tests {
       OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r-" };
     fake.0.borrow_mut().files.insert(631, Ok(vec![cwd, log]));
     (app, fake)
+  }
+
+  #[test]
+  fn paused_overlay_holds_files_and_metrics_keep_updating() {
+    let (mut app, fake) = info_app();
+    assert!(app.handle_key(key('i')).is_continue());
+    assert!(app.handle_key(key(' ')).is_continue());
+    let before = proc_row(&render_buffer(&mut app, 200, 50), 1);
+    fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().clear();
+    let mut procs = varied_procs();
+    procs[1].cpu_pct = 99.0;
+    put_procs(&mut app, procs);
+    assert_eq!(proc_row(&render_buffer(&mut app, 200, 50), 1), before);
+    let metrics = Metrics { sys_power: 42.0, ..test_metrics() };
+    assert!(
+      app.handle_event(Event::Update(Box::new(metrics)), &RwLock::new(TUI_MIN_MS)).is_continue()
+    );
+    assert_eq!(app.sys_power.items[0], 42000);
+    assert!(app.handle_key(key('q')).is_continue());
+    assert_eq!(app.proc_view.selected().unwrap().cpu_pct, 99.0);
+    assert!(app.handle_key(key('i')).is_continue());
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 1).contains("0 fds"));
+    assert!(app.handle_key(key('/')).is_continue());
+    assert!(app.handle_key(key(' ')).is_continue());
+    assert!(app.proc_view.paused, "Space in a filter is text");
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    for width in [200, 60, 20] {
+      let mut term = Terminal::new(TestBackend::new(width, 20)).unwrap();
+      term.draw(|f| app.info.as_mut().unwrap().render(f, f.area(), true)).unwrap();
+      assert!(screen_text(term.backend().buffer()).contains("paused"));
+    }
+    assert!(app.handle_key(key(' ')).is_continue());
+    put_procs(&mut app, varied_procs());
+    assert!(!app.proc_view.paused);
+  }
+
+  #[test]
+  fn paused_rows_show_markers_safe_actions_and_indicator_with_filters() {
+    let (mut app, fake) = info_app();
+    assert!(app.handle_key(key(' ')).is_continue());
+    let mut procs = varied_procs();
+    procs.retain(|p| p.pid != 631);
+    let mut new = procs[1].clone();
+    new.pid = 9000;
+    new.name = "new worker".into();
+    procs.push(new);
+    put_procs(&mut app, procs);
+    let buf = render_buffer(&mut app, 200, 50);
+    let exited = proc_row(&buf, 2);
+    assert!(exited.contains("(exited) WindowServer"), "{exited}");
+    assert_eq!(exited.split_whitespace().filter(|s| *s == "-").count(), 5);
+    assert!(proc_row(&buf, 5).contains("(new) new worker"));
+    for c in ['i', 'k'] {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(app.info.is_none() && !app.kill.is_open() && fake.calls().is_empty());
+    assert!(app.handle_key(key('c')).is_continue());
+    assert_eq!(fake.0.borrow().copied, [WINDOW_SERVER]);
+    for c in "/this is a very long filter".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+    assert!(app.handle_key(key(' ')).is_continue());
+    assert!(app.proc_view.paused && app.proc_view.filter().ends_with(' '));
+    assert!(proc_row(&render_buffer(&mut app, 30, 50), 0).contains("paused"));
+    assert!(press(&mut app, KeyCode::Enter).is_continue());
+    assert!(app.handle_key(key('?')).is_continue());
+    assert!(app.handle_key(key(' ')).is_continue() && app.proc_view.paused);
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    render_buffer(&mut app, 60, 12);
+    assert!(!app.proc_view.paused);
   }
 
   #[test]
