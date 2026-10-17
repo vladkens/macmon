@@ -94,6 +94,17 @@ POWER does today.
       memory. Read it without root (sysctl `kern.memorystatus_vm_pressure_level` and
       `kern.memorystatus_level`, to verify), color the RAM box by it and add it to JSON and
       Prometheus. Decision point before the plan: next to RAM use or instead of it in the title.
+- [ ] **18. Where a process works.** With agents building and testing in several projects at
+      once, the busiest process is often just `rustc`, `cargo` or `node`, and the name doesn't
+      say which project it belongs to. Show the working directory in the list (a column, or the
+      NAME cell for such tools, `~` for home, cut from the left), so the project is visible while
+      scrolling, without opening `i`. Other users' processes show no directory (libproc needs
+      root). Decision point before the plan: a column, a second line, or a toggle.
+- [ ] **19. Who is busy lately.** CPU% is one sample and jumps; TIME covers the whole life of a
+      process. To find what loads the Mac right now (a runaway process, an agent's test run, a
+      build), show CPU used over a recent window, e.g. the last 15 s or 1 min, from the CPU time
+      already sampled, and sort by it. Decision point before the plan: a new column or a switch
+      of TIME between "total" and "recent", and the window length.
 
 Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
 PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
