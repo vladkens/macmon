@@ -85,6 +85,10 @@ POWER does today.
 - [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
       Reddit): disk read / write and network in / out, system-wide, in the TUI, JSON and
       Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
+- [ ] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
+      processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
+      Group an app's helper processes under it, expandable to show which ones are counted. Until
+      then, the total row could say it covers matching processes only.
 
 Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
 PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
