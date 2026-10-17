@@ -896,7 +896,8 @@ impl ProcView {
     if self.paused {
       name.splice(0..0, [heading("paused"), text(" · ")]);
     }
-    let titles = filter_titles(name, &self.filter, self.typing, self.filter_enabled, width, self.paused);
+    let titles =
+      filter_titles(name, &self.filter, self.typing, self.filter_enabled, width, self.paused);
     let actions =
       || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
