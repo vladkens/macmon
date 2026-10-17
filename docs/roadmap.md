@@ -89,6 +89,11 @@ POWER does today.
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
       Group an app's helper processes under it, expandable to show which ones are counted. Until
       then, the total row could say it covers matching processes only.
+- [ ] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
+      little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
+      memory. Read it without root (sysctl `kern.memorystatus_vm_pressure_level` and
+      `kern.memorystatus_level`, to verify), color the RAM box by it and add it to JSON and
+      Prometheus. Decision point before the plan: next to RAM use or instead of it in the title.
 
 Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
 PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
