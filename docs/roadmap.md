@@ -82,6 +82,9 @@ POWER does today.
       `/Library/LaunchDaemons` (needs sudo). Tested by hand in the VM: a daemon running `macmon
       serve` starts at boot without a login, as root and with `UserName`; with `UserName` the
       `StandardErrorPath` file must be writable by that user.
+- [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
+      Reddit): disk read / write and network in / out, system-wide, in the TUI, JSON and
+      Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
 
 Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
 PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
