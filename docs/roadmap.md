@@ -76,6 +76,12 @@ POWER does today.
 - [ ] **13. Social preview card.** The repository still shows GitHub's template image. A
       1280×640 card from a real TUI screenshot of the current release (HTML rendered to PNG),
       uploaded by hand in the repository settings.
+- [ ] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` creates a
+      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs it
+      at boot with nobody logged in (asked on Reddit). An install option for a LaunchDaemon in
+      `/Library/LaunchDaemons` (needs sudo). Tested by hand in the VM: a daemon running `macmon
+      serve` starts at boot without a login, as root and with `UserName`; with `UserName` the
+      `StandardErrorPath` file must be writable by that user.
 
 Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
 PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
