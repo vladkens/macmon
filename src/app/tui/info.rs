@@ -89,6 +89,7 @@ pub(super) struct Info {
   proc: ProcInfo,
   files: Result<Vec<OpenFile>, String>,
   filter: String,
+  filter_enabled: bool,
   pub(super) typing: bool,
   /// The selected row, and its key, which it follows when the rows change.
   index: usize,
@@ -109,7 +110,19 @@ impl Info {
     let home = std::env::var("HOME").unwrap_or_default();
     let (typing, index, key, offset, page) = (false, 0, None, 0, 0);
     let copied = false;
-    let mut info = Self { proc, files, filter, typing, index, key, offset, page, home, copied };
+    let mut info = Self {
+      proc,
+      files,
+      filter,
+      filter_enabled: true,
+      typing,
+      index,
+      key,
+      offset,
+      page,
+      home,
+      copied,
+    };
     info.refresh(sys);
     info
   }
@@ -151,7 +164,7 @@ impl Info {
   /// collapsed.
   fn rows(&self) -> Vec<Row> {
     let Ok(files) = &self.files else { return vec![] };
-    let filter = Filter::parse(&self.filter);
+    let filter = Filter::parse(if self.filter_enabled { &self.filter } else { "" });
     let hit = |f: &OpenFile, t: &str| {
       let text = [f.text.to_lowercase(), self.tilde(&f.text).to_lowercase()];
       f.kind.label().contains(t) || text.iter().any(|text| text.contains(t))
@@ -206,7 +219,15 @@ impl Info {
           self.follow();
         }
       }
-      KeyCode::Char('/') => self.typing = true,
+      KeyCode::Char('/') => {
+        self.filter_enabled = true;
+        self.typing = true;
+        self.follow();
+      }
+      KeyCode::Char('f') if !self.filter.is_empty() => {
+        self.filter_enabled = !self.filter_enabled;
+        self.follow();
+      }
       KeyCode::Char('e') => {
         // exe, cwd, dir and file rows, not sockets
         if let Some(row) = self.rows().get(self.index).filter(|row| row.kind <= Kind::File) {
@@ -249,7 +270,7 @@ impl Info {
   fn counts(&self, rows: &[Row], width: usize) -> Line<'static> {
     let fds: Vec<&OpenFile> = self.files.iter().flatten().filter(|f| f.fd.is_some()).collect();
     let shown = rows.iter().filter(|row| row.kind > Kind::Cwd).map(|row| row.count).sum::<usize>();
-    let total = match self.filter.is_empty() {
+    let total = match self.filter.is_empty() || !self.filter_enabled {
       true => fds.len().to_string(),
       false => format!("{shown}/{}", fds.len()),
     };
@@ -273,7 +294,9 @@ impl Info {
   /// the filter keys on the right while typing.
   fn divider_titles(&self, width: u16) -> Titles<'static> {
     let filter = match self.typing || !self.filter.is_empty() {
-      true => filter_title(&self.filter, self.typing, title_text_room(width, &[])),
+      true => {
+        filter_title(&self.filter, self.typing, self.filter_enabled, title_text_room(width, &[]))
+      }
       false => hint("/", "filter"),
     };
     let hints = join([hint("Enter", "keep"), hint("Esc", "clear")]);
@@ -286,7 +309,7 @@ impl Info {
   /// the filter when there is room for a row below it, then the rows (paths cut by components),
   /// with a scrollbar when they don't fit, or why there are none, and `? | q back` on the bottom
   /// border (not while typing).
-  pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
+  pub(super) fn render(&mut self, f: &mut Frame, area: Rect, paused: bool) {
     f.render_widget(Clear, area);
     let name = vec![heading(self.proc.name.clone()), text(format!(" {}", self.proc.pid))];
     let titles = Titles::new(name);
@@ -328,11 +351,14 @@ impl Info {
     }
     draw_scrollbar(f, area, list, len, self.offset);
 
-    // help and back as on the main footer, `copied` after `c`; nothing while typing (the filter
-    // keys are on the divider)
-    if !self.typing && area.height >= 2 {
+    // Filter keys stay on the divider while typing; paused remains visible on the bottom.
+    if area.height >= 2 {
+      let mut hints = if self.typing { vec![] } else { vec![hint("?", ""), hint("q", "back")] };
+      if paused {
+        hints.insert(0, vec![theme::paused()]);
+      }
       let copied = if self.copied { vec![faint("copied")] } else { vec![] };
-      render_bottom_border(f, area, vec![hint("?", ""), hint("q", "back")], |_| copied);
+      render_bottom_border(f, area, hints, |_| copied);
     }
   }
 }
@@ -486,7 +512,7 @@ mod tests {
 
   fn render(info: &mut Info, width: u16, height: u16) -> Buffer {
     let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
-    term.draw(|f| info.render(f, f.area())).unwrap();
+    term.draw(|f| info.render(f, f.area(), false)).unwrap();
     term.backend().buffer().clone()
   }
 
@@ -768,6 +794,51 @@ mod tests {
     let x = overlay[8].chars().position(|c| c == '×').unwrap() as u16;
     assert_eq!([cell(2, 8), cell(8, 8), cell(12, 8), cell(x, 8)], [faint, faint, plain, faint]);
     assert_eq!(cell(2, 3), (theme::TEXT, Modifier::REVERSED));
+  }
+
+  #[test]
+  fn a_saved_file_filter_toggles_without_losing_text_or_selection() {
+    let (mut info, fake) = info(Ok(files()));
+    assert!(press(&mut info, &fake, KeyCode::Char('f')));
+    assert!(info.filter_enabled);
+    press(&mut info, &fake, KeyCode::Char('/'));
+    type_str(&mut info, &fake, "tcp, /var, !unix");
+    press(&mut info, &fake, KeyCode::Enter);
+    assert_eq!(texts(&info), [ROWS[3], ROWS[4]]);
+    let selected = selected(&info);
+    press(&mut info, &fake, KeyCode::Char('f'));
+    assert_eq!(texts(&info), ROWS);
+    assert_eq!(self::selected(&info), selected);
+    info.refresh(&fake);
+    assert_eq!(texts(&info), ROWS);
+    assert_eq!(info.filter, "tcp, /var, !unix");
+    press(&mut info, &fake, KeyCode::Char('f'));
+    assert_eq!(texts(&info), [ROWS[3], ROWS[4]]);
+    assert_eq!(self::selected(&info), selected);
+    press(&mut info, &fake, KeyCode::Char('f'));
+    press(&mut info, &fake, KeyCode::Char('/'));
+    assert!(info.filter_enabled && info.typing);
+    type_str(&mut info, &fake, "f");
+    assert!(info.filter_enabled);
+    assert_eq!(info.filter, "tcp, /var, !unixf");
+  }
+
+  #[test]
+  fn disabled_file_filters_show_normal_counts_and_faint_truncated_text() {
+    let (mut info, fake) = chrome();
+    press(&mut info, &fake, KeyCode::Char('/'));
+    type_str(&mut info, &fake, "a-long-filter-with-no-matches");
+    press(&mut info, &fake, KeyCode::Enter);
+    assert!(texts(&info).is_empty());
+    press(&mut info, &fake, KeyCode::Char('f'));
+    let wide = rows(&render(&mut info, 100, 16));
+    assert!(wide[1].starts_with("│ 16 fds  5 files "), "{}", wide[1]);
+    let buf = render(&mut info, 14, 8);
+    let shown = rows(&buf);
+    assert!(shown[1].contains("/…atches"), "{}", shown[1]);
+    let slash = (0..14).find(|&x| buf[(x, 1)].symbol() == "/").unwrap();
+    assert!(buf[(slash, 1)].modifier.contains(Modifier::DIM));
+    assert!(buf[(slash + 2, 1)].modifier.contains(Modifier::DIM));
   }
 
   #[test]

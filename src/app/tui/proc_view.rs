@@ -1,7 +1,8 @@
-//! Process panel: a process table with sorting, filtering and a selection that follows its pid,
+//! Process panel: a process table with sorting, filtering and identity-aware selection,
 //! driven by keys and the mouse.
 
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -350,6 +351,7 @@ pub(super) fn filter_titles(
   name: Vec<Span<'static>>,
   filter: &str,
   typing: bool,
+  enabled: bool,
   width: u16,
 ) -> Titles<'static> {
   if !typing && filter.is_empty() {
@@ -357,14 +359,19 @@ pub(super) fn filter_titles(
   }
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
-    Titles::new(name).left(filter_title(filter, typing, beside))
+    Titles::new(name).left(filter_title(filter, typing, enabled, beside))
   } else {
-    Titles::new(filter_title(filter, typing, title_text_room(width, &[])))
+    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[])))
   }
 }
 
 /// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
-pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'static>> {
+pub(super) fn filter_title(
+  filter: &str,
+  typing: bool,
+  enabled: bool,
+  room: u16,
+) -> Vec<Span<'static>> {
   // `/` and the cursor (one cell each) around the filter text
   let text_room = usize::from(room).saturating_sub(1 + usize::from(typing));
 
@@ -377,6 +384,11 @@ pub(super) fn filter_title(filter: &str, typing: bool, room: u16) -> Vec<Span<'s
   }
   if typing {
     spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
+  }
+  if !enabled {
+    for span in &mut spans {
+      *span = faint(span.content.clone());
+    }
   }
   spans
 }
@@ -469,10 +481,18 @@ fn tail(text: &str, max: usize) -> &str {
 
 // MARK: State
 
-/// Selected process: its pid and its row.
+type Identity = (i32, Option<(u64, u64)>);
+
+fn identity(proc: &ProcInfo) -> Identity {
+  // shortcut: ps rows only have PIDs; detect their reuse when the sampler supplies start times.
+  (proc.pid, proc.started)
+}
+
+/// Selected process: its identity and its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Selection {
   pid: i32,
+  started: Option<(u64, u64)>,
   index: usize,
 }
 
@@ -491,9 +511,12 @@ struct Targets {
 /// State of the process panel.
 #[derive(Debug)]
 pub(super) struct ProcView {
+  pub(super) paused: bool,
+  exited: HashSet<Identity>,
   pub(super) sort: ProcSort,
   pub(super) sort_desc: bool,
   filter: String,
+  filter_enabled: bool,
   /// Filter input mode: keys edit the filter instead of acting as shortcuts.
   typing: bool,
   /// Latest sample, sorted; `None` until the first one arrives.
@@ -523,9 +546,12 @@ impl Default for ProcView {
 impl ProcView {
   pub(super) fn new(sort: ProcSort, sort_desc: bool) -> Self {
     Self {
+      paused: false,
+      exited: HashSet::new(),
       sort,
       sort_desc,
       filter: String::new(),
+      filter_enabled: true,
       typing: false,
       procs: None,
       rows: vec![],
@@ -596,38 +622,82 @@ impl ProcView {
     }
   }
 
-  /// Replaces the process list; the selection follows its pid.
+  pub(super) fn exited(&self, proc: &ProcInfo) -> bool {
+    self.exited.contains(&identity(proc))
+  }
+
+  pub(super) fn toggle_pause(&mut self) {
+    self.paused = !self.paused;
+    if !self.paused {
+      if let Some(procs) = &mut self.procs {
+        procs.retain(|p| !self.exited.contains(&identity(p)));
+      }
+      self.exited.clear();
+    }
+    self.refresh(false);
+  }
+
+  /// Updates held processes by identity while paused, ignoring arrivals; the first sample
+  /// initializes a sorted list even if Space was pressed during collection.
   pub(super) fn set_procs(&mut self, procs: Vec<ProcInfo>) {
-    self.procs = Some(procs);
-    self.refresh();
+    let first_sample = self.procs.is_none();
+    if let (true, Some(held)) = (self.paused, &mut self.procs) {
+      let indices: HashMap<_, _> = held.iter().enumerate().map(|(i, p)| (identity(p), i)).collect();
+      self.exited = indices.keys().copied().collect();
+      for proc in procs {
+        let key = identity(&proc);
+        self.exited.remove(&key);
+        if let Some(&i) = indices.get(&key) {
+          held[i] = proc;
+        }
+      }
+    } else {
+      self.procs = Some(procs);
+    }
+    self.refresh(first_sample);
   }
 
   /// Drops the list, ends filter input and forgets the mouse targets (the panel got hidden). The
   /// filter and sort stay.
   pub(super) fn clear(&mut self) {
     self.procs = None;
+    self.paused = false;
+    self.exited.clear();
     self.typing = false;
     self.targets = Targets::default();
-    self.refresh();
+    self.refresh(false);
   }
 
-  /// Re-sorts and re-filters the list. The selection stays on its pid, and is dropped when that
-  /// process is gone or filtered out.
-  fn refresh(&mut self) {
+  /// Re-filters and sorts on live samples or explicit requests. Selection follows identity,
+  /// and is dropped when that process is gone or filtered out.
+  fn refresh(&mut self, sort_requested: bool) {
+    let sort_now = !self.paused || sort_requested;
     let procs = self.procs.as_deref_mut().unwrap_or_default();
-    sort_procs(procs, self.sort, self.sort_desc);
+    if sort_now {
+      sort_procs(procs, self.sort, self.sort_desc);
+    }
 
-    let filter = Filter::parse(&self.filter);
+    let filter = Filter::parse(if self.filter_enabled { &self.filter } else { "" });
     self.rows = (0..procs.len()).filter(|&i| filter.matches(|t| hit(&procs[i], t))).collect();
-    let groups =
-      filter.any.iter().map(|term| Group::sum(term, self.rows().filter(|p| hit(p, term))));
-    self.groups = groups.collect();
-    sort_groups(&mut self.groups, self.sort, self.sort_desc);
+    let groups = filter
+      .any
+      .iter()
+      .map(|term| Group::sum(term, self.rows().filter(|p| !self.exited(p) && hit(p, term))));
+    let mut groups: Vec<_> = groups.collect();
+    if !sort_now {
+      groups.sort_by_key(|g| {
+        self.groups.iter().position(|old| old.term == g.term).unwrap_or(usize::MAX)
+      });
+    }
+    self.groups = groups;
+    if sort_now {
+      sort_groups(&mut self.groups, self.sort, self.sort_desc);
+    }
 
     let procs = self.procs.as_deref().unwrap_or_default();
     let rows = &self.rows;
     self.selected = self.selected.and_then(|sel| {
-      let index = rows.iter().position(|&i| procs[i].pid == sel.pid)?;
+      let index = rows.iter().position(|&i| identity(&procs[i]) == (sel.pid, sel.started))?;
       Some(Selection { index, ..sel })
     });
   }
@@ -649,7 +719,11 @@ impl ProcView {
 
   fn select(&mut self, index: usize) {
     let procs = self.procs.as_deref().unwrap_or_default();
-    self.selected = self.rows.get(index).map(|&i| Selection { pid: procs[i].pid, index });
+    self.selected = self.rows.get(index).map(|&i| Selection {
+      pid: procs[i].pid,
+      started: procs[i].started,
+      index,
+    });
   }
 
   /// Scrolls the table to show row `offset` first, without blank rows below the last process.
@@ -691,10 +765,20 @@ impl ProcView {
     match key.code {
       _ if self.typing => {
         if type_filter(&mut self.filter, &mut self.typing, key) {
-          self.refresh();
+          self.refresh(false);
         }
       }
-      KeyCode::Char('/') => self.typing = true,
+      KeyCode::Char(' ') => self.toggle_pause(),
+      KeyCode::Char('/') => {
+        self.filter_enabled = true;
+        self.typing = true;
+        self.refresh(false);
+      }
+      KeyCode::Char('f') if !self.filter.is_empty() => {
+        self.filter_enabled = !self.filter_enabled;
+        self.refresh(false);
+      }
+      KeyCode::Char('f') => {}
       KeyCode::Char('S') => self.reverse_sort(),
       KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::SHIFT) => self.reverse_sort(),
       KeyCode::Char('s') => self.next_sort(),
@@ -702,7 +786,7 @@ impl ProcView {
         self.selected = None;
         self.filter.clear();
         self.offset = 0;
-        self.refresh();
+        self.refresh(false);
       }
       _ => return false,
     }
@@ -712,7 +796,7 @@ impl ProcView {
 
   fn reverse_sort(&mut self) {
     self.sort_desc = !self.sort_desc;
-    self.refresh();
+    self.refresh(true);
   }
 
   /// Sorts by `sort` in its own direction (`ProcSort::sorts_desc`); the current sort key reverses
@@ -724,7 +808,7 @@ impl ProcView {
       self.sort = sort;
       self.sort_desc = sort.sorts_desc();
     }
-    self.refresh();
+    self.refresh(true);
   }
 
   /// `s`: the next column on screen in the `ProcSort::next` cycle.
@@ -793,7 +877,7 @@ impl ProcView {
     if let Some(procs) = self.procs() {
       let total = procs.len().to_string();
       // padded to the digits of the total, so the filter after it stays put while it is typed
-      let count = if self.filter.is_empty() && !self.typing {
+      let count = if (self.filter.is_empty() || !self.filter_enabled) && !self.typing {
         format!(" {total}")
       } else {
         format!(" {:>width$}/{total}", self.row_count(), width = total.len())
@@ -801,11 +885,14 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let titles = filter_titles(name, &self.filter, self.typing, width);
+    let titles = filter_titles(name, &self.filter, self.typing, self.filter_enabled, width);
     let actions =
       || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
       true => titles,
+      false if self.selected().is_some_and(|p| self.exited(p)) => {
+        titles.left(hint("s", "sort")).right(join([hint("e", "finder"), hint("c", "copy")]))
+      }
       false if self.selected().is_some() => titles.left(hint("s", "sort")).right(actions()),
       false => titles.left(hint("s", "sort")),
     }
@@ -841,7 +928,11 @@ impl App {
 
     let view = &self.proc_view;
     draw_scrollbar(f, area, body, view.row_count(), view.offset);
-    render_bottom_border(f, area, self.footer_hints(), |_| view.border_text(power_shown));
+    let mut hints = self.footer_hints();
+    if view.paused {
+      hints.insert(0, vec![theme::paused()]);
+    }
+    render_bottom_border(f, area, hints, |_| view.border_text(power_shown));
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the
@@ -871,7 +962,7 @@ impl App {
     let columns = fit_columns(table.width, self.proc_view.sort);
 
     let filter = self.proc_view.filter();
-    if self.proc_view.row_count() == 0 && !filter.is_empty() {
+    if self.proc_view.row_count() == 0 && self.proc_view.filter_enabled && !filter.is_empty() {
       let row = body.centered_vertically(Constraint::Length(1));
       let message = format!("no process matches \"{filter}\"");
       f.render_widget(Line::from(dim(message)).centered(), row);
@@ -903,9 +994,22 @@ impl App {
       let y = body.y + i as u16;
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
       draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
+      if self.proc_view.exited(proc) {
+        buf.set_style(Rect { y, height: 1, ..inner }, Style::new().add_modifier(Modifier::DIM));
+      }
       // from border to border, so the row reads as one bar
       if selected {
-        buf.set_style(Rect { y, height: 1, ..inner }, theme::SELECTED);
+        buf.set_style(
+          Rect { y, height: 1, ..inner },
+          theme::SELECTED.remove_modifier(Modifier::DIM),
+        );
+        if self.proc_view.exited(proc)
+          && let Some((_, pid)) = column_areas(Rect { y, height: 1, ..table }, &columns)
+            .into_iter()
+            .find(|(column, _)| *column == ProcSort::Pid)
+        {
+          buf.set_style(pid, theme::SELECTED_EXITED_PID);
+        }
       }
     }
 
@@ -915,6 +1019,11 @@ impl App {
   /// Text of one table cell. Load values are colored by the gradient, zeros are dim and missing
   /// values show as a dim `-`.
   fn proc_cell(&self, column: ProcSort, proc: &ProcInfo) -> Span<'static> {
+    if self.proc_view.exited(proc)
+      && !matches!(column, ProcSort::Pid | ProcSort::Name | ProcSort::User)
+    {
+      return dim("-");
+    }
     match column {
       ProcSort::Pid => text(proc.pid.to_string()),
       ProcSort::Name => text(proc.name.clone()),
@@ -1069,6 +1178,157 @@ mod tests {
   }
 
   #[test]
+  fn paused_startup_uses_sorted_first_sample() {
+    let mut view = ProcView::default();
+    press(&mut view, KeyCode::Char(' '));
+    view.set_procs(sample());
+    assert_eq!(pids(&view), [4410, 631, 2301, 1, 77]);
+    assert!(view.paused && view.exited.is_empty());
+  }
+
+  #[test]
+  fn paused_explicit_sort_reorders_once_and_keeps_selection() {
+    let mut view = view();
+    press(&mut view, KeyCode::Down);
+    let selected = view.selected_pid();
+    press(&mut view, KeyCode::Char(' '));
+    press(&mut view, KeyCode::Char('S'));
+    assert_eq!(pids(&view), [77, 1, 2301, 631, 4410]);
+    assert!(view.paused);
+    assert_eq!(view.selected_pid(), selected);
+    let mut next = sample();
+    next[0].cpu_pct = 100.0;
+    view.set_procs(next);
+    assert_eq!(pids(&view), [77, 1, 2301, 631, 4410]);
+  }
+
+  #[test]
+  fn pause_keeps_slots_live_values_and_selection_until_resume() {
+    let mut view = view();
+    view.fit(3);
+    press(&mut view, KeyCode::Down);
+    press(&mut view, KeyCode::Down);
+    let selected = view.selected().unwrap().pid;
+    let before = pids(&view);
+    let offset = view.offset;
+    press(&mut view, KeyCode::Char(' '));
+    let mut next = sample();
+    next.retain(|p| p.pid != selected);
+    next[0].cpu_pct = 99.0;
+    next.push(proc(9000, "added", 100.0, 10, None, 0.0));
+    view.set_procs(next);
+    assert_eq!(pids(&view), before);
+    assert_eq!(view.selected_pid(), Some(selected));
+    assert!(view.exited(view.selected().unwrap()));
+    assert_eq!(view.offset, offset);
+    assert_eq!(view.rows().find(|p| p.pid == 1).unwrap().cpu_pct, 99.0);
+    view.set_procs(sample());
+    press(&mut view, KeyCode::Char(' '));
+    assert!(!view.paused && view.exited.is_empty());
+    assert_eq!(pids(&view), [4410, 631, 2301, 1, 77]);
+    assert_eq!(view.selected_pid(), Some(selected));
+  }
+
+  #[test]
+  fn pause_distinguishes_reused_pids_and_excludes_exited_totals() {
+    let mut view = ProcView::default();
+    let mut old = proc(123, "worker", 25.0, 10, None, 0.0);
+    old.started = Some((1, 0));
+    view.set_procs(vec![old.clone()]);
+    type_str(&mut view, "/worker");
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Down);
+    press(&mut view, KeyCode::Char(' '));
+    let mut new = old;
+    new.started = Some((2, 0));
+    new.cpu_pct = 50.0;
+    view.set_procs(vec![new.clone()]);
+    assert_eq!(pids(&view), [123]);
+    assert_eq!(view.selected().unwrap().started, Some((1, 0)));
+    assert!(view.exited(view.selected().unwrap()));
+    assert_eq!((view.groups[0].count, view.groups[0].cpu_pct), (0, 0.0));
+    press(&mut view, KeyCode::Char(' '));
+    assert_eq!(view.selected(), None, "PID reuse must not steal selection");
+    assert_eq!(view.procs(), Some([].as_slice()));
+    view.set_procs(vec![new.clone()]);
+    assert_eq!(view.procs(), Some([new].as_slice()));
+    press(&mut view, KeyCode::Char(' '));
+    view.clear();
+    assert!(!view.paused && view.procs().is_none());
+  }
+
+  #[test]
+  fn pause_before_first_sample_and_group_order_are_stable() {
+    let mut view = ProcView::default();
+    press(&mut view, KeyCode::Char(' '));
+    view.set_procs(sample());
+    assert_eq!(pids(&view), [4410, 631, 2301, 1, 77]);
+    press(&mut view, KeyCode::Char(' '));
+    type_str(&mut view, "/safari, cargo");
+    press(&mut view, KeyCode::Enter);
+    assert_eq!(
+      view.groups.iter().map(|g| g.term.as_str()).collect::<Vec<_>>(),
+      ["cargo", "safari"]
+    );
+    press(&mut view, KeyCode::Char(' '));
+    let mut next = sample();
+    next[2].cpu_pct = 100.0;
+    view.set_procs(next);
+    assert_eq!(
+      view.groups.iter().map(|g| g.term.as_str()).collect::<Vec<_>>(),
+      ["cargo", "safari"]
+    );
+    assert_eq!(view.groups[1].cpu_pct, 100.0);
+    press(&mut view, KeyCode::Char('S'));
+    assert!(view.paused);
+    assert_eq!(view.groups[0].term, "cargo");
+    press(&mut view, KeyCode::Char('S'));
+    assert_eq!(view.groups[0].term, "safari");
+    let mut next = sample();
+    next[3].cpu_pct = 200.0;
+    view.set_procs(next);
+    assert_eq!(view.groups[0].term, "safari");
+    press(&mut view, KeyCode::Char(' '));
+    assert_eq!(view.groups[0].term, "cargo");
+  }
+
+  #[test]
+  fn paused_empty_sample_stays_empty_and_resume_accepts_arrivals() {
+    let mut view = ProcView::default();
+    view.set_procs(vec![]);
+    view.toggle_pause();
+    view.set_procs(sample());
+    assert_eq!(view.row_count(), 0);
+    view.toggle_pause();
+    assert_eq!(view.row_count(), 0);
+    view.set_procs(sample());
+    assert_eq!(view.row_count(), 5);
+  }
+
+  #[test]
+  fn paused_header_click_sorts_held_rows_and_preserves_selection() {
+    let mut view = view();
+    view.select(1);
+    let selected = view.selected_pid();
+    view.toggle_pause();
+    view.targets.headers = column_areas(Rect::new(2, 1, 150, 1), &fit_columns(150, view.sort));
+    for column in super::COLUMNS {
+      let (_, rect) = view.targets.headers.iter().find(|(sort, _)| *sort == column).unwrap();
+      view.handle_mouse(super::MouseEvent {
+        kind: super::MouseEventKind::Down(super::MouseButton::Left),
+        column: rect.x,
+        row: rect.y,
+        modifiers: KeyModifiers::NONE,
+      });
+      let mut expected = sample();
+      super::sort_procs(&mut expected, column, view.sort_desc);
+      assert_eq!(pids(&view), expected.iter().map(|p| p.pid).collect::<Vec<_>>());
+      assert!(view.paused);
+      assert_eq!(view.selected_pid(), selected);
+    }
+  }
+
+  #[test]
   fn sorts_by_each_key_and_direction() {
     let cases = [
       (ProcSort::Cpu, [4410, 631, 2301, 1, 77], [77, 1, 2301, 631, 4410]),
@@ -1082,12 +1342,22 @@ mod tests {
       (ProcSort::Pid, [4410, 2301, 631, 77, 1], [1, 77, 631, 2301, 4410]),
       // case-insensitive
       (ProcSort::Name, [631, 77, 2301, 1, 4410], [4410, 1, 2301, 77, 631]),
+      (ProcSort::User, [1, 77, 631, 2301, 4410], [1, 77, 631, 2301, 4410]),
     ];
 
     for (sort, desc, asc) in cases {
       let mut view = ProcView::new(sort, true);
       view.set_procs(sample());
       assert_eq!(pids(&view), desc, "{sort:?} desc");
+      view.select(0);
+      let selected = view.selected_pid();
+      view.toggle_pause();
+      view.reverse_sort();
+      assert_eq!(pids(&view), asc, "{sort:?} paused asc");
+      view.reverse_sort();
+      assert_eq!(pids(&view), desc, "{sort:?} paused desc");
+      assert!(view.paused);
+      assert_eq!(view.selected_pid(), selected);
 
       let mut view = ProcView::new(sort, false);
       view.set_procs(sample());
@@ -1101,6 +1371,7 @@ mod tests {
     // before the first render every column, each in its own direction: numbers largest first,
     // PIDs and text from the start
     let mut view = view();
+    view.toggle_pause();
     let mut sorts = vec![];
     for _ in 0..8 {
       assert!(press(&mut view, KeyCode::Char('s')));
@@ -1149,6 +1420,69 @@ mod tests {
     }
     type_str(&mut view, "1");
     assert_eq!(pids(&view), [4410, 631, 2301, 1]);
+  }
+
+  #[test]
+  fn toggling_a_saved_filter_restores_rows_totals_and_selection_rules() {
+    let mut view = view();
+    assert!(press(&mut view, KeyCode::Char('f')));
+    assert!(view.filter_enabled);
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "saf, cargo, !bookmark");
+    assert!(press(&mut view, KeyCode::Enter));
+    view.select(1);
+    assert_eq!(view.selected_pid(), Some(2301));
+    assert_eq!(pids(&view), [4410, 2301]);
+    assert_eq!(view.groups().len(), 2);
+
+    assert!(press(&mut view, KeyCode::Char('f')));
+    assert_eq!(view.filter(), "saf, cargo, !bookmark");
+    assert_eq!(pids(&view), [4410, 631, 2301, 1, 77]);
+    assert!(view.groups().is_empty());
+    assert_eq!(view.selected_pid(), Some(2301));
+    view.set_procs(sample());
+    assert_eq!(view.row_count(), 5, "new samples keep the filter disabled");
+    assert!(press(&mut view, KeyCode::Char('f')));
+    assert_eq!(pids(&view), [4410, 2301]);
+    assert_eq!(view.groups().len(), 2);
+    assert_eq!(view.selected_pid(), Some(2301));
+
+    assert!(press(&mut view, KeyCode::Char('f')));
+    view.select(1); // WindowServer is outside the saved filter
+    assert!(press(&mut view, KeyCode::Char('/')));
+    assert!(view.filter_enabled && view.typing());
+    assert_eq!(view.selected_pid(), None);
+    type_str(&mut view, "f");
+    assert_eq!(view.filter(), "saf, cargo, !bookmarkf");
+    assert!(view.filter_enabled, "f is text while editing");
+  }
+
+  #[test]
+  fn disabled_filter_titles_keep_the_text_faint_and_the_count_unfiltered() {
+    use ratatui::style::Modifier;
+
+    let mut view = view();
+    press(&mut view, KeyCode::Char('/'));
+    type_str(&mut view, "a-long-filter-with-no-matches");
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Char('f'));
+    for width in [12, 80] {
+      let mut term = Terminal::new(TestBackend::new(width, 3)).unwrap();
+      term.draw(|f| _ = draw_box(f, f.area(), view.titles(width))).unwrap();
+      let buf = term.backend().buffer();
+      let line: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+      assert!(line.contains(if width == 12 { "ches" } else { "matches" }), "{line}");
+      assert!(line.contains("/…") || line.contains("/a-long"), "{line}");
+      if width == 80 {
+        assert!(line.contains("proc 5 ─"), "{line}");
+        assert!(!line.contains("5/5"));
+      }
+      let slash = (0..width).find(|&x| buf[(x, 0)].symbol() == "/").unwrap();
+      let cells = if width == 12 { 6 } else { 1 + view.filter.len() as u16 };
+      for x in slash..slash + cells {
+        assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
+      }
+    }
   }
 
   #[test]
@@ -1222,6 +1556,7 @@ mod tests {
     type_str(&mut view, "saf, cargo, window");
     assert!(press(&mut view, KeyCode::Enter));
     assert_eq!(terms(&view), ["cargo", "window", "saf"]);
+    view.toggle_pause();
     assert!(press(&mut view, KeyCode::Char('S')));
     assert_eq!(terms(&view), ["saf", "window", "cargo"]);
 
