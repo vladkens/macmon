@@ -115,8 +115,3 @@ cover the known-app case), per-process network (only `nettop` has it without roo
 graphs per process, Activity Monitor's Memory and Statistics tabs (context switches, faults,
 Mach messages and system calls, virtual and shared/private memory), Mach port counts and recent
 hangs (need a task port or private API).
-
-Cleanup, no hurry: the Mach calls (`mach_host_self`, `mach_task_self`) come from `libc`, which
-deprecates them in favor of the `mach2` crate, so they sit under `#[allow(deprecated)]`
-(JohnTitor/mach2#34). Declare them with our own `extern "C"`, or move to `mach2` once it has
-what we need.
