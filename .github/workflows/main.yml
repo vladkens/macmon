@@ -41,7 +41,7 @@ jobs:
       # builds outside release commits as the `git describe` version, e.g. 0.9.0-12-g3672a1b
       - uses: vladkens/actions/rust-build@v1
         with:
-          dist: make dist
+          targets: aarch64-apple-darwin
 
   publish:
     needs: [test, build]
