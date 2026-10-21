@@ -42,6 +42,7 @@ jobs:
       - uses: vladkens/actions/rust-build@v1
         with:
           targets: aarch64-apple-darwin
+          dev: true
 
   publish:
     needs: [test, build]
