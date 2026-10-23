@@ -21,7 +21,8 @@ build:
 	ls -lh target/release/macmon
 
 update:
-	cargo upgrade -i
+	cargo upgrade --incompatible
+	cargo update
 
 .PHONY: loc bench remote
 

@@ -1,0 +1,25 @@
+name: latest
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  latest:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update --no-self-update stable && rustup default stable
+      - run: cargo update
+      - run: cargo check --release --all-targets
+      - run: cargo check --release --lib --no-default-features
+      - run: cargo test --release
