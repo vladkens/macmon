@@ -302,6 +302,10 @@ Examples:
 - Half the interval at the maximum frequency → `active = 0.5`, `scaled = 0.5`.
 - One of ten cores working at maximum frequency → cluster `active = scaled = 0.1`.
 
+### Requested vs. actual frequency
+
+The frequencies $f_i$ come from IOReport performance-state residencies. On at least the M4, these reflect the DVFS state requested by the OS, not the clock the hardware actually runs at. Under sustained load the power/thermal limiter can lower the clock while the residency stays in the top state, so `freq_mhz` and `scaled_ratio` do not show throttling. For example, on a Mac mini M4 under all-core load macmon reports the P-cluster at 4464 MHz while `powermetrics` shows 3936–4187 MHz `HW active frequency` for the same second. The actual clock is currently only visible through `sudo powermetrics --samplers cpu_power` (see [#78](https://github.com/vladkens/macmon/issues/78)).
+
 ## 📚 Library usage
 
 `macmon` can be used as a Rust library to collect Apple Silicon metrics in your own applications.
