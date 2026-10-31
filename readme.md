@@ -386,7 +386,7 @@ Creating `Sampler` inside the worker keeps its low-level macOS handles on that t
 
 ## 🤖 How it's made
 
-macmon started hand-written and is now written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. Unit tests cover the chip layouts it parses, from M3 Ultra's channel names to M6's three CPU tiers, and the JSON and Prometheus output; on macOS 27 the power counters are found in Apple's firmware by [scripts/clpc.py](scripts/clpc.py) rather than guessed. I've written software by hand for years ([twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now. Releases are rare; the CLI and data formats stay compatible, the API may still change before 1.0, and every break is listed in [changelog.md](changelog.md).
+macmon started hand-written and is now built with AI agents following [agents.md](agents.md); I decide what to build and review every change. I've written software by hand for years ([twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare; the API may change before 1.0.
 
 ## 🤝 Contributing
 
