@@ -11,14 +11,13 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod config;
 mod fds;
-mod find_clpc;
 mod procs;
 mod query;
 mod serve;
 mod stress;
 mod tui;
 
-use macmon::diagnostics::print_debug;
+use macmon::diagnostics::{find_clpc, print_debug};
 use macmon::{Metrics, Sampler};
 use tui::App;
 
@@ -245,6 +244,19 @@ fn run_stress(
   result
 }
 
+/// Advances from the previous planned tick using the current, nonzero interval.
+/// Keeps the schedule anchored so wake-up delays do not accumulate as drift.
+/// After an overrun, skips old ticks but samples the latest due tick without waiting.
+/// Consecutive calls can therefore produce short intervals when new ticks become due.
+fn wait_until_scheduled_sample(sampled_at: &mut Instant, interval: Duration) {
+  let now = Instant::now();
+  *sampled_at += interval;
+  while *sampled_at + interval <= now {
+    *sampled_at += interval;
+  }
+  thread::sleep(sampled_at.saturating_duration_since(now));
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
 
@@ -253,12 +265,15 @@ fn main() -> Result<(), Box<dyn Error>> {
       // Debug override: require CLPC CPU/GPU/ANE counters without fallback.
       let force_clpc = std::env::var("MACMON_FORCE_CLPC").is_ok_and(|x| x == "1");
       let mut sampler = if force_clpc { Sampler::with_clpc()? } else { Sampler::new()? };
+      let interval = Duration::from_millis(args.interval.max(100).into());
+      let mut sampled_at = Instant::now();
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
 
       loop {
-        let doc = sampler.get_metrics(args.interval.max(100))?;
+        wait_until_scheduled_sample(&mut sampled_at, interval);
+        let doc = sampler.get_metrics_now()?;
 
         let mut doc = metrics_to_json_value(&doc)?;
         if let Some(ref soc) = soc_info_val {
@@ -289,6 +304,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
 
       let mut sampler = Sampler::new()?;
+      let mut sampled_at = Instant::now();
+      let interval = Duration::from_millis(args.interval.max(100).into());
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
 
@@ -304,14 +321,17 @@ fn main() -> Result<(), Box<dyn Error>> {
       });
 
       loop {
-        match sampler.get_metrics(args.interval.max(100)) {
+        wait_until_scheduled_sample(&mut sampled_at, interval);
+        match sampler.get_metrics_now() {
           Ok(m) => *shared.write().unwrap() = Some(m),
           Err(e) => eprintln!("sampling error: {e}"),
         }
       }
     }
     Some(Commands::Debug) => print_debug()?,
-    Some(Commands::FindClpc { powermetrics }) => find_clpc::run(*powermetrics)?,
+    Some(Commands::FindClpc { powermetrics }) => {
+      find_clpc(*powermetrics, wait_until_scheduled_sample)?;
+    }
     Some(Commands::Stress { mode, workers, duration, pulse }) => {
       run_stress(*mode, *workers, *duration, *pulse)?;
     }
@@ -334,6 +354,38 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn scheduled_sampling_uses_current_intervals_without_shifting_deadlines() {
+    let mut sampled_at = Instant::now();
+    for interval in [20, 20, 40, 10].map(Duration::from_millis) {
+      let previous = sampled_at;
+      wait_until_scheduled_sample(&mut sampled_at, interval);
+      assert!(Instant::now() >= sampled_at);
+      assert!(sampled_at >= previous + interval);
+      assert_eq!(sampled_at.duration_since(previous).as_nanos() % interval.as_nanos(), 0);
+    }
+  }
+
+  #[test]
+  fn scheduled_sampling_keeps_the_latest_due_tick_and_resumes_waiting() {
+    let interval = Duration::from_millis(20);
+    let origin = Instant::now();
+    let mut sampled_at = origin;
+    for delay in [55, 75, 0].map(Duration::from_millis) {
+      thread::sleep(delay);
+      let before_wait = Instant::now();
+      wait_until_scheduled_sample(&mut sampled_at, interval);
+      if delay.is_zero() {
+        assert!(sampled_at > before_wait);
+      } else {
+        assert!(sampled_at <= before_wait);
+        assert!(sampled_at + interval > before_wait);
+      }
+      assert!(Instant::now() >= sampled_at);
+      assert_eq!(sampled_at.duration_since(origin).as_nanos() % interval.as_nanos(), 0);
+    }
+  }
 
   #[test]
   fn zero_duration_ane_and_all_skip_warmup() {

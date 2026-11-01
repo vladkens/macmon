@@ -12,7 +12,8 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::propertylist::create_with_data;
 use core_foundation::string::{CFString, CFStringRef};
-use macmon::sources::{
+
+use crate::sources::{
   IOReport, IOServiceIterator, WithError, cfdict_get_val, cfio_integer_value, cfio_watts,
 };
 
@@ -39,7 +40,10 @@ struct Mapping {
   behavioral_ids: Vec<String>,
 }
 
-pub fn run(powermetrics: bool) -> WithError<()> {
+pub fn run(
+  powermetrics: bool,
+  wait_until_scheduled_sample: fn(&mut Instant, Duration),
+) -> WithError<()> {
   if unsafe { libc::geteuid() } == 0 {
     return Err(
       "Run macmon find-clpc as your normal user; --powermetrics elevates only the reference".into(),
@@ -106,11 +110,13 @@ pub fn run(powermetrics: bool) -> WithError<()> {
       // Begin at the next reference boundary, after both samplers have warmed up.
       while reference.output.try_recv().is_ok() {}
       reference.next()?;
+      ior.reset_sample();
     }
+    let mut sampled_at = Instant::now();
     let mut samples = Vec::new();
     for _ in 0..6 {
-      let (sample, msec) = ior.get_samples(1000, 1).pop().ok_or("Missing diagnostic sample")?;
-      let dt = Duration::from_millis(msec);
+      wait_until_scheduled_sample(&mut sampled_at, Duration::from_secs(1));
+      let (sample, dt) = ior.get_sample_now();
       let mut row = Sample { seconds: dt.as_secs_f64(), ..Default::default() };
       for x in sample {
         if x.group == "CLPC" {

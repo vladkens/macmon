@@ -168,10 +168,12 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   thread::spawn(move || {
     let sample = || -> WithError<()> {
       let mut sampler = Sampler::new()?;
+      let mut sampled_at = Instant::now();
       let mut window = 100;
 
       loop {
-        let metrics = sampler.get_metrics(window)?;
+        crate::wait_until_scheduled_sample(&mut sampled_at, Duration::from_millis(window.into()));
+        let metrics = sampler.get_metrics_now()?;
         if tx.send(Event::Update(Box::new(metrics))).is_err() {
           return Ok(());
         }
@@ -254,18 +256,23 @@ fn run_procs_thread<S: FnMut() -> Vec<ProcInfo>>(
       let showing = shown.wait_shown();
 
       // the first sample only sets the baseline: its CPU and power rates are zero
-      let started = Instant::now();
+      let mut sampled_at = Instant::now();
       let mut sample = new_sampler();
       sample();
-      let mut wait = PROCS_WARMUP.saturating_sub(started.elapsed());
+      let mut interval = PROCS_WARMUP;
 
-      while shown.wait_while_shown(showing, wait) {
-        let started = Instant::now();
+      loop {
+        let now = Instant::now();
+        while sampled_at <= now {
+          sampled_at += interval;
+        }
+        if !shown.wait_while_shown(showing, sampled_at.saturating_duration_since(now)) {
+          break;
+        }
         if tx.send(Event::Procs { showing, procs: sample() }).is_err() {
           return;
         }
-        let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
-        wait = interval.saturating_sub(started.elapsed());
+        interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
       }
     }
   })

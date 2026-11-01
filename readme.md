@@ -369,6 +369,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+If your application already has a timer, create the sampler before the first tick and reuse it:
+
+```rust
+// Call this on each tick of your application's timer.
+let metrics = sampler.get_metrics_now()?;
+```
+
+`get_metrics_now()` reads the hardware immediately. It calculates counter-based metrics over the time since the previous sample taken by either method, or since sampler initialization on the first call.
+
 `get_metrics(duration_ms)` blocks the calling thread while collecting one IOReport delta over the complete interval. For a UI, server, or async application, create the sampler inside a dedicated worker thread and send the completed metrics back through a channel:
 
 ```rust
