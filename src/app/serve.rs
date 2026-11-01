@@ -107,10 +107,13 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE+DRAM+GPU SRAM power consumption in Watts", m.all_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
   gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "display_power_watts", "Built-in display backlight power in Watts", m.display_power);
+  gauge_mac!(out, "battery_power_watts", "Battery rail power in Watts", m.battery_power);
+  gauge_mac!(out, "dc_in_power_watts", "External DC input power in Watts", m.dc_in_power);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -310,6 +313,19 @@ mod tests {
   }
 
   #[test]
+  fn smc_power_gauges_include_zero_and_measured_values() {
+    let metrics = Metrics { battery_power: 1.25, dc_in_power: 10.0, ..Default::default() };
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_display_power_watts{chip=\"\"} 0\n"));
+    assert!(output.contains("macmon_battery_power_watts{chip=\"\"} 1.25\n"));
+    assert!(output.contains("macmon_dc_in_power_watts{chip=\"\"} 10\n"));
+    let output = to_prometheus(&metrics, &SocInfo { vm: true, ..Default::default() });
+    for field in ["display", "battery", "dc_in"] {
+      assert!(!output.contains(&format!("macmon_{field}_power_watts")));
+    }
+  }
+
+  #[test]
   fn a_vm_has_no_power_and_frequency_gauges() {
     let tier = CpuTierMetrics { label: "_".into(), ..Default::default() };
     let metrics = Metrics { cpu_tiers: vec![tier], ..Default::default() };
@@ -322,10 +338,11 @@ mod tests {
 
     // a Mac: every gauge, in the same order
     let power =
-      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram"].map(|x| format!("{x}_power_watts"));
+      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram", "display", "battery", "dc_in"]
+        .map(|x| format!("{x}_power_watts"));
     let freqs = ["ecpu_freq_mhz", "pcpu_freq_mhz", "cpu_tier_freq_mhz", "gpu_freq_mhz"];
     let mac = types(false);
-    assert_eq!(mac.len(), 29, "{mac:?}"); // no temperature and fan gauges without readings
+    assert_eq!(mac.len(), 32, "{mac:?}"); // no temperature and fan gauges without readings
     assert!(power.iter().chain(&freqs.map(String::from)).all(|x| mac.contains(x)), "{mac:?}");
 
     // a VM: the same without the power and frequency gauges

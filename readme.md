@@ -210,6 +210,8 @@ Both the CLI and the Rust library use known CLPC counters automatically, and `Sa
 
 The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
 
+`all_power` includes CPU, GPU, ANE, DRAM, and GPU SRAM. Display backlight (`PBwo`/`PDBR`), battery rail (`PPBR`), and DC input (`PDTR`) are separate instantaneous SMC readings, not added to that sum. Unavailable power readings are 0. The sensor names follow [Stats' SMC definitions](https://github.com/exelban/stats/blob/master/Modules/Sensors/values.swift).
+
 <details>
 <summary>JSON example</summary>
 
@@ -269,10 +271,13 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
   "ane_power": 0.0, // Watts
-  "all_power": 0.22231553, // Watts
+  "all_power": 0.3396349585, // CPU + GPU + ANE + DRAM + GPU SRAM, Watts
   "sys_power": 5.876533, // Watts
   "ram_power": 0.11635789, // Watts
   "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "display_power": 4.27, // Built-in display backlight, Watts; 0 when unavailable
+  "battery_power": 0.43, // Battery rail (SMC PPBR), Watts; 0 when unavailable
+  "dc_in_power": 11.56, // External DC input (SMC PDTR), Watts; 0 when unavailable
 }
 ```
 
