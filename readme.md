@@ -329,7 +329,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sampler = Sampler::new()?;
 
     // collect metrics over a 1000ms window
-    let metrics = sampler.get_metrics(1000)?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let metrics = sampler.get_metrics()?;
 
     println!("CPU power:  {:.2} W", metrics.cpu_power);
     println!("GPU power:  {:.2} W", metrics.gpu_power);
@@ -346,10 +347,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`get_metrics(duration_ms)` blocks the calling thread while collecting one IOReport delta over the complete interval. For a UI, server, or async application, create the sampler inside a dedicated worker thread and send the completed metrics back through a channel:
+`get_metrics()` performs synchronous hardware reads without waiting for a sampling interval. The caller controls when to sample, for example from a timer on the thread that owns the sampler. The first delta starts at sampler creation, and later deltas cover the time between samples, including caller processing time.
+
+A dedicated worker thread is optional. If hardware reads affect your application's responsiveness, you can create the sampler in a worker and send completed metrics through a channel:
 
 ```rust
-use std::{sync::mpsc, thread};
+use std::{sync::mpsc, thread, time::{Duration, Instant}};
 
 use macmon::Sampler;
 
@@ -358,8 +361,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     thread::spawn(move || {
         let mut sampler = Sampler::new().expect("failed to create sampler");
+        let mut sampled_at = Instant::now();
 
-        while let Ok(metrics) = sampler.get_metrics(1000) {
+        loop {
+            thread::sleep(Duration::from_secs(1).saturating_sub(sampled_at.elapsed()));
+            sampled_at = Instant::now();
+            let Ok(metrics) = sampler.get_metrics() else { break };
             if tx.send(metrics).is_err() {
                 break;
             }
@@ -374,7 +381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Creating `Sampler` inside the worker keeps its low-level macOS handles on that thread. In an async runtime, use its blocking-thread facility rather than calling `get_metrics` directly from an executor worker.
+Creating `Sampler` inside the worker also keeps its low-level macOS handles on that thread. `get_metrics()` consumes little CPU, but its synchronous macOS calls can block. For UI and async applications, use a worker thread to keep the event loop or executor responsive.
 
 ## 🤝 Contributing
 

@@ -1150,7 +1150,7 @@ fn cfio_get_subs(
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
-  prev: Option<(CFDictionaryRef, std::time::Instant)>,
+  prev: (CFDictionaryRef, std::time::Instant),
 }
 
 impl IOReport {
@@ -1168,7 +1168,8 @@ impl IOReport {
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    Ok(Self { subs, chan, prev: None })
+    let prev = (unsafe { IOReportCreateSamples(subs, chan, null()) }, std::time::Instant::now());
+    Ok(Self { subs, chan, prev })
   }
 
   /// Subscription to the channels `filter` selects, or None when it selects none (a VM).
@@ -1178,7 +1179,8 @@ impl IOReport {
       return Ok(None);
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    Ok(Some(Self { subs, chan, prev: None }))
+    let prev = (unsafe { IOReportCreateSamples(subs, chan, null()) }, std::time::Instant::now());
+    Ok(Some(Self { subs, chan, prev }))
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -1201,79 +1203,31 @@ impl IOReport {
     cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group)
   }
 
-  /// Collect one delta sample over `duration` milliseconds.
-  pub fn get_sample(&self, duration: u64) -> IOReportIterator {
-    unsafe {
-      let sample1 = IOReportCreateSamples(self.subs, self.chan, null());
-      std::thread::sleep(std::time::Duration::from_millis(duration));
-      let sample2 = IOReportCreateSamples(self.subs, self.chan, null());
-
-      let sample3 = IOReportCreateSamplesDelta(sample1, sample2, null());
-      CFRelease(sample1 as _);
-      CFRelease(sample2 as _);
-      IOReportIterator::from_sample(sample3)
-    }
-  }
-
   fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant) {
     (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
   }
 
-  pub(crate) fn get_sample_interval(&mut self, duration: Duration) -> (IOReportIterator, Duration) {
-    let prev = match self.prev {
-      Some(x) => x,
-      None => self.raw_sample(),
-    };
+  /// Replace the baseline with a fresh snapshot, without calculating a delta.
+  pub fn reset_sample(&mut self) {
+    let next = self.raw_sample();
+    unsafe { CFRelease(self.prev.0 as _) };
+    self.prev = next;
+  }
 
-    let target_at = prev.1 + duration;
-    let now = std::time::Instant::now();
-    if target_at > now {
-      std::thread::sleep(target_at.duration_since(now));
-    }
-
+  /// Collect a delta since initialization, reset, or the preceding call, without waiting.
+  ///
+  /// Returns the actual interval between snapshots, with a minimum of 1 ns.
+  /// The caller controls when snapshots are taken.
+  pub fn get_sample(&mut self) -> (IOReportIterator, Duration) {
+    let prev = self.prev;
     let next = self.raw_sample();
     let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
     unsafe { CFRelease(prev.0 as _) };
 
     let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
-    self.prev = Some(next);
+    self.prev = next;
 
     (IOReportIterator::from_sample(diff), elapsed)
-  }
-
-  /// Collect multiple delta samples across one sampling window.
-  pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
-    let count = count.clamp(1, 32);
-    let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
-
-    let mut prev = match self.prev {
-      Some(x) => x,
-      None => self.raw_sample(),
-    };
-
-    let started_at = prev.1;
-    for i in 1..=count {
-      // Keep the requested sampling window stable: IOReportCreateSamples time should not
-      // accumulate as drift on top of the caller's interval.
-      let target_msec = duration.saturating_mul(i as u64) / count as u64;
-      let target_at = started_at + std::time::Duration::from_millis(target_msec);
-      let now = std::time::Instant::now();
-      if target_at > now {
-        std::thread::sleep(target_at.duration_since(now));
-      }
-
-      let next = self.raw_sample();
-      let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
-      unsafe { CFRelease(prev.0 as _) };
-
-      let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
-      prev = next;
-
-      samples.push((IOReportIterator::from_sample(diff), elapsed.max(1)));
-    }
-
-    self.prev = Some(prev);
-    samples
   }
 }
 
@@ -1282,9 +1236,7 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      if let Some(prev) = self.prev {
-        CFRelease(prev.0 as _);
-      }
+      CFRelease(self.prev.0 as _);
     }
   }
 }
@@ -1663,6 +1615,34 @@ impl Drop for SMC {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn sample_duration_follows_external_waits_resets_and_consecutive_calls() {
+    let mut earliest = std::time::Instant::now();
+    if let Some(mut ior) =
+      IOReport::with_filter(Some(crate::shared::ioreport_channels_filter)).unwrap()
+    {
+      for delay in [Duration::from_millis(10), Duration::from_millis(30), Duration::ZERO] {
+        std::thread::sleep(delay);
+        let before = std::time::Instant::now();
+        let (sample, elapsed) = ior.get_sample();
+        assert!(elapsed >= delay.max(Duration::from_nanos(1)));
+        assert!(elapsed <= earliest.elapsed());
+        assert!(sample.count() > 0);
+        earliest = before;
+      }
+      std::thread::sleep(Duration::from_millis(30));
+      earliest = std::time::Instant::now();
+      ior.reset_sample();
+      std::thread::sleep(Duration::from_millis(10));
+      let (sample, elapsed) = ior.get_sample();
+      assert!(elapsed >= Duration::from_millis(10));
+      assert!(elapsed <= earliest.elapsed());
+      assert!(sample.count() > 0);
+    } else {
+      assert!(in_vm(), "no sampling channels outside a VM");
+    }
+  }
 
   #[test]
   fn clpc_descriptors_preserve_driver_counter_ids_and_nanojoule_units() {

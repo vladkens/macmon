@@ -177,9 +177,10 @@ fn print_pmgr() -> WithError<()> {
 }
 
 fn print_ioreport() -> WithError<()> {
-  let dur = 100;
-  let ior = IOReport::with_filter(Some(debug_channels))?.ok_or("no channels")?;
-  for x in ior.get_sample(dur) {
+  let mut ior = IOReport::with_filter(Some(debug_channels))?.ok_or("no channels")?;
+  std::thread::sleep(Duration::from_millis(100));
+  let (sample, duration) = ior.get_sample();
+  for x in sample {
     let subscribed = ioreport_channels_filter(&x.group, &x.subgroup, &x.channel, &x.unit);
     let msg = format!(
       "{} :: {} :: {} ({}{}) =",
@@ -192,7 +193,7 @@ fn print_ioreport() -> WithError<()> {
     match x.unit.as_str() {
       "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
       "mJ" | "uJ" | "nJ" => {
-        println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, Duration::from_millis(dur))?)
+        println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, duration)?)
       }
       "events" | "B" | "KiB" | "MiB" | "ns" | "us" | "ms" | "s" | "" => {
         println!("{msg} {} {}", cfio_integer_value(x.item), x.unit)
