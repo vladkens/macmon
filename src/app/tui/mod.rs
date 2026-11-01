@@ -213,11 +213,33 @@ impl ProcsShown {
     }
   }
 
-  /// Waits until the deadline or a visibility change, including hide/show between checks.
-  fn wait_until_changed(&self, observed: Showing, deadline: Instant) {
+  fn set_interval(&self, msec: &RwLock<u32>, interval: u32) {
+    let _state = self.state.lock().unwrap();
+    let mut current = msec.write().unwrap();
+    if *current != interval {
+      *current = interval;
+      self.changed.notify_all();
+    }
+  }
+
+  /// Waits until the deadline, a visibility change or a new sampling interval.
+  fn wait_until_changed(
+    &self,
+    observed: Showing,
+    interval: u32,
+    msec: &RwLock<u32>,
+    deadline: Instant,
+  ) {
     let state = self.state.lock().unwrap();
     let timeout = deadline.saturating_duration_since(Instant::now());
-    drop(self.changed.wait_timeout_while(state, timeout, |state| *state == observed).unwrap());
+    drop(
+      self
+        .changed
+        .wait_timeout_while(state, timeout, |state| {
+          *state == observed && *msec.read().unwrap() == interval
+        })
+        .unwrap(),
+    );
   }
 }
 
@@ -265,6 +287,8 @@ impl SamplingCoordinator {
   }
 
   fn update(&mut self, shown: &ProcsShown, msec: &RwLock<u32>) -> WithError<Option<Event>> {
+    let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
+    self.next_update = self.next_update.min(instant_now() + interval);
     if self.visibility_changed(shown) {
       return Ok(None);
     }
@@ -302,13 +326,16 @@ impl SamplingCoordinator {
       let run = || -> WithError<()> {
         let mut coordinator = Self::new(Sampler::new()?);
         loop {
-          let observed = *shown.state.lock().unwrap();
+          let (observed, interval) = {
+            let state = shown.state.lock().unwrap();
+            (*state, *msec.read().unwrap())
+          };
           if let Some(event) = coordinator.update(&shown, &msec)? {
             if tx.send(event).is_err() {
               return Ok(());
             }
           } else {
-            shown.wait_until_changed(observed, coordinator.next_deadline());
+            shown.wait_until_changed(observed, interval, &msec, coordinator.next_deadline());
           }
         }
       };
@@ -456,7 +483,7 @@ impl App {
       Event::Failed(_) => return ControlFlow::Break(()),
     };
 
-    *msec.write().unwrap() = self.cfg.interval();
+    self.procs_shown.set_interval(msec, self.cfg.interval());
     flow
   }
 
@@ -2104,6 +2131,42 @@ mod tests {
     advance(50);
     assert!(worker.update(&shown, &interval).unwrap().is_some());
     assert_eq!(worker.next_update, origin + Duration::from_millis(500));
+  }
+
+  #[test]
+  fn a_new_interval_only_shortens_a_distant_regular_deadline() {
+    for (elapsed, interval, remaining) in
+      [(100, 1000, 1000), (9500, 1000, 500), (100, 20_000, 9900), (10_000, 1000, 0)]
+    {
+      let shown = ProcsShown::default();
+      let msec = RwLock::new(10_000);
+      let mut worker = coordinator();
+      advance(100);
+      worker.update(&shown, &msec).unwrap();
+      advance(elapsed);
+      shown.set_interval(&msec, interval);
+      let expected = instant_now() + Duration::from_millis(remaining);
+      if remaining > 0 {
+        assert!(worker.update(&shown, &msec).unwrap().is_none());
+        assert_eq!(worker.next_update, expected);
+        advance(remaining);
+      }
+      assert!(matches!(worker.update(&shown, &msec).unwrap(), Some(Event::Update { .. })));
+    }
+  }
+
+  #[test]
+  fn an_interval_key_interrupts_waiting_even_before_the_wait_starts() {
+    let file = TempConfig::new("interval_key_interrupts_waiting");
+    let mut app = saving_app(&file);
+    app.cfg.set_run_interval(1000);
+    let msec = RwLock::new(1000);
+    let observed = *app.procs_shown.state.lock().unwrap();
+    assert!(app.handle_event(Event::Key(key('-')), &msec).is_continue());
+    assert_eq!(*msec.read().unwrap(), 750);
+    let started = Instant::now();
+    app.procs_shown.wait_until_changed(observed, 1000, &msec, started + Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_millis(500));
   }
 
   #[test]
