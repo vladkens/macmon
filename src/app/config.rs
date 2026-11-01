@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_inline_default::serde_inline_default;
 use serde_json::{Map, Value};
 
-pub(crate) const TUI_MIN_MS: u32 = 250;
+pub(crate) const TUI_MIN_MS: u32 = 100;
 pub(crate) const TUI_MAX_MS: u32 = 10_000;
 
 /// Look of the CPU cluster, GPU and RAM boxes (`v`). Saved under the names of released versions,
@@ -327,6 +327,9 @@ mod tests {
 
     // anything but a JSON object gives the defaults
     assert_eq!(parse("not json").interval, 1000);
+    for (saved, expected) in [(0, 100), (99, 100), (100, 100), (150, 150)] {
+      assert_eq!(parse(&format!(r#"{{"interval":{saved}}}"#)).interval, expected);
+    }
   }
 
   #[test]
@@ -374,6 +377,8 @@ mod tests {
     // `-i 500`: used for this run, clamped like a saved value
     cfg.set_run_interval(10);
     assert_eq!(cfg.interval(), TUI_MIN_MS);
+    cfg.set_run_interval(100);
+    assert_eq!(cfg.interval(), 100);
     cfg.set_run_interval(500);
 
     // other settings save the interval of the file, not the one from `-i`
@@ -383,6 +388,13 @@ mod tests {
 
     // `-` / `+` step from the interval in use and save it
     cfg.dec_interval();
+    assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (250.into(), 250));
+    for _ in 0..2 {
+      cfg.dec_interval();
+      assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (100.into(), 100));
+    }
+    assert_eq!(Config::load_from(Some(file.path())).interval(), 100);
+    cfg.inc_interval();
     assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (250.into(), 250));
   }
 }
