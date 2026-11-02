@@ -46,7 +46,7 @@ impl PowerSources {
       return self.clpc;
     }
 
-    // On macOS 27 Energy Model CPU/ANE counters can freeze without Apple's
+    // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
     // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
     // Drivers with unknown CLPC IDs need the legacy sources; ANE can use PMP.
     Some(self.clpc.or(self.energy_model).unwrap_or(self.pmp))
@@ -194,15 +194,17 @@ pub struct Metrics {
   pub gpu_power: f32,
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
-  /// Sum of CPU, GPU, and ANE power in Watts.
+  /// CLPC package power in Watts, or CPU + GPU + ANE + RAM + media when unavailable.
   #[serde(rename = "all_power")]
   pub chip_power: f32,
   /// System power estimate in Watts, when available.
   pub sys_power: f32,
-  /// DRAM power in Watts.
+  /// Combined DRAM and DCS power in Watts.
   pub ram_power: f32,
   /// GPU SRAM power in Watts.
   pub gpu_ram_power: f32,
+  /// Combined AVE, VDEC, and ISP power in Watts; unavailable counters contribute zero.
+  pub media_power: f32,
 }
 
 // MARK: Helpers
@@ -658,6 +660,11 @@ impl Sampler {
     let mut cpu_power = PowerSources::default();
     let mut gpu_power = PowerSources::default();
     let mut ane_power = PowerSources::default();
+    let mut ram_power = PowerSources::default();
+    let mut dcs_power = PowerSources::default();
+    let mut chip_power = PowerSources::default();
+    let mut gpu_sram_power = PowerSources::default();
+    let mut media_power = PowerSources::default();
 
     // Keep this channel handling in sync with ioreport_channels_filter.
     for x in sample {
@@ -692,8 +699,12 @@ impl Sampler {
           c if c.starts_with("ANE") => {
             ane_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
           }
-          c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
-          c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("DRAM") => {
+            ram_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
+          }
+          c if c.starts_with("DCS") => {
+            dcs_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
+          }
           _ => {}
         }
       }
@@ -706,7 +717,12 @@ impl Sampler {
         let power = match x.channel.as_str() {
           "CPU Energy" => &mut cpu_power,
           "GPU Energy" => &mut gpu_power,
+          "GPU SRAM" => &mut gpu_sram_power,
+          "AVE" | "VDEC" | "ISP" => &mut media_power,
           "ANE" => &mut ane_power,
+          "DRAM" => &mut ram_power,
+          "DCS" => &mut dcs_power,
+          "Package Energy" => &mut chip_power,
           _ => continue,
         };
         power.add_clpc(cfio_watts(x.item, &x.unit, dt)?);
@@ -722,7 +738,13 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    rs.chip_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
+    rs.ram_power =
+      ram_power.watts(false).unwrap_or_default() + dcs_power.watts(false).unwrap_or_default();
+    rs.gpu_ram_power = gpu_sram_power.clpc.unwrap_or_default();
+    rs.media_power = media_power.clpc.unwrap_or_default();
+    rs.chip_power = chip_power
+      .clpc
+      .unwrap_or(rs.cpu_power + rs.gpu_power + rs.ane_power + rs.ram_power + rs.media_power);
     rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
@@ -796,6 +818,7 @@ mod tests {
   use std::time::Duration;
 
   use core_foundation::base::TCFType;
+  use core_foundation::data::CFData;
   use core_foundation::dictionary::CFDictionary;
   use core_foundation::string::CFString;
 
@@ -946,6 +969,83 @@ mod tests {
       let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1)).unwrap();
       assert_eq!((rs.gpu_freq_mhz, rs.gpu_active_ratio), (0, 0.0));
     }
+  }
+
+  #[test]
+  fn samples_selected_power_components_without_double_counting_memory_or_sram() {
+    let rows = [
+      ("Energy Model", "DRAM", "mJ", 10_000i64),
+      ("Energy Model", "DCS", "mJ", 2_000),
+      ("Energy Model", "AVE0", "mJ", 1_000),
+      ("Energy Model", "VDEC", "mJ", 2_000),
+      ("Energy Model", "ISP0", "mJ", 3_000),
+      ("Energy Model", "GPU SRAM", "mJ", 250),
+      ("CLPC", "DRAM", "nJ", 3_000_000_000),
+      ("CLPC", "DCS", "nJ", 4_000_000_000),
+      ("CLPC", "Package Energy", "nJ", 30_000_000_000),
+      ("CLPC", "GPU Energy", "nJ", 10_000_000_000),
+      ("CLPC", "AVE", "mJ", 1_000),
+      ("CLPC", "VDEC", "nJ", 2_000_000_000),
+      ("CLPC", "ISP", "mJ", 3_000),
+      ("CLPC", "GPU SRAM", "mJ", 250),
+    ];
+    let sampler = sampler_without_sources(4, false);
+    for (
+      count,
+      package_delta,
+      expected_ram,
+      expected_chip,
+      expected_gpu,
+      expected_media,
+      expected_sram,
+    ) in [
+      (6, None, 12.0, 12.0, 0.0, 0.0, 0.0),
+      (9, Some(30_000_000_000), 7.0, 30.0, 0.0, 0.0, 0.0),
+      (14, Some(30_000_000_000), 7.0, 30.0, 10.0, 6.0, 0.25),
+      (14, None, 7.0, 23.0, 10.0, 6.0, 0.25),
+      (14, Some(0), 7.0, 0.0, 10.0, 6.0, 0.25),
+      (14, Some(-1), 7.0, 23.0, 10.0, 6.0, 0.25),
+    ] {
+      let rows: Vec<_> = rows[..count]
+        .iter()
+        .filter_map(|&(group, channel, unit, value)| {
+          let value = if channel == "Package Energy" { package_delta? } else { value };
+          Some((group, channel, unit, value))
+        })
+        .collect();
+      // IOReportElement: provider, channel, simple/power type, timestamp, four values.
+      let samples: Vec<_> = rows
+        .iter()
+        .map(|&(_, _, _, value)| {
+          let words = [1i64, 1, 1 | (2 << 16) | (1 << 32), 0, value, i64::MIN, i64::MIN, i64::MIN];
+          let bytes: Vec<_> = words.into_iter().flat_map(i64::to_le_bytes).collect();
+          CFDictionary::from_CFType_pairs(&[(
+            CFString::new("RawElements"),
+            CFData::from_buffer(&bytes),
+          )])
+        })
+        .collect();
+      let items = rows.iter().zip(&samples).map(|(&(group, channel, unit, _), sample)| {
+        IOReportIteratorItem {
+          group: group.into(),
+          subgroup: "Energy Counters".into(),
+          channel: channel.into(),
+          unit: unit.into(),
+          item: sample.as_concrete_TypeRef(),
+        }
+      });
+      let metrics = sampler.get_ioreport_metrics(items, Duration::from_secs(1)).unwrap();
+      assert_eq!(metrics.ram_power, expected_ram);
+      assert_eq!(metrics.media_power, expected_media);
+      assert_eq!(metrics.gpu_ram_power, expected_sram);
+      assert_eq!(metrics.gpu_power, expected_gpu);
+      assert_eq!(metrics.chip_power, expected_chip);
+      let metrics = aggregate_ioreport_metrics(metrics, &sampler.soc);
+      assert_eq!(metrics.chip_power, expected_chip);
+    }
+    let empty = sampler.get_ioreport_metrics([], Duration::from_secs(1)).unwrap();
+    assert_eq!((empty.ram_power, empty.media_power, empty.gpu_ram_power), (0.0, 0.0, 0.0));
+    assert_eq!(empty.chip_power, 0.0);
   }
 
   #[test]

@@ -109,8 +109,9 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
   gauge_mac!(out, "all_power_watts", "Combined chip power consumption in Watts", m.chip_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
-  gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
+  gauge_mac!(out, "ram_power_watts", "Combined DRAM and DCS power consumption in Watts", m.ram_power);
   gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "media_power_watts", "Combined AVE, VDEC, and ISP power consumption in Watts", m.media_power);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -336,11 +337,11 @@ mod tests {
     };
 
     // a Mac: every gauge, in the same order
-    let power =
-      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram"].map(|x| format!("{x}_power_watts"));
+    let power = ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram", "media"]
+      .map(|x| format!("{x}_power_watts"));
     let freqs = ["ecpu_freq_mhz", "pcpu_freq_mhz", "cpu_tier_freq_mhz", "gpu_freq_mhz"];
     let mac = types(false);
-    assert_eq!(mac.len(), 29, "{mac:?}"); // no temperature and fan gauges without readings
+    assert_eq!(mac.len(), 30, "{mac:?}"); // no temperature and fan gauges without readings
     assert!(power.iter().chain(&freqs.map(String::from)).all(|x| mac.contains(x)), "{mac:?}");
 
     // a VM: the same without the power and frequency gauges
