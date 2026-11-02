@@ -7,6 +7,7 @@
 import struct
 import unittest
 
+from clpc import rust_table
 from clpc_binary import Flow, labels
 
 
@@ -92,6 +93,44 @@ class DiscoveryTests(unittest.TestCase):
             0xD65F03C0,  # ret
         ])
         self.assertEqual(fields, {0: {"DRAM", "DCS"}, 4: {"DCS"}})
+
+    def test_rust_export_requires_memory_and_package_counters_and_preserves_their_ids(self):
+        driver = {
+            "bundle": "example",
+            "channels": {
+                component: {"id": f"0x{index:08x}12345678", "dependencies": [component]}
+                for component, index in (
+                    ("CPU", 16), ("GPU", 25), ("ANE", 24),
+                    ("RAM", 26), ("DCS", 27), ("CHIP", 9),
+                )
+            },
+        }
+        catalog = {"complete": True, "macos": "27.2", "build": "26B123", "drivers": [driver]}
+        output = rust_table(catalog)
+        self.assertIn("ram: 26", output)
+        self.assertIn("ram: 0x1234_5678", output)
+        self.assertIn("dcs: 27", output)
+        self.assertIn("chip: 9", output)
+        self.assertNotIn("gpusram:", output)
+        self.assertIn("vdec: None", output)
+        driver["channels"]["AVE"] = {"id": "0x0000003b12345678", "unit": "mJ"}
+        output = rust_table(catalog)
+        self.assertIn('ave: (59, "mJ")', output)
+        self.assertIn('ave: Some(0x1234_5678)', output)
+        for channel in (
+            {"id": "0x0000003c12345678", "unit": "mJ"},
+            {"id": "0x0000003b12345678", "unit": "nJ"},
+        ):
+            catalog["drivers"].append({
+                "bundle": "other",
+                "channels": {**driver["channels"], "AVE": channel},
+            })
+            with self.assertRaises(ValueError):
+                rust_table(catalog)
+            catalog["drivers"].pop()
+        del driver["channels"]["RAM"]
+        with self.assertRaises(ValueError):
+            rust_table(catalog)
 
     def test_duplicate_uses_selected_lane_and_64_bit_store_stops_after_two_lanes(self):
         fields = self.trace([

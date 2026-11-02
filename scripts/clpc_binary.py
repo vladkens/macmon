@@ -826,6 +826,11 @@ COMPONENTS = {
     frozenset({"ANE"}): "ANE",
     frozenset({"GPU"}): "GPU",
     frozenset({"GPU", "GPUSRAM"}): "GPU",
+    frozenset({"AVE"}): "AVE",
+    frozenset({"VDEC"}): "VDEC",
+    frozenset({"ISP"}): "ISP",
+    frozenset({"DRAM"}): "RAM",
+    frozenset({"DCS"}): "DCS",
 }
 
 
@@ -887,6 +892,7 @@ def discover(image, driver, node_rows):
         )
         nodes = [names[3][str(r[0])] for r in enums[3]]
         require(all(nodes), "An energy descriptor has no readable name")
+        chip_dependencies = frozenset(nodes) | {"CPU"}
         acc_addr, acc_name = function("EnergySampler9sampleACCERNS_5arrayIyLm")
         acc_count = int(re.search(r"arrayIyLm(\d+)EEE", acc_name)[1])
         row["inputs"] = {
@@ -1104,7 +1110,10 @@ def discover(image, driver, node_rows):
                 ),
             }
             row["candidates"].append(candidate)
-            component = COMPONENTS.get(dependencies)
+            component = (
+                "CHIP" if dependencies == chip_dependencies
+                else COMPONENTS.get(dependencies)
+            )
             if component:
                 assignments.setdefault(component, []).append(
                     {**candidate, "identification": "automated dependency trace"}
@@ -1120,8 +1129,12 @@ def discover(image, driver, node_rows):
             integer = [hit for hit in hits if hit["storage_type"] == "u64"]
             if len(integer) == 1:
                 row["channels"][component] = integer[0]
+        row["unresolved"] = [
+            component for component in ("GPU", "AVE", "VDEC", "ISP")
+            if component not in row["channels"]
+        ]
         require(
-            set(row["channels"]) == {"CPU", "GPU", "ANE"},
+            {"CPU", "GPU", "ANE", "RAM", "DCS", "CHIP"} <= row["channels"].keys(),
             "Incomplete or ambiguous component trace; inspect candidates and sample_fields",
         )
         row["status"] = "identified"
