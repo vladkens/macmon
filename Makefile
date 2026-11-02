@@ -23,14 +23,10 @@ build:
 update:
 	cargo upgrade -i
 
-.PHONY: loc dist bench remote
+.PHONY: loc bench remote
 
 loc: # production lines, tests excluded; REF=origin/main compares with a git ref
 	@python3 scripts/loc.py $(REF)
-
-dist: build # the release archive for CI (vladkens/actions/rust-build)
-	mkdir -p target/distrib
-	tar czf target/distrib/macmon-dev.tar.gz readme.md LICENSE -C target/release macmon
 
 bench: # compare startup time
 	cargo build $(CARGO_FLAGS)
