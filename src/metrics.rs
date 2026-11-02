@@ -195,7 +195,8 @@ pub struct Metrics {
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
   /// Sum of CPU, GPU, and ANE power in Watts.
-  pub all_power: f32,
+  #[serde(rename = "all_power")]
+  pub chip_power: f32,
   /// System power estimate in Watts, when available.
   pub sys_power: f32,
   /// DRAM power in Watts.
@@ -247,7 +248,6 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
   }
   rs.cpu_scaled_ratio = zero_div(total_scaled, total_cores);
   rs.cpu_active_ratio = zero_div(total_active, total_cores);
-  rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
   rs.with_deprecated_tiers()
 }
 
@@ -722,6 +722,7 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
+    rs.chip_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
     rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
@@ -776,7 +777,7 @@ impl Sampler {
     rs.fans = self.get_fans();
 
     rs.sys_power = match self.get_sys_power() {
-      Ok(val) => val.max(rs.all_power),
+      Ok(val) => val.max(rs.chip_power),
       Err(_) => 0.0,
     };
 
@@ -1019,7 +1020,6 @@ mod tests {
     assert_eq!(tiers.collect::<Vec<_>>(), [("E", 2000, 0.5, 0.5), ("P", 2000, 0.5, 0.5)]);
     assert_eq!(rs.cpu_scaled_ratio, 0.5);
     assert_eq!(rs.cpu_active_ratio, 0.5);
-    assert_eq!(rs.all_power, 4.0);
 
     // deprecated fields: the lowest and the highest tier
     assert_eq!((rs.ecpu_freq_mhz, rs.ecpu_scaled_ratio, rs.ecpu_active_ratio), (2000, 0.5, 0.5));

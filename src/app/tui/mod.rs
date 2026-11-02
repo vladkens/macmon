@@ -286,7 +286,7 @@ pub struct App {
   cpu_power: PowerStore,
   gpu_power: PowerStore,
   ane_power: PowerStore,
-  all_power: PowerStore,
+  chip_power: PowerStore,
   sys_power: PowerStore,
 
   cpu_temp: TempStore,
@@ -331,7 +331,7 @@ impl App {
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
-    self.all_power.push(data.all_power as f64);
+    self.chip_power.push(data.chip_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
     self.clusters.push(&data);
@@ -654,7 +654,7 @@ mod tests {
       cpu_power: 4.5,
       gpu_power: 2.0,
       ane_power: 0.1,
-      all_power: 6.6,
+      chip_power: 6.6,
       sys_power: 12.0,
       ..Default::default()
     }

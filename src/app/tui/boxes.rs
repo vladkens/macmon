@@ -528,7 +528,7 @@ impl App {
     if self.sys_power.items.first().is_some_and(|&mw| mw > 0) {
       self.power_box("Total", &self.sys_power, None)
     } else {
-      self.power_box("Power", &self.all_power, None)
+      self.power_box("Power", &self.chip_power, None)
     }
   }
 }

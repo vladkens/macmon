@@ -107,7 +107,7 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge_mac!(out, "all_power_watts", "Combined chip power consumption in Watts", m.chip_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
   gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
@@ -298,6 +298,21 @@ mod tests {
   use macmon::{CpuTierMetrics, Metrics, SocInfo};
 
   use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
+
+  #[test]
+  fn chip_power_keeps_existing_json_and_prometheus_names() {
+    let metrics = Metrics { chip_power: 4.5, ..Default::default() };
+    let soc = SocInfo::default();
+    let pipe = serde_json::to_value(&metrics).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&to_json(&metrics, &soc)).unwrap();
+    for value in [pipe, json] {
+      assert_eq!(value["all_power"], 4.5);
+      assert!(value.get("chip_power").is_none());
+    }
+    let output = to_prometheus(&metrics, &soc);
+    assert!(output.contains("macmon_all_power_watts{chip=\"\"} 4.5\n"));
+    assert!(!output.contains("macmon_chip_power_watts"));
+  }
 
   #[test]
   fn unavailable_temperature_has_no_prometheus_gauge() {
