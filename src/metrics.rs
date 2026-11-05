@@ -194,7 +194,7 @@ pub struct Metrics {
   pub gpu_power: f32,
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
-  /// Sum of CPU, GPU, and ANE power in Watts.
+  /// Sum of CPU, GPU, ANE, DRAM, and GPU SRAM power in Watts.
   pub all_power: f32,
   /// System power estimate in Watts, when available.
   pub sys_power: f32,
@@ -202,6 +202,12 @@ pub struct Metrics {
   pub ram_power: f32,
   /// GPU SRAM power in Watts.
   pub gpu_ram_power: f32,
+  /// Built-in display backlight power in Watts, or 0 without a readable sensor.
+  pub display_power: f32,
+  /// Battery rail power (SMC PPBR) in Watts, or 0 when unavailable.
+  pub battery_power: f32,
+  /// External DC input power (SMC PDTR) in Watts, or 0 when unavailable.
+  pub dc_in_power: f32,
 }
 
 // MARK: Helpers
@@ -247,7 +253,7 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
   }
   rs.cpu_scaled_ratio = zero_div(total_scaled, total_cores);
   rs.cpu_active_ratio = zero_div(total_active, total_cores);
-  rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
+  rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power + rs.ram_power + rs.gpu_ram_power;
   rs.with_deprecated_tiers()
 }
 
@@ -644,8 +650,8 @@ impl Sampler {
     Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
   }
 
-  fn get_sys_power(&mut self) -> WithError<f32> {
-    self.smc.as_mut().ok_or("SMC unavailable")?.read_float_val("PSTR")
+  fn get_smc_power(&mut self, key: &str) -> Option<f32> {
+    self.smc.as_mut()?.read_float_val(key).ok().filter(|value| value.is_finite())
   }
 
   fn get_ioreport_metrics(
@@ -775,10 +781,12 @@ impl Sampler {
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
-    rs.sys_power = match self.get_sys_power() {
-      Ok(val) => val.max(rs.all_power),
-      Err(_) => 0.0,
-    };
+    rs.sys_power = self.get_smc_power("PSTR").map_or(0.0, |val| val.max(rs.all_power));
+    // Backlight sensor names used by different Apple Silicon generations.
+    rs.display_power =
+      self.get_smc_power("PBwo").or_else(|| self.get_smc_power("PDBR")).unwrap_or(0.0);
+    rs.battery_power = self.get_smc_power("PPBR").unwrap_or(0.0);
+    rs.dc_in_power = self.get_smc_power("PDTR").unwrap_or(0.0);
 
     Ok(rs)
   }
@@ -924,6 +932,11 @@ mod tests {
     assert_eq!(rs.cpu_tiers.len(), 1);
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
+    assert_eq!((rs.display_power, rs.battery_power, rs.dc_in_power), (0.0, 0.0, 0.0));
+    let json = serde_json::to_value(&rs).unwrap();
+    for field in ["display_power", "battery_power", "dc_in_power"] {
+      assert_eq!(json[field].as_f64(), Some(0.0));
+    }
 
     // CLPC counters are required whether IOReport has channels or not
     assert!(sampler_without_sources(2, true).get_metrics(10).is_err());
@@ -1009,6 +1022,11 @@ mod tests {
         cpu_power: 1.5,
         gpu_power: 2.0,
         ane_power: 0.5,
+        ram_power: 0.25,
+        gpu_ram_power: 0.125,
+        display_power: 3.0,
+        battery_power: 10.0,
+        dc_in_power: 20.0,
         ..Default::default()
       },
       &soc_info(2, 1),
@@ -1019,7 +1037,8 @@ mod tests {
     assert_eq!(tiers.collect::<Vec<_>>(), [("E", 2000, 0.5, 0.5), ("P", 2000, 0.5, 0.5)]);
     assert_eq!(rs.cpu_scaled_ratio, 0.5);
     assert_eq!(rs.cpu_active_ratio, 0.5);
-    assert_eq!(rs.all_power, 4.0);
+    // Package power includes memory, but not display, battery, or adapter power.
+    assert_eq!(rs.all_power, 4.375);
 
     // deprecated fields: the lowest and the highest tier
     assert_eq!((rs.ecpu_freq_mhz, rs.ecpu_scaled_ratio, rs.ecpu_active_ratio), (2000, 0.5, 0.5));
