@@ -7,7 +7,7 @@ Rootless Apple Silicon monitor and Rust library. Sampling and metric types live 
 - Break JSON or Prometheus output, the library API or `~/.config/macmon.json` (same field names and values, `view_type` is `"Sparkline"` / `"Gauge"`), or add a dependency, only with the person's approval. Change dependencies only with `cargo add` / `cargo remove` / `cargo upgrade`, never by hand.
 - Keep CLI-only code and dependencies behind the `app` feature, so the library builds with `--no-default-features`.
 - Keep metric collection rootless, with fallbacks for older systems.
-- Everything reaches `main` as a squash-merged PR from a `feat/<name>` branch.
+- Everything reaches `main` as a squash-merged PR.
 
 ## Code
 
@@ -15,8 +15,10 @@ Rootless Apple Silicon monitor and Rust library. Sampling and metric types live 
 - Release builds abort on panic: undo every terminal mode the TUI enables in `restore_term_once`.
 - The TUI saves settings on key presses: set `HOME` to a temporary directory for manual runs.
 - Before investigating or changing power sources, read [Power sources and macOS 27](readme.md#power-sources-and-macos-27) and [docs/clpc-discovery.md](docs/clpc-discovery.md). Zero CPU/ANE readings may be unavailable counters, not zero consumption. Verify CLPC report IDs, CPU/GPU/ANE assignments and units against an independent reference under separate component loads; table positions and response to load alone prove nothing.
+- A counter missing from one source may be in another: check `Energy Model`, `PMP`, CLPC and SMC before calling it unavailable. A zero that never moves means the source doesn't work. `powermetrics` doesn't show DRAM.
+- New metric fields are optional, `null` without a source, and appear in `macmon debug`. Existing fields keep their names and read 0.
 - Validate sampling changes with `macmon pipe` on the affected hardware and macOS version, and report runtime results apart from build and test results, naming untested configurations.
-- Keep features small: past ~200 production lines (`make loc REF=origin/main`) stop and report before going on.
+- Keep a PR under ~200 production lines (`make loc REF=origin/main`).
 
 ## Workflow
 

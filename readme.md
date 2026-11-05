@@ -384,13 +384,11 @@ Creating `Sampler` inside the worker keeps its low-level macOS handles on that t
 - [graelo/pumas](https://github.com/graelo/pumas) – Written in Rust, requires sudo.
 - [context-labs/mactop](https://github.com/context-labs/mactop) – Written in Go, requires sudo.
 
-## 🤖 How it's made
-
-macmon started hand-written and is now built with AI agents following [agents.md](agents.md): I choose what to build, review the changes and test them on real machines. Before agents, I wrote software by hand for years ([twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare on purpose: I'd rather test and polish a set of changes than ship each one as it lands, and I try not to break your config or data; when something has to break, [changelog.md](changelog.md) says so.
-
 ## 🤝 Contributing
 
-Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md). When reporting an issue, mention the version `macmon -V` shows: the [dev pre-release](https://github.com/vladkens/macmon/releases/tag/dev), built from `main`, shows its git version there and in the TUI title, e.g. `macmon 0.9.0-12-g3672a1b` (local builds show the crate version).
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
+
+When reporting an issue, mention the version from `macmon -V`, and for a wrong or missing metric add the output of `macmon debug`.
 
 ## 📝 License
 
