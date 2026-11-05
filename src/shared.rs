@@ -13,7 +13,6 @@ pub(crate) fn is_pmp_ane_channel(group: &str, subgroup: &str, channel: &str, uni
 }
 
 pub(crate) fn is_pmp_dram_channel(group: &str, subgroup: &str, channel: &str, unit: &str) -> bool {
-  // The "DRAM Energy" subgroup (F0, F1, F2) would double count this total.
   group == "PMP"
     && subgroup == "Energy Counters"
     && channel.starts_with("DRAM")

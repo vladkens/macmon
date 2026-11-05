@@ -208,8 +208,6 @@ The working rootless workaround we found is to read hidden energy reports from t
 
 Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
 
-`ram_power` comes from the `Energy Model` DRAM channel, or from `PMP` on chips without one, such as M1.
-
 ### Output format
 
 The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:

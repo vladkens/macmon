@@ -43,7 +43,6 @@ impl PowerSources {
   }
 
   fn add_pmp(&mut self, watts: f32) {
-    // Same invalid deltas as in add_clpc.
     if watts.is_finite() && watts >= 0.0 {
       self.pmp += watts;
     }
@@ -737,7 +736,6 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    // CLPC isn't read for DRAM, so force_clpc doesn't apply here.
     rs.ram_power = ram_power.watts(false).unwrap_or_default();
     rs.cpu_tiers = cpu_cores.into_metrics();
 
