@@ -79,22 +79,11 @@ Options:
 
 ### Interactive mode
 
-Run `macmon` without a subcommand to open the terminal interface. System metrics appear above the process list.
-Press `?` to show the keys.
+Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
-Press `Space` to pause or resume the process list. Process values and system metrics continue to update while paused.
-New processes appear on the next sample after resume. The file and socket list stops updating while paused.
-Sorting still works while paused. Each sort changes the row order once and keeps the list paused.
+Press `/` to filter the process list. A filter is a comma-separated list of terms, each matched case-insensitively against the process name or pid: `safari, cargo` shows processes matching any term, and a term starting with `!` hides its matches (`chrome, !helper`). `Enter` keeps the filter, `Esc` clears it.
 
-Exited rows stay in place with dim text and `-` for unavailable values. A selected exited row has a dim red PID.
-The bottom border shows `paused` in bold yellow.
-
-Press `/` to filter process names or PIDs. The filter ignores differences between uppercase and lowercase letters.
-Separate terms with commas: `safari, cargo` shows matches for either term. Start a term with `!` to exclude matches: `chrome, !helper` excludes helper processes.
-Press `Enter` to keep the filter. Press `Esc` to clear it.
-
-Press `f` outside filter input to turn the filter off or on. The app keeps its text and shows it dim while off.
-Press `/` to turn the filter on and edit its text. The process list and file list have separate filters.
+Press `Space` to pause the process list: rows keep their order while values update, new processes wait until you resume, and the files list of `i` stops updating. Press `f` to turn the filter off and on without losing its text.
 
 ### JSON output
 

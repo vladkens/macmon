@@ -1371,7 +1371,6 @@ mod tests {
     // before the first render every column, each in its own direction: numbers largest first,
     // PIDs and text from the start
     let mut view = view();
-    view.toggle_pause();
     let mut sorts = vec![];
     for _ in 0..8 {
       assert!(press(&mut view, KeyCode::Char('s')));
@@ -1556,7 +1555,6 @@ mod tests {
     type_str(&mut view, "saf, cargo, window");
     assert!(press(&mut view, KeyCode::Enter));
     assert_eq!(terms(&view), ["cargo", "window", "saf"]);
-    view.toggle_pause();
     assert!(press(&mut view, KeyCode::Char('S')));
     assert_eq!(terms(&view), ["saf", "window", "cargo"]);
 
