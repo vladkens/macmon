@@ -438,6 +438,7 @@ impl App {
       if key.code == KeyCode::Char(' ') && !info.typing {
         self.proc_view.toggle_pause();
       }
+
       let help = key.code == KeyCode::Char('?') && !info.typing;
       self.help = help.then_some(0);
       self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
@@ -1009,6 +1010,7 @@ mod tests {
     for c in "/nothing-matches".chars() {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     assert!(press(&mut app, KeyCode::Enter).is_continue());
     assert!(screen_text(&render_buffer(&mut app, 200, 50)).contains("no process matches"));
     assert!(app.handle_key(key('f')).is_continue());
@@ -1689,6 +1691,7 @@ mod tests {
       term.draw(|f| app.info.as_mut().unwrap().render(f, f.area(), true)).unwrap();
       assert!(screen_text(term.backend().buffer()).contains("paused"));
     }
+
     assert!(app.handle_key(key(' ')).is_continue());
     put_procs(&mut app, varied_procs());
     assert!(!app.proc_view.paused);
@@ -1738,9 +1741,11 @@ mod tests {
       assert_eq!(buf[(x, 49)].fg, ratatui::style::Color::Yellow);
       assert!(buf[(x, 49)].modifier.contains(Modifier::BOLD));
     }
+
     for c in ['i', 'k'] {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     assert!(app.info.is_none() && !app.kill.is_open() && fake.calls().is_empty());
     assert!(app.handle_key(key('c')).is_continue());
     assert_eq!(fake.0.borrow().copied, [WINDOW_SERVER]);
@@ -1749,6 +1754,7 @@ mod tests {
     for c in "/this is a very long filter".chars() {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     assert!(app.handle_key(key(' ')).is_continue());
     assert!(app.proc_view.paused && app.proc_view.filter().ends_with(' '));
     assert!(row(&render_buffer(&mut app, 30, 50), 49).contains("paused"));

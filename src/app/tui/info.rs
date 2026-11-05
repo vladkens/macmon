@@ -357,6 +357,7 @@ impl Info {
       if paused {
         hints.insert(0, vec![theme::paused()]);
       }
+
       let copied = if self.copied { vec![faint("copied")] } else { vec![] };
       render_bottom_border(f, area, hints, |_| copied);
     }

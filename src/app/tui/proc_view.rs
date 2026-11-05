@@ -385,11 +385,13 @@ pub(super) fn filter_title(
   if typing {
     spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
   }
+
   if !enabled {
     for span in &mut spans {
       *span = faint(span.content.clone());
     }
   }
+
   spans
 }
 
@@ -632,8 +634,10 @@ impl ProcView {
       if let Some(procs) = &mut self.procs {
         procs.retain(|p| !self.exited.contains(&identity(p)));
       }
+
       self.exited.clear();
     }
+
     self.refresh(false);
   }
 
@@ -654,6 +658,7 @@ impl ProcView {
     } else {
       self.procs = Some(procs);
     }
+
     self.refresh(first_sample);
   }
 
@@ -689,6 +694,7 @@ impl ProcView {
         self.groups.iter().position(|old| old.term == g.term).unwrap_or(usize::MAX)
       });
     }
+
     self.groups = groups;
     if sort_now {
       sort_groups(&mut self.groups, self.sort, self.sort_desc);
@@ -808,6 +814,7 @@ impl ProcView {
       self.sort = sort;
       self.sort_desc = sort.sorts_desc();
     }
+
     self.refresh(true);
   }
 
@@ -932,6 +939,7 @@ impl App {
     if view.paused {
       hints.insert(0, vec![theme::paused()]);
     }
+
     render_bottom_border(f, area, hints, |_| view.border_text(power_shown));
   }
 
@@ -997,6 +1005,7 @@ impl App {
       if self.proc_view.exited(proc) {
         buf.set_style(Rect { y, height: 1, ..inner }, Style::new().add_modifier(Modifier::DIM));
       }
+
       // from border to border, so the row reads as one bar
       if selected {
         buf.set_style(
@@ -1024,6 +1033,7 @@ impl App {
     {
       return dim("-");
     }
+
     match column {
       ProcSort::Pid => text(proc.pid.to_string()),
       ProcSort::Name => text(proc.name.clone()),
@@ -1476,6 +1486,7 @@ mod tests {
         assert!(line.contains("proc 5 ─"), "{line}");
         assert!(!line.contains("5/5"));
       }
+
       let slash = (0..width).find(|&x| buf[(x, 0)].symbol() == "/").unwrap();
       let cells = if width == 12 { 6 } else { 1 + view.filter.len() as u16 };
       for x in slash..slash + cells {
