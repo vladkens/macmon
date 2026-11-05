@@ -202,11 +202,11 @@ The default `pulse` mode generates a predictable cyclic CPU load with a fixed 50
 
 ### Power sources and macOS 27
 
-macOS 27 broke the CPU/ANE power source that macmon previously used without root. The IOReport `Energy Model` counters can remain visible but stop updating: refreshing them now requires the private `com.apple.private.pmgr.nrg.reporting` entitlement. Apple's signed `powermetrics` has this entitlement and can keep using the named channels. Running macmon with `sudo` does not grant the same access.
+macOS 27 broke the CPU/ANE/DRAM power source that macmon previously used without root. The IOReport `Energy Model` counters can remain visible but stop updating: refreshing them now requires the private `com.apple.private.pmgr.nrg.reporting` entitlement. Apple's signed `powermetrics` has this entitlement and can keep using the named channels. Running macmon with `sudo` does not grant the same access.
 
-The working rootless workaround we found is to read hidden energy reports from the AppleCLPC driver through IOReport. These reports use opaque IDs instead of discoverable CPU/GPU/ANE channel names, so macmon has to identify the counters and verify their units. This leaves macmon maintaining undocumented mappings for data that Apple's own tool can still read directly.
+macmon reads hidden energy reports from the AppleCLPC driver through IOReport without root. These reports use opaque IDs instead of discoverable CPU/GPU/ANE/DRAM channel names and require driver-specific mappings with verified units.
 
-Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy CPU/GPU/ANE and memory fallbacks for older systems. `all_power` uses the driver's full package aggregate when available, otherwise CPU + GPU + ANE + RAM + media. `ram_power` sums DRAM + DCS, preferring CLPC for each component. `media_power` sums separate CLPC AVE + VDEC + ISP reports. GPU power follows the firmware's aggregate, which includes GPUSRAM on some chips. New chips or driver versions may need additional mappings. Zero readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
 
 ### Output format
 
@@ -263,18 +263,19 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
   "pcpu_freq_mhz": 1800,
   "pcpu_scaled_ratio": 0.015181795,
   "pcpu_active_ratio": 0.04,
-  "ecpu_cores": [/* cores of the first tier */],
-  "pcpu_cores": [/* cores of the last tier */],
+  "ecpu_cores": [/* cores of the first tier */], // Deprecated, use cpu_tiers
+  "pcpu_cores": [/* cores of the last tier */], // Deprecated, use cpu_tiers
   "gpu_freq_mhz": 461, // GPU frequency
   "gpu_scaled_ratio": 0.021497859, // Frequency-scaled ratio (0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
   "ane_power": 0.0, // Watts
-  "all_power": 0.22231553, // Watts
+  "all_power": 4.22231553, // CLPC package aggregate, or CPU + GPU + ANE + RAM + media fallback, Watts
   "sys_power": 5.876533, // Watts
-  "ram_power": 0.11635789, // Watts
-  "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "ram_power": 0.11635789, // DRAM + DCS, Watts
+  "gpu_ram_power": 0.0, // Separate GPU SRAM power is unavailable, Watts
+  "media_power": 0.0, // AVE + VDEC + ISP, Watts
 }
 ```
 

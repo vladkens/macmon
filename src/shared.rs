@@ -20,8 +20,20 @@ pub(crate) fn is_clpc_energy_channel(
 ) -> bool {
   group == "CLPC"
     && subgroup == "Energy Counters"
-    && matches!(channel, "CPU Energy" | "GPU Energy" | "ANE")
-    && unit == "nJ"
+    && matches!(
+      channel,
+      "CPU Energy"
+        | "GPU Energy"
+        | "ANE"
+        | "DRAM"
+        | "DCS"
+        | "Package Energy"
+        | "GPU SRAM"
+        | "AVE"
+        | "VDEC"
+        | "ISP"
+    )
+    && matches!(unit, "nJ" | "mJ")
 }
 
 pub(crate) fn ioreport_channels_filter(
@@ -41,7 +53,7 @@ pub(crate) fn ioreport_channels_filter(
       || channel.ends_with("CPU Energy")
       || channel.starts_with("ANE")
       || channel.starts_with("DRAM")
-      || channel.starts_with("GPU SRAM");
+      || channel.starts_with("DCS");
   }
 
   if group == "CPU Stats" {
@@ -57,11 +69,23 @@ mod tests {
 
   #[test]
   fn subscribes_only_to_known_clpc_energy_counters() {
-    for channel in ["CPU Energy", "GPU Energy", "ANE"] {
+    for channel in [
+      "CPU Energy",
+      "GPU Energy",
+      "ANE",
+      "DRAM",
+      "DCS",
+      "Package Energy",
+      "GPU SRAM",
+      "AVE",
+      "VDEC",
+      "ISP",
+    ] {
       assert!(ioreport_channels_filter("CLPC", "Energy Counters", channel, "nJ"));
       assert!(!ioreport_channels_filter("CLPC", "Energy Counters", channel, "events"));
     }
-    assert!(!ioreport_channels_filter("CLPC", "Energy Counters", "DRAM", "nJ"));
+    assert!(!ioreport_channels_filter("CLPC", "Energy Counters", "GPU + SRAM Energy", "nJ"));
+    assert!(ioreport_channels_filter("CLPC", "Energy Counters", "ISP", "mJ"));
     assert!(!ioreport_channels_filter("CLPC", "Performance States", "ANE", "nJ"));
   }
 
@@ -73,5 +97,15 @@ mod tests {
     assert!(!ioreport_channels_filter("PMP", "Energy Counters", "ANE", "events"));
     assert!(!ioreport_channels_filter("H11ANE", "H11ANE Power State", "ANE Power", ""));
     assert!(!ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "mJ"));
+  }
+
+  #[test]
+  fn subscribes_to_memory_and_selected_media_components() {
+    for name in ["DRAM", "DCS0"] {
+      assert!(ioreport_channels_filter("Energy Model", "", name, "mJ"));
+    }
+    for name in ["MSR", "AFR", "AMCC", "DISP", "GPUCS", "AVE", "VDEC", "ISP", "GPU SRAM"] {
+      assert!(!ioreport_channels_filter("Energy Model", "", name, "mJ"));
+    }
   }
 }

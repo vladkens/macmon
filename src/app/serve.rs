@@ -107,10 +107,11 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge_mac!(out, "all_power_watts", "Combined chip power consumption in Watts", m.chip_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
-  gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
+  gauge_mac!(out, "ram_power_watts", "Combined DRAM and DCS power consumption in Watts", m.ram_power);
   gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "media_power_watts", "Combined AVE, VDEC, and ISP power consumption in Watts", m.media_power);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -300,6 +301,21 @@ mod tests {
   use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
 
   #[test]
+  fn chip_power_keeps_existing_json_and_prometheus_names() {
+    let metrics = Metrics { chip_power: 4.5, ..Default::default() };
+    let soc = SocInfo::default();
+    let pipe = serde_json::to_value(&metrics).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&to_json(&metrics, &soc)).unwrap();
+    for value in [pipe, json] {
+      assert_eq!(value["all_power"], 4.5);
+      assert!(value.get("chip_power").is_none());
+    }
+    let output = to_prometheus(&metrics, &soc);
+    assert!(output.contains("macmon_all_power_watts{chip=\"\"} 4.5\n"));
+    assert!(!output.contains("macmon_chip_power_watts"));
+  }
+
+  #[test]
   fn unavailable_temperature_has_no_prometheus_gauge() {
     let mut metrics = Metrics::default();
     metrics.temp.cpu_temp_avg = Some(45.0);
@@ -321,11 +337,11 @@ mod tests {
     };
 
     // a Mac: every gauge, in the same order
-    let power =
-      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram"].map(|x| format!("{x}_power_watts"));
+    let power = ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram", "media"]
+      .map(|x| format!("{x}_power_watts"));
     let freqs = ["ecpu_freq_mhz", "pcpu_freq_mhz", "cpu_tier_freq_mhz", "gpu_freq_mhz"];
     let mac = types(false);
-    assert_eq!(mac.len(), 29, "{mac:?}"); // no temperature and fan gauges without readings
+    assert_eq!(mac.len(), 30, "{mac:?}"); // no temperature and fan gauges without readings
     assert!(power.iter().chain(&freqs.map(String::from)).all(|x| mac.contains(x)), "{mac:?}");
 
     // a VM: the same without the power and frequency gauges

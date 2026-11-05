@@ -411,7 +411,7 @@ class Flow:
             if name.startswith("s"):
                 return vs[0]
             if name.startswith("d"):
-                return join(vs[0], vs[1])
+                return (*vs[:2], 0, 0)
             return vs
         if isinstance(v, int) and name.startswith("w"):
             v &= 0xFFFFFFFF
@@ -433,7 +433,7 @@ class Flow:
             elif name.startswith("s"):
                 v = (v, 0, 0, 0)
             elif name.startswith("d"):
-                v = (v, v, 0, 0)
+                v = (*v[:2], 0, 0) if isinstance(v, tuple) else (v, v, 0, 0)
             elif not isinstance(v, tuple):
                 v = (v,) * 4
         rf[k] = v
@@ -499,21 +499,25 @@ class Flow:
             )
         return BAD
 
-    def load(self, a, width, mem):
+    def load(self, a, width, mem, vector=False):
         vals = tuple(self.readword(plus(a, i), mem) for i in range(0, width, 4))
-        if width == 16:
-            return vals
+        if width == 16 or vector and width == 8:
+            return (*vals, *((0,) * (4 - len(vals))))
         if width == 8:
             if isinstance(vals[0], Ptr):
                 return vals[0]
             if all(isinstance(v, int) for v in vals):
                 return vals[0] | (vals[1] << 32)
-            return join(*vals)
+            return vals[0] if vals[0] == vals[1] else vals
         return vals[0]
 
     def store(self, a, width, v, mem, pc):
-        if isinstance(a, int) and a in self.reports and width == 8:
-            self.report_writes[(pc, a)] = join(self.report_writes.get((pc, a)), v)
+        if isinstance(a, int):
+            for offset in range(0, width, 8):
+                target = a + offset
+                if target in self.reports and width - offset >= 8:
+                    value = v[offset // 4:offset // 4 + 2] if isinstance(v, tuple) else v
+                    self.report_writes[(pc, target)] = join(self.report_writes.get((pc, target)), value)
         if isinstance(a, Ptr) and a.indexed:
             self.indexed_stores.add((pc, a, width))
         if not isinstance(a, Ptr) or a.indexed:
@@ -524,7 +528,7 @@ class Flow:
             vs = tuple((v >> (i * 32)) & 0xFFFFFFFF for i in range(width // 4))
         else:
             vs = (v,) * (width // 4)
-        for i, value in enumerate(vs):
+        for i, value in enumerate(vs[: width // 4]):
             addr = plus(a, i * 4)
             mem[addr] = value
             if a.base in ("out", "sample"):
@@ -581,7 +585,7 @@ class Flow:
                     succ.append(target)
             elif m in ("adrp", "adr"):
                 self.put(ins, o[0], rf, self.get(ins, o[1], rf))
-            elif m in ("mov", "fmov"):
+            elif m in ("mov", "fmov", "dup"):
                 self.put(ins, o[0], rf, self.get(ins, o[1], rf))
             elif m == "movz":
                 self.put(ins, o[0], rf, self.get(ins, o[1], rf))
@@ -638,6 +642,8 @@ class Flow:
                 self.put(ins, o[0], rf, value)
                 if m == "ands":
                     rf["zero"] = value == 0 if isinstance(value, int) else None
+            elif m == "ld1" and o[0].vector_index >= 0 and ".s}" in ins.op_str:
+                self.put(ins, o[0], rf, self.load(self.address(ins, o[1], rf), 4, mem))
             elif m in ("ldr", "ldur", "ldrb", "ldrh", "ldrsw", "ldp"):
                 mo = o[-1] if o[-1].type == ARM64_OP_MEM else o[-2]
                 a = self.address(ins, mo, rf)
@@ -647,7 +653,8 @@ class Flow:
                 count = 2 if m == "ldp" else 1
                 w = self.width(ins, o[0])
                 for n in range(count):
-                    self.put(ins, o[n], rf, self.load(plus(a, n * w), w, mem))
+                    vector = ins.reg_name(o[n].reg).startswith("d")
+                    self.put(ins, o[n], rf, self.load(plus(a, n * w), w, mem, vector))
                 if ins.writeback and o[-1].type == ARM64_OP_IMM:
                     rf[self.key(ins, mo.mem.base)] = plus(a, o[-1].imm)
             elif m in ("str", "stur", "strb", "strh", "stp"):
@@ -662,6 +669,10 @@ class Flow:
                     self.store(plus(a, n * w), w, self.get(ins, o[n], rf), mem, pc)
                 if ins.writeback and o[-1].type == ARM64_OP_IMM:
                     rf[self.key(ins, mo.mem.base)] = plus(a, o[-1].imm)
+            elif m == "fcvtl":
+                value = self.get(ins, o[1], rf)
+                lanes = value if isinstance(value, tuple) else (value,) * 4
+                self.put(ins, o[0], rf, (lanes[0], lanes[0], lanes[1], lanes[1]))
             elif m in (
                 "fmul",
                 "fdiv",
@@ -815,6 +826,11 @@ COMPONENTS = {
     frozenset({"ANE"}): "ANE",
     frozenset({"GPU"}): "GPU",
     frozenset({"GPU", "GPUSRAM"}): "GPU",
+    frozenset({"AVE"}): "AVE",
+    frozenset({"VDEC"}): "VDEC",
+    frozenset({"ISP"}): "ISP",
+    frozenset({"DRAM"}): "RAM",
+    frozenset({"DCS"}): "DCS",
 }
 
 
@@ -876,6 +892,7 @@ def discover(image, driver, node_rows):
         )
         nodes = [names[3][str(r[0])] for r in enums[3]]
         require(all(nodes), "An energy descriptor has no readable name")
+        chip_dependencies = frozenset(nodes) | {"CPU"}
         acc_addr, acc_name = function("EnergySampler9sampleACCERNS_5arrayIyLm")
         acc_count = int(re.search(r"arrayIyLm(\d+)EEE", acc_name)[1])
         row["inputs"] = {
@@ -1040,11 +1057,15 @@ def discover(image, driver, node_rows):
         )
         reports = {}
         for channel in driver["channels"]:
-            if (
-                "configureSimpleReportIyE" in channel["configure"]
-                and "generateSimpleReportIyE" in channel["generate"]
-            ):
-                reports.setdefault(int(channel["storage"], 16), []).append(channel)
+            for suffix, storage_type in (("IyE", "u64"), ("IdE", "f64")):
+                if (
+                    f"configureSimpleReport{suffix}" in channel["configure"]
+                    and f"generateSimpleReport{suffix}" in channel["generate"]
+                ):
+                    reports.setdefault(int(channel["storage"], 16), []).append(
+                        {**channel, "storage_type": storage_type, "value_type": "u64",
+                         "unit": "nJ" if storage_type == "u64" else "mJ"}
+                    )
         caller = flow(
             addr, helper=helper_outputs, inputs=inputs, indices=indices, reports=reports
         )
@@ -1073,12 +1094,15 @@ def discover(image, driver, node_rows):
             if len(reports[target]) != 1:
                 continue
             dependencies = labels(value)
-            markers = {f"counter:{target:x}", "rounded"}
+            report = reports[target][0]
+            markers = {f"counter:{target:x}"}
+            if report["storage_type"] == "u64":
+                markers.add("rounded")
             if not markers <= dependencies:
                 continue
-            dependencies -= markers
+            dependencies -= markers | {"rounded"}
             candidate = {
-                **reports[target][0],
+                **report,
                 "writer": hex(pc),
                 "dependencies": sorted(dependencies),
                 "evidence": describe(
@@ -1086,7 +1110,10 @@ def discover(image, driver, node_rows):
                 ),
             }
             row["candidates"].append(candidate)
-            component = COMPONENTS.get(dependencies)
+            component = (
+                "CHIP" if dependencies == chip_dependencies
+                else COMPONENTS.get(dependencies)
+            )
             if component:
                 assignments.setdefault(component, []).append(
                     {**candidate, "identification": "automated dependency trace"}
@@ -1096,8 +1123,18 @@ def discover(image, driver, node_rows):
             for component, hits in assignments.items()
             if len(hits) == 1
         }
+        # Retain integer counters when an additional double report exposes the
+        # same component; keep all candidates in the catalog for inspection.
+        for component, hits in assignments.items():
+            integer = [hit for hit in hits if hit["storage_type"] == "u64"]
+            if len(integer) == 1:
+                row["channels"][component] = integer[0]
+        row["unresolved"] = [
+            component for component in ("GPU", "AVE", "VDEC", "ISP")
+            if component not in row["channels"]
+        ]
         require(
-            set(row["channels"]) == {"CPU", "GPU", "ANE"},
+            {"CPU", "GPU", "ANE", "RAM", "DCS", "CHIP"} <= row["channels"].keys(),
             "Incomplete or ambiguous component trace; inspect candidates and sample_fields",
         )
         row["status"] = "identified"

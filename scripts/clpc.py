@@ -4,7 +4,7 @@
 # ///
 """Extract CLPC energy IDs from Apple IPSWs; see docs/clpc-discovery.md.
 
-scan [latest|VERSION|BUILD|APPLE_URL] prints discovered CPU/GPU/ANE IDs as Rust constants.
+scan [latest|VERSION|BUILD|APPLE_URL] prints component and package energy IDs as Rust constants.
 history MAJOR compares every indexed stable release in a macOS branch.
 compare OLD_JSON NEW_JSON compares two saved catalogs.
 Downloads, catalogs and comparisons stay under the repository's out/clpc-static/.
@@ -29,7 +29,9 @@ from urllib.parse import urlparse
 from clpc_binary import Image, discover
 
 OUT = Path(__file__).resolve().parent.parent / "out" / "clpc-static"
-COMPONENTS = ("CPU", "GPU", "ANE")
+CORE_COMPONENTS = ("CPU", "GPU", "ANE", "RAM", "DCS", "CHIP")
+EXTRA_COMPONENTS = ("AVE", "VDEC", "ISP")
+COMPONENTS = (*CORE_COMPONENTS, *EXTRA_COMPONENTS)
 APPLE_CATALOG = (
     "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml"
 )
@@ -44,29 +46,51 @@ def save(path, value):
 def rust_table(catalog):
     if not catalog["complete"]:
         raise ValueError("Cannot export an incomplete catalog")
-    indices = {
-        tuple(int(d["channels"][c]["id"], 16) >> 32 for c in COMPONENTS)
-        for d in catalog["drivers"]
-    }
-    if len(indices) != 1:
-        raise ValueError(
-            "Drivers have different table indices; inspect JSON before updating Rust"
-        )
-    cpu, gpu, ane = indices.pop()
+    table_indices = []
+    for component in CORE_COMPONENTS:
+        values = {
+            int(d["channels"][component]["id"], 16) >> 32
+            for d in catalog["drivers"] if component in d["channels"]
+        }
+        if len(values) != 1:
+            raise ValueError(f"Missing or inconsistent {component} table index")
+        table_indices.append(values.pop())
+    cpu, gpu, ane, ram, dcs, chip = table_indices
+    extra_indices = []
+    for component in EXTRA_COMPONENTS:
+        values = {
+            (int(d["channels"][component]["id"], 16) >> 32, d["channels"][component]["unit"])
+            for d in catalog["drivers"] if component in d["channels"]
+        }
+        if len(values) > 1:
+            raise ValueError(f"Inconsistent {component} table index or unit")
+        if values:
+            index, unit = values.pop()
+            extra_indices.append(f'{component.lower()}: ({index}, "{unit}")')
     major = int(catalog["macos"].split(".")[0])
     lines = [
         f"// Generated from macOS {catalog['macos']} ({catalog['build']}) by scripts/clpc.py.",
-        f"const INDICES_{major}: ClpcIndices = ClpcIndices {{ cpu: {cpu}, gpu: {gpu}, ane: {ane} }};",
+        f"const INDICES_{major}: ClpcIndices = ClpcIndices {{ cpu: {cpu}, gpu: {gpu}, ane: {ane}, ram: {ram}, dcs: {dcs}, chip: {chip}, {', '.join(extra_indices)} }};",
         "",
         "const CLPC_KEYS: &[ClpcKeys] = &[",
     ]
     for driver in catalog["drivers"]:
         lines.extend(["  ClpcKeys {", f'    bundle: "{driver["bundle"]}",'])
-        for component in COMPONENTS:
-            key = int(driver["channels"][component]["id"], 16) & 0xFFFFFFFF
+        for component in CORE_COMPONENTS:
+            channel = driver["channels"].get(component)
+            if channel is None:
+                raise ValueError(f'{driver["bundle"]}: missing {component} report')
+            key = int(channel["id"], 16) & 0xFFFFFFFF
             lines.append(
                 f"    {component.lower()}: 0x{key >> 16:04x}_{key & 0xFFFF:04x},"
             )
+        for component in EXTRA_COMPONENTS:
+            channel = driver["channels"].get(component)
+            value = "None"
+            if channel:
+                key = int(channel["id"], 16) & 0xFFFFFFFF
+                value = f"Some(0x{key >> 16:04x}_{key & 0xFFFF:04x})"
+            lines.append(f"    {component.lower()}: {value},")
         lines.append("  },")
     return "\n".join([*lines, "];", ""])
 
@@ -244,7 +268,7 @@ def scan(release):
     )
     dest = OUT / f"catalog-{version}-{build}.json"
     save(dest, result)
-    lines = ["driver\tCPU\tGPU\tANE\tstatus"] + [
+    lines = ["driver\t" + "\t".join(COMPONENTS) + "\tstatus"] + [
         "\t".join(
             [
                 d["bundle"],
