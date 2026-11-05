@@ -7,7 +7,8 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, zero_div,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_dram_channel,
+  zero_div,
 };
 use crate::sources::{
   IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, cfio_get_residencies, cfio_watts,
@@ -48,7 +49,7 @@ impl PowerSources {
 
     // On macOS 27 Energy Model CPU/ANE counters can freeze without Apple's
     // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
-    // Drivers with unknown CLPC IDs need the legacy sources; ANE can use PMP.
+    // Drivers with unknown CLPC IDs need the legacy sources; ANE and DRAM can use PMP.
     Some(self.clpc.or(self.energy_model).unwrap_or(self.pmp))
   }
 }
@@ -658,6 +659,7 @@ impl Sampler {
     let mut cpu_power = PowerSources::default();
     let mut gpu_power = PowerSources::default();
     let mut ane_power = PowerSources::default();
+    let mut ram_power = PowerSources::default();
 
     // Keep this channel handling in sync with ioreport_channels_filter.
     for x in sample {
@@ -692,7 +694,9 @@ impl Sampler {
           c if c.starts_with("ANE") => {
             ane_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
           }
-          c if c.starts_with("DRAM") => rs.ram_power += cfio_watts(x.item, &x.unit, dt)?,
+          c if c.starts_with("DRAM") => {
+            ram_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
+          }
           c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
           _ => {}
         }
@@ -700,6 +704,10 @@ impl Sampler {
 
       if is_pmp_ane_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
         ane_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
+      }
+
+      if is_pmp_dram_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        ram_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
       }
 
       if is_clpc_energy_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
@@ -722,6 +730,8 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
+    // No CLPC counter for DRAM is known, so force_clpc doesn't apply here.
+    rs.ram_power = ram_power.watts(false).unwrap_or_default();
     rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
@@ -822,6 +832,15 @@ mod tests {
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
+  }
+
+  #[test]
+  fn ram_power_keeps_frozen_energy_model_zero_over_pmp() {
+    let mut power = PowerSources { pmp: 1.6, ..Default::default() };
+    power.add_energy_model(0.0);
+    assert_eq!(power.watts(false), Some(0.0));
+
+    assert_eq!(PowerSources { pmp: 1.6, ..Default::default() }.watts(false), Some(1.6));
   }
 
   #[test]
