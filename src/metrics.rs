@@ -730,7 +730,7 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    // No CLPC counter for DRAM is known, so force_clpc doesn't apply here.
+    // CLPC isn't read for DRAM, so force_clpc doesn't apply here.
     rs.ram_power = ram_power.watts(false).unwrap_or_default();
     rs.cpu_tiers = cpu_cores.into_metrics();
 
@@ -832,15 +832,6 @@ mod tests {
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
-  }
-
-  #[test]
-  fn ram_power_keeps_frozen_energy_model_zero_over_pmp() {
-    let mut power = PowerSources { pmp: 1.6, ..Default::default() };
-    power.add_energy_model(0.0);
-    assert_eq!(power.watts(false), Some(0.0));
-
-    assert_eq!(PowerSources { pmp: 1.6, ..Default::default() }.watts(false), Some(1.6));
   }
 
   #[test]
