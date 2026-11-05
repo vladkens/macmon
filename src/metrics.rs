@@ -42,6 +42,13 @@ impl PowerSources {
     *self.energy_model.get_or_insert(0.0) += watts;
   }
 
+  fn add_pmp(&mut self, watts: f32) {
+    // Same invalid deltas as in add_clpc.
+    if watts.is_finite() && watts >= 0.0 {
+      self.pmp += watts;
+    }
+  }
+
   fn watts(self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
@@ -707,7 +714,7 @@ impl Sampler {
       }
 
       if is_pmp_dram_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
-        ram_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
+        ram_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
       }
 
       if is_clpc_energy_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
@@ -832,6 +839,16 @@ mod tests {
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
+  }
+
+  #[test]
+  fn pmp_power_skips_invalid_deltas() {
+    let mut power = PowerSources::default();
+    for watts in [-1.0, f32::NAN, f32::INFINITY, 1.6] {
+      power.add_pmp(watts);
+    }
+
+    assert_eq!(power.watts(false), Some(1.6));
   }
 
   #[test]
