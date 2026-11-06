@@ -13,6 +13,7 @@ mod config;
 mod fds;
 mod find_clpc;
 mod procs;
+mod query;
 mod serve;
 mod stress;
 mod tui;

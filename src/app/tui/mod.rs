@@ -1018,7 +1018,7 @@ mod tests {
     app.proc_view.set_procs(vec![]);
     let screen = screen_text(&render_buffer(&mut app, 200, 50));
     assert!(!screen.contains("no process matches"));
-    assert!(screen.contains("proc 0 ─ /nothing-matches"));
+    assert!(screen.contains("proc 0 ─ / nothing-matches"));
     assert!(app.handle_key(key('f')).is_continue());
     assert!(screen_text(&render_buffer(&mut app, 200, 50)).contains("no process matches"));
   }
@@ -1577,12 +1577,12 @@ mod tests {
       assert!(app.handle_key(key(c)).is_continue());
     }
     let typing = title(&mut app, 200);
-    assert!(typing.starts_with("╭─ proc 1/3 ─ /saf█ ───") && !typing.contains("sort"), "{typing}");
+    assert!(typing.starts_with("╭─ proc 1/3 ─ / saf█ ───") && !typing.contains("sort"), "{typing}");
     assert!(!typing.contains("kill"), "{typing}");
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let filtered = title(&mut app, 200);
     assert!(
-      filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───")
+      filtered.starts_with("╭─ proc 1/3 ─ / saf ─ sort ───")
         && filtered.ends_with(" info | finder | copy | kill ─╮")
     );
   }
@@ -1882,7 +1882,7 @@ mod tests {
     // typed into its filter `?` is text
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('?')).is_continue());
     assert!(app.help.is_none());
-    assert!(proc_row(&render_buffer(&mut app, 200, 50), 2).starts_with("├─ /?█ "));
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 2).starts_with("├─ / ?█ "));
   }
 
   #[test]
@@ -1893,7 +1893,7 @@ mod tests {
     // typed into its filter `q` is text
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('q')).is_continue());
     assert!(press(&mut app, KeyCode::Enter).is_continue());
-    assert!(row(&mut app, 2).starts_with("├─ /q ───"), "{}", row(&mut app, 2));
+    assert!(row(&mut app, 2).starts_with("├─ / q ───"), "{}", row(&mut app, 2));
     // then it closes the overlay, with the filter set too
     assert!(app.handle_key(key('q')).is_continue());
     assert!(app.info.is_none());

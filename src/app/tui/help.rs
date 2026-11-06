@@ -28,7 +28,7 @@ const HELP: &[Row] = &[
   Key("v", "graph / gauge"),
   Key("r", "CPU and GPU usage: freq / raw"),
   Key("- / +", "update interval"),
-  Key("/", "filter the processes"),
+  Key("/", "filter the processes: node mem:>1g !user:root"),
   Key("Space", "pause / resume the list (values update)"),
   Key("f", "turn the saved process filter off / on"),
   Key("s / S", "sort by the next column / reverse"),

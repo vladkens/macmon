@@ -89,12 +89,12 @@ POWER does today.
       Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
 - [ ] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
-      Group an app's helper processes under it, expandable to show which ones are counted. Three
-      PRs. First, the total row says it covers matching processes only. Second, identical names
-      in one row with a count (`node ×240, 6 GB`, asked on Reddit: agents leave dozens of copies
-      of a process, each tiny on its own), built on the group rows of the filter. Third, totals
-      by process tree, so an app or `claude` counts its helpers and MCP servers: this needs the
-      parent pid in `ProcInfo`.
+      Group an app's helper processes under it, expandable to show which ones are counted. Two
+      PRs. First, the total row says it covers matching processes only. Second, `app:safari` in
+      the filter (item 22) totals a whole app, so `claude` counts its helpers and MCP servers
+      too. The parent pid isn't enough: XPC services are children of `launchd`. The responsible
+      pid and the coalition both link them to their app without root; compare them with Safari
+      open before the plan. Identical names need no feature: `/node` already totals them.
 - [x] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
       memory. Read it without root (sysctl `kern.memorystatus_level` and
@@ -117,8 +117,11 @@ POWER does today.
       or an LLM agent can't read it (asked on Reddit, as `top` flags for an alias; copying those
       flags isn't the point). Decision point before the plan: a new subcommand or a field of
       `pipe` and `serve`, and what sampling processes costs there.
-- [ ] **21. Supported macOS versions.** Asked on Reddit, and the readme doesn't say. Find the
-      oldest version macmon runs on and state it in the readme.
+- [x] **21. Supported macOS versions.** Asked on Reddit, and the readme didn't say: macOS 14,
+      current when macmon first came out, and later.
+- [ ] **22. Filter queries.** Filter the process list by more than the name, with words like
+      `mem:>1g` and `user:root`, as fsearch does.
+      Plan: [docs/plans/20261106-filter-query.md](plans/20261106-filter-query.md).
 
 Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
 the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and

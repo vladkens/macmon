@@ -21,6 +21,7 @@ use super::store::ratio;
 use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
 use crate::procs::ProcInfo;
+use crate::query::{Query, is_bad};
 
 /// Narrowest NAME column; other columns are dropped to keep it.
 const NAME_MIN_WIDTH: u16 = 8;
@@ -32,8 +33,8 @@ const POWER_HOT_W: f64 = 10.0;
 const FILTER_CURSOR: &str = "█";
 /// Stands for the cut part of a text too long for its cells.
 pub(super) const ELLIPSIS: &str = "…";
-/// Cells of the shortest filter title worth showing next to the count: `/…x█`.
-const FILTER_MIN_WIDTH: u16 = 4;
+/// Cells of the shortest filter title worth showing next to the count: `/ …x█`.
+const FILTER_MIN_WIDTH: u16 = 5;
 /// Rows one wheel step moves the selection and scrolls the table.
 const WHEEL_ROWS: usize = 3;
 /// Fewest process rows left below the group totals; with fewer the totals are hidden.
@@ -239,8 +240,8 @@ fn sort_groups(groups: &mut [Group], sort: ProcSort, desc: bool) {
 }
 
 /// Filter text split into terms: `safari, cargo, !helper` keeps rows matching any term and none of
-/// the `!` ones. Each term is lowercase (a process matches it in its name or pid); empty terms are
-/// ignored, so a filter still being typed (`safari,`) keeps its rows.
+/// the `!` ones. Each term is lowercase; empty terms are ignored, so a filter still being typed
+/// (`safari,`) keeps its rows.
 #[derive(Debug, Default)]
 pub(super) struct Filter {
   any: Vec<String>,
@@ -266,11 +267,6 @@ impl Filter {
     let hit = |term: &String| hit(term);
     (self.any.is_empty() || self.any.iter().any(hit)) && !self.none.iter().any(hit)
   }
-}
-
-/// Whether the lowercase `term` is in the name or pid of `proc`.
-fn hit(proc: &ProcInfo, term: &str) -> bool {
-  proc.name.to_lowercase().contains(term) || proc.pid.to_string().contains(term)
 }
 
 /// Totals of the listed processes matching one filter term: `chrome` sums Chrome and all its
@@ -345,7 +341,7 @@ pub(super) fn type_filter(filter: &mut String, typing: &mut bool, key: KeyEvent)
 }
 
 /// `name`, then `/ filter`, or the filter once there is one or it is being typed. A filter too
-/// long for the border shows its end (`/…ari█`); with no room for that next to `name`, the filter
+/// long for the border shows its end (`/ …ari█`); with no room for that next to `name`, the filter
 /// takes its place.
 pub(super) fn filter_titles(
   name: Vec<Span<'static>>,
@@ -359,28 +355,41 @@ pub(super) fn filter_titles(
   }
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
-    Titles::new(name).left(filter_title(filter, typing, enabled, beside))
+    Titles::new(name).left(filter_title(filter, typing, enabled, beside, is_bad))
   } else {
-    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[])))
+    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[]), is_bad))
   }
 }
 
-/// `/saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
+/// `filter` as text, the words `bad` tells in the warning color.
+fn filter_words(filter: &str, bad: fn(&str) -> bool) -> Vec<Span<'static>> {
+  let word = |part: &str| {
+    let word = part.trim_end_matches([' ', ',']);
+    let span = if bad(word) { theme::warn(word.to_string()) } else { text(word.to_string()) };
+    [span, text(part[word.len()..].to_string())]
+  };
+
+  filter.split_inclusive([' ', ',']).flat_map(word).collect()
+}
+
+/// `/ saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after
+/// `…`.
 pub(super) fn filter_title(
   filter: &str,
   typing: bool,
   enabled: bool,
   room: u16,
+  bad: fn(&str) -> bool,
 ) -> Vec<Span<'static>> {
-  // `/` and the cursor (one cell each) around the filter text
-  let text_room = usize::from(room).saturating_sub(1 + usize::from(typing));
+  // `/ ` (two cells) and the cursor (one) around the filter text
+  let text_room = usize::from(room).saturating_sub(2 + usize::from(typing));
 
-  let mut spans = vec![heading("/")];
+  let mut spans = vec![theme::key("/ ")];
   if Span::raw(filter).width() <= text_room {
-    spans.push(text(filter.to_string()));
+    spans.extend(filter_words(filter, bad));
   } else {
     spans.push(dim(ELLIPSIS));
-    spans.push(text(tail(filter, text_room.saturating_sub(1)).to_string()));
+    spans.extend(filter_words(tail(filter, text_room.saturating_sub(1)), bad));
   }
   if typing {
     spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
@@ -655,10 +664,14 @@ impl ProcView {
           held[i] = proc;
         }
       }
-    } else {
-      self.procs = Some(procs);
+
+      // the rows stay while paused, only their totals change
+      let filter = Query::parse(if self.filter_enabled { &self.filter } else { "" });
+      self.update_totals(&filter, false);
+      return;
     }
 
+    self.procs = Some(procs);
     self.refresh(first_sample);
   }
 
@@ -673,8 +686,7 @@ impl ProcView {
     self.refresh(false);
   }
 
-  /// Re-filters and sorts on live samples or explicit requests. Selection follows identity,
-  /// and is dropped when that process is gone or filtered out.
+  /// Re-filters and sorts on live samples or explicit requests.
   fn refresh(&mut self, sort_requested: bool) {
     let sort_now = !self.paused || sort_requested;
     let procs = self.procs.as_deref_mut().unwrap_or_default();
@@ -682,12 +694,18 @@ impl ProcView {
       sort_procs(procs, self.sort, self.sort_desc);
     }
 
-    let filter = Filter::parse(if self.filter_enabled { &self.filter } else { "" });
-    self.rows = (0..procs.len()).filter(|&i| filter.matches(|t| hit(&procs[i], t))).collect();
+    let filter = Query::parse(if self.filter_enabled { &self.filter } else { "" });
+    self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
+    self.update_totals(&filter, sort_now);
+  }
+
+  /// Totals of the rows and the selection, which follows identity and is dropped when that process
+  /// is gone or filtered out.
+  fn update_totals(&mut self, filter: &Query, sort_now: bool) {
     let groups = filter
       .any
       .iter()
-      .map(|term| Group::sum(term, self.rows().filter(|p| !self.exited(p) && hit(p, term))));
+      .map(|term| Group::sum(&term.text, self.rows().filter(|p| !self.exited(p) && term.hit(p))));
     let mut groups: Vec<_> = groups.collect();
     if !sort_now {
       groups.sort_by_key(|g| {
@@ -1133,11 +1151,13 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
+  use ratatui::style::Color;
 
   use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time};
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
   use crate::tui::boxes::draw_box;
+  use crate::tui::theme;
 
   const MIB: u64 = 1 << 20;
 
@@ -1265,6 +1285,25 @@ mod tests {
     press(&mut view, KeyCode::Char(' '));
     view.clear();
     assert!(!view.paused && view.procs().is_none());
+  }
+
+  #[test]
+  fn pause_keeps_rows_that_stop_matching_a_value_filter() {
+    let mut view = view();
+    type_str(&mut view, "/cpu:>3");
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Down);
+    press(&mut view, KeyCode::Char(' '));
+
+    let mut next = sample();
+    next.iter_mut().for_each(|p| p.cpu_pct = 0.0);
+    view.set_procs(next);
+    assert_eq!(pids(&view), [4410, 631, 2301]);
+    assert_eq!(view.selected_pid(), Some(4410));
+    assert_eq!(view.groups[0].count, 0);
+
+    press(&mut view, KeyCode::Char(' '));
+    assert_eq!((pids(&view), view.selected_pid()), (vec![], None));
   }
 
   #[test]
@@ -1480,19 +1519,35 @@ mod tests {
       term.draw(|f| _ = draw_box(f, f.area(), view.titles(width))).unwrap();
       let buf = term.backend().buffer();
       let line: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
-      assert!(line.contains(if width == 12 { "ches" } else { "matches" }), "{line}");
-      assert!(line.contains("/…") || line.contains("/a-long"), "{line}");
+      assert!(line.contains(if width == 12 { "hes" } else { "matches" }), "{line}");
+      assert!(line.contains("/ …") || line.contains("/ a-long"), "{line}");
       if width == 80 {
         assert!(line.contains("proc 5 ─"), "{line}");
         assert!(!line.contains("5/5"));
       }
 
       let slash = (0..width).find(|&x| buf[(x, 0)].symbol() == "/").unwrap();
-      let cells = if width == 12 { 6 } else { 1 + view.filter.len() as u16 };
+      let cells = if width == 12 { 6 } else { 2 + view.filter.len() as u16 };
       for x in slash..slash + cells {
         assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
       }
     }
+  }
+
+  #[test]
+  fn bad_filter_words_show_in_the_warning_color() {
+    let mut view = view();
+    type_str(&mut view, "/node mem:>1x, !user: cpu:5");
+    let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+    term.draw(|f| _ = draw_box(f, f.area(), view.titles(80))).unwrap();
+    let buf = term.backend().buffer();
+    let red = (0..80).filter(|&x| buf[(x, 0)].fg == Color::Red);
+    let red = red.map(|x| buf[(x, 0)].symbol()).collect::<String>();
+    assert_eq!(red, "mem:>1x!user:");
+
+    let row: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+    let slash = row[..row.find("─ /").unwrap()].chars().count() as u16 + 2;
+    assert_eq!(buf[(slash, 0)].fg, theme::KEY);
   }
 
   #[test]
@@ -1553,6 +1608,12 @@ mod tests {
       ("saf".to_string(), 1, 12.0, 900, Some(0.8), false, 5.0),
       ("d".to_string(), 1, 0.5, 20, None, true, 0.0),
     ];
+    assert_eq!(summary(&view), expected);
+
+    press(&mut view, KeyCode::Esc);
+    press(&mut view, KeyCode::Char('/'));
+    type_str(&mut view, "saf mem:>500m");
+    let expected = [("saf mem:>500m".to_string(), 1, 12.0, 900, Some(0.8), false, 5.0)];
     assert_eq!(summary(&view), expected);
   }
 
@@ -1824,18 +1885,18 @@ mod tests {
       term.draw(|f| _ = draw_box(f, f.area(), view.titles(80))).unwrap();
       let buf = term.backend().buffer();
       let row: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
-      let at = row.find("─ /").map(|i| row[..i].chars().count());
+      let at = row.find("/324 ─ ").map(|i| row[..i].chars().count());
       (row, at)
     };
 
     assert!(title(&view).0.starts_with("╭─ proc 324 ─ / filter ─ sort ─"));
     assert!(press(&mut view, KeyCode::Char('/')));
     let (row, open) = title(&view);
-    assert!(row.starts_with("╭─ proc 324/324 ─ /█ ─"), "{row}");
+    assert!(row.starts_with("╭─ proc 324/324 ─ / █ ─"), "{row}");
     for (name, n) in names {
       type_str(&mut view, name);
       let (row, at) = title(&view);
-      assert!(row.starts_with(&format!("╭─ proc {n:>3}/324 ─ /{name}█ ─")), "{row}");
+      assert!(row.starts_with(&format!("╭─ proc {n:>3}/324 ─ / {name}█ ─")), "{row}");
       assert_eq!(at, open, "{row}");
       for _ in name.chars() {
         assert!(press(&mut view, KeyCode::Backspace));
