@@ -2,8 +2,9 @@
 
 use std::cmp::Ordering;
 use std::ffi::c_int;
+use std::num::NonZeroU16;
 
-use crate::fds::cwd;
+use crate::fds::{cwd, has_port};
 use crate::procs::{ProcInfo, cmd_line, exe_path};
 
 unsafe extern "C" {
@@ -30,6 +31,8 @@ enum Cond {
   Cmd(String),
   /// Lowercase text in the name of the app of the process or of its responsible process.
   App(String),
+  /// A local TCP or UDP port, read only for this word.
+  Port(NonZeroU16),
   /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
   Num(fn(&ProcInfo) -> Option<f64>, Ordering, f64),
 }
@@ -47,6 +50,7 @@ impl Cond {
       "dir" => Some(Self::Dir(value.to_string())),
       "cmd" => Some(Self::Cmd(value.to_string())),
       "app" => Some(Self::App(value.to_string())),
+      "port" => value.parse().ok().map(Self::Port),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
       "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
@@ -76,6 +80,7 @@ impl Cond {
       }
       Self::Cmd(text) => cmd_line(proc.pid).is_some_and(|cmd| cmd.to_lowercase().contains(text)),
       Self::App(text) => in_app(proc, text),
+      Self::Port(port) => has_port(proc.pid, port.get()),
       Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
     }
   }
@@ -153,6 +158,8 @@ impl Query {
 
 #[cfg(test)]
 mod tests {
+  use std::net::{TcpListener, TcpStream, UdpSocket};
+
   use super::{Query, app_name, is_bad};
   use crate::procs::ProcInfo;
 
@@ -265,6 +272,10 @@ mod tests {
       ("dir:", &all),
       ("cmd:", &all),
       ("app:", &all),
+      ("port:", &all),
+      ("port:http", &all),
+      ("port:0", &all),
+      ("port:65536", &all),
       ("!mem:>", &all),
       ("saf mem:>", &[2301, 77]),
       ("saf !mem:>1x", &[2301, 77]),
@@ -303,12 +314,26 @@ mod tests {
     assert!(!Query::parse("app:helper").matches(&helper));
     assert!(!Query::parse("app:gone").matches(&gone));
 
+    // a local port of this process, listening or connected, and not a remote one
+    let hit = |port: u16| Query::parse(&format!("port:{port}")).matches(&own);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    assert!(hit(port) && hit(client.local_addr().unwrap().port()));
+    assert!(hit(udp.local_addr().unwrap().port()));
+    assert!(!hit(1));
+    drop(listener);
+    assert!(!hit(port));
+    assert!(!Query::parse(&format!("port:{}", udp.local_addr().unwrap().port())).matches(&gone));
+
     // bad words: known keys with values that aren't valid
-    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "cmd:", "app:", "cpu:>1g"] {
+    let bad = ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "cmd:", "app:", "cpu:>1g"];
+    for word in bad.into_iter().chain(["port:", "port:http", "port:0", "port:65536"]) {
       assert!(is_bad(word), "{word}");
     }
 
-    for word in ["", "!", "node", "!node", "foo:", "mem:1g", "mem:>1G", "user:root"] {
+    for word in ["", "!", "node", "!node", "foo:", "mem:1g", "mem:>1G", "user:root", "port:3000"] {
       assert!(!is_bad(word), "{word}");
     }
 
