@@ -333,8 +333,8 @@ struct MetricBox<'a> {
   /// History, newest first.
   data: &'a [u64],
   scale: Scale,
-  /// Color of the border and the graph or gauge, instead of the usual ones.
-  color: Option<Color>,
+  /// Color of the border instead of `theme::BORDER`.
+  border: Option<Color>,
 }
 
 impl App {
@@ -374,12 +374,12 @@ impl App {
     let fans = self.fans.label();
     for &(kind, r) in &plan.boxes {
       let metric = self.metric_box(kind);
-      let border = metric.color.unwrap_or(theme::BORDER);
+      let border = metric.border.unwrap_or(theme::BORDER);
       let inner = draw_colored_box(f, r, fit_titles(r.width, metric.titles), border);
-      let graph = Graph::new(metric.data).three_levels(self.three_level_bars).color(metric.color);
+      let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
       match metric.scale {
         Scale::Load { load, .. } if self.cfg.view_type == ViewType::Gauge => {
-          f.render_widget(Gauge::new(load).color(metric.color), inner)
+          f.render_widget(Gauge::new(load), inner)
         }
         Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
@@ -468,7 +468,7 @@ impl App {
       titles: vec![Titles::new(full), Titles::new(short)],
       data: &series.items,
       scale: Scale::Load { max: 100, load: series.ratio },
-      color: None,
+      border: None,
     }
   }
 
@@ -476,9 +476,10 @@ impl App {
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
   /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
   /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
-  /// title, so no number is ever cut. At warning and critical memory pressure the border and the
-  /// graph or gauge take its color, and the two widest titles come first with `· pressure warning`
-  /// / `· pressure critical` at the end, so the word goes before the GB figures.
+  /// title, so no number is ever cut. At warning and critical memory pressure the border takes
+  /// its color, the graph or gauge stays in the load colors, and the two widest titles come first
+  /// with `· pressure warning` / `· pressure critical` at the end, so the word goes before the GB
+  /// figures.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
@@ -514,7 +515,7 @@ impl App {
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
     let scale = Scale::Load { max: mem.ram_total, load };
-    MetricBox { titles, data: &mem.items, scale, color: pressure.map(|(color, _)| color) }
+    MetricBox { titles, data: &mem.items, scale, border: pressure.map(|(color, _)| color) }
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
@@ -541,7 +542,7 @@ impl App {
       }
     });
 
-    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power, color: None }
+    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power, border: None }
   }
 
   /// `Total 12.00W (12.00, 12.00)`, the whole system, or `Power 6.60W (6.60, 6.60)`, CPU + GPU +

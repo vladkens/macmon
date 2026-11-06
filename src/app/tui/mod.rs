@@ -1481,7 +1481,14 @@ mod tests {
   fn ram_box_follows_memory_pressure() {
     use ratatui::style::Color;
 
-    let pressure_app = |level| test_app_with(|m| m.memory.pressure_level = level);
+    let load_app = |percent: u64, level| {
+      test_app_with(|m| {
+        m.memory.ram_usage = m.memory.ram_total / 100 * percent;
+        m.memory.pressure_level = level;
+      })
+    };
+    // 80 % of the RAM in use: red on the load gradient, unlike the warning color
+    let pressure_app = |level| load_app(80, level);
     let top = |app: &mut App, width: u16| {
       let buf = render_buffer(app, width * 4 + 2, 50);
       box_top(app, &buf, Metric::Ram).trim_matches(['╭', '╮', '─']).trim().to_string()
@@ -1494,10 +1501,10 @@ mod tests {
       (buf[(area.x, area.y)].fg, buf[(area.right() - 2, area.bottom() - 2)].fg)
     };
 
-    const FULL: &str = "RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB";
-    const SHORT: &str = "RAM 56% · SWAP 50%";
+    const FULL: &str = "RAM 28.80 GB (80.0%) · SWAP 1.00 / 2.0 GB";
+    const SHORT: &str = "RAM 80% · SWAP 50%";
     let cases = [(1, "pressure warning", Color::Yellow), (2, "pressure critical", Color::Red)];
-    for (level, word, color) in cases {
+    for (level, word, border) in cases {
       let mut app = pressure_app(Some(level));
       let extra = word.chars().count() as u16 + 3; // with ` · `
 
@@ -1508,32 +1515,40 @@ mod tests {
         (46 + extra, format!("{SHORT} · {word}")),
         (24 + extra, format!("{SHORT} · {word}")),
         (23 + extra, SHORT.to_string()),
-        (20, "RAM 56% SW 50%".to_string()),
-        (19, "RAM 56%".to_string()),
+        (20, "RAM 80% SW 50%".to_string()),
+        (19, "RAM 80%".to_string()),
         (12, String::new()),
       ];
       for (width, title) in titles {
         assert_eq!(top(&mut app, width), title, "{level} at {width}");
       }
 
-      // the colors don't depend on the width, even with no room for a title
+      // the border doesn't depend on the width, even with no room for a title, and the graph
+      // keeps its load color
       for width in [80, 30, 12] {
-        assert_eq!(colors(&mut app, width), (color, color), "{level} at {width}");
+        assert_eq!(colors(&mut app, width), (border, Color::Red), "{level} at {width}");
       }
 
       // the gauge too
       app.cfg.view_type = ViewType::Gauge;
-      let buf = render_buffer(&mut app, 200, 50);
+      assert_eq!(colors(&mut app, 80).0, border);
+      let buf = render_buffer(&mut app, 80 * 4 + 2, 50);
       let boxes = app.layout(buf.area).boxes;
       let (_, area) = boxes.into_iter().find(|(m, _)| *m == Metric::Ram).expect("metric box");
-      assert_eq!(buf[(area.x + 1, area.y + 1)].fg, color);
+      assert_eq!(buf[(area.x + 1, area.y + 1)].fg, Color::Red);
+    }
+
+    // at a low load the graph stays green, unlike both pressure colors
+    for (level, border) in [(1, Color::Yellow), (2, Color::Red)] {
+      let mut app = load_app(20, Some(level));
+      assert_eq!(colors(&mut app, 80), (border, Color::Green), "{level}");
     }
 
     // normal pressure or no reading: nothing changes
     for level in [Some(0), None] {
       let mut app = pressure_app(level);
       assert_eq!(top(&mut app, 80), FULL);
-      assert_eq!(colors(&mut app, 80), (Color::DarkGray, Color::Yellow));
+      assert_eq!(colors(&mut app, 80), (Color::DarkGray, Color::Red));
     }
   }
 

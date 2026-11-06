@@ -724,7 +724,7 @@ fn sysctl_u64(name: &str) -> Option<u64> {
   sysctl_buf(name).map(u64::from_ne_bytes)
 }
 
-/// Kernel memory pressure value, the one Activity Monitor graphs; readable without root.
+/// The kernel's memory pressure level as the raw sysctl value; readable without root.
 pub(crate) fn memory_pressure_raw() -> Option<u32> {
   sysctl_u32("kern.memorystatus_vm_pressure_level")
 }

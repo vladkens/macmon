@@ -82,7 +82,7 @@ pub struct MemMetrics {
   pub swap_total: u64,
   /// Used swap in bytes.
   pub swap_usage: u64,
-  /// Memory pressure as Activity Monitor shows it: 0 normal, 1 warning, 2 critical, or None when
+  /// The kernel's memory pressure level: 0 normal, 1 warning, 2 critical, or None when
   /// unavailable.
   pub pressure_level: Option<u8>,
 }
