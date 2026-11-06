@@ -77,19 +77,24 @@ POWER does today.
 - [ ] **13. Social preview card.** The repository still shows GitHub's template image. A
       1280×640 card from a real TUI screenshot of the current release (HTML rendered to PNG),
       uploaded by hand in the repository settings.
-- [ ] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` creates a
-      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs it
-      at boot with nobody logged in (asked on Reddit). An install option for a LaunchDaemon in
-      `/Library/LaunchDaemons` (needs sudo). Tested by hand in the VM: a daemon running `macmon
-      serve` starts at boot without a login, as root and with `UserName`; with `UserName` the
-      `StandardErrorPath` file must be writable by that user.
+- [x] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` created a
+      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs
+      it at boot with nobody logged in (asked on Reddit). `sudo macmon serve --install` now
+      installs a LaunchDaemon in `/Library/LaunchDaemons`, replacing the user's agent, and
+      `--install --agent` is the old LaunchAgent, without sudo. Tested by hand in the VM: a
+      daemon running `macmon serve` starts at boot without a login, as root and with `UserName`;
+      with `UserName` the `StandardErrorPath` file must be writable by that user.
 - [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
       Reddit): disk read / write and network in / out, system-wide, in the TUI, JSON and
       Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
 - [ ] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
-      Group an app's helper processes under it, expandable to show which ones are counted. Until
-      then, the total row could say it covers matching processes only.
+      Group an app's helper processes under it, expandable to show which ones are counted. Three
+      PRs. First, the total row says it covers matching processes only. Second, identical names
+      in one row with a count (`node ×240, 6 GB`, asked on Reddit: agents leave dozens of copies
+      of a process, each tiny on its own), built on the group rows of the filter. Third, totals
+      by process tree, so an app or `claude` counts its helpers and MCP servers: this needs the
+      parent pid in `ProcInfo`.
 - [ ] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
       memory. Read it without root (sysctl `kern.memorystatus_vm_pressure_level` and
@@ -99,20 +104,26 @@ POWER does today.
       once, the busiest process is often just `rustc`, `cargo` or `node`, and the name doesn't
       say which project it belongs to. Show the working directory in the list (a column, or the
       NAME cell for such tools, `~` for home, cut from the left), so the project is visible while
-      scrolling, without opening `i`. Other users' processes show no directory (libproc needs
-      root). Decision point before the plan: a column, a second line, or a toggle.
+      scrolling, without opening `i` (asked on Reddit too: which project in Claude or ChatGPT
+      uses what). Other users' processes show no directory (libproc needs root). Decision point
+      before the plan: a column, a second line, or a toggle.
 - [ ] **19. Who is busy lately.** CPU% is one sample and jumps; TIME covers the whole life of a
       process. To find what loads the Mac right now (a runaway process, an agent's test run, a
       build), show CPU used over a recent window, e.g. the last 15 s or 1 min, from the CPU time
       already sampled, and sort by it. Decision point before the plan: a new column or a switch
       of TIME between "total" and "recent", and the window length.
+- [ ] **20. Processes in `pipe` and JSON.** The process list exists only in the TUI, so a script
+      or an LLM agent can't read it (asked on Reddit, as `top` flags for an alias; copying those
+      flags isn't the point). Decision point before the plan: a new subcommand or a field of
+      `pipe` and `serve`, and what sampling processes costs there.
+- [ ] **21. Supported macOS versions.** Asked on Reddit, and the readme doesn't say. Find the
+      oldest version macmon runs on and state it in the readme.
 
-Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
-PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
-small and self-contained, good for an outside contributor.
+Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
+the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and
+self-contained, good for an outside contributor.
 
-Later, only on request: automatic grouping of an app's processes (filter terms with totals
-cover the known-app case), per-process network (only `nettop` has it without root), history
+Later, only on request: per-process network (only `nettop` has it without root), history
 graphs per process, Activity Monitor's Memory and Statistics tabs (context switches, faults,
 Mach messages and system calls, virtual and shared/private memory), Mach port counts and recent
 hangs (need a task port or private API).

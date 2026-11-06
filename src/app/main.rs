@@ -81,13 +81,17 @@ enum Commands {
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
 
-    /// Install as a launchd service (auto-start on login)
+    /// Install as a LaunchDaemon that starts at boot (needs sudo)
     #[arg(long, default_value_t = false)]
     install: bool,
 
-    /// Uninstall the launchd service
+    /// Uninstall the launchd service, daemon or agent
     #[arg(long, default_value_t = false)]
     uninstall: bool,
+
+    /// With --install: a LaunchAgent that starts at login instead, no sudo
+    #[arg(long, default_value_t = false, requires = "install")]
+    agent: bool,
   },
 
   /// Print debug information
@@ -270,11 +274,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { host, port, install, uninstall }) => {
-      if *install || *uninstall {
-        serve::launchd(host, *port, *install)?;
-        return Ok(());
+    Some(Commands::Serve { host, port, install, uninstall, agent }) => {
+      if *install && *agent {
+        return serve::install_agent(host, *port);
       }
+
+      if *install {
+        return serve::install_daemon(host, *port);
+      }
+
+      if *uninstall {
+        return serve::uninstall();
+      }
+
       let mut sampler = Sampler::new()?;
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
@@ -286,6 +298,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       thread::spawn(move || {
         if let Err(e) = serve::run(&host, port, shared_http, soc_http) {
           eprintln!("server error: {e}");
+          std::process::exit(1); // without HTTP there is nothing to run for; launchd retries
         }
       });
 
@@ -326,6 +339,13 @@ mod tests {
     for mode in [StressMode::Ane, StressMode::All] {
       run_stress(mode, None, Some(0), None).unwrap();
     }
+  }
+
+  #[test]
+  fn agent_needs_install() {
+    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--agent"]).is_ok());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--agent"]).is_err());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--agent"]).is_err());
   }
 
   #[test]
