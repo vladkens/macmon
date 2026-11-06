@@ -87,14 +87,10 @@ POWER does today.
 - [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
       Reddit): disk read / write and network in / out, system-wide, in the TUI, JSON and
       Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
-- [ ] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
+- [x] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
-      Group an app's helper processes under it, expandable to show which ones are counted. Two
-      PRs. First, the total row says it covers matching processes only. Second, `app:safari` in
-      the filter (item 22) totals a whole app, so `claude` counts its helpers and MCP servers
-      too. The parent pid isn't enough: XPC services are children of `launchd`. The responsible
-      pid and the coalition both link them to their app without root; compare them with Safari
-      open before the plan. Identical names need no feature: `/node` already totals them.
+      `app:safari` in the filter matches a process by its name, its responsible process or an
+      ancestor, so the total covers the whole app.
 - [x] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
       memory. Read it without root (sysctl `kern.memorystatus_level` and

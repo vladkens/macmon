@@ -1,9 +1,20 @@
 //! The process filter: words and `key:value` conditions matched against `ProcInfo`.
 
 use std::cmp::Ordering;
+use std::ffi::c_int;
+use std::iter::successors;
 
 use crate::fds::cwd;
-use crate::procs::ProcInfo;
+use crate::procs::{ProcInfo, bsd_info, c_chars_to_string};
+
+/// Most ancestors `app:` looks at, against a cycle of parents.
+const MAX_ANCESTORS: usize = 32;
+
+unsafe extern "C" {
+  /// The process macOS holds responsible for `pid`, such as Safari for its WebKit services, which
+  /// are children of `launchd`. libSystem, undocumented.
+  fn responsibility_get_pid_responsible_for_pid(pid: c_int) -> c_int;
+}
 
 /// Units of a number in a filter word and their worth: no unit, bytes (binary, as the MEM column
 /// shows them) and seconds.
@@ -19,6 +30,8 @@ enum Cond {
   Has(fn(&ProcInfo) -> &str, String),
   /// Lowercase text in the working directory, read only for this word.
   Dir(String),
+  /// Lowercase text in the name of the process, its responsible process or an ancestor.
+  App(String),
   /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
   Num(fn(&ProcInfo) -> Option<f64>, Ordering, f64),
 }
@@ -30,10 +43,11 @@ impl Cond {
     let (key, value) = word.split_once(':').unwrap_or(("", word));
     match key {
       _ if word.is_empty() => None,
-      "user" | "path" | "dir" if value.is_empty() => None,
+      "user" | "path" | "dir" | "app" if value.is_empty() => None,
       "user" => Some(Self::Has(|p| &p.user, value.to_string())),
       "path" => Some(Self::Has(|p| &p.path, value.to_string())),
       "dir" => Some(Self::Dir(value.to_string())),
+      "app" => Some(Self::App(value.to_string())),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
       "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
@@ -61,9 +75,28 @@ impl Cond {
       Self::Dir(text) => {
         cwd(proc.pid).ok().flatten().is_some_and(|dir| dir.to_lowercase().contains(text))
       }
+      Self::App(text) => proc.name.to_lowercase().contains(text) || in_app(proc.pid, text),
       Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
     }
   }
+}
+
+/// Whether lowercase `text` is in the name of the responsible process of `pid` or of `pid` and its
+/// ancestors up to `launchd`. Reads only the current user's processes, so the chain ends at another
+/// user's one.
+fn in_app(pid: i32, text: &str) -> bool {
+  let named = |info: libc::proc_bsdinfo| {
+    let names = [c_chars_to_string(&info.pbi_name), c_chars_to_string(&info.pbi_comm)];
+    names.iter().any(|name| name.to_lowercase().contains(text))
+  };
+  let parent = |info: &libc::proc_bsdinfo| match info.pbi_ppid as i32 {
+    0 | 1 => None,
+    ppid => bsd_info(ppid),
+  };
+
+  let responsible = unsafe { responsibility_get_pid_responsible_for_pid(pid) };
+  let chain = successors(bsd_info(pid), parent).take(MAX_ANCESTORS);
+  chain.chain(bsd_info(responsible)).any(named)
 }
 
 /// Whether a word of the filter text has a known key and a value that isn't valid.
@@ -215,6 +248,7 @@ mod tests {
       ("power:>1g", &all),
       ("user:", &all),
       ("dir:", &all),
+      ("app:", &all),
       ("!mem:>", &all),
       ("saf mem:>", &[2301, 77]),
       ("saf !mem:>1x", &[2301, 77]),
@@ -241,8 +275,19 @@ mod tests {
     assert!(!Query::parse("dir:/no/such/dir").matches(&own));
     assert!(!Query::parse("dir:/").matches(&gone));
 
+    // the app: this process, a child of it, the row's name of a process that can't be read
+    let mut child = std::process::Command::new("/bin/sleep").arg("9").spawn().unwrap();
+    let row = proc(child.id() as i32, "child", 0.0, 0, None, 0.0);
+    assert!(Query::parse("app:macmon").matches(&own));
+    assert!(Query::parse("app:macmon").matches(&row));
+    assert!(!Query::parse("app:no-such-app").matches(&row));
+    assert!(Query::parse("app:gone").matches(&gone));
+    assert!(!Query::parse("app:macmon").matches(&gone));
+    child.kill().unwrap();
+    child.wait().unwrap();
+
     // bad words: known keys with values that aren't valid
-    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "cpu:>1g"] {
+    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "app:", "cpu:>1g"] {
       assert!(is_bad(word), "{word}");
     }
 

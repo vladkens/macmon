@@ -83,7 +83,7 @@ Options:
 
 Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
-Press `/` to filter the process list. A process shows if it matches any comma-separated term, and a term of only `!` words hides what it matches. All the words of a term must match, case-insensitively: a plain word in the name or pid, or a key: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) or `time:` (`s`, `m`, `h`, `d`) with `>` (the default) or `<`, `user:`, `path:` or `dir:` (the working directory) with text. `!` before a word negates it. For example `chrome, !helper` or `node mem:>500m !user:root`. `Enter` keeps the filter, `Esc` clears it.
+Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows Safari and all its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory) and `app:` (the process, its responsible process or an ancestor). `Enter` keeps the filter, `Esc` clears it.
 
 Press `Space` to pause the process list: rows keep their order while values update, new processes wait until you resume, and the files list of `i` stops updating. Press `f` to turn the filter off and on without losing its text.
 
