@@ -1,9 +1,16 @@
 //! The process filter: words and `key:value` conditions matched against `ProcInfo`.
 
 use std::cmp::Ordering;
+use std::ffi::c_int;
 
 use crate::fds::cwd;
-use crate::procs::ProcInfo;
+use crate::procs::{ProcInfo, exe_path};
+
+unsafe extern "C" {
+  /// The process macOS holds responsible for `pid`, such as Safari for its WebKit services, which
+  /// are children of `launchd`. libSystem, undocumented.
+  fn responsibility_get_pid_responsible_for_pid(pid: c_int) -> c_int;
+}
 
 /// Units of a number in a filter word and their worth: no unit, bytes (binary, as the MEM column
 /// shows them) and seconds.
@@ -19,6 +26,8 @@ enum Cond {
   Has(fn(&ProcInfo) -> &str, String),
   /// Lowercase text in the working directory, read only for this word.
   Dir(String),
+  /// Lowercase text in the name of the app of the process or of its responsible process.
+  App(String),
   /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
   Num(fn(&ProcInfo) -> Option<f64>, Ordering, f64),
 }
@@ -30,10 +39,11 @@ impl Cond {
     let (key, value) = word.split_once(':').unwrap_or(("", word));
     match key {
       _ if word.is_empty() => None,
-      "user" | "path" | "dir" if value.is_empty() => None,
+      "user" | "path" | "dir" | "app" if value.is_empty() => None,
       "user" => Some(Self::Has(|p| &p.user, value.to_string())),
       "path" => Some(Self::Has(|p| &p.path, value.to_string())),
       "dir" => Some(Self::Dir(value.to_string())),
+      "app" => Some(Self::App(value.to_string())),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
       "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
@@ -61,9 +71,24 @@ impl Cond {
       Self::Dir(text) => {
         cwd(proc.pid).ok().flatten().is_some_and(|dir| dir.to_lowercase().contains(text))
       }
+      Self::App(text) => in_app(proc, text),
       Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
     }
   }
+}
+
+/// Name of the app an executable runs from: the outermost `.app` in its path, as a helper has its
+/// own bundle inside the app's.
+fn app_name(path: &str) -> Option<&str> {
+  path.split('/').find_map(|part| part.strip_suffix(".app"))
+}
+
+/// Whether lowercase `text` is in the name of the app of `proc` or of its responsible process,
+/// which is known only for the current user's processes.
+fn in_app(proc: &ProcInfo, text: &str) -> bool {
+  let hit = |path: &str| app_name(path).is_some_and(|name| name.to_lowercase().contains(text));
+  let responsible = unsafe { responsibility_get_pid_responsible_for_pid(proc.pid) };
+  hit(&proc.path) || exe_path(responsible).is_some_and(|path| hit(&path))
 }
 
 /// Whether a word of the filter text has a known key and a value that isn't valid.
@@ -124,7 +149,7 @@ impl Query {
 
 #[cfg(test)]
 mod tests {
-  use super::{Query, is_bad};
+  use super::{Query, app_name, is_bad};
   use crate::procs::ProcInfo;
 
   fn proc(pid: i32, name: &str, cpu: f32, mem_mb: u64, power: Option<f32>, gpu: f32) -> ProcInfo {
@@ -151,6 +176,25 @@ mod tests {
       proc(4410, "cargo", 80.0, 150, Some(3.2), 0.0),
       proc(77, "safaribookmarksyncagent", 0.0, 10, Some(0.0), 0.0),
     ]
+  }
+
+  #[test]
+  fn app_name_is_the_outermost_bundle() {
+    let cases = [
+      ("/Applications/Safari.app/Contents/MacOS/Safari", Some("Safari")),
+      (
+        "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Safari",
+        Some("Safari"),
+      ),
+      ("/Applications/Foo.app/Contents/Frameworks/Foo Helper.app/Foo Helper", Some("Foo")),
+      ("/System/Cryptexes/App/usr/libexec/SafariBookmarksSyncAgent", None),
+      ("/usr/local/bin/foo.app.sh", None),
+      ("", None),
+    ];
+
+    for (path, expected) in cases {
+      assert_eq!(app_name(path), expected, "{path}");
+    }
   }
 
   #[test]
@@ -215,6 +259,7 @@ mod tests {
       ("power:>1g", &all),
       ("user:", &all),
       ("dir:", &all),
+      ("app:", &all),
       ("!mem:>", &all),
       ("saf mem:>", &[2301, 77]),
       ("saf !mem:>1x", &[2301, 77]),
@@ -241,8 +286,15 @@ mod tests {
     assert!(!Query::parse("dir:/no/such/dir").matches(&own));
     assert!(!Query::parse("dir:/").matches(&gone));
 
+    // the app of a process's own path; without a bundle, a name is no app
+    let mut helper = proc(i32::MAX, "helper", 0.0, 0, None, 0.0);
+    helper.path = "/Applications/Foo.app/Contents/Frameworks/Foo Helper.app/Foo Helper".to_string();
+    assert!(Query::parse("app:foo").matches(&helper));
+    assert!(!Query::parse("app:helper").matches(&helper));
+    assert!(!Query::parse("app:gone").matches(&gone));
+
     // bad words: known keys with values that aren't valid
-    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "cpu:>1g"] {
+    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "app:", "cpu:>1g"] {
       assert!(is_bad(word), "{word}");
     }
 
