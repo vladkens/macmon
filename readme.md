@@ -237,6 +237,7 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
     "swap_total": 4294967296, // Bytes
     "swap_usage": 2602434560, // Bytes
     "pressure_level": 0, // Kernel memory pressure level: 0 normal, 1 warning, 2 critical, null when unavailable
+    "pressure_percent": 25, // Memory pressure as in Activity Monitor (0–100), null when unavailable
   },
   "fans": [
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },

@@ -476,10 +476,10 @@ impl App {
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
   /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
   /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
-  /// title, so no number is ever cut. At warning and critical memory pressure the border takes
-  /// its color, the graph or gauge stays in the load colors, and the two widest titles come first
-  /// with `· pressure warning` / `· pressure critical` at the end, so the word goes before the GB
-  /// figures.
+  /// title, so no number is ever cut. With a memory pressure reading each title ends with `·
+  /// PRESSURE 25%`, or `PR 25%` on the narrower ones, the GB figures going first and the pressure
+  /// last (`PR 25%` alone). At warning and critical pressure the percent and the border take the
+  /// color of the level; the graph or gauge stays in the load colors.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
@@ -501,21 +501,28 @@ impl App {
     }
     titles.push(short.into());
 
-    let pressure = match mem.pressure_level {
-      Some(1) => Some((theme::WARNING, "pressure warning")),
-      Some(2) => Some((theme::CRITICAL, "pressure critical")),
+    let color = match mem.pressure_level {
+      Some(1) => Some(theme::WARNING),
+      Some(2) => Some(theme::CRITICAL),
       _ => None,
     };
-    if let Some((color, word)) = pressure {
-      let word = [dim(" · "), Span::styled(word, color)];
-      let worded: Vec<_> = titles.iter().take(2).map(|x| [&x[..], &word].concat()).collect();
-      titles.splice(0..0, worded);
+    if let Some(percent) = mem.pressure_percent {
+      let percent = Span::styled(format!("{percent}%"), color.unwrap_or(theme::TEXT));
+      let long = [dim(" · "), heading("PRESSURE"), text(" "), percent.clone()];
+      let brief = [heading("PR"), text(" "), percent];
+
+      // the two widest titles with the long form, the rest with the brief one
+      let first_brief = if mem.swap_total > 0 { 2 } else { 1 };
+      let with_long = titles.iter().take(2).map(|x| [&x[..], &long].concat());
+      let with_brief =
+        titles[first_brief..].iter().map(|x| [&x[..], &[text(" ")], &brief].concat());
+      titles = with_long.chain(with_brief).chain([brief.to_vec()]).collect();
     }
 
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
     let scale = Scale::Load { max: mem.ram_total, load };
-    MetricBox { titles, data: &mem.items, scale, border: pressure.map(|(color, _)| color) }
+    MetricBox { titles, data: &mem.items, scale, border: color }
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when

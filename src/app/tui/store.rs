@@ -136,6 +136,7 @@ pub(super) struct MemoryStore {
   pub(super) swap_usage: u64,
   pub(super) swap_total: u64,
   pub(super) pressure_level: Option<u8>,
+  pub(super) pressure_percent: Option<u8>,
 }
 
 impl MemoryStore {
@@ -148,6 +149,7 @@ impl MemoryStore {
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
     self.pressure_level = value.pressure_level;
+    self.pressure_percent = value.pressure_percent;
   }
 }
 
