@@ -21,7 +21,7 @@ use super::store::ratio;
 use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
 use crate::procs::ProcInfo;
-use crate::query::Query;
+use crate::query::{Query, is_bad};
 
 /// Narrowest NAME column; other columns are dropped to keep it.
 const NAME_MIN_WIDTH: u16 = 8;
@@ -355,10 +355,21 @@ pub(super) fn filter_titles(
   }
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
-    Titles::new(name).left(filter_title(filter, typing, enabled, beside))
+    Titles::new(name).left(filter_title(filter, typing, enabled, beside, is_bad))
   } else {
-    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[])))
+    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[]), is_bad))
   }
+}
+
+/// `filter` as text, the words `bad` tells in the warning color.
+fn filter_words(filter: &str, bad: fn(&str) -> bool) -> Vec<Span<'static>> {
+  let word = |part: &str| {
+    let word = part.trim_end_matches([' ', ',']);
+    let span = if bad(word) { theme::warn(word.to_string()) } else { text(word.to_string()) };
+    [span, text(part[word.len()..].to_string())]
+  };
+
+  filter.split_inclusive([' ', ',']).flat_map(word).collect()
 }
 
 /// `saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
@@ -367,16 +378,17 @@ pub(super) fn filter_title(
   typing: bool,
   enabled: bool,
   room: u16,
+  bad: fn(&str) -> bool,
 ) -> Vec<Span<'static>> {
   // the cursor takes one cell after the filter text
   let text_room = usize::from(room).saturating_sub(usize::from(typing));
 
   let mut spans = vec![];
   if Span::raw(filter).width() <= text_room {
-    spans.push(text(filter.to_string()));
+    spans.extend(filter_words(filter, bad));
   } else {
     spans.push(dim(ELLIPSIS));
-    spans.push(text(tail(filter, text_room.saturating_sub(1)).to_string()));
+    spans.extend(filter_words(tail(filter, text_room.saturating_sub(1)), bad));
   }
   if typing {
     spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
@@ -1133,6 +1145,7 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
+  use ratatui::style::Color;
 
   use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time};
   use crate::config::ProcSort;
@@ -1513,6 +1526,18 @@ mod tests {
         assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
       }
     }
+  }
+
+  #[test]
+  fn bad_filter_words_show_in_the_warning_color() {
+    let mut view = view();
+    type_str(&mut view, "/node mem:>1x, !user: cpu:5");
+    let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
+    term.draw(|f| _ = draw_box(f, f.area(), view.titles(80))).unwrap();
+    let buf = term.backend().buffer();
+    let yellow = (0..80).filter(|&x| buf[(x, 0)].fg == Color::Yellow);
+    let yellow = yellow.map(|x| buf[(x, 0)].symbol()).collect::<String>();
+    assert_eq!(yellow, "mem:>1x!user:");
   }
 
   #[test]

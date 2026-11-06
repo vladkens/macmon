@@ -295,7 +295,8 @@ impl Info {
   fn divider_titles(&self, width: u16) -> Titles<'static> {
     let filter = match self.typing || !self.filter.is_empty() {
       true => {
-        filter_title(&self.filter, self.typing, self.filter_enabled, title_text_room(width, &[]))
+        let room = title_text_room(width, &[]);
+        filter_title(&self.filter, self.typing, self.filter_enabled, room, |_| false)
       }
       false => hint("/", "filter"),
     };

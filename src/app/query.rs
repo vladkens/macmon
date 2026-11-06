@@ -59,6 +59,13 @@ impl Cond {
   }
 }
 
+/// Whether a word of the filter text has a known key and a value that isn't valid.
+pub fn is_bad(word: &str) -> bool {
+  let word = word.to_lowercase();
+  let word = word.strip_prefix('!').unwrap_or(&word);
+  !word.is_empty() && Cond::parse(word).is_none()
+}
+
 /// One comma-separated term of a process filter: its text and its words, `true` for a negated one.
 pub struct Term {
   pub text: String,
@@ -110,7 +117,7 @@ impl Query {
 
 #[cfg(test)]
 mod tests {
-  use super::Query;
+  use super::{Query, is_bad};
   use crate::procs::ProcInfo;
 
   fn proc(pid: i32, name: &str, cpu: f32, mem_mb: u64, power: Option<f32>, gpu: f32) -> ProcInfo {
@@ -217,6 +224,15 @@ mod tests {
       let query = Query::parse(filter);
       let hits: Vec<_> = procs.iter().filter(|p| query.matches(p)).map(|p| p.pid).collect();
       assert_eq!(hits, *expected, "{filter:?}");
+    }
+
+    // bad words: known keys with values that aren't valid
+    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "cpu:>1g"] {
+      assert!(is_bad(word), "{word}");
+    }
+
+    for word in ["", "!", "node", "!node", "foo:", "mem:1g", "mem:>1G", "user:root"] {
+      assert!(!is_bad(word), "{word}");
     }
 
     // total rows: terms with a plain word, not the ignored or negated ones
