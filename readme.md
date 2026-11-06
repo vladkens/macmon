@@ -30,8 +30,6 @@
 
 ## 📥 Installation
 
-macmon runs on Apple Silicon Macs with macOS 14 or later.
-
 Install [`macmon`](https://formulae.brew.sh/formula/macmon) using [brew](https://brew.sh/):
 
 ```sh
@@ -60,6 +58,8 @@ nix-env -i macmon
 ```
 
 </details>
+
+Tested on macOS 14 and later; older versions may work too.
 
 ## 🚀 Usage
 
