@@ -349,6 +349,13 @@ pub fn launch_daemon(
 
   if !install {
     bootout_daemon();
+
+    // bootout also fails when nothing is loaded: only a service still there is an error
+    let args = ["print", DAEMON_TARGET];
+    if std::process::Command::new("launchctl").args(args).output()?.status.success() {
+      return Err(format!("launchctl bootout failed, {DAEMON_PLIST} stays").into());
+    }
+
     std::fs::remove_file(DAEMON_PLIST)?;
     eprintln!("macmon daemon uninstalled");
     return Ok(());
@@ -363,9 +370,11 @@ pub fn launch_daemon(
   let plist = plist(&bin.to_string_lossy(), host, port, Some(&user));
 
   // launchd refuses a plist that isn't root-owned or is writable by others; umask can't be trusted
-  std::fs::write(DAEMON_PLIST, plist)?;
-  std::os::unix::fs::chown(DAEMON_PLIST, Some(0), Some(0))?;
-  std::fs::set_permissions(DAEMON_PLIST, std::fs::Permissions::from_mode(0o644))?;
+  let tmp = format!("{DAEMON_PLIST}.tmp");
+  std::fs::write(&tmp, plist)?;
+  std::os::unix::fs::chown(&tmp, Some(0), Some(0))?;
+  std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+  std::fs::rename(&tmp, DAEMON_PLIST)?;
 
   // the file goes first: if writing it fails, the running service is still up
   bootout_daemon();
