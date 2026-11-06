@@ -98,9 +98,9 @@ POWER does today.
 - [x] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
       memory. Read it without root (sysctl `kern.memorystatus_level` and
-      `kern.memorystatus_vm_pressure_level`), plot its history in the RAM box instead of RAM use,
-      which stays a number in the title next to the percent, color the graph, the percent and the
-      border by the level and add both to JSON and Prometheus.
+      `kern.memorystatus_vm_pressure_level`), plot the percent in the RAM box's graph and gauge
+      instead of RAM use, colored by the level, keep the box's title and border as they were and
+      add both to JSON and Prometheus.
 - [ ] **18. Where a process works.** With agents building and testing in several projects at
       once, the busiest process is often just `rustc`, `cargo` or `node`, and the name doesn't
       say which project it belongs to. Show the working directory in the list (a column, or the

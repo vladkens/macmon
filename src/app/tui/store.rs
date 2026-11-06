@@ -127,12 +127,11 @@ impl PowerStore {
   }
 }
 
-/// Latest RAM / SWAP usage with the RAM usage history (bytes, newest first) and the memory
-/// pressure history (percent, newest first, 0 for a sample without a reading).
+/// Latest RAM / SWAP usage and memory pressure with the history of the pressure (percent, newest
+/// first), or of the RAM usage (bytes) without a reading.
 #[derive(Debug, Default)]
 pub(super) struct MemoryStore {
   pub(super) items: Vec<u64>,
-  pub(super) pressure: Vec<u64>,
   pub(super) ram_usage: u64,
   pub(super) ram_total: u64,
   pub(super) swap_usage: u64,
@@ -143,10 +142,8 @@ pub(super) struct MemoryStore {
 
 impl MemoryStore {
   pub(super) fn push(&mut self, value: MemMetrics) {
-    self.items.insert(0, value.ram_usage);
+    self.items.insert(0, value.pressure_percent.map_or(value.ram_usage, u64::from));
     self.items.truncate(HISTORY_LEN);
-    self.pressure.insert(0, value.pressure_percent.unwrap_or(0).into());
-    self.pressure.truncate(HISTORY_LEN);
 
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
@@ -269,13 +266,7 @@ mod tests {
     for i in 0..HISTORY_LEN + 10 {
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
-      let pressure_percent = Some((i % 100) as u8);
-      mem.push(MemMetrics {
-        ram_total: 100,
-        ram_usage: i as u64,
-        pressure_percent,
-        ..Default::default()
-      });
+      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, ..Default::default() });
       temp.push(Some(i as f32 + 1.0));
     }
 
@@ -283,7 +274,6 @@ mod tests {
     let last = HISTORY_LEN as u64 + 9;
     assert_eq!((power.items.len(), power.items[0]), (HISTORY_LEN, last * 1000));
     assert_eq!((mem.items.len(), mem.items[0]), (HISTORY_LEN, last));
-    assert_eq!((mem.pressure.len(), mem.pressure[0]), (HISTORY_LEN, last % 100));
     for mode in [RatioMode::Scaled, RatioMode::Active] {
       assert_eq!(freq.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
     }

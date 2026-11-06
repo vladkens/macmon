@@ -164,12 +164,7 @@ pub(super) fn title_text_room(width: u16, titles: &[Line]) -> u16 {
 
 /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders.
 pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
-  draw_colored_box(f, area, titles, theme::BORDER)
-}
-
-/// `draw_box` with the border in `color`.
-fn draw_colored_box(f: &mut Frame, area: Rect, titles: Titles, color: Color) -> Rect {
-  let block = Block::bordered().border_type(BorderType::Rounded).border_style(color);
+  let block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::BORDER);
   let inner = block.inner(area);
   f.render_widget(block, area);
   // title text without a color of its own in the text color, not the border's
@@ -318,12 +313,9 @@ pub(super) fn render_bottom_border(
 
 /// How a metric box draws its history.
 enum Scale {
-  /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
-  /// switches it to a gauge of the current `load` (`0.0..=1.0`).
-  Load { max: u64, load: f64 },
-  /// Memory pressure: the graph is scaled to 100 and `v` switches it to a gauge of the current
-  /// `load` (`0.0..=1.0`), both in `color`.
-  Pressure { load: f64, color: Color },
+  /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load or in
+  /// `color`, and `v` switches it to a gauge of the current `load` (`0.0..=1.0`).
+  Load { max: u64, load: f64, color: Option<Color> },
   /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
   /// original; no gauge.
   Power,
@@ -336,8 +328,6 @@ struct MetricBox<'a> {
   /// History, newest first.
   data: &'a [u64],
   scale: Scale,
-  /// Color of the border instead of `theme::BORDER`.
-  border: Option<Color>,
 }
 
 impl App {
@@ -377,18 +367,13 @@ impl App {
     let fans = self.fans.label();
     for &(kind, r) in &plan.boxes {
       let metric = self.metric_box(kind);
-      let border = metric.border.unwrap_or(theme::BORDER);
-      let inner = draw_colored_box(f, r, fit_titles(r.width, metric.titles), border);
+      let inner = draw_box(f, r, fit_titles(r.width, metric.titles));
       let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
       match metric.scale {
-        Scale::Load { load, .. } if self.cfg.view_type == ViewType::Gauge => {
-          f.render_widget(Gauge::new(load), inner)
+        Scale::Load { load, color, .. } if self.cfg.view_type == ViewType::Gauge => {
+          f.render_widget(Gauge::new(load, color), inner)
         }
-        Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
-        Scale::Pressure { load, color } if self.cfg.view_type == ViewType::Gauge => {
-          f.render_widget(Gauge::new(load).color(color), inner)
-        }
-        Scale::Pressure { color, .. } => f.render_widget(graph.max(100).color(color), inner),
+        Scale::Load { max, color, .. } => f.render_widget(graph.max(max).color(color), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
       }
 
@@ -474,74 +459,48 @@ impl App {
     MetricBox {
       titles: vec![Titles::new(full), Titles::new(short)],
       data: &series.items,
-      scale: Scale::Load { max: 100, load: series.ratio },
-      border: None,
+      scale: Scale::Load { max: 100, load: series.ratio, color: None },
     }
   }
 
-  /// RAM and swap usage with the memory pressure over its history scaled to 100 %, as in Activity
-  /// Monitor, or a gauge, both in the color of the pressure level. Without a pressure reading, the
-  /// RAM usage history scaled to the total RAM, or a gauge, in the load colors. The total
+  /// RAM and swap usage over the memory pressure history, or a gauge, in the color of the pressure
+  /// level; without a reading, over the RAM usage history scaled to the total RAM. The total
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
   /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
   /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
-  /// title, so no number is ever cut. With a pressure reading the percentages lose their load
-  /// colors and the title ends with `· PRESSURE 25%`: the GB figures go first, then the swap
-  /// (`RAM 70% · PRESSURE 25%`), `PR` takes its place (`RAM 70% PR 25%`), and the pressure goes
-  /// last (`PR 25%`). At warning and critical pressure the percent and the border take the color
-  /// of the level.
+  /// title, so no number is ever cut.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
     let (used, load) = (gib(mem.ram_usage), ratio(gib(mem.ram_usage), gib(mem.ram_total)));
-    let percent = |load: f64, decimals| match mem.pressure_percent {
-      Some(_) => text(format!("{:.decimals$}%", load * 100.0)),
-      None => self.percent(load, decimals),
-    };
-    let full = [heading("RAM"), text(format!(" {used:.2} GB (")), percent(load, 1), text(")")];
-    let short = [heading("RAM"), text(" "), percent(load, 0)];
+    let full = [heading("RAM"), text(format!(" {used:.2} GB (")), self.percent(load, 1), text(")")];
+    let short = [heading("RAM"), text(" "), self.percent(load, 0)];
 
     let mut titles = vec![];
     if mem.swap_total > 0 {
       let (used, total) = (gib(mem.swap_usage), gib(mem.swap_total));
       let swap = [dim(" · "), heading("SWAP")];
       let full_swap = [text(format!(" {used:.2} / {total:.1} GB"))];
-      let short_swap = [text(" "), percent(ratio(used, total), 0)];
+      let short_swap = [text(" "), self.percent(ratio(used, total), 0)];
       titles.push([&full[..], &swap, &full_swap].concat());
       titles.push([&short[..], &swap, &short_swap].concat());
       titles.push([&short[..], &[text(" "), heading("SW")], &short_swap].concat());
     } else {
       titles.push(full.into());
     }
-    titles.push(short.to_vec());
-
-    let color = match mem.pressure_level {
-      Some(1) => Some(theme::WARNING),
-      Some(2) => Some(theme::CRITICAL),
-      _ => None,
-    };
-    if let Some(percent) = mem.pressure_percent {
-      let percent = Span::styled(format!("{percent}%"), color.unwrap_or(theme::TEXT));
-      let long = [dim(" · "), heading("PRESSURE"), text(" "), percent.clone()];
-      let brief = [heading("PR"), text(" "), percent];
-
-      // the titles with figures, then `short`, with the long form; the narrowest with the brief
-      titles.truncate(if mem.swap_total > 0 { 2 } else { 1 });
-      titles.push(short.to_vec());
-      titles = titles.iter().map(|x| [&x[..], &long].concat()).collect();
-      titles.extend([[&short[..], &[text(" ")], &brief].concat(), brief.to_vec()]);
-    }
+    titles.push(short.into());
 
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
-    let (data, scale) = match mem.pressure_percent {
-      Some(percent) => {
-        let (load, color) = (f64::from(percent) / 100.0, color.unwrap_or(theme::NORMAL));
-        (&mem.pressure, Scale::Pressure { load, color })
+    let scale = match mem.pressure_percent {
+      // the levels 0, 1, 2 are the green, yellow and red of the gradient
+      Some(x) => {
+        let color = Some(gradient(f64::from(mem.pressure_level.unwrap_or(0)) / 2.0));
+        Scale::Load { max: 100, load: f64::from(x) / 100.0, color }
       }
-      None => (&mem.items, Scale::Load { max: mem.ram_total, load }),
+      None => Scale::Load { max: mem.ram_total, load, color: None },
     };
-    MetricBox { titles, data, scale, border: color }
+    MetricBox { titles, data: &mem.items, scale }
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
@@ -568,7 +527,7 @@ impl App {
       }
     });
 
-    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power, border: None }
+    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power }
   }
 
   /// `Total 12.00W (12.00, 12.00)`, the whole system, or `Power 6.60W (6.60, 6.60)`, CPU + GPU +
