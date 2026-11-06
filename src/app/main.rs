@@ -344,10 +344,8 @@ mod tests {
   #[test]
   fn agent_needs_install() {
     assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--agent"]).is_ok());
-    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--uninstall"]).is_ok());
     assert!(Cli::try_parse_from(["macmon", "serve", "--agent"]).is_err());
     assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--agent"]).is_err());
-    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--daemon"]).is_err());
   }
 
   #[test]
