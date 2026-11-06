@@ -119,7 +119,7 @@ POWER does today.
       `mem:>1g` and `user:root`, as fsearch does.
       Plan: [docs/plans/completed/20261106-filter-query.md](plans/completed/20261106-filter-query.md).
 - [x] **23. Process command line.** `node` and `python` differ only by their arguments: `cmd:`
-      in the filter, a `cmd` row in the `i` overlay and the selected row's on the bottom border,
+      in the filter, a `cmd` row in the `i` overlay and the arguments after the name in the list,
       from `sysctl` `KERN_PROCARGS2`, read only for these. Own processes only: other users' need
       a `ps` run per refresh, about 7 times the cost of reading the own ones.
 - [ ] **24. A cheaper process list.** macmon's own cost with the process list is 1.7 to 2 s of

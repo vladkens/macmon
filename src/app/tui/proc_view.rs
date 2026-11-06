@@ -538,8 +538,8 @@ pub(super) struct ProcView {
   /// Totals of `rows` for each filter term, sorted like the processes.
   groups: Vec<Group>,
   selected: Option<Selection>,
-  /// The process `read_cmd` read and its command line, dropped with each sample.
-  cmd: Option<(Identity, Option<String>)>,
+  /// Arguments of the rows on screen since the last sample, empty when there are none to show.
+  args: HashMap<Identity, String>,
   /// First row on screen.
   offset: usize,
   /// Rows on screen at the last render, the PgUp / PgDn step.
@@ -571,7 +571,7 @@ impl ProcView {
       rows: vec![],
       groups: vec![],
       selected: None,
-      cmd: None,
+      args: HashMap::new(),
       offset: 0,
       page: 0,
       targets: Targets::default(),
@@ -657,6 +657,7 @@ impl ProcView {
   /// Updates held processes by identity while paused, ignoring arrivals; the first sample
   /// initializes a sorted list even if Space was pressed during collection.
   pub(super) fn set_procs(&mut self, procs: Vec<ProcInfo>) {
+    self.args.clear();
     let first_sample = self.procs.is_none();
     if let (true, Some(held)) = (self.paused, &mut self.procs) {
       let indices: HashMap<_, _> = held.iter().enumerate().map(|(i, p)| (identity(p), i)).collect();
@@ -706,7 +707,6 @@ impl ProcView {
   /// Totals of the rows and the selection, which follows identity and is dropped when that process
   /// is gone or filtered out.
   fn update_totals(&mut self, filter: &Query, sort_now: bool) {
-    self.cmd = None;
     let groups = filter
       .any
       .iter()
@@ -737,6 +737,18 @@ impl ProcView {
     self.page = height;
     self.offset =
       scroll_offset(self.offset, self.selected.map(|s| s.index), height, self.rows.len());
+  }
+
+  /// Reads the arguments of the rows on screen that have none yet: not of `ps` rows (no start
+  /// time, other users' processes) or a pid reused since the sample (another start time).
+  fn read_args(&mut self, sys: &dyn ProcSys) {
+    let rows: Vec<Identity> = self.page_rows().map(|(_, proc)| identity(proc)).collect();
+    for (pid, started) in rows {
+      self.args.entry((pid, started)).or_insert_with(|| {
+        let own = started.is_some() && sys.identity(pid) == started;
+        own.then(|| sys.args(pid)).flatten().unwrap_or_default()
+      });
+    }
   }
 
   /// Rows on screen after `fit`, with a flag for the selected one.
@@ -928,30 +940,14 @@ impl ProcView {
     }
   }
 
-  /// Reads the command line of the selected process, unless it is known: none for a pid reused
-  /// since the sample (another start time).
-  fn read_cmd(&mut self, sys: &dyn ProcSys) {
-    let Some(Selection { pid, started, .. }) = self.selected else { return };
-    if self.cmd.as_ref().is_none_or(|(id, _)| *id != (pid, started)) {
-      let cmd = (sys.identity(pid) == started).then(|| sys.cmd_line(pid)).flatten();
-      self.cmd = Some(((pid, started), cmd.filter(|cmd| !cmd.is_empty())));
-    }
-  }
-
-  /// Left side of the bottom border of the process box in `room` cells: a faint `copied` after
-  /// `c`, else the command line of the selected process, else a dim note that POWER is known for
-  /// own processes only, while the POWER column shows processes without it next to some with it.
-  fn border_text(&self, power_shown: bool, room: usize) -> Vec<Span<'static>> {
+  /// Left side of the bottom border of the process box: a faint `copied` after `c`, else a dim
+  /// note that POWER is known for own processes only, while the POWER column shows processes
+  /// without it next to some with it.
+  fn border_text(&self, power_shown: bool) -> Vec<Span<'static>> {
     let procs = self.procs().unwrap_or_default();
     let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
-    let cmd = self.selected.and(self.cmd.as_ref()).and_then(|(_, cmd)| cmd.as_deref());
     if self.copied {
       vec![faint("copied")]
-    } else if let Some(cmd) = cmd.filter(|cmd| Span::raw(*cmd).width() > room) {
-      // both ends: the program and the last arguments
-      vec![dim(format!("{}{}", head(cmd, room / 2), cut_start(cmd, room - room / 2)))]
-    } else if let Some(cmd) = cmd {
-      vec![dim(cmd.to_string())]
     } else if power_shown && power(true) && power(false) {
       vec![dim("POWER: own processes only")]
     } else {
@@ -964,15 +960,13 @@ impl ProcView {
 
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
-  /// the process rows with a scrollbar when they don't fit, and the command line or the POWER note
-  /// and the key hints on the bottom border. Keeps the cells that react to the mouse for
-  /// `ProcView::handle_mouse`.
+  /// the process rows with a scrollbar when they don't fit, and the POWER note and the key hints
+  /// on the bottom border. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let inner = draw_box(f, area, self.proc_view.titles(area.width));
     let (headers, body) = self.render_proc_table(f, inner);
     let power_shown = headers.iter().any(|&(column, _)| column == ProcSort::Power);
     self.proc_view.targets = Targets { area, headers, body };
-    self.proc_view.read_cmd(&*self.kill.sys);
 
     let view = &self.proc_view;
     draw_scrollbar(f, area, body, view.row_count(), view.offset);
@@ -981,7 +975,7 @@ impl App {
       hints.insert(0, vec![theme::paused()]);
     }
 
-    render_bottom_border(f, area, hints, |room| view.border_text(power_shown, room));
+    render_bottom_border(f, area, hints, |_| view.border_text(power_shown));
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the
@@ -1006,6 +1000,7 @@ impl App {
       ..inner
     };
     self.proc_view.fit(body.height as usize);
+    self.proc_view.read_args(&*self.kill.sys);
     // one blank cell between the columns and each border, as in the metrics box
     let table = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let columns = fit_columns(table.width, self.proc_view.sort);
@@ -1042,7 +1037,10 @@ impl App {
     for (i, (selected, proc)) in self.proc_view.page_rows().enumerate() {
       let y = body.y + i as u16;
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
-      draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
+      let row = Rect { y, height: 1, ..table };
+      draw_row(buf, row, &columns, cells);
+      let args = self.proc_view.args.get(&identity(proc));
+      draw_args(buf, row, &columns, proc, args.map_or("", |args| args));
       if self.proc_view.exited(proc) {
         buf.set_style(Rect { y, height: 1, ..inner }, Style::new().add_modifier(Modifier::DIM));
       }
@@ -1166,6 +1164,22 @@ fn draw_row<'a>(
     };
     buf.set_stringn(cell_area.x, cell_area.y, text, usize::from(cell_area.width), cell.style);
   }
+}
+
+/// Draws `args` dim after the name of `proc` in its column, cut at the end of the column.
+fn draw_args(
+  buf: &mut Buffer,
+  row: Rect,
+  columns: &[(ProcSort, u16)],
+  proc: &ProcInfo,
+  args: &str,
+) {
+  let areas = column_areas(row, columns);
+  let Some((_, area)) = areas.iter().find(|(column, _)| *column == ProcSort::Name) else { return };
+  let name = Span::raw(&proc.name).width() + 1;
+  let Some(room) = usize::from(area.width).checked_sub(name) else { return };
+  let style = Style::new().fg(theme::DIM);
+  buf.set_stringn(area.x + name as u16, row.y, cut_end(args, room), room, style);
 }
 
 #[cfg(test)]

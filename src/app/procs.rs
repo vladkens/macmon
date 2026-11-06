@@ -271,9 +271,14 @@ pub(crate) fn exe_path(pid: i32) -> Option<String> {
   Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
 }
 
-/// Command line as `ps` shows it: the arguments joined by spaces, without the environment that
-/// follows them. `None` for other users' processes (`EINVAL` without root) and gone ones.
+/// Command line as `ps` shows it: the arguments joined by spaces.
 pub(crate) fn cmd_line(pid: i32) -> Option<String> {
+  Some(args(pid)?.join(" "))
+}
+
+/// Arguments of a process from `argv[0]`, without the environment that follows them. `None` for
+/// other users' processes (`EINVAL` without root) and gone ones.
+pub(crate) fn args(pid: i32) -> Option<Vec<String>> {
   let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
   let mut call = |buf: *mut u8, size: &mut usize| unsafe {
     libc::sysctl(mib.as_mut_ptr(), 3, buf.cast(), size, std::ptr::null_mut(), 0) == 0
@@ -292,14 +297,14 @@ pub(crate) fn cmd_line(pid: i32) -> Option<String> {
 /// the environment. XNU's `exec_extract_strings` pads the path with NULs to 8 bytes; `argv[0]` may
 /// be empty, so skipping NULs instead would take the first variable of the environment for an
 /// argument. `None` when the padding isn't there.
-fn parse_args(buf: &[u8]) -> Option<String> {
+fn parse_args(buf: &[u8]) -> Option<Vec<String>> {
   let (argc, rest) = buf.split_first_chunk()?;
   let path = rest.iter().position(|&b| b == 0)?;
   let start = (path + 1).next_multiple_of(8);
   rest.get(path..start)?.iter().all(|&b| b == 0).then_some(())?;
 
   let args = rest[start..].split(|&b| b == 0).take(i32::from_ne_bytes(*argc) as usize);
-  Some(args.map(String::from_utf8_lossy).collect::<Vec<_>>().join(" "))
+  Some(args.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect())
 }
 
 /// Reads a process through libproc; fails for other users' processes.
@@ -1052,7 +1057,8 @@ mod tests {
 
     for (argc, rest, args) in cases {
       let buf = [&argc.to_ne_bytes(), *rest].concat();
-      assert_eq!(parse_args(&buf).as_deref(), *args, "{}", rest.escape_ascii());
+      let joined = parse_args(&buf).map(|args| args.join(" "));
+      assert_eq!(joined.as_deref(), *args, "{}", rest.escape_ascii());
     }
 
     assert_eq!(parse_args(b"\0\0"), None);
