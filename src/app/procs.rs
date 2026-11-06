@@ -261,7 +261,7 @@ fn rusage(pid: i32, flavor: c_int) -> Option<rusage_info_v6> {
 }
 
 /// Executable path; readable for processes of any user.
-fn exe_path(pid: i32) -> Option<String> {
+pub(crate) fn exe_path(pid: i32) -> Option<String> {
   let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
   let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
   if len <= 0 {

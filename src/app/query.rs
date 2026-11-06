@@ -2,13 +2,9 @@
 
 use std::cmp::Ordering;
 use std::ffi::c_int;
-use std::iter::successors;
 
 use crate::fds::cwd;
-use crate::procs::{ProcInfo, bsd_info, c_chars_to_string};
-
-/// Most ancestors `app:` looks at, against a cycle of parents.
-const MAX_ANCESTORS: usize = 32;
+use crate::procs::{ProcInfo, exe_path};
 
 unsafe extern "C" {
   /// The process macOS holds responsible for `pid`, such as Safari for its WebKit services, which
@@ -30,7 +26,7 @@ enum Cond {
   Has(fn(&ProcInfo) -> &str, String),
   /// Lowercase text in the working directory, read only for this word.
   Dir(String),
-  /// Lowercase text in the name of the process, its responsible process or an ancestor.
+  /// Lowercase text in the name of the app of the process or of its responsible process.
   App(String),
   /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
   Num(fn(&ProcInfo) -> Option<f64>, Ordering, f64),
@@ -75,28 +71,24 @@ impl Cond {
       Self::Dir(text) => {
         cwd(proc.pid).ok().flatten().is_some_and(|dir| dir.to_lowercase().contains(text))
       }
-      Self::App(text) => proc.name.to_lowercase().contains(text) || in_app(proc.pid, text),
+      Self::App(text) => in_app(proc, text),
       Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
     }
   }
 }
 
-/// Whether lowercase `text` is in the name of the responsible process of `pid` or of `pid` and its
-/// ancestors up to `launchd`. Reads only the current user's processes, so the chain ends at another
-/// user's one.
-fn in_app(pid: i32, text: &str) -> bool {
-  let named = |info: libc::proc_bsdinfo| {
-    let names = [c_chars_to_string(&info.pbi_name), c_chars_to_string(&info.pbi_comm)];
-    names.iter().any(|name| name.to_lowercase().contains(text))
-  };
-  let parent = |info: &libc::proc_bsdinfo| match info.pbi_ppid as i32 {
-    0 | 1 => None,
-    ppid => bsd_info(ppid),
-  };
+/// Name of the app an executable runs from: the outermost `.app` in its path, as a helper has its
+/// own bundle inside the app's.
+fn app_name(path: &str) -> Option<&str> {
+  path.split('/').find_map(|part| part.strip_suffix(".app"))
+}
 
-  let responsible = unsafe { responsibility_get_pid_responsible_for_pid(pid) };
-  let chain = successors(bsd_info(pid), parent).take(MAX_ANCESTORS);
-  chain.chain(bsd_info(responsible)).any(named)
+/// Whether lowercase `text` is in the name of the app of `proc` or of its responsible process,
+/// which is known only for the current user's processes.
+fn in_app(proc: &ProcInfo, text: &str) -> bool {
+  let hit = |path: &str| app_name(path).is_some_and(|name| name.to_lowercase().contains(text));
+  let responsible = unsafe { responsibility_get_pid_responsible_for_pid(proc.pid) };
+  hit(&proc.path) || exe_path(responsible).is_some_and(|path| hit(&path))
 }
 
 /// Whether a word of the filter text has a known key and a value that isn't valid.
@@ -157,7 +149,7 @@ impl Query {
 
 #[cfg(test)]
 mod tests {
-  use super::{Query, is_bad};
+  use super::{Query, app_name, is_bad};
   use crate::procs::ProcInfo;
 
   fn proc(pid: i32, name: &str, cpu: f32, mem_mb: u64, power: Option<f32>, gpu: f32) -> ProcInfo {
@@ -184,6 +176,25 @@ mod tests {
       proc(4410, "cargo", 80.0, 150, Some(3.2), 0.0),
       proc(77, "safaribookmarksyncagent", 0.0, 10, Some(0.0), 0.0),
     ]
+  }
+
+  #[test]
+  fn app_name_is_the_outermost_bundle() {
+    let cases = [
+      ("/Applications/Safari.app/Contents/MacOS/Safari", Some("Safari")),
+      (
+        "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Safari",
+        Some("Safari"),
+      ),
+      ("/Applications/Foo.app/Contents/Frameworks/Foo Helper.app/Foo Helper", Some("Foo")),
+      ("/System/Cryptexes/App/usr/libexec/SafariBookmarksSyncAgent", None),
+      ("/usr/local/bin/foo.app.sh", None),
+      ("", None),
+    ];
+
+    for (path, expected) in cases {
+      assert_eq!(app_name(path), expected, "{path}");
+    }
   }
 
   #[test]
@@ -275,16 +286,12 @@ mod tests {
     assert!(!Query::parse("dir:/no/such/dir").matches(&own));
     assert!(!Query::parse("dir:/").matches(&gone));
 
-    // the app: this process, a child of it, the row's name of a process that can't be read
-    let mut child = std::process::Command::new("/bin/sleep").arg("9").spawn().unwrap();
-    let row = proc(child.id() as i32, "child", 0.0, 0, None, 0.0);
-    assert!(Query::parse("app:macmon").matches(&own));
-    assert!(Query::parse("app:macmon").matches(&row));
-    assert!(!Query::parse("app:no-such-app").matches(&row));
-    assert!(Query::parse("app:gone").matches(&gone));
-    assert!(!Query::parse("app:macmon").matches(&gone));
-    child.kill().unwrap();
-    child.wait().unwrap();
+    // the app of a process's own path; without a bundle, a name is no app
+    let mut helper = proc(i32::MAX, "helper", 0.0, 0, None, 0.0);
+    helper.path = "/Applications/Foo.app/Contents/Frameworks/Foo Helper.app/Foo Helper".to_string();
+    assert!(Query::parse("app:foo").matches(&helper));
+    assert!(!Query::parse("app:helper").matches(&helper));
+    assert!(!Query::parse("app:gone").matches(&gone));
 
     // bad words: known keys with values that aren't valid
     for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "app:", "cpu:>1g"] {

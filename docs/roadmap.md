@@ -89,8 +89,8 @@ POWER does today.
       Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
 - [x] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
-      `app:safari` in the filter matches a process by its name, its responsible process or an
-      ancestor, so the total covers the whole app.
+      `app:safari` in the filter matches the processes of an app: those running from its `.app`
+      bundle or with such a responsible process, so the total covers the whole app.
 - [x] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
       memory. Read it without root (sysctl `kern.memorystatus_level` and
