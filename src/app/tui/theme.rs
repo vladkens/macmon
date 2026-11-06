@@ -36,9 +36,9 @@ pub(super) fn paused() -> Span<'static> {
   Span::styled("paused", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD))
 }
 
-/// A filter word that is ignored: yellow (ANSI 3).
+/// A filter word that is ignored: red (ANSI 1).
 pub(super) fn warn<'a>(text: impl Into<Cow<'a, str>>) -> Span<'a> {
-  Span::styled(text, Color::Yellow)
+  Span::styled(text, Color::Red)
 }
 
 /// Text in the default color. The color is set, not left out, so text drawn over a border doesn't

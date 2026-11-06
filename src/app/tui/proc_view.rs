@@ -1541,9 +1541,9 @@ mod tests {
     let mut term = Terminal::new(TestBackend::new(80, 3)).unwrap();
     term.draw(|f| _ = draw_box(f, f.area(), view.titles(80))).unwrap();
     let buf = term.backend().buffer();
-    let yellow = (0..80).filter(|&x| buf[(x, 0)].fg == Color::Yellow);
-    let yellow = yellow.map(|x| buf[(x, 0)].symbol()).collect::<String>();
-    assert_eq!(yellow, "mem:>1x!user:");
+    let red = (0..80).filter(|&x| buf[(x, 0)].fg == Color::Red);
+    let red = red.map(|x| buf[(x, 0)].symbol()).collect::<String>();
+    assert_eq!(red, "mem:>1x!user:");
 
     let row: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
     let slash = row[..row.find("─ /").unwrap()].chars().count() as u16 + 2;
