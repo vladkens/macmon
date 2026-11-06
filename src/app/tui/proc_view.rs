@@ -646,7 +646,7 @@ impl ProcView {
       self.exited.clear();
     }
 
-    self.refresh(false, false);
+    self.refresh(false);
   }
 
   /// Updates held processes by identity while paused, ignoring arrivals; the first sample
@@ -663,11 +663,15 @@ impl ProcView {
           held[i] = proc;
         }
       }
-    } else {
-      self.procs = Some(procs);
+
+      // the rows stay while paused, only their totals change
+      let filter = Query::parse(if self.filter_enabled { &self.filter } else { "" });
+      self.update_totals(&filter, false);
+      return;
     }
 
-    self.refresh(first_sample, self.paused && !first_sample);
+    self.procs = Some(procs);
+    self.refresh(first_sample);
   }
 
   /// Drops the list, ends filter input and forgets the mouse targets (the panel got hidden). The
@@ -678,13 +682,11 @@ impl ProcView {
     self.exited.clear();
     self.typing = false;
     self.targets = Targets::default();
-    self.refresh(false, false);
+    self.refresh(false);
   }
 
-  /// Re-filters and sorts on live samples or explicit requests; `keep_rows` (a sample while
-  /// paused) only updates the totals. Selection follows identity, and is dropped when that process
-  /// is gone or filtered out.
-  fn refresh(&mut self, sort_requested: bool, keep_rows: bool) {
+  /// Re-filters and sorts on live samples or explicit requests.
+  fn refresh(&mut self, sort_requested: bool) {
     let sort_now = !self.paused || sort_requested;
     let procs = self.procs.as_deref_mut().unwrap_or_default();
     if sort_now {
@@ -692,10 +694,13 @@ impl ProcView {
     }
 
     let filter = Query::parse(if self.filter_enabled { &self.filter } else { "" });
-    if !keep_rows {
-      self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
-    }
+    self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
+    self.update_totals(&filter, sort_now);
+  }
 
+  /// Totals of the rows and the selection, which follows identity and is dropped when that process
+  /// is gone or filtered out.
+  fn update_totals(&mut self, filter: &Query, sort_now: bool) {
     let groups = filter
       .any
       .iter()
@@ -783,18 +788,18 @@ impl ProcView {
     match key.code {
       _ if self.typing => {
         if type_filter(&mut self.filter, &mut self.typing, key) {
-          self.refresh(false, false);
+          self.refresh(false);
         }
       }
       KeyCode::Char(' ') => self.toggle_pause(),
       KeyCode::Char('/') => {
         self.filter_enabled = true;
         self.typing = true;
-        self.refresh(false, false);
+        self.refresh(false);
       }
       KeyCode::Char('f') if !self.filter.is_empty() => {
         self.filter_enabled = !self.filter_enabled;
-        self.refresh(false, false);
+        self.refresh(false);
       }
       KeyCode::Char('f') => {}
       KeyCode::Char('S') => self.reverse_sort(),
@@ -804,7 +809,7 @@ impl ProcView {
         self.selected = None;
         self.filter.clear();
         self.offset = 0;
-        self.refresh(false, false);
+        self.refresh(false);
       }
       _ => return false,
     }
@@ -814,7 +819,7 @@ impl ProcView {
 
   fn reverse_sort(&mut self) {
     self.sort_desc = !self.sort_desc;
-    self.refresh(true, false);
+    self.refresh(true);
   }
 
   /// Sorts by `sort` in its own direction (`ProcSort::sorts_desc`); the current sort key reverses
@@ -827,7 +832,7 @@ impl ProcView {
       self.sort_desc = sort.sorts_desc();
     }
 
-    self.refresh(true, false);
+    self.refresh(true);
   }
 
   /// `s`: the next column on screen in the `ProcSort::next` cycle.
