@@ -20,5 +20,5 @@ The process filter stays what it is for plain text and gains `key:value` words, 
 
 ## Tasks
 
-- [ ] PR 1: words and keys, without `dir:`. Readme and help.
+- [x] PR 1: words and keys, without `dir:`. Readme and help.
 - [ ] PR 2: `dir:` with the working directory of each process, measured for its cost.
