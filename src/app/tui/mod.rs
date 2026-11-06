@@ -14,13 +14,13 @@ use std::io::{self, Stdout, Write, stdout};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use info::Info;
 use kill::Kill;
 use layout::{LayoutPlan, compute_layout};
-use macmon::{Metrics, Sampler, SocInfo};
+use macmon::{Metrics, SocInfo};
 use proc_view::ProcView;
 use ratatui::crossterm::event::{
   self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, KeyCode,
@@ -28,10 +28,26 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::{ExecutableCommand, cursor, terminal};
 use ratatui::prelude::*;
+use sampling_deps::{ProcSampler, Sampler, instant_now};
 use store::{CpuClusters, FanStore, FreqSample, FreqStore, MemoryStore, PowerStore, TempStore};
 
 use crate::config::{Config, TUI_MIN_MS};
-use crate::procs::{ProcInfo, ProcSampler};
+use crate::procs::ProcInfo;
+
+mod sampling_deps {
+  #[cfg(not(test))]
+  pub(super) use macmon::Sampler;
+
+  #[cfg(test)]
+  pub(super) use super::tests::{ProcSampler, Sampler, instant_now};
+  #[cfg(not(test))]
+  pub(super) use crate::procs::ProcSampler;
+
+  #[cfg(not(test))]
+  pub(super) fn instant_now() -> std::time::Instant {
+    std::time::Instant::now()
+  }
+}
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -108,7 +124,10 @@ fn set_mouse_capture(out: &mut impl Write, on: bool, want: bool) -> io::Result<b
 // MARK: Threads
 
 enum Event {
-  Update(Box<Metrics>),
+  Update {
+    metrics: Box<Metrics>,
+    procs: Option<(u64, Vec<ProcInfo>)>,
+  },
   /// The sampler failed: the app ends with this error.
   Failed(String),
   /// A process sample with the number of the panel showing it was started in.
@@ -162,30 +181,8 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>) {
   });
 }
 
-/// Sends metrics: the first sample after 100 ms, then one per interval; stops once the app is
-/// gone or after an error.
-fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
-  thread::spawn(move || {
-    let sample = || -> WithError<()> {
-      let mut sampler = Sampler::new()?;
-      let mut window = 100;
-
-      loop {
-        let metrics = sampler.get_metrics(window)?;
-        if tx.send(Event::Update(Box::new(metrics))).is_err() {
-          return Ok(());
-        }
-        window = msec.read().map_or(TUI_MIN_MS, |x| *x).max(TUI_MIN_MS);
-      }
-    };
-    if let Err(err) = sample() {
-      let _ = tx.send(Event::Failed(err.to_string()));
-    }
-  });
-}
-
-/// Whether the process panel is on screen, shared with the process thread, which samples only
-/// while it is. Every change wakes the thread, and every show starts a new showing, so the thread
+/// Whether the process panel is on screen, shared with the sampling thread.
+/// Every change wakes the thread, and every show starts a new showing, so the thread
 /// also notices a hide when the panel is back before it gets to look.
 #[derive(Debug, Default)]
 struct ProcsShown {
@@ -216,59 +213,137 @@ impl ProcsShown {
     }
   }
 
-  /// Blocks until the panel is on screen; returns the number of that showing.
-  fn wait_shown(&self) -> u64 {
-    let state = self.changed.wait_while(self.state.lock().unwrap(), |state| !state.on);
-    state.unwrap().count
-  }
-
-  /// Waits `timeout`, or less once the showing `count` ends (a hide, also with a show right
-  /// after it); returns whether it goes on.
-  fn wait_while_shown(&self, count: u64, timeout: Duration) -> bool {
-    let same = |state: &mut Showing| *state == Showing { on: true, count };
-    let state = self.state.lock().unwrap();
-    let (mut state, _) = self.changed.wait_timeout_while(state, timeout, same).unwrap();
-    same(&mut state)
-  }
-}
-
-/// Sampler of a showing in `run_procs_thread`: samples processes with a new `ProcSampler`.
-fn proc_sampler() -> impl FnMut() -> Vec<ProcInfo> {
-  let mut sampler = ProcSampler::new();
-  move || sampler.sample()
-}
-
-/// Sends `Event::Procs` every `msec` while the process panel is `shown` and blocks otherwise.
-/// Each showing gets a new sampler from `new_sampler`, so rates after a hide don't average over
-/// the hidden time; a hide ends the wait for the next sample at once, also during a long
-/// interval. Every sample carries the showing it was started in, so the app can drop one that
-/// a hide (and maybe a show) overtook while it ran. Exits when the receiver is gone.
-fn run_procs_thread<S: FnMut() -> Vec<ProcInfo>>(
-  tx: mpsc::Sender<Event>,
-  msec: Arc<RwLock<u32>>,
-  shown: Arc<ProcsShown>,
-  new_sampler: impl Fn() -> S + Send + 'static,
-) -> JoinHandle<()> {
-  thread::spawn(move || {
-    loop {
-      let showing = shown.wait_shown();
-
-      // the first sample only sets the baseline: its CPU and power rates are zero
-      let started = Instant::now();
-      let mut sample = new_sampler();
-      sample();
-      let mut wait = PROCS_WARMUP.saturating_sub(started.elapsed());
-
-      while shown.wait_while_shown(showing, wait) {
-        let started = Instant::now();
-        if tx.send(Event::Procs { showing, procs: sample() }).is_err() {
-          return;
-        }
-        let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
-        wait = interval.saturating_sub(started.elapsed());
-      }
+  fn set_interval(&self, msec: &RwLock<u32>, interval: u32) {
+    let _state = self.state.lock().unwrap();
+    let mut current = msec.write().unwrap();
+    if *current != interval {
+      *current = interval;
+      self.changed.notify_all();
     }
-  })
+  }
+
+  /// Waits until the deadline, a visibility change or a new sampling interval.
+  fn wait_until_changed(
+    &self,
+    observed: Showing,
+    interval: u32,
+    msec: &RwLock<u32>,
+    deadline: Instant,
+  ) {
+    let state = self.state.lock().unwrap();
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    drop(
+      self
+        .changed
+        .wait_timeout_while(state, timeout, |state| {
+          *state == observed && *msec.read().unwrap() == interval
+        })
+        .unwrap(),
+    );
+  }
+}
+
+struct SamplingCoordinator {
+  sampler: Sampler,
+  processes: Option<(u64, ProcSampler)>,
+  next_update: Instant,
+  quick_at: Option<Instant>,
+}
+
+impl SamplingCoordinator {
+  fn new(sampler: Sampler) -> Self {
+    let next_update = instant_now() + PROCS_WARMUP;
+    Self { sampler, processes: None, next_update, quick_at: None }
+  }
+
+  /// Returns true when a new baseline was collected; visibility must be checked again after it.
+  fn visibility_changed(&mut self, shown: &ProcsShown) -> bool {
+    let showing = shown.showing();
+    if showing == self.processes.as_ref().map(|(count, _)| *count) {
+      return false;
+    }
+    self.processes = None;
+    self.quick_at = None;
+    if let Some(count) = showing {
+      let started = instant_now();
+      if self.next_update.saturating_duration_since(started) >= Duration::from_millis(500) {
+        self.quick_at = Some(started + PROCS_WARMUP);
+      }
+      let mut sampler = ProcSampler::new();
+      sampler.sample(); // The first sample only sets the baseline.
+      self.processes = Some((count, sampler));
+      return true;
+    }
+    false
+  }
+
+  fn collect_processes(&mut self, shown: &ProcsShown) -> Option<(u64, Vec<ProcInfo>)> {
+    let (showing, sampler) = self.processes.as_mut()?;
+    (shown.showing() == Some(*showing)).then(|| (*showing, sampler.sample()))
+  }
+
+  fn next_deadline(&self) -> Instant {
+    self.quick_at.map_or(self.next_update, |quick| quick.min(self.next_update))
+  }
+
+  fn update(&mut self, shown: &ProcsShown, msec: &RwLock<u32>) -> WithError<Option<Event>> {
+    let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
+    self.next_update = self.next_update.min(instant_now() + interval);
+    if self.visibility_changed(shown) {
+      return Ok(None);
+    }
+    let started = instant_now();
+    let (started, procs, metrics) = if started >= self.next_update {
+      let metrics = Box::new(self.sampler.get_metrics()?);
+      (started, self.collect_processes(shown), metrics)
+    } else if self.quick_at.is_some_and(|deadline| started >= deadline) {
+      self.quick_at = None;
+      let Some((showing, procs)) = self.collect_processes(shown) else {
+        return Ok(None);
+      };
+      let started = instant_now();
+      if started < self.next_update {
+        return Ok(Some(Event::Procs { showing, procs }));
+      }
+      // Reuse the quick result when collecting it overtook the regular deadline.
+      let metrics = Box::new(self.sampler.get_metrics()?);
+      (started, Some((showing, procs)), metrics)
+    } else {
+      return Ok(None);
+    };
+    // Keep the latest due tick on the original schedule, skipping older missed ticks.
+    let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
+    while self.next_update + interval <= started {
+      self.next_update += interval;
+    }
+    self.next_update += interval;
+    self.quick_at = None;
+    Ok(Some(Event::Update { metrics, procs }))
+  }
+
+  fn spawn(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Arc<ProcsShown>) {
+    thread::spawn(move || {
+      let run = || -> WithError<()> {
+        let mut coordinator = Self::new(Sampler::new()?);
+        loop {
+          let (observed, interval) = {
+            let state = shown.state.lock().unwrap();
+            (*state, *msec.read().unwrap())
+          };
+          if let Some(event) = coordinator.update(&shown, &msec)? {
+            if tx.send(event).is_err() {
+              return Ok(());
+            }
+          } else {
+            shown.wait_until_changed(observed, interval, &msec, coordinator.next_deadline());
+          }
+        }
+      };
+      if let Err(err) = run() {
+        let _ = tx.send(Event::Failed(err.to_string()));
+      }
+    });
+  }
 }
 
 // MARK: App
@@ -381,7 +456,7 @@ impl App {
   }
 
   /// Applies one event. Returns `Break` when the app should quit. Keys can change the interval,
-  /// which `msec` hands on to the sampling threads.
+  /// which `msec` hands on to the sampling thread.
   fn handle_event(&mut self, event: Event, msec: &RwLock<u32>) -> ControlFlow<()> {
     let flow = match event {
       Event::Key(key) => self.handle_key(key),
@@ -389,8 +464,11 @@ impl App {
         self.handle_mouse(mouse);
         return ControlFlow::Continue(());
       }
-      Event::Update(data) => {
-        self.update_metrics(*data);
+      Event::Update { metrics, procs } => {
+        self.update_metrics(*metrics);
+        if let Some((showing, procs)) = procs {
+          self.update_procs(showing, procs);
+        }
         return ControlFlow::Continue(());
       }
       Event::Procs { showing, procs } => {
@@ -407,7 +485,7 @@ impl App {
       Event::Failed(_) => return ControlFlow::Break(()),
     };
 
-    *msec.write().unwrap() = self.cfg.interval();
+    self.procs_shown.set_interval(msec, self.cfg.interval());
     flow
   }
 
@@ -554,8 +632,7 @@ impl App {
     let msec = Arc::new(RwLock::new(self.cfg.interval()));
 
     let (tx, rx) = mpsc::channel::<Event>();
-    run_sampler_thread(tx.clone(), msec.clone());
-    run_procs_thread(tx.clone(), msec.clone(), self.procs_shown.clone(), proc_sampler);
+    SamplingCoordinator::spawn(tx.clone(), msec.clone(), self.procs_shown.clone());
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
@@ -581,11 +658,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::{Cell, RefCell};
   use std::num::NonZeroU16;
   use std::ops::ControlFlow;
+  use std::rc::Rc;
   use std::sync::atomic::AtomicBool;
-  use std::sync::{Arc, Mutex, RwLock, mpsc};
-  use std::time::Duration;
+  use std::sync::{Arc, RwLock};
+  use std::time::{Duration, Instant};
 
   use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
@@ -601,7 +680,9 @@ mod tests {
   use super::kill::tests::FakeSys;
   use super::layout::Metric;
   use super::theme::{self, gradient};
-  use super::{App, Event, restore_term_once, run_procs_thread};
+  use super::{
+    App, Event, PROCS_WARMUP, ProcsShown, SamplingCoordinator, WithError, restore_term_once,
+  };
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::fds::{Kind, OpenFile};
   use crate::procs::ProcInfo;
@@ -1968,54 +2049,361 @@ mod tests {
     assert_eq!((app.proc_view.filter(), app.kill.is_open()), ("saf", true));
   }
 
+  thread_local! {
+    static TIME: Cell<Instant> = Cell::new(Instant::now());
+    static SOURCES: RefCell<Rc<RefCell<TestSources>>> = RefCell::new(Rc::new(RefCell::new(TestSources::default())));
+  }
+  pub(super) fn instant_now() -> Instant {
+    TIME.with(Cell::get)
+  }
+  fn advance(millis: u64) {
+    TIME.with(|time| time.set(time.get() + Duration::from_millis(millis)));
+  }
+  #[derive(Default)]
+  struct TestSources {
+    calls: Vec<(&'static str, usize)>,
+    generation: usize,
+    on_metrics: Option<Box<dyn FnOnce()>>,
+    on_processes: Option<Box<dyn FnOnce()>>,
+    fail: bool,
+  }
+  pub(super) struct Sampler {
+    state: Rc<RefCell<TestSources>>,
+  }
+  impl Sampler {
+    pub(super) fn new() -> WithError<Self> {
+      let state = Rc::new(RefCell::new(TestSources::default()));
+      SOURCES.with(|sources| *sources.borrow_mut() = state.clone());
+      TIME.with(|time| time.set(Instant::now()));
+      Ok(Self { state })
+    }
+    pub(super) fn get_metrics(&mut self) -> WithError<Metrics> {
+      let action = {
+        let mut state = self.state.borrow_mut();
+        state.calls.push(("metrics", 0));
+        state.on_metrics.take()
+      };
+      if let Some(action) = action {
+        action();
+      }
+      if self.state.borrow().fail {
+        return Err("source failed".into());
+      }
+      Ok(test_metrics())
+    }
+  }
+  pub(super) struct ProcSampler {
+    state: Rc<RefCell<TestSources>>,
+    generation: usize,
+    baseline: bool,
+  }
+  impl ProcSampler {
+    pub(super) fn new() -> Self {
+      let state = SOURCES.with(|sources| sources.borrow().clone());
+      let generation = {
+        let mut state = state.borrow_mut();
+        state.generation += 1;
+        state.generation
+      };
+      Self { state, generation, baseline: true }
+    }
+    pub(super) fn sample(&mut self) -> Vec<ProcInfo> {
+      let action = {
+        let mut state = self.state.borrow_mut();
+        state.calls.push((if self.baseline { "baseline" } else { "processes" }, self.generation));
+        state.on_processes.take()
+      };
+      self.baseline = false;
+      if let Some(action) = action {
+        action();
+      }
+      test_procs()
+    }
+  }
+  fn coordinator() -> SamplingCoordinator {
+    SamplingCoordinator::new(Sampler::new().unwrap())
+  }
+
+  #[test]
+  fn regular_update_collects_metrics_then_processes_in_one_event() {
+    let shown = Arc::new(ProcsShown::default());
+    shown.set(true);
+    let mut worker = coordinator();
+    let interval = RwLock::new(100);
+    assert!(worker.update(&shown, &interval).unwrap().is_none()); // baseline
+    advance(99);
+    assert!(worker.update(&shown, &interval).unwrap().is_none());
+    advance(1);
+    assert!(matches!(
+      worker.update(&shown, &interval).unwrap(),
+      Some(Event::Update { procs: Some((1, _)), .. })
+    ));
+    assert_eq!(
+      worker.sampler.state.borrow_mut().calls,
+      [("baseline", 1), ("metrics", 0), ("processes", 1)]
+    );
+  }
+
+  #[test]
+  fn hidden_panel_keeps_regular_metrics_without_creating_a_process_sampler() {
+    let shown = Arc::new(ProcsShown::default());
+    let mut worker = coordinator();
+    for _ in 0..2 {
+      advance(100);
+      assert!(matches!(
+        worker.update(&shown, &RwLock::new(100)).unwrap(),
+        Some(Event::Update { procs: None, .. })
+      ));
+    }
+    assert_eq!(worker.sampler.state.borrow_mut().calls, [("metrics", 0), ("metrics", 0)]);
+    assert_eq!(worker.sampler.state.borrow_mut().generation, 0);
+  }
+
+  #[test]
+  fn hiding_during_metrics_collection_skips_the_process_read() {
+    let shown = Arc::new(ProcsShown::default());
+    shown.set(true);
+    let mut worker = coordinator();
+    worker.update(&shown, &RwLock::new(100)).unwrap();
+    let shown_for_read = shown.clone();
+    worker.sampler.state.borrow_mut().on_metrics =
+      Some(Box::new(move || shown_for_read.set(false)));
+    advance(100);
+    assert!(matches!(
+      worker.update(&shown, &RwLock::new(100)).unwrap(),
+      Some(Event::Update { procs: None, .. })
+    ));
+    assert_eq!(worker.sampler.state.borrow_mut().calls, [("baseline", 1), ("metrics", 0)]);
+  }
+
+  #[test]
+  fn a_new_showing_during_baseline_collection_gets_a_fresh_sampler() {
+    let shown = Arc::new(ProcsShown::default());
+    shown.set(true);
+    let mut worker = coordinator();
+    let shown_for_read = shown.clone();
+    worker.sampler.state.borrow_mut().on_processes = Some(Box::new(move || {
+      shown_for_read.set(false);
+      shown_for_read.set(true);
+    }));
+    assert!(worker.update(&shown, &RwLock::new(100)).unwrap().is_none());
+    worker.sampler.state.borrow_mut().on_processes = None;
+    advance(100);
+    assert!(worker.update(&shown, &RwLock::new(100)).unwrap().is_none());
+    assert!(matches!(
+      worker.update(&shown, &RwLock::new(100)).unwrap(),
+      Some(Event::Update { procs: Some((2, _)), .. })
+    ));
+    assert_eq!(
+      worker.sampler.state.borrow_mut().calls,
+      [("baseline", 1), ("baseline", 2), ("metrics", 0), ("processes", 2)]
+    );
+  }
+
+  #[test]
+  fn quick_updates_are_only_scheduled_at_least_500_ms_before_the_common_cycle() {
+    for remaining in [499, 500, 501] {
+      let shown = Arc::new(ProcsShown::default());
+      let mut worker = coordinator();
+      advance(100);
+      worker.update(&shown, &RwLock::new(1000)).unwrap();
+      advance(1000 - remaining);
+      shown.set(true);
+      worker.update(&shown, &RwLock::new(1000)).unwrap();
+      assert_eq!(worker.quick_at, (remaining >= 500).then(|| instant_now() + PROCS_WARMUP));
+      shown.set(false);
+      worker.update(&shown, &RwLock::new(1000)).unwrap();
+      assert!(worker.quick_at.is_none());
+      assert!(worker.processes.is_none());
+    }
+  }
+
+  #[test]
+  fn quick_process_update_preserves_the_regular_deadline() {
+    let shown = Arc::new(ProcsShown::default());
+    let mut worker = coordinator();
+    let interval = RwLock::new(1000);
+    advance(100);
+    worker.update(&shown, &interval).unwrap();
+    let deadline = worker.next_update;
+    shown.set(true);
+    worker.update(&shown, &interval).unwrap();
+    advance(99);
+    assert!(worker.update(&shown, &interval).unwrap().is_none());
+    advance(1);
+    assert!(matches!(
+      worker.update(&shown, &interval).unwrap(),
+      Some(Event::Procs { showing: 1, .. })
+    ));
+    assert_eq!(worker.next_update, deadline);
+    advance(900);
+    assert!(matches!(
+      worker.update(&shown, &interval).unwrap(),
+      Some(Event::Update { procs: Some((1, _)), .. })
+    ));
+    assert_eq!(
+      worker.sampler.state.borrow_mut().calls,
+      [("metrics", 0), ("baseline", 1), ("processes", 1), ("metrics", 0), ("processes", 1)]
+    );
+  }
+
+  #[test]
+  fn quick_collection_crossing_the_regular_deadline_is_reused_in_one_update() {
+    let shown = Arc::new(ProcsShown::default());
+    let mut worker = coordinator();
+    let interval = RwLock::new(1000);
+    advance(100);
+    worker.update(&shown, &interval).unwrap();
+    shown.set(true);
+    worker.update(&shown, &interval).unwrap();
+    worker.sampler.state.borrow_mut().on_processes = Some(Box::new(move || advance(900)));
+    advance(100);
+    assert!(matches!(
+      worker.update(&shown, &interval).unwrap(),
+      Some(Event::Update { procs: Some((1, _)), .. })
+    ));
+    assert_eq!(
+      worker.sampler.state.borrow_mut().calls,
+      [("metrics", 0), ("baseline", 1), ("processes", 1), ("metrics", 0)]
+    );
+    assert_eq!(worker.next_update, instant_now() + Duration::from_millis(1000));
+  }
+
+  #[test]
+  fn an_overrun_and_interval_change_preserve_the_regular_schedule() {
+    let shown = Arc::new(ProcsShown::default());
+    let interval = Arc::new(RwLock::new(100));
+    let mut worker = coordinator();
+    let period = interval.clone();
+    worker.sampler.state.borrow_mut().on_metrics = Some(Box::new(move || {
+      advance(250);
+      *period.write().unwrap() = 200;
+    }));
+    advance(100);
+    assert!(worker.update(&shown, &interval).unwrap().is_some());
+    worker.sampler.state.borrow_mut().on_metrics = None;
+    assert!(worker.update(&shown, &interval).unwrap().is_some());
+    assert_eq!(worker.next_update, instant_now() + Duration::from_millis(150));
+    assert!(worker.update(&shown, &interval).unwrap().is_none());
+    advance(150);
+    assert!(worker.update(&shown, &interval).unwrap().is_some());
+  }
+
+  #[test]
+  fn a_late_wakeup_skips_old_ticks_without_shifting_the_regular_schedule() {
+    let shown = ProcsShown::default();
+    let interval = RwLock::new(100);
+    let mut worker = coordinator();
+    let origin = instant_now();
+    advance(350);
+    assert!(worker.update(&shown, &interval).unwrap().is_some());
+    assert_eq!(worker.next_update, origin + Duration::from_millis(400));
+    assert!(worker.update(&shown, &interval).unwrap().is_none());
+    advance(50);
+    assert!(worker.update(&shown, &interval).unwrap().is_some());
+    assert_eq!(worker.next_update, origin + Duration::from_millis(500));
+  }
+
+  #[test]
+  fn a_new_interval_only_shortens_a_distant_regular_deadline() {
+    for (elapsed, interval, remaining) in
+      [(100, 1000, 1000), (9500, 1000, 500), (100, 20_000, 9900), (10_000, 1000, 0)]
+    {
+      let shown = ProcsShown::default();
+      let msec = RwLock::new(10_000);
+      let mut worker = coordinator();
+      advance(100);
+      worker.update(&shown, &msec).unwrap();
+      advance(elapsed);
+      shown.set_interval(&msec, interval);
+      let expected = instant_now() + Duration::from_millis(remaining);
+      if remaining > 0 {
+        assert!(worker.update(&shown, &msec).unwrap().is_none());
+        assert_eq!(worker.next_update, expected);
+        advance(remaining);
+      }
+      assert!(matches!(worker.update(&shown, &msec).unwrap(), Some(Event::Update { .. })));
+    }
+  }
+
+  #[test]
+  fn an_interval_key_interrupts_waiting_even_before_the_wait_starts() {
+    let file = TempConfig::new("interval_key_interrupts_waiting");
+    let mut app = saving_app(&file);
+    app.cfg.set_run_interval(1000);
+    let msec = RwLock::new(1000);
+    let observed = *app.procs_shown.state.lock().unwrap();
+    assert!(app.handle_event(Event::Key(key('-')), &msec).is_continue());
+    assert_eq!(*msec.read().unwrap(), 750);
+    let started = Instant::now();
+    app.procs_shown.wait_until_changed(observed, 1000, &msec, started + Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_millis(500));
+  }
+
+  #[test]
+  fn source_errors_reach_the_worker() {
+    let mut worker = coordinator();
+    worker.sampler.state.borrow_mut().fail = true;
+    advance(100);
+    let error = worker.update(&ProcsShown::default(), &RwLock::new(100)).err().unwrap();
+    assert_eq!(error.to_string(), "source failed");
+  }
+
+  #[test]
+  fn a_common_update_applies_metrics_and_processes_before_the_next_frame() {
+    let mut app = test_app();
+    render_buffer(&mut app, 200, 50);
+    let showing = app.procs_shown.showing().unwrap();
+    let mut metrics = test_metrics();
+    metrics.cpu_power = 97.0;
+    let history = app.cpu_power.items.len();
+
+    let event = Event::Update { metrics: Box::new(metrics), procs: Some((showing, test_procs())) };
+    assert!(app.handle_event(event, &RwLock::new(TUI_MIN_MS)).is_continue());
+    assert_eq!(app.cpu_power.items.len(), history + 1);
+    assert_eq!(app.cpu_power.items[0], 97_000);
+    assert_eq!(app.proc_view.procs(), Some(test_procs().as_slice()));
+    let frame = render_to_string(&mut app, 200, 50);
+    assert!(frame.contains("WindowServer"));
+    assert!(!frame.contains("collecting…"));
+  }
+
   #[test]
   fn a_sample_started_before_a_hide_and_show_never_reaches_the_list() {
     let mut app = test_app();
     render_buffer(&mut app, 200, 50);
-
-    // a sampler that reports each sample as it starts and finishes it only when released
-    let (started_tx, started) = mpsc::channel();
-    let (release, gate) = mpsc::channel::<()>();
-    let gate = Arc::new(Mutex::new(gate));
-    let new_sampler = move || {
-      let (started_tx, gate) = (started_tx.clone(), gate.clone());
-      move || {
-        let _ = started_tx.send(());
-        let _ = gate.lock().unwrap().recv();
-        test_procs()
-      }
-    };
-    let (tx, rx) = mpsc::channel();
-    let msec = Arc::new(RwLock::new(TUI_MIN_MS));
-    run_procs_thread(tx, msec.clone(), app.procs_shown.clone(), new_sampler);
-
-    let timeout = Duration::from_secs(5);
-    // Lets the next sample of the process thread run to its end.
-    let finish_sample = || {
-      started.recv_timeout(timeout).expect("no sample started");
-      release.send(()).unwrap();
-    };
-    // Hands the next event of the process thread to the app.
-    let take_event = |app: &mut App| {
-      let event = rx.recv_timeout(timeout).expect("no process sample");
-      assert!(app.handle_event(event, &msec).is_continue());
-    };
-
-    // the baseline, then a sample that runs while the panel is hidden and shown again
-    finish_sample();
-    started.recv_timeout(timeout).expect("no sample started");
-    render_buffer(&mut app, 60, 12);
-    render_buffer(&mut app, 200, 50);
-    assert!(app.procs_visible());
-    release.send(()).unwrap();
-    take_event(&mut app);
+    let shown = app.procs_shown.clone();
+    let interval = RwLock::new(100);
+    let mut worker = coordinator();
+    worker.update(&shown, &interval).unwrap();
+    let shown_for_read = shown.clone();
+    worker.sampler.state.borrow_mut().on_processes = Some(Box::new(move || {
+      shown_for_read.set(false);
+      shown_for_read.set(true);
+    }));
+    advance(100);
+    let event = worker.update(&shown, &interval).unwrap().unwrap();
+    let history = app.cpu_power.items.len();
+    assert!(app.handle_event(event, &interval).is_continue());
+    assert_eq!(app.cpu_power.items.len(), history + 1, "current metrics were discarded");
     assert_eq!(app.proc_view.procs(), None, "a stale sample reached the list");
-    assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
 
-    // the new showing: its own baseline, then its first sample fills the list
-    finish_sample();
-    finish_sample();
-    take_event(&mut app);
+    worker.sampler.state.borrow_mut().on_processes = None;
+    assert!(worker.update(&shown, &interval).unwrap().is_none());
+    advance(100);
+    let event = worker.update(&shown, &interval).unwrap().unwrap();
+    assert!(app.handle_event(event, &interval).is_continue());
     assert_eq!(app.proc_view.procs(), Some(test_procs().as_slice()));
+    assert_eq!(
+      worker.sampler.state.borrow_mut().calls,
+      [
+        ("baseline", 1),
+        ("metrics", 0),
+        ("processes", 1),
+        ("baseline", 2),
+        ("metrics", 0),
+        ("processes", 2),
+      ]
+    );
   }
 }
