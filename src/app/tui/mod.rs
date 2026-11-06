@@ -292,6 +292,8 @@ pub struct App {
   cpu_temp: TempStore,
   gpu_temp: TempStore,
   fans: FanStore,
+  /// Pieces of the line on the bottom border of the metrics box, see `boxes::system_line`.
+  system_line: Vec<Span<'static>>,
 
   /// CPU clusters, lowest tier first (E / P on M1–M4, E / S on M5, P / S on M5 Pro/Max, E / P / S
   /// on M6).
@@ -328,6 +330,7 @@ impl App {
   }
 
   fn update_metrics(&mut self, data: Metrics) {
+    self.system_line = boxes::system_line(&data);
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
@@ -1414,6 +1417,29 @@ mod tests {
       let bottom = box_row(&app, &buf, Metric::TotalPower, true);
       assert!(bottom.starts_with("╰───") && bottom.ends_with(end), "{bottom}");
     }
+  }
+
+  #[test]
+  fn system_line_on_the_bottom_border_of_the_metrics_box_drops_from_the_end() {
+    let mut app = test_app_with(|m| {
+      (m.net_in, m.net_out) = (Some(2048), Some(1024));
+      (m.disk_read, m.disk_write) = (Some(3 << 20), Some(0));
+    });
+
+    // (window width, line)
+    let line = "─ net ↓2K ↑1K | disk r3M w0K ─";
+    for (width, text) in [(80, line), (31, "─ net ↓2K ↑1K ─")] {
+      let buf = render_buffer(&mut app, width, 50);
+      let bottom = row(&buf, PROC_Y - 1);
+      assert!(bottom.starts_with("╰") && bottom.contains(text), "{bottom}");
+    }
+    let bottom = row(&render_buffer(&mut app, 16, 50), PROC_Y - 1);
+    assert!(!bottom.contains("net"), "{bottom}");
+
+    // nothing without a value
+    let mut app = test_app_with(|m| m.net_in = Some(2048));
+    let bottom = row(&render_buffer(&mut app, 80, 50), PROC_Y - 1);
+    assert!(!bottom.contains("net"), "{bottom}");
   }
 
   #[test]

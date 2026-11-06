@@ -288,6 +288,10 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
   "sys_power": 5.876533, // Watts
   "ram_power": 0.11635789, // Watts
   "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
+  "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
+  "disk_read": 1048576, // Bytes per second read from the disks, null when unavailable
+  "disk_write": 262144, // Bytes per second written to the disks, null when unavailable
 }
 ```
 

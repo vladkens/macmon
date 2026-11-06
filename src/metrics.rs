@@ -1,7 +1,7 @@
 //! Metrics model and hardware sampler.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
@@ -12,8 +12,8 @@ use crate::shared::{
 };
 use crate::sources::{
   IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, cfio_get_residencies, cfio_watts,
-  cpu_load_ticks, get_soc_info, libc_ram, libc_swap, memory_pressure_level,
-  memory_pressure_percent, memory_pressure_raw, memory_status_raw,
+  cpu_load_ticks, disk_bytes, get_soc_info, libc_ram, libc_swap, memory_pressure_level,
+  memory_pressure_percent, memory_pressure_raw, memory_status_raw, net_bytes,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -215,6 +215,14 @@ pub struct Metrics {
   pub ram_power: f32,
   /// GPU SRAM power in Watts.
   pub gpu_ram_power: f32,
+  /// Bytes per second received by the Ethernet and Wi-Fi interfaces, or None without one.
+  pub net_in: Option<u64>,
+  /// Bytes per second sent by the Ethernet and Wi-Fi interfaces, or None without one.
+  pub net_out: Option<u64>,
+  /// Bytes per second read from the disks, or None when unavailable.
+  pub disk_read: Option<u64>,
+  /// Bytes per second written to the disks, or None when unavailable.
+  pub disk_write: Option<u64>,
 }
 
 // MARK: Helpers
@@ -248,6 +256,26 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
 /// no reading.
 fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
   if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
+}
+
+/// Byte counters of the network and the disks at one moment.
+struct ByteCounters {
+  at: Instant,
+  net: Option<[u64; 2]>,
+  disk: Option<[u64; 2]>,
+}
+
+impl ByteCounters {
+  fn read() -> Self {
+    Self { at: Instant::now(), net: net_bytes(), disk: disk_bytes() }
+  }
+}
+
+/// Bytes per second of both counters over `secs`. Counters go back when an interface or a disk
+/// goes away: that reads 0.
+fn byte_rates(prev: Option<[u64; 2]>, cur: Option<[u64; 2]>, secs: f64) -> [Option<u64>; 2] {
+  let rate = |i: usize| Some(zero_div(cur?[i].saturating_sub(prev?[i]) as f64, secs) as u64);
+  [rate(0), rate(1)]
 }
 
 fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
@@ -550,6 +578,8 @@ pub struct Sampler {
   use_cpu_ticks: bool,
   /// CPU ticks at the end of the last sample; the first sample takes its own baseline.
   cpu_ticks: Option<Vec<[u32; 4]>>,
+  /// Byte counters at the end of the last sample; the first sample takes its own baseline.
+  bytes: Option<ByteCounters>,
   hid: IOHIDSensors,
   smc: Option<SMC>,
   smc_cpu_keys: Vec<String>,
@@ -574,6 +604,7 @@ impl Sampler {
       ior,
       use_cpu_ticks,
       cpu_ticks: None,
+      bytes: None,
       hid,
       smc: smc_sensors.smc,
       smc_cpu_keys: smc_sensors.cpu_keys,
@@ -787,6 +818,7 @@ impl Sampler {
     let duration = Duration::from_millis(duration as u64);
     // like the IOReport baseline, taken when the first interval begins
     let ticks = self.cpu_ticks.take().or_else(|| self.use_cpu_ticks.then(cpu_load_ticks).flatten());
+    let bytes = self.bytes.take().unwrap_or_else(ByteCounters::read);
     let mut rs = match self.ior.as_mut() {
       Some(ior) => {
         let (sample, elapsed) = ior.get_sample_interval(duration);
@@ -816,6 +848,12 @@ impl Sampler {
     rs.ram_power = checked_ram_power(rs.ram_power, sys_power);
     rs.sys_power = sys_power.map_or(0.0, |val| val.max(rs.all_power));
 
+    let cur = ByteCounters::read();
+    let secs = (cur.at - bytes.at).as_secs_f64();
+    [rs.net_in, rs.net_out] = byte_rates(bytes.net, cur.net, secs);
+    [rs.disk_read, rs.disk_write] = byte_rates(bytes.disk, cur.disk, secs);
+    self.bytes = Some(cur);
+
     Ok(rs)
   }
 
@@ -836,14 +874,23 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
-    TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, checked_ram_power,
-    collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value,
-    temperature_average, uses_cpu_ticks,
+    TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies,
+    checked_ram_power, collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel,
+    smc_numeric_value, temperature_average, uses_cpu_ticks,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
     tiers_from_perflevels,
   };
+
+  #[test]
+  fn byte_rates_need_both_counters_and_never_go_negative() {
+    let (prev, cur) = (Some([1000, 5000]), Some([3000, 4000]));
+    assert_eq!(byte_rates(prev, cur, 2.0), [Some(1000), Some(0)]);
+    assert_eq!(byte_rates(prev, cur, 0.0), [Some(0), Some(0)]);
+    assert_eq!(byte_rates(None, cur, 2.0), [None, None]);
+    assert_eq!(byte_rates(prev, None, 2.0), [None, None]);
+  }
 
   #[test]
   fn ram_power_above_the_smc_total_is_dropped() {
@@ -937,6 +984,7 @@ mod tests {
       ior: None,
       use_cpu_ticks: true,
       cpu_ticks: None,
+      bytes: None,
       hid: IOHIDSensors::new().unwrap(),
       smc: None,
       smc_cpu_keys: vec![],

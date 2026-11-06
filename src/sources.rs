@@ -497,6 +497,63 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
   Ok((usage, total))
 }
 
+// MARK: Network and disk
+
+/// `IFT_ETHER` of `net/if_types.h`: Ethernet and Wi-Fi. It leaves out loopback, and tunnels and
+/// bridges, whose traffic the interfaces under them count already.
+const IFT_ETHER: u8 = 6;
+
+/// Reads a value of type `T` from the sysctl `mib`.
+fn sysctl_mib<T>(mib: &[i32]) -> Option<T> {
+  let mut val = MaybeUninit::<T>::uninit();
+  let mut size = size_of::<T>();
+  let ret = unsafe {
+    let (name, len) = (mib.as_ptr() as *mut _, mib.len() as u32);
+    libc::sysctl(name, len, val.as_mut_ptr().cast(), &mut size, null_mut(), 0)
+  };
+  (ret == 0).then(|| unsafe { val.assume_init() })
+}
+
+/// `read` on the properties of every IORegistry service named `service`, leaving out the `None`s.
+fn read_services<T>(service: &str, read: impl Fn(CFDictionaryRef) -> Option<T>) -> Vec<T> {
+  let Ok(services) = IOServiceIterator::new(service) else { return vec![] };
+  let read_one = |(entry, name)| {
+    let props = cfio_get_props(entry, name);
+    unsafe { IOObjectRelease(entry) };
+
+    let props = props.ok()?;
+    let val = read(props);
+    unsafe { CFRelease(props as _) };
+    val
+  };
+  services.filter_map(read_one).collect()
+}
+
+fn sum_pairs(pairs: impl IntoIterator<Item = [u64; 2]>) -> Option<[u64; 2]> {
+  pairs.into_iter().reduce(|a, b| [a[0] + b[0], a[1] + b[1]])
+}
+
+/// Bytes received and sent by the Ethernet and Wi-Fi interfaces since they came up, or None
+/// without one. From `IFMIB_IFDATA`, which matches `netstat -ib`: on macOS 27 `getifaddrs` and
+/// `NET_RT_IFLIST2` give the same counters cut to 32 bits and rounded down to 1 KiB.
+pub(crate) fn net_bytes() -> Option<[u64; 2]> {
+  let [net, link, generic] = [libc::CTL_NET, libc::PF_LINK, libc::NETLINK_GENERIC];
+  let count: i32 = sysctl_mib(&[net, link, generic, libc::IFMIB_SYSTEM, libc::IFMIB_IFCOUNT])?;
+  let data = |i| sysctl_mib(&[net, link, generic, libc::IFMIB_IFDATA, i, libc::IFDATA_GENERAL]);
+  let ifs = (1..=count).filter_map(data).map(|x: libc::ifmibdata| x.ifmd_data);
+  sum_pairs(ifs.filter(|x| x.ifi_type == IFT_ETHER).map(|x| [x.ifi_ibytes, x.ifi_obytes]))
+}
+
+/// Bytes read and written by the storage drivers since they came up, as `iostat` counts them (a
+/// mounted disk image is one too), or None without one.
+pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
+  sum_pairs(read_services("IOBlockStorageDriver", |props| {
+    let stats = cfdict_get_val(props, "Statistics")? as CFDictionaryRef;
+    let bytes = |key| cfnum_get_i64(stats, key).map(|x| x as u64);
+    Some([bytes("Bytes (Read)")?, bytes("Bytes (Write)")?])
+  }))
+}
+
 // MARK: SockInfo
 
 /// Static Apple Silicon system information.

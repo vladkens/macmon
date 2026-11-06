@@ -161,7 +161,7 @@ fn fit_columns(width: u16, sort: ProcSort) -> Vec<(ProcSort, u16)> {
 
 /// Memory size in the most readable unit: `512K`, `64M`, `1.5G`, `128G`. The unit follows the
 /// rounded value, so 1023.9 MiB reads `1.0G`, not `1024M`.
-fn format_mem(bytes: u64) -> String {
+pub(super) fn format_mem(bytes: u64) -> String {
   /// Bytes in a KiB, and each unit in the next one.
   const KIB: f64 = 1024.0;
   let kib = bytes as f64 / KIB;

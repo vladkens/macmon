@@ -4,6 +4,7 @@
 
 use std::ops::Range;
 
+use macmon::Metrics;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,7 +14,7 @@ use ratatui::widgets::{Block, BorderType, Scrollbar, ScrollbarOrientation, Scrol
 
 use super::App;
 use super::layout::{LayoutPlan, Metric};
-use super::proc_view::{ELLIPSIS, head};
+use super::proc_view::{ELLIPSIS, format_mem, head};
 use super::store::{ClusterStore, FreqStore, PowerStore, ratio};
 use super::theme::{self, dim, faint, gradient, heading, text};
 use super::widgets::{Gauge, Graph};
@@ -309,6 +310,17 @@ pub(super) fn render_bottom_border(
   }
 }
 
+/// Pieces of the system line on the bottom border of the metrics box, the first kept longest.
+/// Metrics without a value are left out.
+pub(super) fn system_line(m: &Metrics) -> Vec<Span<'static>> {
+  let rates = |a: &str, x: Option<u64>, b: &str, y: Option<u64>| {
+    Some(format!("{a}{} {b}{}", format_mem(x?), format_mem(y?)))
+  };
+  let pieces =
+    [rates("net ↓", m.net_in, "↑", m.net_out), rates("disk r", m.disk_read, "w", m.disk_write)];
+  pieces.into_iter().flatten().map(text).collect()
+}
+
 // MARK: Metric boxes
 
 /// How a metric box draws its history.
@@ -358,8 +370,15 @@ impl App {
     hints
   }
 
-  /// Metrics box: chip and version in the title, the metric boxes inside and the key hints on the
-  /// bottom border when it is the lowest box.
+  /// The system line in `room` cells: its pieces joined, dropped from the end when too long.
+  fn system_spans(&self, room: usize) -> Vec<Span<'static>> {
+    let widths: Vec<u16> = self.system_line.iter().map(|x| cells(x.width())).collect();
+    let shown = fit_joined(cells(room + 2), &widths);
+    join(self.system_line.iter().take(shown).map(|x| vec![x.clone()]))
+  }
+
+  /// Metrics box: chip and version in the title, the metric boxes inside, and on the bottom border
+  /// the system line and the key hints when it is the lowest box.
   pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
     let Some(area) = plan.top else { return };
     draw_box(f, area, self.metrics_titles());
@@ -384,7 +403,7 @@ impl App {
     }
 
     let hints = if plan.proc.is_none() { self.footer_hints() } else { vec![] };
-    render_bottom_border(f, area, hints, |_| vec![]);
+    render_bottom_border(f, area, hints, |room| self.system_spans(room));
   }
 
   /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, `macmon vX` right; the

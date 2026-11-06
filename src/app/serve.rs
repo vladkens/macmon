@@ -99,6 +99,10 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
   gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", ?m.memory.pressure_level);
   gauge_any!(out, "memory_pressure_percent", "Memory pressure in percent, as in Activity Monitor", ?m.memory.pressure_percent);
+  gauge_any!(out, "net_in_bytes_per_second", "Bytes per second received by the Ethernet and Wi-Fi interfaces", ?m.net_in);
+  gauge_any!(out, "net_out_bytes_per_second", "Bytes per second sent by the Ethernet and Wi-Fi interfaces", ?m.net_out);
+  gauge_any!(out, "disk_read_bytes_per_second", "Bytes per second read from the disks", ?m.disk_read);
+  gauge_any!(out, "disk_write_bytes_per_second", "Bytes per second written to the disks", ?m.disk_write);
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
@@ -471,6 +475,30 @@ mod tests {
     assert!(output.contains("macmon_memory_pressure_level{chip=\"\"} 1\n"));
     assert!(output.contains("# TYPE macmon_memory_pressure_percent gauge\n"));
     assert!(output.contains("macmon_memory_pressure_percent{chip=\"\"} 25\n"));
+  }
+
+  #[test]
+  fn net_and_disk_gauges_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(!output.contains("macmon_net_") && !output.contains("macmon_disk_"));
+
+    metrics.net_in = Some(1000);
+    metrics.disk_write = Some(2000);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_net_in_bytes_per_second{chip=\"\"} 1000\n"));
+    assert!(output.contains("macmon_disk_write_bytes_per_second{chip=\"\"} 2000\n"));
+    assert!(!output.contains("macmon_net_out") && !output.contains("macmon_disk_read"));
+  }
+
+  #[test]
+  fn net_and_disk_in_json_are_numbers_or_null() {
+    let metrics = Metrics { net_out: Some(1000), ..Default::default() };
+    let json = to_json(&metrics, &SocInfo::default());
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json.get("net_in"), Some(&serde_json::Value::Null));
+    assert_eq!(json.get("net_out"), Some(&serde_json::json!(1000)));
+    assert_eq!(json.get("disk_read"), Some(&serde_json::Value::Null));
   }
 
   #[test]
