@@ -42,8 +42,15 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
-  // `gauge_any!`: a gauge every Mac and VM has.
+  // `gauge_any!`: a gauge every Mac and VM has; `?` before the value leaves it out without a value.
   macro_rules! gauge_any {
+    // This `?` isn't Rust's `?` operator but this macro's own marker for an `Option` value: the
+    // gauge is left out when it is `None`.
+    ($out:expr, $name:literal, $help:literal, ?$value:expr) => {
+      if let Some(value) = $value {
+        gauge_any!($out, $name, $help, value);
+      }
+    };
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
       gauge_head!($out, $name, $help);
       let name = metric_name!($name);
@@ -84,16 +91,14 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   }
 
   let mut out = String::new();
-  if let Some(value) = m.temp.cpu_temp_avg {
-    gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
-  }
-  if let Some(value) = m.temp.gpu_temp_avg {
-    gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", value);
-  }
+  gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", ?m.temp.cpu_temp_avg);
+  gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", ?m.temp.gpu_temp_avg);
   gauge_any!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
   gauge_any!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge_any!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
+  gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", ?m.memory.pressure_level);
+  gauge_any!(out, "memory_pressure_percent", "Memory pressure in percent, as in Activity Monitor", ?m.memory.pressure_percent);
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
@@ -451,6 +456,36 @@ mod tests {
     assert!(output.contains("macmon_cpu_temp_celsius{chip=\"\"} 45"));
     assert!(!output.contains("macmon_gpu_temp_celsius"));
     assert!(output.contains("macmon_gpu_freq_mhz"));
+  }
+
+  #[test]
+  fn memory_pressure_gauge_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(!output.contains("macmon_memory_pressure_"));
+
+    metrics.memory.pressure_level = Some(1);
+    metrics.memory.pressure_percent = Some(25);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("# TYPE macmon_memory_pressure_level gauge\n"));
+    assert!(output.contains("macmon_memory_pressure_level{chip=\"\"} 1\n"));
+    assert!(output.contains("# TYPE macmon_memory_pressure_percent gauge\n"));
+    assert!(output.contains("macmon_memory_pressure_percent{chip=\"\"} 25\n"));
+  }
+
+  #[test]
+  fn memory_pressure_in_json_is_a_number_or_null() {
+    let mut metrics = Metrics::default();
+    let fields = |metrics: &Metrics| {
+      let json = to_json(metrics, &SocInfo::default());
+      let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+      ["pressure_level", "pressure_percent"].map(|x| json["memory"].get(x).cloned())
+    };
+    assert_eq!(fields(&metrics), [Some(serde_json::Value::Null), Some(serde_json::Value::Null)]);
+
+    metrics.memory.pressure_level = Some(2);
+    metrics.memory.pressure_percent = Some(59);
+    assert_eq!(fields(&metrics), [Some(serde_json::json!(2)), Some(serde_json::json!(59))]);
   }
 
   #[test]

@@ -724,6 +724,35 @@ fn sysctl_u64(name: &str) -> Option<u64> {
   sysctl_buf(name).map(u64::from_ne_bytes)
 }
 
+/// `kern.memorystatus_level`, readable without root.
+pub(crate) fn memory_status_raw() -> Option<u32> {
+  sysctl_u32("kern.memorystatus_level")
+}
+
+/// Memory pressure in percent as in Activity Monitor, which reads the same level through
+/// `memorystatus_get_level()` and shows 100 minus it. `None` for a level above 100.
+pub(crate) fn memory_pressure_percent(raw: u32) -> Option<u8> {
+  u8::try_from(raw).ok().and_then(|x| 100u8.checked_sub(x))
+}
+
+/// The kernel's memory pressure level as the raw sysctl value; readable without root.
+pub(crate) fn memory_pressure_raw() -> Option<u32> {
+  sysctl_u32("kern.memorystatus_vm_pressure_level")
+}
+
+/// 0 normal, 1 warning, 2 critical from the sysctl value: XNU returns its
+/// `NOTE_MEMORYSTATUS_PRESSURE_*` flags (`bsd/sys/event_private.h`), the same as
+/// `DISPATCH_MEMORYPRESSURE_*` (1, 2, 4), see `sysctl_memorystatus_vm_pressure_level` in
+/// `bsd/kern/kern_memorystatus_notify.c`.
+pub(crate) fn memory_pressure_level(raw: u32) -> Option<u8> {
+  match raw {
+    1 => Some(0),
+    2 => Some(1),
+    4 => Some(2),
+    _ => None,
+  }
+}
+
 /// Read an integer CFNumber property from an IORegistry properties dictionary.
 fn cfnum_get_i64(dict: CFDictionaryRef, key: &str) -> Option<i64> {
   let obj = cfdict_get_val(dict, key)? as CFNumberRef;
@@ -1819,6 +1848,22 @@ mod tests {
     let soc = soc_info_from(m2(), Some((vec![600, 912], vec![660, 3504], vec![444]))).unwrap();
     let freqs = soc.cpu_tiers.iter().map(|x| x.freqs.clone()).collect::<Vec<_>>();
     assert_eq!((freqs, soc.gpu_freqs), (vec![vec![600, 912], vec![660, 3504]], vec![444]));
+  }
+
+  #[test]
+  fn memory_pressure_percent_is_100_minus_the_level() {
+    let cases = [(75, Some(25)), (41, Some(59)), (0, Some(100)), (100, Some(0))];
+    for (raw, percent) in cases.into_iter().chain([(101, None), (300, None)]) {
+      assert_eq!(memory_pressure_percent(raw), percent, "{raw}");
+    }
+  }
+
+  #[test]
+  fn memory_pressure_level_maps_the_kernel_flags() {
+    let cases = [(1, Some(0)), (2, Some(1)), (4, Some(2)), (0, None), (3, None), (8, None)];
+    for (raw, level) in cases {
+      assert_eq!(memory_pressure_level(raw), level, "{raw}");
+    }
   }
 
   #[test]

@@ -653,6 +653,7 @@ mod tests {
         ram_usage: 20 << 30,
         swap_total: 2 << 30,
         swap_usage: 1 << 30,
+        ..Default::default()
       },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
       cpu_tiers: vec![cpu_tier("E", 1800, 0.42, 0.5), cpu_tier("P", 3200, 0.77, 0.8)],
@@ -1445,6 +1446,7 @@ mod tests {
           ram_usage: (16.81 * GIB) as u64,
           swap_total: if swap { 3 << 30 } else { 0 },
           swap_usage: if swap { (2.37 * GIB) as u64 } else { 0 },
+          ..Default::default()
         }
       })
     };
@@ -1472,6 +1474,42 @@ mod tests {
         let top = box_top(&app, &buf, Metric::Ram);
         assert_eq!(top, format!("╭{title}{dashes}╮"), "swap {has_swap} at {width}");
       }
+    }
+  }
+
+  #[test]
+  fn ram_box_plots_the_pressure_in_the_color_of_its_level() {
+    use ratatui::style::Color::{Green, Red, Yellow};
+
+    // (RAM %, level, pressure %, color of the newest bar, whether it reaches the top); the last
+    // two rows have no reading, so the RAM in its load colors
+    let cases = [
+      (20, Some(0), Some(100), Green, true),
+      (20, None, Some(100), Green, true),
+      (20, Some(1), Some(100), Yellow, true),
+      (20, Some(2), Some(100), Red, true),
+      (100, Some(0), Some(1), Green, false),
+      (100, None, None, Red, true),
+      (20, Some(2), None, Green, false),
+    ];
+    for (ram, level, percent, color, top) in cases {
+      let mut app = test_app_with(|m| {
+        m.memory.ram_usage = m.memory.ram_total / 100 * ram;
+        m.memory.pressure_level = level;
+        m.memory.pressure_percent = percent;
+      });
+      let buf = render_buffer(&mut app, 330, 50);
+      let (_, r) = app.layout(buf.area).boxes.into_iter().find(|x| x.0 == Metric::Ram).unwrap();
+      assert_eq!(buf[(r.right() - 2, r.bottom() - 2)].fg, color);
+      assert_eq!(buf[(r.right() - 2, r.y + 1)].symbol() != " ", top);
+
+      // the gauge: as many of the 80 cells as the pressure or the RAM take, in the same color
+      app.cfg.view_type = ViewType::Gauge;
+      let buf = render_buffer(&mut app, 330, 50);
+      let cells = (r.x + 1..r.right() - 1).filter(|&x| buf[(x, r.y + 1)].symbol() != " ");
+      let share = percent.map_or(ram, u64::from);
+      assert_eq!(cells.count() as u64, (share * 80 + 50) / 100);
+      assert_eq!(buf[(r.x + 1, r.y + 1)].fg, color);
     }
   }
 
