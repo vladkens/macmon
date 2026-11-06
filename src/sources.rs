@@ -564,17 +564,20 @@ pub(crate) fn uptime_secs() -> Option<u64> {
   now.checked_sub(boot.tv_sec as u64)
 }
 
-/// Percent and whether it is charging, from the properties of `AppleSmartBattery`. As in
-/// `pmset -g batt`: on Apple Silicon `CurrentCapacity` is the percent, not mAh.
-fn battery_from(props: CFDictionaryRef) -> Option<(u8, bool)> {
+/// Percent, whether it is charging and whether external power is connected, from the properties
+/// of `AppleSmartBattery`. As in `pmset -g batt`: on Apple Silicon `CurrentCapacity` is the
+/// percent, not mAh.
+fn battery_from(props: CFDictionaryRef) -> Option<(u8, bool, bool)> {
+  let flag = |key| {
+    let val = cfdict_get_val(props, key)?;
+    Some(bool::from(unsafe { CFBoolean::wrap_under_get_rule(val as _) }))
+  };
   let percent = u8::try_from(cfnum_get_i64(props, "CurrentCapacity")?).ok()?;
-  let charging = cfdict_get_val(props, "IsCharging")?;
-  let charging = unsafe { CFBoolean::wrap_under_get_rule(charging as _) };
-  Some((percent, charging.into()))
+  Some((percent, flag("IsCharging")?, flag("ExternalConnected")?))
 }
 
-/// Percent and charging state of the internal battery, or None on a desktop.
-pub(crate) fn battery() -> Option<(u8, bool)> {
+/// Percent, charging and plugged in state of the internal battery, or None on a desktop.
+pub(crate) fn battery() -> Option<(u8, bool, bool)> {
   read_services("AppleSmartBattery", battery_from).pop()
 }
 
@@ -1775,17 +1778,19 @@ mod tests {
   use super::*;
 
   #[test]
-  fn battery_needs_percent_and_charging_state() {
+  fn battery_needs_percent_charging_and_plugged_state() {
     let key = |x| CFString::new(x).as_CFType();
     let percent = |x: i32| (key("CurrentCapacity"), CFNumber::from(x).as_CFType());
-    let charging = (key("IsCharging"), CFBoolean::true_value().as_CFType());
+    let charging = (key("IsCharging"), CFBoolean::false_value().as_CFType());
+    let plugged = (key("ExternalConnected"), CFBoolean::true_value().as_CFType());
     let read = |pairs: &[(CFType, CFType)]| {
       battery_from(CFDictionary::from_CFType_pairs(pairs).as_concrete_TypeRef())
     };
 
-    assert_eq!(read(&[percent(87), charging.clone()]), Some((87, true)));
-    assert_eq!(read(&[percent(87)]), None);
-    assert_eq!(read(&[percent(-1), charging]), None);
+    assert_eq!(read(&[percent(87), charging.clone(), plugged.clone()]), Some((87, false, true)));
+    assert_eq!(read(&[percent(87), charging.clone()]), None);
+    assert_eq!(read(&[percent(87), plugged.clone()]), None);
+    assert_eq!(read(&[percent(-1), charging, plugged]), None);
   }
 
   #[test]

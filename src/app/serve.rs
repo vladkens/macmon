@@ -106,6 +106,7 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_any!(out, "uptime_seconds", "Seconds since boot", ?m.uptime);
   gauge_any!(out, "battery_percent", "Battery charge in percent", ?m.battery_percent);
   gauge_any!(out, "battery_charging", "1 while the battery is charging, 0 otherwise", ?m.battery_charging.map(u8::from));
+  gauge_any!(out, "battery_plugged", "1 while external power is connected, 0 on battery", ?m.battery_plugged.map(u8::from));
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
@@ -514,11 +515,13 @@ mod tests {
 
     metrics.uptime = Some(3600);
     (metrics.battery_percent, metrics.battery_charging) = (Some(87), Some(true));
+    metrics.battery_plugged = Some(false);
     let output = to_prometheus(&metrics, &SocInfo::default());
     for line in [
       "macmon_uptime_seconds{chip=\"\"} 3600\n",
       "macmon_battery_percent{chip=\"\"} 87\n",
       "macmon_battery_charging{chip=\"\"} 1\n",
+      "macmon_battery_plugged{chip=\"\"} 0\n",
     ] {
       assert!(output.contains(line), "{line}");
     }
@@ -530,17 +533,24 @@ mod tests {
     let fields = |metrics: &Metrics| {
       let json = to_json(metrics, &SocInfo::default());
       let json: serde_json::Value = serde_json::from_str(&json).unwrap();
-      ["uptime", "battery_percent", "battery_charging"].map(|x| json.get(x).cloned())
+      ["uptime", "battery_percent", "battery_charging", "battery_plugged"]
+        .map(|x| json.get(x).cloned())
     };
-    assert_eq!(fields(&Metrics::default()), [null.clone(), null.clone(), null]);
+    assert_eq!(fields(&Metrics::default()), [null.clone(), null.clone(), null.clone(), null]);
 
     let metrics = Metrics {
       uptime: Some(3600),
       battery_percent: Some(87),
       battery_charging: Some(false),
+      battery_plugged: Some(true),
       ..Default::default()
     };
-    let values = [serde_json::json!(3600), serde_json::json!(87), serde_json::json!(false)];
+    let values = [
+      serde_json::json!(3600),
+      serde_json::json!(87),
+      serde_json::json!(false),
+      serde_json::json!(true),
+    ];
     assert_eq!(fields(&metrics), values.map(Some));
   }
 

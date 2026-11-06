@@ -231,6 +231,8 @@ pub struct Metrics {
   pub battery_percent: Option<u8>,
   /// Whether the battery is charging, or None without a battery.
   pub battery_charging: Option<bool>,
+  /// Whether external power is connected, charging or not, or None without a battery.
+  pub battery_plugged: Option<bool>,
 }
 
 // MARK: Helpers
@@ -863,7 +865,10 @@ impl Sampler {
     self.bytes = Some(cur);
 
     rs.uptime = uptime_secs();
-    (rs.battery_percent, rs.battery_charging) = battery().unzip();
+    let battery = battery();
+    rs.battery_percent = battery.map(|x| x.0);
+    rs.battery_charging = battery.map(|x| x.1);
+    rs.battery_plugged = battery.map(|x| x.2);
 
     Ok(rs)
   }

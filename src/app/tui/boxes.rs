@@ -339,13 +339,13 @@ pub(super) fn rates_line(m: &Metrics) -> Vec<Span<'static>> {
   pieces.into_iter().flatten().map(text).collect()
 }
 
-/// Uptime and battery for the title of the metrics box, the first kept longest. Metrics without a
-/// value are left out.
+/// Uptime and battery for the title of the metrics box, the first kept longest: `bat 100%+` when
+/// plugged in, charging or full, `bat 87%` on battery. Metrics without a value are left out.
 pub(super) fn system_titles(m: &Metrics) -> Vec<Span<'static>> {
-  let charging = if m.battery_charging == Some(true) { "+" } else { "" };
+  let plugged = if m.battery_plugged == Some(true) { "+" } else { "" };
   let pieces = [
     m.uptime.map(|x| format!("up {}", format_uptime(x))),
-    m.battery_percent.map(|x| format!("bat {x}%{charging}")),
+    m.battery_percent.map(|x| format!("bat {x}%{plugged}")),
   ];
   pieces.into_iter().flatten().map(text).collect()
 }

@@ -1465,10 +1465,18 @@ mod tests {
   fn uptime_and_battery_in_the_metrics_title_go_before_anything_else() {
     let mut app = test_app_with(|m| {
       m.uptime = Some(273600);
-      (m.battery_percent, m.battery_charging) = (Some(87), Some(true));
+      (m.battery_percent, m.battery_charging, m.battery_plugged) =
+        (Some(87), Some(false), Some(true));
     });
     let top = row(&render_buffer(&mut app, 200, 50), 0);
     assert!(top.contains(") ─ up 3d 4h ─ bat 87%+ ─"), "{top}");
+
+    // on battery: no `+`
+    let mut on_battery = test_app_with(|m| {
+      (m.battery_percent, m.battery_plugged) = (Some(87), Some(false));
+    });
+    let top = row(&render_buffer(&mut on_battery, 200, 50), 0);
+    assert!(top.contains(") ─ bat 87% ─"), "{top}");
 
     // whatever is shown, the rest of the title stays as it is without them
     let mut plain = test_app_with(|_| {});

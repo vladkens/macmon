@@ -139,7 +139,7 @@ pub fn print_debug() -> WithError<()> {
   println!("Network bytes in, out: {:?}", net_bytes());
   println!("Disk bytes read, written: {:?}", disk_bytes());
   println!("Uptime seconds: {:?}", uptime_secs());
-  println!("Battery percent, charging: {:?}", battery());
+  println!("Battery percent, charging, plugged in: {:?}", battery());
 
   print_divider("AppleARMIODevice");
   print_section(print_pmgr());

@@ -295,6 +295,7 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
   "uptime": 273600, // Seconds since boot, null when unavailable
   "battery_percent": 87, // Battery charge (0–100), null without a battery
   "battery_charging": true, // null without a battery
+  "battery_plugged": true, // External power connected, charging or not, null without a battery
 }
 ```
 
