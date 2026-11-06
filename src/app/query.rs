@@ -39,10 +39,10 @@ impl Cond {
     }
   }
 
-  /// A limit such as `>1g`, in the units of `read`.
+  /// A limit such as `>1g`, `<1g` or `1g` (the same as `>1g`), in the units of `read`.
   fn num(read: fn(&ProcInfo) -> Option<f64>, units: &[(&str, f64)], value: &str) -> Option<Self> {
-    let side = if value.starts_with('>') { Ordering::Greater } else { Ordering::Less };
-    let value = value.strip_prefix(['>', '<'])?;
+    let side = if value.starts_with('<') { Ordering::Less } else { Ordering::Greater };
+    let value = value.strip_prefix(['>', '<']).unwrap_or(value);
     let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
     let (_, worth) = units.iter().find(|(unit, _)| *unit == &value[number.len()..])?;
     Some(Self::Num(read, side, number.parse::<f64>().ok()? * worth))
@@ -190,12 +190,15 @@ mod tests {
       ("time:>76s", &[77]),
       ("time:>1h", &[]),
       ("time:<1d", &all),
+      // no sign: `>`
+      ("cpu:50", &[4410]),
+      ("mem:500m", &[2301]),
+      ("time:1m", &[77]),
       // values not complete yet
       ("mem:", &all),
       ("mem:>", &all),
       ("mem:>1x", &all),
       ("power:>1g", &all),
-      ("cpu:50", &all),
       ("user:", &all),
       ("!mem:>", &all),
       ("saf mem:>", &[2301, 77]),
