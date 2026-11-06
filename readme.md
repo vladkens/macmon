@@ -142,7 +142,7 @@ sudo macmon serve --install --daemon    # install and start (takes --host and --
 sudo macmon serve --uninstall --daemon  # stop and remove
 ```
 
-This creates `/Library/LaunchDaemons/com.macmon.plist`. The daemon runs as the user who called `sudo`, not as root. Remove the agent first if you have one (`macmon serve --uninstall`): both want the same port.
+This creates `/Library/LaunchDaemons/com.macmon.plist`. The daemon runs as the user who called `sudo`, not as root, and with FileVault on it starts after the disk is unlocked following a restart. Remove the agent first if you have one (`macmon serve --uninstall`): both want the same port.
 
 #### Prometheus and Grafana
 

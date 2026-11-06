@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
+use std::time::Duration;
 
 use macmon::{Metrics, SocInfo};
 
@@ -298,54 +299,80 @@ fn user_home(user: &str) -> Option<String> {
   Some(dir.to_string_lossy().into_owned())
 }
 
-pub fn launch_daemon(
-  host: &str,
-  port: u16,
-  install: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-  if unsafe { libc::geteuid() } != 0 {
-    let args = std::env::args().collect::<Vec<_>>().join(" ");
-    eprintln!("the macmon daemon needs root, run: sudo {args}");
-    std::process::exit(1);
-  }
-
-  // bootout silently in case it's already running
+fn bootout_daemon() {
   let _ = std::process::Command::new("launchctl")
     .args(["bootout", DAEMON_TARGET])
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null())
     .status();
+}
+
+fn bootstrap_daemon() -> Result<(), Box<dyn std::error::Error>> {
+  let mut tries = 6;
+
+  loop {
+    let args = ["bootstrap", "system", DAEMON_PLIST];
+    let out = std::process::Command::new("launchctl").args(args).output()?;
+    if out.status.success() {
+      return Ok(());
+    }
+
+    tries -= 1;
+    if tries == 0 {
+      let err = String::from_utf8_lossy(&out.stderr);
+      let err = err.trim();
+      let msg = format!("launchctl bootstrap failed, {DAEMON_PLIST} stays for next boot: {err}");
+      return Err(msg.into());
+    }
+
+    // right after bootout launchd may still be removing the old service
+    thread::sleep(Duration::from_millis(500));
+  }
+}
+
+// A plain root shell has no SUDO_USER, or has root in it: a daemon must never run as root.
+fn daemon_user(sudo_user: Option<String>) -> Option<String> {
+  sudo_user.filter(|x| !x.is_empty() && x != "root")
+}
+
+pub fn launch_daemon(
+  host: &str,
+  port: u16,
+  install: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let args = std::env::args().collect::<Vec<_>>().join(" ");
+
+  if unsafe { libc::geteuid() } != 0 {
+    eprintln!("the macmon daemon needs root, run: sudo {args}");
+    std::process::exit(1);
+  }
 
   if !install {
+    bootout_daemon();
     std::fs::remove_file(DAEMON_PLIST)?;
     eprintln!("macmon daemon uninstalled");
     return Ok(());
   }
 
-  let user = std::env::var("SUDO_USER").ok().filter(|x| !x.is_empty() && x != "root");
+  let Some(user) = daemon_user(std::env::var("SUDO_USER").ok()) else {
+    eprintln!("the macmon daemon must not run as root, from your own account run: sudo {args}");
+    std::process::exit(1);
+  };
+
   let bin = std::env::current_exe()?;
-  let plist = plist(&bin.to_string_lossy(), host, port, user.as_deref());
+  let plist = plist(&bin.to_string_lossy(), host, port, Some(&user));
 
   // launchd refuses a plist that isn't root-owned or is writable by others; umask can't be trusted
   std::fs::write(DAEMON_PLIST, plist)?;
   std::os::unix::fs::chown(DAEMON_PLIST, Some(0), Some(0))?;
   std::fs::set_permissions(DAEMON_PLIST, std::fs::Permissions::from_mode(0o644))?;
 
-  let status =
-    std::process::Command::new("launchctl").args(["bootstrap", "system", DAEMON_PLIST]).status()?;
-  if !status.success() {
-    std::fs::remove_file(DAEMON_PLIST)?;
-    return Err(format!("launchctl bootstrap failed: {status}").into());
-  }
+  // the file goes first: if writing it fails, the running service is still up
+  bootout_daemon();
+  bootstrap_daemon()?;
 
   eprintln!("macmon daemon installed: {DAEMON_PLIST}");
   eprintln!("configured to serve on {}", serve_url(host, port));
-
-  let Some(user) = user else {
-    eprintln!("no SUDO_USER: the daemon runs as root");
-    return Ok(());
-  };
-
   eprintln!("the daemon runs as {user}");
 
   let agent = user_home(&user).map(|x| format!("{x}/Library/LaunchAgents/com.macmon.plist"));
@@ -382,7 +409,9 @@ pub fn run(
 mod tests {
   use macmon::{CpuTierMetrics, Metrics, SocInfo};
 
-  use super::{escape_label_value, escape_xml, plist, serve_url, to_json, to_prometheus};
+  use super::{
+    daemon_user, escape_label_value, escape_xml, plist, serve_url, to_json, to_prometheus,
+  };
 
   const AGENT_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -469,6 +498,15 @@ mod tests {
     let user = "  <key>UserName</key>\n  <string>a&amp;b</string>\n";
     let expected = AGENT_PLIST.replace("</dict>", &format!("{user}</dict>"));
     assert_eq!(plist("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, Some("a&b")), expected);
+  }
+
+  #[test]
+  fn daemon_needs_a_non_root_sudo_user() {
+    assert_eq!(daemon_user(Some("user".into())), Some("user".into()));
+
+    for value in [None, Some(String::new()), Some("root".into())] {
+      assert_eq!(daemon_user(value), None);
+    }
   }
 
   #[test]

@@ -297,6 +297,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       thread::spawn(move || {
         if let Err(e) = serve::run(&host, port, shared_http, soc_http) {
           eprintln!("server error: {e}");
+          std::process::exit(1); // without HTTP there is nothing to run for; launchd retries
         }
       });
 

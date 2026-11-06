@@ -118,9 +118,9 @@ POWER does today.
 - [ ] **21. Supported macOS versions.** Asked on Reddit, and the readme doesn't say. Find the
       oldest version macmon runs on and state it in the readme.
 
-Order for 0.11: 14, 17, then 5 (decide which columns fit 80 cells; 6 only if too many), the
-second PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13
-are small and self-contained, good for an outside contributor.
+Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
+the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and
+self-contained, good for an outside contributor.
 
 Later, only on request: per-process network (only `nettop` has it without root), history
 graphs per process, Activity Monitor's Memory and Statistics tabs (context switches, faults,
