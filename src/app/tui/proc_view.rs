@@ -21,6 +21,7 @@ use super::store::ratio;
 use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
 use crate::procs::ProcInfo;
+use crate::query::Query;
 
 /// Narrowest NAME column; other columns are dropped to keep it.
 const NAME_MIN_WIDTH: u16 = 8;
@@ -265,110 +266,6 @@ impl Filter {
   pub(super) fn matches(&self, hit: impl Fn(&str) -> bool) -> bool {
     let hit = |term: &String| hit(term);
     (self.any.is_empty() || self.any.iter().any(hit)) && !self.none.iter().any(hit)
-  }
-}
-
-/// Units of a number in a filter word and their worth: no unit, bytes (binary, as the MEM column
-/// shows them) and seconds.
-const NUM: &[(&str, f64)] = &[("", 1.0)];
-const MEM: &[(&str, f64)] = &[("", 1.0), ("k", 1024.0), ("m", 1048576.0), ("g", 1073741824.0)];
-const TIME: &[(&str, f64)] = &[("", 1.0), ("s", 1.0), ("m", 60.0), ("h", 3600.0), ("d", 86400.0)];
-
-/// What one word of a process filter looks for.
-enum Cond {
-  /// Lowercase text in the name or pid.
-  Text(String),
-  /// Lowercase text in the value of a key.
-  Has(fn(&ProcInfo) -> &str, String),
-  /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
-  Num(fn(&ProcInfo) -> Option<f64>, Ordering, f64),
-}
-
-impl Cond {
-  /// `None` for a known key with a value that isn't complete yet, and for an empty word; a word
-  /// without a known key is text.
-  fn parse(word: &str) -> Option<Self> {
-    let (key, value) = word.split_once(':').unwrap_or(("", word));
-    match key {
-      _ if word.is_empty() => None,
-      "user" | "path" if value.is_empty() => None,
-      "user" => Some(Self::Has(|p| &p.user, value.to_string())),
-      "path" => Some(Self::Has(|p| &p.path, value.to_string())),
-      "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
-      "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
-      "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
-      "mem" => Self::num(|p| Some(p.mem_bytes as f64), MEM, value.trim_end_matches('b')),
-      "time" => Self::num(|p| Some(p.cpu_time_ns as f64 / 1e9), TIME, value),
-      _ => Some(Self::Text(word.to_string())),
-    }
-  }
-
-  /// A limit such as `>1g`, in the units of `read`.
-  fn num(read: fn(&ProcInfo) -> Option<f64>, units: &[(&str, f64)], value: &str) -> Option<Self> {
-    let side = if value.starts_with('>') { Ordering::Greater } else { Ordering::Less };
-    let value = value.strip_prefix(['>', '<'])?;
-    let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    let (_, worth) = units.iter().find(|(unit, _)| *unit == &value[number.len()..])?;
-    Some(Self::Num(read, side, number.parse::<f64>().ok()? * worth))
-  }
-
-  fn hit(&self, proc: &ProcInfo) -> bool {
-    match self {
-      Self::Text(text) => {
-        proc.name.to_lowercase().contains(text) || proc.pid.to_string().contains(text)
-      }
-      Self::Has(read, text) => read(proc).to_lowercase().contains(text),
-      Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
-    }
-  }
-}
-
-/// One comma-separated term of a process filter: its text and its words, `true` for a negated one.
-struct Term {
-  text: String,
-  words: Vec<(bool, Cond)>,
-}
-
-impl Term {
-  /// `None` without a complete word: such a term is ignored, as an empty one is.
-  fn parse(text: &str) -> Option<Self> {
-    let text = text.trim().to_lowercase();
-    let mut words = vec![];
-    let mut bang = false;
-    for word in text.split_whitespace() {
-      let bare = word.strip_prefix('!');
-      let (not, word) = (bang || bare.is_some(), bare.unwrap_or(word));
-      // `!` alone goes with the next word: `! helper`
-      bang = word.is_empty();
-      words.extend(Cond::parse(word).map(|cond| (not, cond)));
-    }
-
-    (!words.is_empty()).then_some(Self { text, words })
-  }
-
-  fn hit(&self, proc: &ProcInfo) -> bool {
-    self.words.iter().all(|(not, cond)| cond.hit(proc) != *not)
-  }
-}
-
-/// `Filter` of the process list, with words in its terms: in `node !user:root, cargo mem:>1g,
-/// !helper` a row passes if it matches any term and every term of only negated words, which has no
-/// total row.
-struct Query {
-  any: Vec<Term>,
-  none: Vec<Term>,
-}
-
-impl Query {
-  fn parse(text: &str) -> Self {
-    let terms = text.split(',').filter_map(Term::parse);
-    let (none, any) = terms.partition(|t| t.words.iter().all(|(not, _)| *not));
-    Self { any, none }
-  }
-
-  fn matches(&self, proc: &ProcInfo) -> bool {
-    let any = self.any.is_empty() || self.any.iter().any(|t| t.hit(proc));
-    any && self.none.iter().all(|t| t.hit(proc))
   }
 }
 
@@ -1237,9 +1134,7 @@ mod tests {
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
 
-  use super::{
-    ProcView, Query, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time,
-  };
+  use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time};
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
   use crate::tui::boxes::draw_box;
@@ -1640,88 +1535,6 @@ mod tests {
       type_str(&mut view, filter);
       assert_eq!(pids(&view), expected, "{filter:?}");
     }
-  }
-
-  #[test]
-  fn queries_match_words_and_keys() {
-    let mut procs = sample();
-    procs[0].user = "root".to_string();
-    procs[1].path = String::new();
-    procs[2].path = "/Applications/Safari.app/Contents/MacOS/Safari".to_string();
-    procs.push(proc(500, "Google Chrome", 1.0, 5, Some(0.1), 0.0));
-    procs.push(proc(501, "Google Chrome Helper", 1.0, 5, Some(0.1), 0.0));
-    procs.push(proc(502, "node:worker", 1.0, 5, Some(0.1), 0.0));
-    let all = [1, 631, 2301, 4410, 77, 500, 501, 502];
-
-    let cases: &[(&str, &[i32])] = &[
-      // old filters
-      ("safari, cargo", &[2301, 4410, 77]),
-      ("chrome, !helper", &[500]),
-      ("chrome, ! helper", &[500]),
-      ("safari,", &[2301, 77]),
-      ("safari, !", &[2301, 77]),
-      // all words of a term
-      ("google helper", &[501]),
-      ("saf mem:>500m", &[2301]),
-      ("saf mem:>500m, cargo", &[2301, 4410]),
-      // `!` words
-      ("saf !bookmark", &[2301]),
-      ("!bookmark saf", &[2301]),
-      ("!google !saf !node", &[1, 631, 4410]),
-      ("d !user:root", &[631, 502]),
-      // keys, with `>` and `<`
-      ("cpu:>50", &[4410]),
-      ("cpu:<0.5", &[77]),
-      ("gpu:>5", &[631]),
-      ("gpu:<5", &[1, 4410, 77, 500, 501, 502]),
-      ("power:>1", &[631, 4410]),
-      ("power:<0.5", &[77, 500, 501, 502]),
-      ("mem:>500m", &[2301]),
-      ("mem:<6", &[]),
-      ("time:>1m", &[77]),
-      ("time:<2", &[1, 2301, 500, 501]),
-      ("user:ROOT", &[1]),
-      ("path:/applications", &[2301]),
-      // units
-      ("mem:>899mb", &[2301]),
-      ("mem:>900m", &[]),
-      ("mem:<6144k", &[500, 501, 502]),
-      ("mem:<6144kb", &[500, 501, 502]),
-      ("mem:>0.8G", &[2301]),
-      ("mem:>0.8gb", &[2301]),
-      ("mem:<1b", &[]),
-      ("time:>76s", &[77]),
-      ("time:>1h", &[]),
-      ("time:<1d", &all),
-      // values not complete yet
-      ("mem:", &all),
-      ("mem:>", &all),
-      ("mem:>1x", &all),
-      ("power:>1g", &all),
-      ("cpu:50", &all),
-      ("user:", &all),
-      ("!mem:>", &all),
-      ("saf mem:>", &[2301, 77]),
-      ("saf !mem:>1x", &[2301, 77]),
-      ("saf, mem:>", &[2301, 77]),
-      // unknown keys are text
-      ("node:work", &[502]),
-      ("foo:>1", &[]),
-      // no value for a key
-      ("power:<1000", &[631, 2301, 4410, 77, 500, 501, 502]),
-      ("!power:>1", &[1, 2301, 77, 500, 501, 502]),
-      ("path:/", &[1, 2301, 4410, 77, 500, 501, 502]),
-    ];
-
-    for (filter, expected) in cases {
-      let query = Query::parse(filter);
-      let hits: Vec<_> = procs.iter().filter(|p| query.matches(p)).map(|p| p.pid).collect();
-      assert_eq!(hits, *expected, "{filter:?}");
-    }
-
-    // total rows: terms with a plain word, not the ignored or negated ones
-    let query = Query::parse(" Saf  mem:>1, mem:>, !bookmark");
-    assert_eq!(query.any.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["saf  mem:>1"]);
   }
 
   #[test]
