@@ -271,6 +271,29 @@ pub(crate) fn exe_path(pid: i32) -> Option<String> {
   Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
 }
 
+/// Command line as `ps` shows it: the arguments joined by spaces, without the environment that
+/// follows them. `None` for other users' processes (`EINVAL` without root) and gone ones.
+pub(crate) fn cmd_line(pid: i32) -> Option<String> {
+  let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+  let mut call = |buf: *mut u8, size: &mut usize| unsafe {
+    libc::sysctl(mib.as_mut_ptr(), 3, buf.cast(), size, std::ptr::null_mut(), 0) == 0
+  };
+
+  // With a NULL buffer it gives the size.
+  let mut size = 0;
+  call(std::ptr::null_mut(), &mut size).then_some(())?;
+  let mut buf = vec![0u8; size];
+  call(buf.as_mut_ptr(), &mut size).then_some(())?;
+  buf.truncate(size);
+
+  // `argc`, the executable path, NUL padding, then the arguments and the environment
+  let (argc, rest) = buf.split_first_chunk()?;
+  let rest = &rest[rest.iter().position(|&b| b == 0)?..];
+  let rest = &rest[rest.iter().position(|&b| b != 0)?..];
+  let args = rest.split(|&b| b == 0).take(i32::from_ne_bytes(*argc) as usize);
+  Some(args.map(String::from_utf8_lossy).collect::<Vec<_>>().join(" "))
+}
+
 /// Reads a process through libproc; fails for other users' processes.
 fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<Raw> {
   let info = bsd_info(pid)?;

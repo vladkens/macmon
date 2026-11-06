@@ -118,6 +118,13 @@ POWER does today.
 - [x] **22. Filter queries.** Filter the process list by more than the name, with words like
       `mem:>1g` and `user:root`, as fsearch does.
       Plan: [docs/plans/completed/20261106-filter-query.md](plans/completed/20261106-filter-query.md).
+- [x] **23. Process command line.** `node` and `python` differ only by their arguments: `cmd:`
+      in the filter and a `cmd` row in the `i` overlay, from `sysctl` `KERN_PROCARGS2`, read only
+      while a filter uses it. Own processes only: other users' need a `ps` run per refresh, about
+      7 times the cost of reading the own ones.
+- [ ] **24. A cheaper process list.** macmon's own cost with the process list is 1.7 to 2 s of
+      CPU a minute at 1 s, against 0.3 for htop and 1 for btop, and 0.3 without the list. Most of
+      it is `ps`, which gives other users' processes; look for a cheaper way.
 
 Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
 the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and

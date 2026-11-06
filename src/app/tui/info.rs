@@ -1,5 +1,5 @@
-//! The info overlay (`i`): the executable, working directory, open files and sockets of the
-//! selected process, under a line counting the descriptors; `e` reveals one.
+//! The info overlay (`i`): the executable, command line, working directory, open files and sockets
+//! of the selected process, under a line counting the descriptors; `e` reveals one.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
@@ -229,8 +229,8 @@ impl Info {
         self.follow();
       }
       KeyCode::Char('e') => {
-        // exe, cwd, dir and file rows, not sockets
-        if let Some(row) = self.rows().get(self.index).filter(|row| row.kind <= Kind::File) {
+        // exe, cwd, dir and file rows, not the command line or sockets
+        if let Some(row) = self.rows().get(self.index).filter(|row| row.kind.is_path()) {
           sys.reveal(&row.text);
         }
       }
@@ -340,9 +340,9 @@ impl Info {
       let columns = format!(" {:5} {:2}  ", row.kind.label(), row.mode);
       let count = if row.count > 1 { format!("  ×{}", row.count) } else { String::new() };
       let room = usize::from(list.width).saturating_sub(COLUMNS + 1 + Span::raw(&count).width());
-      let shown = match row.kind {
-        kind if kind > Kind::File => cut_middle(&self.tilde(&row.text), room), // sockets
-        _ => cut_path(&self.tilde(&row.text), room),
+      let shown = match row.kind.is_path() {
+        true => cut_path(&self.tilde(&row.text), room),
+        false => cut_middle(&self.tilde(&row.text), room),
       };
       let line = Rect { y, height: 1, ..list };
       f.render_widget(Line::from(vec![side(columns), text(shown), side(count)]), line);
@@ -607,8 +607,9 @@ mod tests {
     let mut files = files();
     files.push(file(10, Kind::File, "r-", ""));
     files.push(file(11, Kind::Dir, "r-", "/Users/vlad/Downloads"));
+    files.push(file(-1, Kind::Cmd, "", "node server.js"));
     let (mut info, fake) = info(Ok(files));
-    // `e` on every row: not the sockets; `f` nothing
+    // `e` on every row: not the command line or the sockets; `f` nothing
     for _ in 0..info.rows().len() {
       assert!(press(&mut info, &fake, KeyCode::Char('f')));
       assert!(press(&mut info, &fake, KeyCode::Char('e')));

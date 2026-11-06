@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::ffi::c_int;
 
 use crate::fds::cwd;
-use crate::procs::{ProcInfo, exe_path};
+use crate::procs::{ProcInfo, cmd_line, exe_path};
 
 unsafe extern "C" {
   /// The process macOS holds responsible for `pid`, such as Safari for its WebKit services, which
@@ -26,6 +26,8 @@ enum Cond {
   Has(fn(&ProcInfo) -> &str, String),
   /// Lowercase text in the working directory, read only for this word.
   Dir(String),
+  /// Lowercase text in the command line, read only for this word.
+  Cmd(String),
   /// Lowercase text in the name of the app of the process or of its responsible process.
   App(String),
   /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
@@ -39,10 +41,11 @@ impl Cond {
     let (key, value) = word.split_once(':').unwrap_or(("", word));
     match key {
       _ if word.is_empty() => None,
-      "user" | "path" | "dir" | "app" if value.is_empty() => None,
+      "user" | "path" | "dir" | "cmd" | "app" if value.is_empty() => None,
       "user" => Some(Self::Has(|p| &p.user, value.to_string())),
       "path" => Some(Self::Has(|p| &p.path, value.to_string())),
       "dir" => Some(Self::Dir(value.to_string())),
+      "cmd" => Some(Self::Cmd(value.to_string())),
       "app" => Some(Self::App(value.to_string())),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
@@ -71,6 +74,7 @@ impl Cond {
       Self::Dir(text) => {
         cwd(proc.pid).ok().flatten().is_some_and(|dir| dir.to_lowercase().contains(text))
       }
+      Self::Cmd(text) => cmd_line(proc.pid).is_some_and(|cmd| cmd.to_lowercase().contains(text)),
       Self::App(text) => in_app(proc, text),
       Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
     }
@@ -259,6 +263,7 @@ mod tests {
       ("power:>1g", &all),
       ("user:", &all),
       ("dir:", &all),
+      ("cmd:", &all),
       ("app:", &all),
       ("!mem:>", &all),
       ("saf mem:>", &[2301, 77]),
@@ -286,6 +291,11 @@ mod tests {
     assert!(!Query::parse("dir:/no/such/dir").matches(&own));
     assert!(!Query::parse("dir:/").matches(&gone));
 
+    // the command line: of this process, without its environment, none of a gone process
+    assert!(Query::parse("cmd:macmon").matches(&own));
+    assert!(!Query::parse("cmd:path=").matches(&own));
+    assert!(!Query::parse("cmd:/").matches(&gone));
+
     // the app of a process's own path; without a bundle, a name is no app
     let mut helper = proc(i32::MAX, "helper", 0.0, 0, None, 0.0);
     helper.path = "/Applications/Foo.app/Contents/Frameworks/Foo Helper.app/Foo Helper".to_string();
@@ -294,7 +304,7 @@ mod tests {
     assert!(!Query::parse("app:gone").matches(&gone));
 
     // bad words: known keys with values that aren't valid
-    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "app:", "cpu:>1g"] {
+    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "cmd:", "app:", "cpu:>1g"] {
       assert!(is_bad(word), "{word}");
     }
 
