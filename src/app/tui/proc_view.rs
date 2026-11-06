@@ -270,11 +270,9 @@ impl Filter {
 
 /// Units of a number in a filter word and their worth: no unit, bytes (binary, as the MEM column
 /// shows them) and seconds.
-const NUM_UNITS: &[(&str, f64)] = &[("", 1.0)];
-const MEM_UNITS: &[(&str, f64)] =
-  &[("", 1.0), ("k", 1024.0), ("m", 1048576.0), ("g", 1073741824.0)];
-const TIME_UNITS: &[(&str, f64)] =
-  &[("", 1.0), ("s", 1.0), ("m", 60.0), ("h", 3600.0), ("d", 86400.0)];
+const NUM: &[(&str, f64)] = &[("", 1.0)];
+const MEM: &[(&str, f64)] = &[("", 1.0), ("k", 1024.0), ("m", 1048576.0), ("g", 1073741824.0)];
+const TIME: &[(&str, f64)] = &[("", 1.0), ("s", 1.0), ("m", 60.0), ("h", 3600.0), ("d", 86400.0)];
 
 /// What one word of a process filter looks for.
 enum Cond {
@@ -296,26 +294,21 @@ impl Cond {
       "user" | "path" if value.is_empty() => None,
       "user" => Some(Self::Has(|p| &p.user, value.to_string())),
       "path" => Some(Self::Has(|p| &p.path, value.to_string())),
-      "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM_UNITS, value),
-      "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM_UNITS, value),
-      "power" => Self::num(|p| p.power_w.map(f64::from), NUM_UNITS, value),
-      "mem" => Self::num(|p| Some(p.mem_bytes as f64), MEM_UNITS, value.trim_end_matches('b')),
-      "time" => Self::num(|p| Some(p.cpu_time_ns as f64 / 1e9), TIME_UNITS, value),
+      "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
+      "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
+      "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
+      "mem" => Self::num(|p| Some(p.mem_bytes as f64), MEM, value.trim_end_matches('b')),
+      "time" => Self::num(|p| Some(p.cpu_time_ns as f64 / 1e9), TIME, value),
       _ => Some(Self::Text(word.to_string())),
     }
   }
 
   /// A limit such as `>1g`, in the units of `read`.
   fn num(read: fn(&ProcInfo) -> Option<f64>, units: &[(&str, f64)], value: &str) -> Option<Self> {
-    let (side, value) = match (value.strip_prefix('>'), value.strip_prefix('<')) {
-      (Some(value), _) => (Ordering::Greater, value),
-      (_, Some(value)) => (Ordering::Less, value),
-      _ => return None,
-    };
-
+    let side = if value.starts_with('>') { Ordering::Greater } else { Ordering::Less };
+    let value = value.strip_prefix(['>', '<'])?;
     let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    let unit = &value[number.len()..];
-    let (_, worth) = units.iter().find(|(name, _)| *name == unit)?;
+    let (_, worth) = units.iter().find(|(unit, _)| *unit == &value[number.len()..])?;
     Some(Self::Num(read, side, number.parse::<f64>().ok()? * worth))
   }
 
@@ -744,7 +737,7 @@ impl ProcView {
       self.exited.clear();
     }
 
-    self.refresh(false);
+    self.refresh(false, false);
   }
 
   /// Updates held processes by identity while paused, ignoring arrivals; the first sample
@@ -765,7 +758,7 @@ impl ProcView {
       self.procs = Some(procs);
     }
 
-    self.refresh(first_sample);
+    self.refresh(first_sample, self.paused && !first_sample);
   }
 
   /// Drops the list, ends filter input and forgets the mouse targets (the panel got hidden). The
@@ -776,12 +769,13 @@ impl ProcView {
     self.exited.clear();
     self.typing = false;
     self.targets = Targets::default();
-    self.refresh(false);
+    self.refresh(false, false);
   }
 
-  /// Re-filters and sorts on live samples or explicit requests. Selection follows identity,
-  /// and is dropped when that process is gone or filtered out.
-  fn refresh(&mut self, sort_requested: bool) {
+  /// Re-filters and sorts on live samples or explicit requests; `keep_rows` (a sample while
+  /// paused) only updates the totals. Selection follows identity, and is dropped when that process
+  /// is gone or filtered out.
+  fn refresh(&mut self, sort_requested: bool, keep_rows: bool) {
     let sort_now = !self.paused || sort_requested;
     let procs = self.procs.as_deref_mut().unwrap_or_default();
     if sort_now {
@@ -789,7 +783,10 @@ impl ProcView {
     }
 
     let filter = Query::parse(if self.filter_enabled { &self.filter } else { "" });
-    self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
+    if !keep_rows {
+      self.rows = (0..procs.len()).filter(|&i| filter.matches(&procs[i])).collect();
+    }
+
     let groups = filter
       .any
       .iter()
@@ -877,18 +874,18 @@ impl ProcView {
     match key.code {
       _ if self.typing => {
         if type_filter(&mut self.filter, &mut self.typing, key) {
-          self.refresh(false);
+          self.refresh(false, false);
         }
       }
       KeyCode::Char(' ') => self.toggle_pause(),
       KeyCode::Char('/') => {
         self.filter_enabled = true;
         self.typing = true;
-        self.refresh(false);
+        self.refresh(false, false);
       }
       KeyCode::Char('f') if !self.filter.is_empty() => {
         self.filter_enabled = !self.filter_enabled;
-        self.refresh(false);
+        self.refresh(false, false);
       }
       KeyCode::Char('f') => {}
       KeyCode::Char('S') => self.reverse_sort(),
@@ -898,7 +895,7 @@ impl ProcView {
         self.selected = None;
         self.filter.clear();
         self.offset = 0;
-        self.refresh(false);
+        self.refresh(false, false);
       }
       _ => return false,
     }
@@ -908,7 +905,7 @@ impl ProcView {
 
   fn reverse_sort(&mut self) {
     self.sort_desc = !self.sort_desc;
-    self.refresh(true);
+    self.refresh(true, false);
   }
 
   /// Sorts by `sort` in its own direction (`ProcSort::sorts_desc`); the current sort key reverses
@@ -921,7 +918,7 @@ impl ProcView {
       self.sort_desc = sort.sorts_desc();
     }
 
-    self.refresh(true);
+    self.refresh(true, false);
   }
 
   /// `s`: the next column on screen in the `ProcSort::next` cycle.
@@ -1376,6 +1373,25 @@ mod tests {
   }
 
   #[test]
+  fn pause_keeps_rows_that_stop_matching_a_value_filter() {
+    let mut view = view();
+    type_str(&mut view, "/cpu:>3");
+    press(&mut view, KeyCode::Enter);
+    press(&mut view, KeyCode::Down);
+    press(&mut view, KeyCode::Char(' '));
+
+    let mut next = sample();
+    next.iter_mut().for_each(|p| p.cpu_pct = 0.0);
+    view.set_procs(next);
+    assert_eq!(pids(&view), [4410, 631, 2301]);
+    assert_eq!(view.selected_pid(), Some(4410));
+    assert_eq!(view.groups[0].count, 0);
+
+    press(&mut view, KeyCode::Char(' '));
+    assert_eq!((pids(&view), view.selected_pid()), (vec![], None));
+  }
+
+  #[test]
   fn pause_before_first_sample_and_group_order_are_stable() {
     let mut view = ProcView::default();
     press(&mut view, KeyCode::Char(' '));
@@ -1743,6 +1759,12 @@ mod tests {
       ("saf".to_string(), 1, 12.0, 900, Some(0.8), false, 5.0),
       ("d".to_string(), 1, 0.5, 20, None, true, 0.0),
     ];
+    assert_eq!(summary(&view), expected);
+
+    press(&mut view, KeyCode::Esc);
+    press(&mut view, KeyCode::Char('/'));
+    type_str(&mut view, "saf mem:>500m");
+    let expected = [("saf mem:>500m".to_string(), 1, 12.0, 900, Some(0.8), false, 5.0)];
     assert_eq!(summary(&view), expected);
   }
 
