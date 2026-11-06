@@ -12,7 +12,7 @@ use crate::shared::{
 };
 use crate::sources::{
   IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, cfio_get_residencies, cfio_watts,
-  cpu_load_ticks, get_soc_info, libc_ram, libc_swap,
+  cpu_load_ticks, get_soc_info, libc_ram, libc_swap, memory_pressure_level, memory_pressure_raw,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -82,6 +82,9 @@ pub struct MemMetrics {
   pub swap_total: u64,
   /// Used swap in bytes.
   pub swap_usage: u64,
+  /// Memory pressure as Activity Monitor shows it: 0 normal, 1 warning, 2 critical, or None when
+  /// unavailable.
+  pub pressure_level: Option<u8>,
 }
 
 /// Fan speed metrics.
@@ -648,7 +651,8 @@ impl Sampler {
   fn get_mem(&mut self) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
-    Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
+    let pressure_level = memory_pressure_raw().and_then(memory_pressure_level);
+    Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage, pressure_level })
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {

@@ -94,6 +94,9 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_any!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge_any!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
+  if let Some(value) = m.memory.pressure_level {
+    gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", value);
+  }
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
@@ -451,6 +454,32 @@ mod tests {
     assert!(output.contains("macmon_cpu_temp_celsius{chip=\"\"} 45"));
     assert!(!output.contains("macmon_gpu_temp_celsius"));
     assert!(output.contains("macmon_gpu_freq_mhz"));
+  }
+
+  #[test]
+  fn memory_pressure_gauge_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(!output.contains("macmon_memory_pressure_level"));
+
+    metrics.memory.pressure_level = Some(1);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("# TYPE macmon_memory_pressure_level gauge\n"));
+    assert!(output.contains("macmon_memory_pressure_level{chip=\"\"} 1\n"));
+  }
+
+  #[test]
+  fn memory_pressure_in_json_is_a_number_or_null() {
+    let mut metrics = Metrics::default();
+    let level = |metrics: &Metrics| {
+      let json = to_json(metrics, &SocInfo::default());
+      let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+      json["memory"].get("pressure_level").cloned()
+    };
+    assert_eq!(level(&metrics), Some(serde_json::Value::Null));
+
+    metrics.memory.pressure_level = Some(2);
+    assert_eq!(level(&metrics), Some(serde_json::json!(2)));
   }
 
   #[test]

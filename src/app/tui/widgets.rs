@@ -22,15 +22,22 @@ const FULL: char = '█';
 const HALF: char = '▄';
 
 /// Gauge view of the original macmon: a bar across its whole area, filled from the left to `ratio`
-/// (rounded to whole cells) in the load color of `ratio`; the rest stays blank.
+/// (rounded to whole cells) in the load color of `ratio` or in one color; the rest stays blank.
 pub(super) struct Gauge {
   ratio: f64,
+  color: Option<Color>,
 }
 
 impl Gauge {
   /// Gauge for `ratio` in `0.0..=1.0`, clamped outside the range.
   pub(super) fn new(ratio: f64) -> Self {
-    Self { ratio: if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) } }
+    Self { ratio: if ratio.is_nan() { 0.0 } else { ratio.clamp(0.0, 1.0) }, color: None }
+  }
+
+  /// Draws the bar in `color` instead of its load color; `None` keeps the load color.
+  pub(super) fn color(mut self, color: Option<Color>) -> Self {
+    self.color = color;
+    self
   }
 }
 
@@ -39,7 +46,7 @@ impl Widget for Gauge {
     let area = area.intersection(buf.area);
     // at most `area.width`, as the ratio is at most 1
     let filled = (f64::from(area.width) * self.ratio).round() as u16;
-    let color = gradient(self.ratio);
+    let color = self.color.unwrap_or_else(|| gradient(self.ratio));
     for y in area.top()..area.bottom() {
       for x in area.left()..area.left() + filled {
         buf[(x, y)].set_char(FULL).set_fg(color);
@@ -78,9 +85,9 @@ impl<'a> Graph<'a> {
     self
   }
 
-  /// Draws every bar in `color` instead of its load color.
-  pub(super) fn color(mut self, color: Color) -> Self {
-    self.color = Some(color);
+  /// Draws every bar in `color` instead of its load color; `None` keeps the load color.
+  pub(super) fn color(mut self, color: impl Into<Option<Color>>) -> Self {
+    self.color = color.into();
     self
   }
 }
@@ -212,7 +219,8 @@ mod tests {
       let row = format!("{}{}", "█".repeat(filled), " ".repeat(usize::from(width) - filled));
       assert_eq!(rows(&buf), vec![row; 3], "{ratio} in {width}");
     }
-    // in the load color of the ratio
+    // in the load color of the ratio, or the color given
     assert_eq!(draw(Gauge::new(0.5), 4, 1)[(0, 0)].fg, Color::Yellow);
+    assert_eq!(draw(Gauge::new(0.5).color(Some(Color::Red)), 4, 1)[(0, 0)].fg, Color::Red);
   }
 }

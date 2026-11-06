@@ -7,7 +7,7 @@ use std::ops::Range;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
@@ -164,7 +164,12 @@ pub(super) fn title_text_room(width: u16, titles: &[Line]) -> u16 {
 
 /// Draws a rounded box with `titles` on the top border. Returns the area inside the borders.
 pub(super) fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> Rect {
-  let block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::BORDER);
+  draw_colored_box(f, area, titles, theme::BORDER)
+}
+
+/// `draw_box` with the border in `color`.
+fn draw_colored_box(f: &mut Frame, area: Rect, titles: Titles, color: Color) -> Rect {
+  let block = Block::bordered().border_type(BorderType::Rounded).border_style(color);
   let inner = block.inner(area);
   f.render_widget(block, area);
   // title text without a color of its own in the text color, not the border's
@@ -328,6 +333,8 @@ struct MetricBox<'a> {
   /// History, newest first.
   data: &'a [u64],
   scale: Scale,
+  /// Color of the border and the graph or gauge, instead of the usual ones.
+  color: Option<Color>,
 }
 
 impl App {
@@ -367,11 +374,12 @@ impl App {
     let fans = self.fans.label();
     for &(kind, r) in &plan.boxes {
       let metric = self.metric_box(kind);
-      let inner = draw_box(f, r, fit_titles(r.width, metric.titles));
-      let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
+      let border = metric.color.unwrap_or(theme::BORDER);
+      let inner = draw_colored_box(f, r, fit_titles(r.width, metric.titles), border);
+      let graph = Graph::new(metric.data).three_levels(self.three_level_bars).color(metric.color);
       match metric.scale {
         Scale::Load { load, .. } if self.cfg.view_type == ViewType::Gauge => {
-          f.render_widget(Gauge::new(load), inner)
+          f.render_widget(Gauge::new(load).color(metric.color), inner)
         }
         Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
@@ -460,6 +468,7 @@ impl App {
       titles: vec![Titles::new(full), Titles::new(short)],
       data: &series.items,
       scale: Scale::Load { max: 100, load: series.ratio },
+      color: None,
     }
   }
 
@@ -467,7 +476,9 @@ impl App {
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
   /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
   /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
-  /// title, so no number is ever cut.
+  /// title, so no number is ever cut. At warning and critical memory pressure the border and the
+  /// graph or gauge take its color, and the two widest titles come first with `· pressure warning`
+  /// / `· pressure critical` at the end, so the word goes before the GB figures.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
@@ -489,9 +500,21 @@ impl App {
     }
     titles.push(short.into());
 
+    let pressure = match mem.pressure_level {
+      Some(1) => Some((theme::WARNING, "pressure warning")),
+      Some(2) => Some((theme::CRITICAL, "pressure critical")),
+      _ => None,
+    };
+    if let Some((color, word)) = pressure {
+      let word = [dim(" · "), Span::styled(word, color)];
+      let worded: Vec<_> = titles.iter().take(2).map(|x| [&x[..], &word].concat()).collect();
+      titles.splice(0..0, worded);
+    }
+
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
-    MetricBox { titles, data: &mem.items, scale: Scale::Load { max: mem.ram_total, load } }
+    let scale = Scale::Load { max: mem.ram_total, load };
+    MetricBox { titles, data: &mem.items, scale, color: pressure.map(|(color, _)| color) }
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
@@ -518,7 +541,7 @@ impl App {
       }
     });
 
-    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power }
+    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power, color: None }
   }
 
   /// `Total 12.00W (12.00, 12.00)`, the whole system, or `Power 6.60W (6.60, 6.60)`, CPU + GPU +

@@ -95,11 +95,10 @@ POWER does today.
       of a process, each tiny on its own), built on the group rows of the filter. Third, totals
       by process tree, so an app or `claude` counts its helpers and MCP servers: this needs the
       parent pid in `ProcInfo`.
-- [ ] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
+- [x] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
-      memory. Read it without root (sysctl `kern.memorystatus_vm_pressure_level` and
-      `kern.memorystatus_level`, to verify), color the RAM box by it and add it to JSON and
-      Prometheus. Decision point before the plan: next to RAM use or instead of it in the title.
+      memory. Read it without root (sysctl `kern.memorystatus_vm_pressure_level`), color the RAM
+      box by it, show it next to RAM use in the title and add it to JSON and Prometheus.
 - [ ] **18. Where a process works.** With agents building and testing in several projects at
       once, the busiest process is often just `rustc`, `cargo` or `node`, and the name doesn't
       say which project it belongs to. Show the working directory in the list (a column, or the

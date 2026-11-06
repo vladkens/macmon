@@ -135,6 +135,7 @@ pub(super) struct MemoryStore {
   pub(super) ram_total: u64,
   pub(super) swap_usage: u64,
   pub(super) swap_total: u64,
+  pub(super) pressure_level: Option<u8>,
 }
 
 impl MemoryStore {
@@ -146,6 +147,7 @@ impl MemoryStore {
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
+    self.pressure_level = value.pressure_level;
   }
 }
 
@@ -261,7 +263,7 @@ mod tests {
     for i in 0..HISTORY_LEN + 10 {
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
-      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, swap_total: 0, swap_usage: 0 });
+      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, ..Default::default() });
       temp.push(Some(i as f32 + 1.0));
     }
 

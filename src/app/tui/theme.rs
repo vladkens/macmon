@@ -22,6 +22,11 @@ pub(super) const SELECTED: Style = Style::new().fg(TEXT).add_modifier(Modifier::
 pub(super) const SELECTED_EXITED_PID: Style =
   Style::new().fg(Color::Red).add_modifier(Modifier::DIM).remove_modifier(Modifier::REVERSED);
 
+/// Memory pressure at warning: yellow (ANSI 3).
+pub(super) const WARNING: Color = Color::Yellow;
+/// Memory pressure at critical: red (ANSI 1).
+pub(super) const CRITICAL: Color = Color::Red;
+
 /// Steps of the load gradient: green up to `GREEN_MAX`, yellow up to `YELLOW_MAX`, red above.
 const GREEN_MAX: f64 = 1.0 / 3.0;
 const YELLOW_MAX: f64 = 2.0 / 3.0;

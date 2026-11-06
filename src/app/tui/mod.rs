@@ -653,6 +653,7 @@ mod tests {
         ram_usage: 20 << 30,
         swap_total: 2 << 30,
         swap_usage: 1 << 30,
+        pressure_level: None,
       },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
       cpu_tiers: vec![cpu_tier("E", 1800, 0.42, 0.5), cpu_tier("P", 3200, 0.77, 0.8)],
@@ -1445,6 +1446,7 @@ mod tests {
           ram_usage: (16.81 * GIB) as u64,
           swap_total: if swap { 3 << 30 } else { 0 },
           swap_usage: if swap { (2.37 * GIB) as u64 } else { 0 },
+          pressure_level: None,
         }
       })
     };
@@ -1472,6 +1474,66 @@ mod tests {
         let top = box_top(&app, &buf, Metric::Ram);
         assert_eq!(top, format!("╭{title}{dashes}╮"), "swap {has_swap} at {width}");
       }
+    }
+  }
+
+  #[test]
+  fn ram_box_follows_memory_pressure() {
+    use ratatui::style::Color;
+
+    let pressure_app = |level| test_app_with(|m| m.memory.pressure_level = level);
+    let top = |app: &mut App, width: u16| {
+      let buf = render_buffer(app, width * 4 + 2, 50);
+      box_top(app, &buf, Metric::Ram).trim_matches(['╭', '╮', '─']).trim().to_string()
+    };
+    // colors of the RAM box at `width`: the top left corner, then the cell at its bottom right
+    let colors = |app: &mut App, width: u16| {
+      let buf = render_buffer(app, width * 4 + 2, 50);
+      let boxes = app.layout(buf.area).boxes;
+      let (_, area) = boxes.into_iter().find(|(m, _)| *m == Metric::Ram).expect("metric box");
+      (buf[(area.x, area.y)].fg, buf[(area.right() - 2, area.bottom() - 2)].fg)
+    };
+
+    const FULL: &str = "RAM 20.00 GB (55.6%) · SWAP 1.00 / 2.0 GB";
+    const SHORT: &str = "RAM 56% · SWAP 50%";
+    let cases = [(1, "pressure warning", Color::Yellow), (2, "pressure critical", Color::Red)];
+    for (level, word, color) in cases {
+      let mut app = pressure_app(Some(level));
+      let extra = word.chars().count() as u16 + 3; // with ` · `
+
+      // (box width, title): the word comes with the two widest titles and goes before the GB
+      // figures; narrower, the titles of normal pressure
+      let titles = [
+        (47 + extra, format!("{FULL} · {word}")),
+        (46 + extra, format!("{SHORT} · {word}")),
+        (24 + extra, format!("{SHORT} · {word}")),
+        (23 + extra, SHORT.to_string()),
+        (20, "RAM 56% SW 50%".to_string()),
+        (19, "RAM 56%".to_string()),
+        (12, String::new()),
+      ];
+      for (width, title) in titles {
+        assert_eq!(top(&mut app, width), title, "{level} at {width}");
+      }
+
+      // the colors don't depend on the width, even with no room for a title
+      for width in [80, 30, 12] {
+        assert_eq!(colors(&mut app, width), (color, color), "{level} at {width}");
+      }
+
+      // the gauge too
+      app.cfg.view_type = ViewType::Gauge;
+      let buf = render_buffer(&mut app, 200, 50);
+      let boxes = app.layout(buf.area).boxes;
+      let (_, area) = boxes.into_iter().find(|(m, _)| *m == Metric::Ram).expect("metric box");
+      assert_eq!(buf[(area.x + 1, area.y + 1)].fg, color);
+    }
+
+    // normal pressure or no reading: nothing changes
+    for level in [Some(0), None] {
+      let mut app = pressure_app(level);
+      assert_eq!(top(&mut app, 80), FULL);
+      assert_eq!(colors(&mut app, 80), (Color::DarkGray, Color::Yellow));
     }
   }
 
