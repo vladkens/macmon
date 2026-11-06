@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::parser::ValueSource;
-use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod config;
 mod fds;
@@ -72,7 +72,6 @@ enum Commands {
   },
 
   /// Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
-  #[command(group(ArgGroup::new("service").args(["install", "uninstall"]).multiple(true)))]
   Serve {
     /// Host address to listen on
     #[arg(long, default_value = "0.0.0.0")]
@@ -82,17 +81,17 @@ enum Commands {
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
 
-    /// Install as a launchd service (auto-start on login)
+    /// Install as a LaunchDaemon that starts at boot (needs sudo)
     #[arg(long, default_value_t = false)]
     install: bool,
 
-    /// Uninstall the launchd service
+    /// Uninstall the launchd service, daemon or agent
     #[arg(long, default_value_t = false)]
     uninstall: bool,
 
-    /// With --install or --uninstall: a LaunchDaemon that starts at boot, no login (needs sudo)
-    #[arg(long, default_value_t = false, requires = "service")]
-    daemon: bool,
+    /// With --install: a LaunchAgent that starts at login instead, no sudo
+    #[arg(long, default_value_t = false, requires = "install")]
+    agent: bool,
   },
 
   /// Print debug information
@@ -275,15 +274,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { host, port, install, uninstall, daemon }) => {
-      if *daemon {
-        serve::launch_daemon(host, *port, *install)?;
-        return Ok(());
+    Some(Commands::Serve { host, port, install, uninstall, agent }) => {
+      if *install && *agent {
+        return serve::install_agent(host, *port);
       }
 
-      if *install || *uninstall {
-        serve::launchd(host, *port, *install)?;
-        return Ok(());
+      if *install {
+        return serve::install_daemon(host, *port);
+      }
+
+      if *uninstall {
+        return serve::uninstall();
       }
 
       let mut sampler = Sampler::new()?;
@@ -341,11 +342,12 @@ mod tests {
   }
 
   #[test]
-  fn daemon_needs_install_or_uninstall() {
-    assert!(Cli::try_parse_from(["macmon", "serve", "--daemon"]).is_err());
-    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--daemon"]).is_ok());
-    assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--daemon"]).is_ok());
+  fn agent_needs_install() {
+    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--agent"]).is_ok());
     assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--uninstall"]).is_ok());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--agent"]).is_err());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--agent"]).is_err());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--daemon"]).is_err());
   }
 
   #[test]

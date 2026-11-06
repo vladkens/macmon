@@ -77,12 +77,13 @@ POWER does today.
 - [ ] **13. Social preview card.** The repository still shows GitHub's template image. A
       1280×640 card from a real TUI screenshot of the current release (HTML rendered to PNG),
       uploaded by hand in the repository settings.
-- [x] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` creates a
-      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs it
-      at boot with nobody logged in (asked on Reddit). An install option for a LaunchDaemon in
-      `/Library/LaunchDaemons` (needs sudo). Tested by hand in the VM: a daemon running `macmon
-      serve` starts at boot without a login, as root and with `UserName`; with `UserName` the
-      `StandardErrorPath` file must be writable by that user.
+- [x] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` created a
+      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs
+      it at boot with nobody logged in (asked on Reddit). `sudo macmon serve --install` now
+      installs a LaunchDaemon in `/Library/LaunchDaemons`, replacing the user's agent, and
+      `--install --agent` is the old LaunchAgent, without sudo. Tested by hand in the VM: a
+      daemon running `macmon serve` starts at boot without a login, as root and with `UserName`;
+      with `UserName` the `StandardErrorPath` file must be writable by that user.
 - [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
       Reddit): disk read / write and network in / out, system-wide, in the TUI, JSON and
       Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.

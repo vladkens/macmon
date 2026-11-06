@@ -124,25 +124,25 @@ Two endpoints are available:
 
 #### launchd service
 
-To start `macmon serve` automatically on login and keep it running:
+To start `macmon serve` at boot, with nobody logged in, and keep it running:
 
 ```sh
-macmon serve --install                   # install and start (default port 9090)
-macmon serve --port 8080 --install       # with custom port
-macmon serve --host 127.0.0.1 --install  # listen on localhost only
-macmon serve --uninstall                 # stop and remove
+sudo macmon serve --install                   # install and start (default port 9090)
+sudo macmon serve --port 8080 --install       # with custom port
+sudo macmon serve --host 127.0.0.1 --install  # listen on localhost only
+sudo macmon serve --uninstall                 # stop and remove
 ```
 
-This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that auto-starts on login and restarts on crash.
+`--install` needs sudo: it creates a LaunchDaemon at `/Library/LaunchDaemons/com.macmon.plist` that restarts on crash. The daemon runs as the user who called `sudo`, not as root, and with FileVault on it starts after the disk is unlocked following a restart. If that user has the agent below, the daemon replaces it.
 
-An agent starts only after login. To start at boot with nobody logged in, for example on an always-on Mac scraped by Prometheus, install a daemon instead:
+To start at login instead, without sudo:
 
 ```sh
-sudo macmon serve --install --daemon    # install and start (takes --host and --port too)
-sudo macmon serve --uninstall --daemon  # stop and remove
+macmon serve --install --agent  # install and start (takes --host and --port too)
+macmon serve --uninstall        # stop and remove
 ```
 
-This creates `/Library/LaunchDaemons/com.macmon.plist`. The daemon runs as the user who called `sudo`, not as root, and with FileVault on it starts after the disk is unlocked following a restart. Remove the agent first if you have one (`macmon serve --uninstall`): both want the same port.
+This creates a LaunchAgent at `~/Library/LaunchAgents/com.macmon.plist`. It's refused while the daemon is installed: both want the same port.
 
 #### Prometheus and Grafana
 
