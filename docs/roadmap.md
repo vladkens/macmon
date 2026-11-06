@@ -119,9 +119,9 @@ POWER does today.
       `pipe` and `serve`, and what sampling processes costs there.
 - [x] **21. Supported macOS versions.** Asked on Reddit, and the readme didn't say: macOS 14,
       current when macmon first came out, and later.
-- [ ] **22. Filter queries.** Filter the process list by more than the name, with words like
+- [x] **22. Filter queries.** Filter the process list by more than the name, with words like
       `mem:>1g` and `user:root`, as fsearch does.
-      Plan: [docs/plans/20261106-filter-query.md](plans/20261106-filter-query.md).
+      Plan: [docs/plans/completed/20261106-filter-query.md](plans/completed/20261106-filter-query.md).
 
 Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
 the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and

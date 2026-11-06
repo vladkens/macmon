@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 
+use crate::fds::cwd;
 use crate::procs::ProcInfo;
 
 /// Units of a number in a filter word and their worth: no unit, bytes (binary, as the MEM column
@@ -16,6 +17,8 @@ enum Cond {
   Text(String),
   /// Lowercase text in the value of a key.
   Has(fn(&ProcInfo) -> &str, String),
+  /// Lowercase text in the working directory, read only for this word.
+  Dir(String),
   /// The value of a key, if any, above (`Greater`) or below (`Less`) a limit.
   Num(fn(&ProcInfo) -> Option<f64>, Ordering, f64),
 }
@@ -27,9 +30,10 @@ impl Cond {
     let (key, value) = word.split_once(':').unwrap_or(("", word));
     match key {
       _ if word.is_empty() => None,
-      "user" | "path" if value.is_empty() => None,
+      "user" | "path" | "dir" if value.is_empty() => None,
       "user" => Some(Self::Has(|p| &p.user, value.to_string())),
       "path" => Some(Self::Has(|p| &p.path, value.to_string())),
+      "dir" => Some(Self::Dir(value.to_string())),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
       "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
@@ -54,6 +58,9 @@ impl Cond {
         proc.name.to_lowercase().contains(text) || proc.pid.to_string().contains(text)
       }
       Self::Has(read, text) => read(proc).to_lowercase().contains(text),
+      Self::Dir(text) => {
+        cwd(proc.pid).ok().flatten().is_some_and(|dir| dir.to_lowercase().contains(text))
+      }
       Self::Num(read, side, limit) => read(proc).and_then(|x| x.partial_cmp(limit)) == Some(*side),
     }
   }
@@ -207,6 +214,7 @@ mod tests {
       ("mem:>1x", &all),
       ("power:>1g", &all),
       ("user:", &all),
+      ("dir:", &all),
       ("!mem:>", &all),
       ("saf mem:>", &[2301, 77]),
       ("saf !mem:>1x", &[2301, 77]),
@@ -226,8 +234,16 @@ mod tests {
       assert_eq!(hits, *expected, "{filter:?}");
     }
 
+    // the working directory: of this process, none of a process that can't be read
+    let own = proc(std::process::id() as i32, "own", 0.0, 0, None, 0.0);
+    let gone = proc(i32::MAX, "gone", 0.0, 0, None, 0.0);
+    let dir = format!("dir:{}", std::env::current_dir().unwrap().display());
+    assert!(Query::parse(&dir).matches(&own));
+    assert!(!Query::parse("dir:/no/such/dir").matches(&own));
+    assert!(!Query::parse("dir:/").matches(&gone));
+
     // bad words: known keys with values that aren't valid
-    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "cpu:>1g"] {
+    for word in ["mem:", "mem:>", "!MEM:>1x", "user:", "dir:", "cpu:>1g"] {
       assert!(is_bad(word), "{word}");
     }
 
