@@ -237,8 +237,7 @@ mod tests {
     // the working directory: of this process, none of a process that can't be read
     let own = proc(std::process::id() as i32, "own", 0.0, 0, None, 0.0);
     let gone = proc(i32::MAX, "gone", 0.0, 0, None, 0.0);
-    let dir = format!("dir:{}", std::env::current_dir().unwrap().display());
-    assert!(Query::parse(&dir).matches(&own));
+    assert!(Query::parse("dir:/").matches(&own));
     assert!(!Query::parse("dir:/no/such/dir").matches(&own));
     assert!(!Query::parse("dir:/").matches(&gone));
 
