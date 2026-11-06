@@ -555,20 +555,13 @@ pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
   }))
 }
 
-// MARK: Uptime, load and battery
+// MARK: Uptime and battery
 
 /// Seconds since boot.
 pub(crate) fn uptime_secs() -> Option<u64> {
   let boot: libc::timeval = sysctl_mib(&[libc::CTL_KERN, libc::KERN_BOOTTIME])?;
   let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
   now.checked_sub(boot.tv_sec as u64)
-}
-
-/// Load average over 1, 5 and 15 minutes.
-pub(crate) fn load_avg() -> Option<[f32; 3]> {
-  let mut avg = [0f64; 3];
-  let count = unsafe { libc::getloadavg(avg.as_mut_ptr(), 3) };
-  (count == 3).then(|| avg.map(|x| x as f32))
 }
 
 /// Percent and whether it is charging, from the properties of `AppleSmartBattery`. As in
@@ -1801,9 +1794,8 @@ mod tests {
   }
 
   #[test]
-  fn uptime_and_load_are_read() {
+  fn uptime_is_read() {
     assert!(uptime_secs().is_some_and(|x| x > 0));
-    assert!(load_avg().is_some());
   }
 
   #[test]

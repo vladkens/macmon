@@ -293,7 +293,6 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
   "disk_read": 1048576, // Bytes per second read from the disks, a mounted disk image on top of the disk that holds it, null when unavailable
   "disk_write": 262144, // Bytes per second written to the disks, a mounted disk image on top of the disk that holds it, null when unavailable
   "uptime": 273600, // Seconds since boot, null when unavailable
-  "load_avg": [1.94, 2.0, 1.8], // Load average over 1, 5 and 15 minutes, null when unavailable
   "battery_percent": 87, // Battery charge (0–100), null without a battery
   "battery_charging": true, // null without a battery
 }

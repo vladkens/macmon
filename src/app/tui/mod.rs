@@ -292,8 +292,10 @@ pub struct App {
   cpu_temp: TempStore,
   gpu_temp: TempStore,
   fans: FanStore,
-  /// Pieces of the line on the bottom border of the metrics box, see `boxes::system_line`.
-  system_line: Vec<Span<'static>>,
+  /// `net` and `disk` for the bottom border of the metrics box, see `boxes::rates_line`.
+  rates_line: Vec<Span<'static>>,
+  /// Uptime and battery for its title, see `boxes::system_titles`.
+  system_titles: Vec<Span<'static>>,
 
   /// CPU clusters, lowest tier first (E / P on M1–M4, E / S on M5, P / S on M5 Pro/Max, E / P / S
   /// on M6).
@@ -330,7 +332,8 @@ impl App {
   }
 
   fn update_metrics(&mut self, data: Metrics) {
-    self.system_line = boxes::system_line(&data);
+    self.rates_line = boxes::rates_line(&data);
+    self.system_titles = boxes::system_titles(&data);
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
@@ -1420,39 +1423,60 @@ mod tests {
   }
 
   #[test]
-  fn system_line_on_the_bottom_border_of_the_metrics_box_drops_from_the_end() {
+  fn rates_on_the_right_of_the_metrics_box_bottom_border_drop_from_the_end() {
     let mut app = test_app_with(|m| {
       (m.net_in, m.net_out) = (Some(2048), Some(1024));
       (m.disk_read, m.disk_write) = (Some(3 << 20), Some(0));
     });
 
-    // (window width, line)
-    let line = "─ net ↓2K ↑1K | disk r3M w0K ─";
-    for (width, text) in [(80, line), (31, "─ net ↓2K ↑1K ─")] {
-      let buf = render_buffer(&mut app, width, 50);
-      let bottom = row(&buf, PROC_Y - 1);
-      assert!(bottom.starts_with("╰") && bottom.contains(text), "{bottom}");
+    // (window width, end of the border): `disk` needs 44 cells, `net` 23
+    let net = "─ net ↓   2K ↑   1K ─╯";
+    let both = "─ net ↓   2K ↑   1K │ disk r   3M w   0K ─╯";
+    for (width, end) in [(200, both), (44, both), (43, net), (23, net)] {
+      let bottom = row(&render_buffer(&mut app, width, 50), PROC_Y - 1);
+      assert!(bottom.starts_with("╰") && bottom.ends_with(end), "{bottom}");
     }
 
-    let bottom = row(&render_buffer(&mut app, 16, 50), PROC_Y - 1);
+    let bottom = row(&render_buffer(&mut app, 22, 50), PROC_Y - 1);
     assert!(!bottom.contains("net"), "{bottom}");
-
-    // every piece, the battery with its charging mark
-    let mut app = test_app_with(|m| {
-      (m.net_in, m.net_out) = (Some(2048), Some(1024));
-      (m.disk_read, m.disk_write) = (Some(3 << 20), Some(0));
-      m.load_avg = Some([1.94, 2.0, 1.8]);
-      m.uptime = Some(273600);
-      (m.battery_percent, m.battery_charging) = (Some(87), Some(true));
-    });
-    let bottom = row(&render_buffer(&mut app, 80, 50), PROC_Y - 1);
-    let line = "─ net ↓2K ↑1K | disk r3M w0K | load 1.9 2.0 1.8 | up 3d 4h | bat 87%+ ─";
-    assert!(bottom.contains(line), "{bottom}");
 
     // nothing without a value
     let mut app = test_app_with(|m| m.net_in = Some(2048));
     let bottom = row(&render_buffer(&mut app, 80, 50), PROC_Y - 1);
     assert!(!bottom.contains("net"), "{bottom}");
+  }
+
+  #[test]
+  fn key_hints_keep_their_place_before_the_rates() {
+    let mut app = test_app_with(|m| {
+      (m.net_in, m.net_out) = (Some(2048), Some(1024));
+      (m.disk_read, m.disk_write) = (Some(3 << 20), Some(0));
+    });
+    app.cfg.toggle_procs();
+
+    // (window width, what stands left of the hints)
+    for (width, rates) in [(200, "w   0K ─ ? "), (80, "↑   1K ─ ? "), (40, "── ? ")] {
+      let bottom = row(&render_buffer(&mut app, width, 50), 49);
+      assert!(bottom.contains(rates) && bottom.contains("quit"), "{bottom}");
+    }
+  }
+
+  #[test]
+  fn uptime_and_battery_in_the_metrics_title_go_before_anything_else() {
+    let mut app = test_app_with(|m| {
+      m.uptime = Some(273600);
+      (m.battery_percent, m.battery_charging) = (Some(87), Some(true));
+    });
+    let top = row(&render_buffer(&mut app, 200, 50), 0);
+    assert!(top.contains(") ─ up 3d 4h ─ bat 87%+ ─"), "{top}");
+
+    // whatever is shown, the rest of the title stays as it is without them
+    let mut plain = test_app_with(|_| {});
+    for width in 5..120 {
+      let top = row(&render_buffer(&mut app, width, 50), 0);
+      let top = top.replace(" up 3d 4h ", &"─".repeat(10)).replace(" bat 87%+ ", &"─".repeat(10));
+      assert_eq!(top, row(&render_buffer(&mut plain, width, 50), 0), "{width}");
+    }
   }
 
   #[test]

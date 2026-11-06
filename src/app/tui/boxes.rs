@@ -24,6 +24,8 @@ use crate::config::{RatioMode, TUI_MAX_MS, ViewType};
 const GIB: f64 = (1u64 << 30) as f64;
 /// Between the key hints on a bottom border.
 const SEPARATOR: &str = " | ";
+/// Between `net` and `disk` on the bottom border of the metrics box; as wide as `SEPARATOR`.
+const RATES_SEPARATOR: &str = " │ ";
 /// Fewest cells worth a text on the left of a bottom border; with less room it is left out.
 const BORDER_TEXT_MIN: u16 = 8;
 
@@ -278,6 +280,22 @@ fn cut_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
   cut
 }
 
+/// Draws the `hints` that fit right-aligned over the bottom border of box `area`, dropping them
+/// from the end. Returns the cells left of them, keeping a border cell on both sides.
+fn render_hints(f: &mut Frame, area: Rect, hints: Vec<Vec<Span<'static>>>) -> u16 {
+  let free = area.width.saturating_sub(4);
+  let widths: Vec<u16> = hints.iter().map(|hint| spans_width(hint)).collect();
+  let shown = fit_joined(free, &widths);
+  if shown == 0 {
+    return free;
+  }
+
+  let line = padded(join(hints.into_iter().take(shown)));
+  let width = width_u16(&line);
+  f.buffer_mut().set_line(area.right() - 2 - width, area.bottom() - 1, &line, width);
+  free.saturating_sub(width + 1)
+}
+
 /// Draws `hints` (right-aligned) and a text (left) over the bottom border of box `area`. Like
 /// titles, they keep a border cell next to the corners and between each other. The hints come
 /// first and drop from the end when the border is too short, so `quit` stays as long as it fits.
@@ -290,18 +308,7 @@ pub(super) fn render_bottom_border(
   text: impl FnOnce(usize) -> Vec<Span<'static>>,
 ) {
   let y = area.bottom() - 1;
-  let mut free = area.width.saturating_sub(4);
-
-  let widths: Vec<u16> = hints.iter().map(|hint| spans_width(hint)).collect();
-  let shown = fit_joined(free, &widths);
-  if shown > 0 {
-    let line = padded(join(hints.into_iter().take(shown)));
-    let width = width_u16(&line);
-    f.buffer_mut().set_line(area.right() - 2 - width, y, &line, width);
-    free = free.saturating_sub(width + 1);
-  }
-
-  let room = free.saturating_sub(2);
+  let room = render_hints(f, area, hints).saturating_sub(2);
   if room >= BORDER_TEXT_MIN {
     let spans = cut_spans(text(usize::from(room)), usize::from(room));
     if !spans.is_empty() {
@@ -320,17 +327,23 @@ fn format_uptime(secs: u64) -> String {
   }
 }
 
-/// Pieces of the system line on the bottom border of the metrics box, the first kept longest.
-/// Metrics without a value are left out.
-pub(super) fn system_line(m: &Metrics) -> Vec<Span<'static>> {
+/// `net` and `disk` for the bottom border of the metrics box, the first kept longest. Each number
+/// is padded to the widest `format_mem` gives, so the line keeps its length. Metrics without a
+/// value are left out.
+pub(super) fn rates_line(m: &Metrics) -> Vec<Span<'static>> {
   let rates = |a: &str, x: Option<u64>, b: &str, y: Option<u64>| {
-    Some(format!("{a}{} {b}{}", format_mem(x?), format_mem(y?)))
+    Some(format!("{a}{:>5} {b}{:>5}", format_mem(x?), format_mem(y?)))
   };
+  let pieces =
+    [rates("net ↓", m.net_in, "↑", m.net_out), rates("disk r", m.disk_read, "w", m.disk_write)];
+  pieces.into_iter().flatten().map(text).collect()
+}
+
+/// Uptime and battery for the title of the metrics box, the first kept longest. Metrics without a
+/// value are left out.
+pub(super) fn system_titles(m: &Metrics) -> Vec<Span<'static>> {
   let charging = if m.battery_charging == Some(true) { "+" } else { "" };
   let pieces = [
-    rates("net ↓", m.net_in, "↑", m.net_out),
-    rates("disk r", m.disk_read, "w", m.disk_write),
-    m.load_avg.map(|[a, b, c]| format!("load {a:.1} {b:.1} {c:.1}")),
     m.uptime.map(|x| format!("up {}", format_uptime(x))),
     m.battery_percent.map(|x| format!("bat {x}%{charging}")),
   ];
@@ -386,18 +399,23 @@ impl App {
     hints
   }
 
-  /// The system line in `room` cells: its pieces joined, dropped from the end when too long.
-  fn system_spans(&self, room: usize) -> Vec<Span<'static>> {
-    let widths: Vec<u16> = self.system_line.iter().map(|x| cells(x.width())).collect();
-    let shown = fit_joined(cells(room + 2), &widths);
-    join(self.system_line.iter().take(shown).map(|x| vec![x.clone()]))
+  /// `net` and `disk` right-aligned in the `free` cells of the bottom border of box `area`,
+  /// dropped from the end when too long.
+  fn render_rates(&self, f: &mut Frame, area: Rect, free: u16) {
+    let widths: Vec<u16> = self.rates_line.iter().map(|x| cells(x.width())).collect();
+    let shown = fit_joined(free, &widths);
+    if shown > 0 {
+      let pieces = self.rates_line[..shown].iter().cloned();
+      let line = pieces.flat_map(|x| [dim(RATES_SEPARATOR), x]).skip(1).collect();
+      render_hints(f, Rect { width: free + 4, ..area }, vec![line]);
+    }
   }
 
-  /// Metrics box: chip and version in the title, the metric boxes inside, and on the bottom border
-  /// the system line and the key hints when it is the lowest box.
+  /// Metrics box: chip, uptime, battery and version in the title, the metric boxes inside, and on
+  /// the bottom border, from the right, the key hints when it is the lowest box, `net` and `disk`.
   pub(super) fn render_metrics_box(&self, f: &mut Frame, plan: &LayoutPlan) {
     let Some(area) = plan.top else { return };
-    draw_box(f, area, self.metrics_titles());
+    draw_box(f, area, self.metrics_titles(area.width));
 
     let fans = self.fans.label();
     for &(kind, r) in &plan.boxes {
@@ -419,14 +437,20 @@ impl App {
     }
 
     let hints = if plan.proc.is_none() { self.footer_hints() } else { vec![] };
-    render_bottom_border(f, area, hints, |room| self.system_spans(room));
+    let free = render_hints(f, area, hints);
+    self.render_rates(f, area, free);
   }
 
-  /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, `macmon vX` right; the
-  /// version gives way to the chip.
-  fn metrics_titles(&self) -> Titles<'static> {
+  /// Chip as in the original UI (`Apple M3 Pro (6E+6P+18GPU 36GB)`) left, then uptime and battery,
+  /// `macmon vX` right; the version gives way to the chip. Battery, then uptime, are dropped first
+  /// on a box `width` cells wide.
+  fn metrics_titles(&self, width: u16) -> Titles<'static> {
     let version = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    Titles::new(self.chip_title()).right(text(version))
+    let titles = |count| {
+      let extra = self.system_titles.iter().take(count).cloned();
+      extra.fold(Titles::new(self.chip_title()), Titles::left).right(text(version.clone()))
+    };
+    fit_titles(width, (0..=self.system_titles.len()).rev().map(titles).collect())
   }
 
   /// `Apple M3 Pro (6E+6P+18GPU 36GB)`, the details in parentheses dim. Core counts come from the
@@ -579,6 +603,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+  use macmon::Metrics;
   use ratatui::Terminal;
   use ratatui::backend::TestBackend;
   use ratatui::buffer::Buffer;
@@ -587,7 +612,7 @@ mod tests {
   use ratatui::text::Span;
 
   use super::{
-    Titles, draw_box, draw_scrollbar, fit_titles, format_uptime, hint, place_titles,
+    Titles, draw_box, draw_scrollbar, fit_titles, format_uptime, hint, place_titles, rates_line,
     render_bottom_border,
   };
   use crate::tui::theme::{self, dim, text};
@@ -633,6 +658,21 @@ mod tests {
     // none fits: the last one is cut
     assert_eq!(fitted(14), "── CPU 4.50W──");
     assert_eq!(fitted(10), "── CPU 4──");
+  }
+
+  #[test]
+  fn rates_keep_their_length_for_every_value() {
+    for rate in [0, 2 << 10, 869 << 10, 1023 << 10, 1023 << 20, 3 << 29, 999 << 30] {
+      let m = Metrics {
+        net_in: Some(rate),
+        net_out: Some(0),
+        disk_read: Some(rate),
+        disk_write: Some(0),
+        ..Default::default()
+      };
+      let widths = rates_line(&m).iter().map(Span::width).collect::<Vec<_>>();
+      assert_eq!(widths, [17, 18], "{rate}");
+    }
   }
 
   #[test]
