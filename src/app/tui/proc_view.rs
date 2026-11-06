@@ -33,8 +33,8 @@ const POWER_HOT_W: f64 = 10.0;
 const FILTER_CURSOR: &str = "█";
 /// Stands for the cut part of a text too long for its cells.
 pub(super) const ELLIPSIS: &str = "…";
-/// Cells of the shortest filter title worth showing next to the count: `…x█`.
-const FILTER_MIN_WIDTH: u16 = 3;
+/// Cells of the shortest filter title worth showing next to the count: `/ …x█`.
+const FILTER_MIN_WIDTH: u16 = 5;
 /// Rows one wheel step moves the selection and scrolls the table.
 const WHEEL_ROWS: usize = 3;
 /// Fewest process rows left below the group totals; with fewer the totals are hidden.
@@ -341,7 +341,7 @@ pub(super) fn type_filter(filter: &mut String, typing: &mut bool, key: KeyEvent)
 }
 
 /// `name`, then `/ filter`, or the filter once there is one or it is being typed. A filter too
-/// long for the border shows its end (`…ari█`); with no room for that next to `name`, the filter
+/// long for the border shows its end (`/ …ari█`); with no room for that next to `name`, the filter
 /// takes its place.
 pub(super) fn filter_titles(
   name: Vec<Span<'static>>,
@@ -372,7 +372,8 @@ fn filter_words(filter: &str, bad: fn(&str) -> bool) -> Vec<Span<'static>> {
   filter.split_inclusive([' ', ',']).flat_map(word).collect()
 }
 
-/// `saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after `…`.
+/// `/ saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after
+/// `…`.
 pub(super) fn filter_title(
   filter: &str,
   typing: bool,
@@ -380,10 +381,10 @@ pub(super) fn filter_title(
   room: u16,
   bad: fn(&str) -> bool,
 ) -> Vec<Span<'static>> {
-  // the cursor takes one cell after the filter text
-  let text_room = usize::from(room).saturating_sub(usize::from(typing));
+  // `/ ` (two cells) and the cursor (one) around the filter text
+  let text_room = usize::from(room).saturating_sub(2 + usize::from(typing));
 
-  let mut spans = vec![];
+  let mut spans = vec![theme::key("/ ")];
   if Span::raw(filter).width() <= text_room {
     spans.extend(filter_words(filter, bad));
   } else {
@@ -1156,6 +1157,7 @@ mod tests {
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
   use crate::tui::boxes::draw_box;
+  use crate::tui::theme;
 
   const MIB: u64 = 1 << 20;
 
@@ -1517,17 +1519,16 @@ mod tests {
       term.draw(|f| _ = draw_box(f, f.area(), view.titles(width))).unwrap();
       let buf = term.backend().buffer();
       let line: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
-      assert!(line.contains(if width == 12 { "ches" } else { "matches" }), "{line}");
-      assert!(!line.contains('/') && (line.contains('…') || line.contains("a-long")), "{line}");
+      assert!(line.contains(if width == 12 { "hes" } else { "matches" }), "{line}");
+      assert!(line.contains("/ …") || line.contains("/ a-long"), "{line}");
       if width == 80 {
         assert!(line.contains("proc 5 ─"), "{line}");
         assert!(!line.contains("5/5"));
       }
 
-      let start = if width == 12 { "…" } else { "a" };
-      let start = (0..width).find(|&x| buf[(x, 0)].symbol() == start).unwrap();
-      let cells = if width == 12 { 5 } else { view.filter.len() as u16 };
-      for x in start..start + cells {
+      let slash = (0..width).find(|&x| buf[(x, 0)].symbol() == "/").unwrap();
+      let cells = if width == 12 { 6 } else { 2 + view.filter.len() as u16 };
+      for x in slash..slash + cells {
         assert!(buf[(x, 0)].modifier.contains(Modifier::DIM));
       }
     }
@@ -1543,6 +1544,10 @@ mod tests {
     let yellow = (0..80).filter(|&x| buf[(x, 0)].fg == Color::Yellow);
     let yellow = yellow.map(|x| buf[(x, 0)].symbol()).collect::<String>();
     assert_eq!(yellow, "mem:>1x!user:");
+
+    let row: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+    let slash = row[..row.find("─ /").unwrap()].chars().count() as u16 + 2;
+    assert_eq!(buf[(slash, 0)].fg, theme::KEY);
   }
 
   #[test]
@@ -1887,11 +1892,11 @@ mod tests {
     assert!(title(&view).0.starts_with("╭─ proc 324 ─ / filter ─ sort ─"));
     assert!(press(&mut view, KeyCode::Char('/')));
     let (row, open) = title(&view);
-    assert!(row.starts_with("╭─ proc 324/324 ─ █ ─"), "{row}");
+    assert!(row.starts_with("╭─ proc 324/324 ─ / █ ─"), "{row}");
     for (name, n) in names {
       type_str(&mut view, name);
       let (row, at) = title(&view);
-      assert!(row.starts_with(&format!("╭─ proc {n:>3}/324 ─ {name}█ ─")), "{row}");
+      assert!(row.starts_with(&format!("╭─ proc {n:>3}/324 ─ / {name}█ ─")), "{row}");
       assert_eq!(at, open, "{row}");
       for _ in name.chars() {
         assert!(press(&mut view, KeyCode::Backspace));
