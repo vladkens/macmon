@@ -586,7 +586,7 @@ mod tests {
     let shown = rows(&render(&mut info, 80, 8));
     assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(59)));
     let divider =
-      "├─ /tcp, unix█ ─────────────────────────────────────── Enter keep | Esc clear ─┤";
+      "├─ tcp, unix█ ──────────────────────────────────────── Enter keep | Esc clear ─┤";
     assert_eq!(shown[1], divider);
     // nothing on the bottom border while typing
     assert_eq!(shown[7], format!("╰{}╯", "─".repeat(78)));
@@ -597,7 +597,7 @@ mod tests {
     );
     let shown = rows(&render(&mut info, 80, 8));
     assert!(shown[0].ends_with("─── copy | finder ─╮"), "{}", shown[0]);
-    assert_eq!(shown[1], format!("├─ /tcp, unix {}┤", "─".repeat(65)));
+    assert_eq!(shown[1], format!("├─ tcp, unix {}┤", "─".repeat(66)));
   }
 
   #[test]
@@ -836,10 +836,10 @@ mod tests {
     assert!(wide[1].starts_with("│ 16 fds  5 files "), "{}", wide[1]);
     let buf = render(&mut info, 14, 8);
     let shown = rows(&buf);
-    assert!(shown[1].contains("/…atches"), "{}", shown[1]);
-    let slash = (0..14).find(|&x| buf[(x, 1)].symbol() == "/").unwrap();
-    assert!(buf[(slash, 1)].modifier.contains(Modifier::DIM));
-    assert!(buf[(slash + 2, 1)].modifier.contains(Modifier::DIM));
+    assert!(shown[1].contains("─ …matches"), "{}", shown[1]);
+    let start = (0..14).find(|&x| buf[(x, 1)].symbol() == "…").unwrap();
+    assert!(buf[(start, 1)].modifier.contains(Modifier::DIM));
+    assert!(buf[(start + 2, 1)].modifier.contains(Modifier::DIM));
   }
 
   #[test]
