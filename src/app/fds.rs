@@ -157,17 +157,20 @@ unsafe fn fd_info<T>(pid: i32, fd: i32, flavor: c_int) -> Option<T> {
   unsafe { read(call) }.ok().flatten()
 }
 
+/// Working directory of a process. `Err(errno)` when it can't be read, as in `open_files`.
+pub fn cwd(pid: i32) -> Result<Option<String>, i32> {
+  let flavor = libc::PROC_PIDVNODEPATHINFO;
+  let call = |buf, size| unsafe { libc::proc_pidinfo(pid, flavor, 0, buf, size) };
+  let cwd: Option<libc::proc_vnodepathinfo> = unsafe { read(call) }?;
+  Ok(cwd.map(|cwd| c_chars_to_string(cwd.pvi_cdir.vip_path.as_flattened())))
+}
+
 /// Working directory first, then the descriptors in fd order. `Err(errno)` when the process
 /// can't be read: `EPERM` for other users' processes (without root), `ESRCH` when it's gone.
 /// A descriptor that can't be read is left out.
 pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
-  let flavor = libc::PROC_PIDVNODEPATHINFO;
-  let call = |buf, size| unsafe { libc::proc_pidinfo(pid, flavor, 0, buf, size) };
-  let cwd: Option<libc::proc_vnodepathinfo> = unsafe { read(call) }?;
-
   let mut files = Vec::new();
-  if let Some(cwd) = cwd {
-    let text = c_chars_to_string(cwd.pvi_cdir.vip_path.as_flattened());
+  if let Some(text) = cwd(pid)? {
     files.push(OpenFile { fd: None, kind: Kind::Cwd, text, mode: "" });
   }
 

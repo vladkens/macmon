@@ -1,3 +1,5 @@
+Done: 2026-11-06, PR #123
+
 # Filter queries (roadmap item 22)
 
 The process filter stays what it is for plain text and gains `key:value` words, in the style of fsearch. Old filters keep working.
@@ -21,4 +23,8 @@ The process filter stays what it is for plain text and gains `key:value` words, 
 ## Tasks
 
 - [x] PR 1: words and keys, without `dir:`. Readme and help.
-- [ ] PR 2: `dir:` with the working directory of each process, measured for its cost.
+- [x] PR 2: `dir:` with the working directory of each process, measured for its cost.
+
+## Result
+
+The process filter takes words, `!` and the keys `cpu:`, `gpu:`, `power:`, `mem:`, `time:`, `user:`, `path:` and `dir:`. A sample while paused keeps the rows and updates only the totals. `dir:` reads the working directory only while a filter uses it, without a change to sampling: a refresh of about 970 processes took about 1.3 ms with `dir:` and 0.1 ms without.
