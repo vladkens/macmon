@@ -17,6 +17,7 @@ use super::App;
 use super::boxes::{
   Titles, draw_box, draw_scrollbar, hint, join, render_bottom_border, title_text_room,
 };
+use super::kill::ProcSys;
 use super::store::ratio;
 use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
@@ -537,6 +538,8 @@ pub(super) struct ProcView {
   /// Totals of `rows` for each filter term, sorted like the processes.
   groups: Vec<Group>,
   selected: Option<Selection>,
+  /// The process `read_cmd` read and its command line, dropped with each sample.
+  cmd: Option<(Identity, Option<String>)>,
   /// First row on screen.
   offset: usize,
   /// Rows on screen at the last render, the PgUp / PgDn step.
@@ -568,6 +571,7 @@ impl ProcView {
       rows: vec![],
       groups: vec![],
       selected: None,
+      cmd: None,
       offset: 0,
       page: 0,
       targets: Targets::default(),
@@ -702,6 +706,7 @@ impl ProcView {
   /// Totals of the rows and the selection, which follows identity and is dropped when that process
   /// is gone or filtered out.
   fn update_totals(&mut self, filter: &Query, sort_now: bool) {
+    self.cmd = None;
     let groups = filter
       .any
       .iter()
@@ -923,14 +928,30 @@ impl ProcView {
     }
   }
 
-  /// Left side of the bottom border of the process box: a faint `copied` after `c`, else a dim
-  /// note that POWER is known for own processes only, while the POWER column shows processes
-  /// without it next to some with it.
-  fn border_text(&self, power_shown: bool) -> Vec<Span<'static>> {
+  /// Reads the command line of the selected process, unless it is known: none for a pid reused
+  /// since the sample (another start time).
+  fn read_cmd(&mut self, sys: &dyn ProcSys) {
+    let Some(Selection { pid, started, .. }) = self.selected else { return };
+    if self.cmd.as_ref().is_none_or(|(id, _)| *id != (pid, started)) {
+      let cmd = (sys.identity(pid) == started).then(|| sys.cmd_line(pid)).flatten();
+      self.cmd = Some(((pid, started), cmd.filter(|cmd| !cmd.is_empty())));
+    }
+  }
+
+  /// Left side of the bottom border of the process box in `room` cells: a faint `copied` after
+  /// `c`, else the command line of the selected process, else a dim note that POWER is known for
+  /// own processes only, while the POWER column shows processes without it next to some with it.
+  fn border_text(&self, power_shown: bool, room: usize) -> Vec<Span<'static>> {
     let procs = self.procs().unwrap_or_default();
     let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
+    let cmd = self.selected.and(self.cmd.as_ref()).and_then(|(_, cmd)| cmd.as_deref());
     if self.copied {
       vec![faint("copied")]
+    } else if let Some(cmd) = cmd.filter(|cmd| Span::raw(*cmd).width() > room) {
+      // both ends: the program and the last arguments
+      vec![dim(format!("{}{}", head(cmd, room / 2), cut_start(cmd, room - room / 2)))]
+    } else if let Some(cmd) = cmd {
+      vec![dim(cmd.to_string())]
     } else if power_shown && power(true) && power(false) {
       vec![dim("POWER: own processes only")]
     } else {
@@ -943,13 +964,15 @@ impl ProcView {
 
 impl App {
   /// Process panel: count, filter and sort hint in the title, a header row with the sort arrow,
-  /// the process rows with a scrollbar when they don't fit, and the POWER note and the key hints
-  /// on the bottom border. Keeps the cells that react to the mouse for `ProcView::handle_mouse`.
+  /// the process rows with a scrollbar when they don't fit, and the command line or the POWER note
+  /// and the key hints on the bottom border. Keeps the cells that react to the mouse for
+  /// `ProcView::handle_mouse`.
   pub(super) fn render_proc_box(&mut self, f: &mut Frame, area: Rect) {
     let inner = draw_box(f, area, self.proc_view.titles(area.width));
     let (headers, body) = self.render_proc_table(f, inner);
     let power_shown = headers.iter().any(|&(column, _)| column == ProcSort::Power);
     self.proc_view.targets = Targets { area, headers, body };
+    self.proc_view.read_cmd(&*self.kill.sys);
 
     let view = &self.proc_view;
     draw_scrollbar(f, area, body, view.row_count(), view.offset);
@@ -958,7 +981,7 @@ impl App {
       hints.insert(0, vec![theme::paused()]);
     }
 
-    render_bottom_border(f, area, hints, |_| view.border_text(power_shown));
+    render_bottom_border(f, area, hints, |room| view.border_text(power_shown, room));
   }
 
   /// Header row and process rows in `inner`, or "collecting…" until the first sample. Returns the

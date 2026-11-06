@@ -1625,6 +1625,38 @@ mod tests {
     );
   }
 
+  #[test]
+  fn the_bottom_border_has_the_command_line_of_the_selected_process() {
+    let bottom = |app: &mut App, width| row(&render_buffer(app, width, 50), 49);
+    let (mut app, fake) = kill_app(); // WindowServer selected
+    let cmd = "/System/Library/WindowServer -daemon";
+    fake.0.borrow_mut().cmds.insert(631, cmd.to_string());
+    let buf = render_buffer(&mut app, 200, 50);
+    assert!(row(&buf, 49).starts_with(&format!("╰─ {cmd} ─")), "{}", row(&buf, 49));
+    assert_eq!(buf[(3, 49)].fg, theme::DIM);
+
+    // cut in the middle to fit
+    let shown = bottom(&mut app, 80);
+    assert!(shown.starts_with("╰─ /System/Libra…") && shown.contains(" -daemon ─ ?"), "{shown}");
+
+    // one read for the frames of a sample, one more for a new sample
+    assert_eq!(fake.0.borrow().cmd_reads, 1);
+    put_procs(&mut app, varied_procs());
+    bottom(&mut app, 200);
+    bottom(&mut app, 200);
+    assert_eq!(fake.0.borrow().cmd_reads, 2);
+
+    // `copied` over it; the POWER note for a process without one and without a selection
+    assert!(app.handle_key(key('c')).is_continue());
+    assert!(bottom(&mut app, 200).starts_with("╰─ copied ─"));
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    assert!(bottom(&mut app, 200).starts_with("╰─ POWER: own processes only ─"));
+    assert!(press(&mut app, KeyCode::Up).is_continue());
+    assert!(bottom(&mut app, 200).starts_with(&format!("╰─ {cmd} ─")));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    assert!(bottom(&mut app, 200).starts_with("╰─ POWER: own processes only ─"));
+  }
+
   /// `app_with_procs` of `varied_procs` with WindowServer selected, killing through a fake with
   /// their processes.
   fn kill_app() -> (App, FakeSys) {
