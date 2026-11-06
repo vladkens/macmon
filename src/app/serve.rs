@@ -284,6 +284,10 @@ fn install_refusal(args: &str) -> String {
 }
 
 pub fn install_agent(host: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+  if is_root() {
+    refuse(&format!("the macmon agent belongs to your user, run without sudo: {}", own_args()));
+  }
+
   if Path::new(DAEMON_PLIST).exists() {
     refuse(&agent_refusal(&std::env::args().next().unwrap_or("macmon".into())));
   }
@@ -330,8 +334,10 @@ fn remove_user_agent(user: &str) -> std::io::Result<bool> {
     return Ok(false);
   }
 
-  // fails when it isn't loaded, which is fine
-  launchctl_quiet(&["bootout", &format!("gui/{uid}/com.macmon")]);
+  // fails when it isn't loaded, which is fine; loaded over SSH it sits in user/<uid>
+  for domain in ["gui", "user"] {
+    launchctl_quiet(&["bootout", &format!("{domain}/{uid}/com.macmon")]);
+  }
 
   std::fs::remove_file(plist_path)?;
   eprintln!("removed the launchd agent of {user}");
