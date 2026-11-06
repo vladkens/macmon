@@ -321,6 +321,9 @@ enum Scale {
   /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
   /// switches it to a gauge of the current `load` (`0.0..=1.0`).
   Load { max: u64, load: f64 },
+  /// Memory pressure: the graph is scaled to 100 and `v` switches it to a gauge of the current
+  /// `load` (`0.0..=1.0`), both in `color`.
+  Pressure { load: f64, color: Color },
   /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
   /// original; no gauge.
   Power,
@@ -382,6 +385,10 @@ impl App {
           f.render_widget(Gauge::new(load), inner)
         }
         Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
+        Scale::Pressure { load, color } if self.cfg.view_type == ViewType::Gauge => {
+          f.render_widget(Gauge::new(load).color(color), inner)
+        }
+        Scale::Pressure { color, .. } => f.render_widget(graph.max(100).color(color), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
       }
 
@@ -472,34 +479,41 @@ impl App {
     }
   }
 
-  /// RAM and swap usage over the RAM usage history scaled to the total RAM, or a gauge. The total
+  /// RAM and swap usage with the memory pressure over its history scaled to 100 %, as in Activity
+  /// Monitor, or a gauge, both in the color of the pressure level. Without a pressure reading, the
+  /// RAM usage history scaled to the total RAM, or a gauge, in the load colors. The total
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
   /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
   /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
-  /// title, so no number is ever cut. With a memory pressure reading each title ends with `·
-  /// PRESSURE 25%`, or `PR 25%` on the narrower ones, the GB figures going first and the pressure
-  /// last (`PR 25%` alone). At warning and critical pressure the percent and the border take the
-  /// color of the level; the graph or gauge stays in the load colors.
+  /// title, so no number is ever cut. With a pressure reading the percentages lose their load
+  /// colors and the title ends with `· PRESSURE 25%`: the GB figures go first, then the swap
+  /// (`RAM 70% · PRESSURE 25%`), `PR` takes its place (`RAM 70% PR 25%`), and the pressure goes
+  /// last (`PR 25%`). At warning and critical pressure the percent and the border take the color
+  /// of the level.
   fn ram_box(&self) -> MetricBox<'_> {
     let mem = &self.mem;
     let gib = |bytes: u64| bytes as f64 / GIB;
     let (used, load) = (gib(mem.ram_usage), ratio(gib(mem.ram_usage), gib(mem.ram_total)));
-    let full = [heading("RAM"), text(format!(" {used:.2} GB (")), self.percent(load, 1), text(")")];
-    let short = [heading("RAM"), text(" "), self.percent(load, 0)];
+    let percent = |load: f64, decimals| match mem.pressure_percent {
+      Some(_) => text(format!("{:.decimals$}%", load * 100.0)),
+      None => self.percent(load, decimals),
+    };
+    let full = [heading("RAM"), text(format!(" {used:.2} GB (")), percent(load, 1), text(")")];
+    let short = [heading("RAM"), text(" "), percent(load, 0)];
 
     let mut titles = vec![];
     if mem.swap_total > 0 {
       let (used, total) = (gib(mem.swap_usage), gib(mem.swap_total));
       let swap = [dim(" · "), heading("SWAP")];
       let full_swap = [text(format!(" {used:.2} / {total:.1} GB"))];
-      let short_swap = [text(" "), self.percent(ratio(used, total), 0)];
+      let short_swap = [text(" "), percent(ratio(used, total), 0)];
       titles.push([&full[..], &swap, &full_swap].concat());
       titles.push([&short[..], &swap, &short_swap].concat());
       titles.push([&short[..], &[text(" "), heading("SW")], &short_swap].concat());
     } else {
       titles.push(full.into());
     }
-    titles.push(short.into());
+    titles.push(short.to_vec());
 
     let color = match mem.pressure_level {
       Some(1) => Some(theme::WARNING),
@@ -511,18 +525,23 @@ impl App {
       let long = [dim(" · "), heading("PRESSURE"), text(" "), percent.clone()];
       let brief = [heading("PR"), text(" "), percent];
 
-      // the two widest titles with the long form, the rest with the brief one
-      let first_brief = if mem.swap_total > 0 { 2 } else { 1 };
-      let with_long = titles.iter().take(2).map(|x| [&x[..], &long].concat());
-      let with_brief =
-        titles[first_brief..].iter().map(|x| [&x[..], &[text(" ")], &brief].concat());
-      titles = with_long.chain(with_brief).chain([brief.to_vec()]).collect();
+      // the titles with figures, then `short`, with the long form; the narrowest with the brief
+      titles.truncate(if mem.swap_total > 0 { 2 } else { 1 });
+      titles.push(short.to_vec());
+      titles = titles.iter().map(|x| [&x[..], &long].concat()).collect();
+      titles.extend([[&short[..], &[text(" ")], &brief].concat(), brief.to_vec()]);
     }
 
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
-    let scale = Scale::Load { max: mem.ram_total, load };
-    MetricBox { titles, data: &mem.items, scale, border: color }
+    let (data, scale) = match mem.pressure_percent {
+      Some(percent) => {
+        let (load, color) = (f64::from(percent) / 100.0, color.unwrap_or(theme::NORMAL));
+        (&mem.pressure, Scale::Pressure { load, color })
+      }
+      None => (&mem.items, Scale::Load { max: mem.ram_total, load }),
+    };
+    MetricBox { titles, data, scale, border: color }
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when

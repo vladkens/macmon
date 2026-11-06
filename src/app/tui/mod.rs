@@ -595,8 +595,8 @@ mod tests {
   use ratatui::crossterm::event::{
     EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
   };
-  use ratatui::layout::Margin;
-  use ratatui::style::Modifier;
+  use ratatui::layout::{Margin, Rect};
+  use ratatui::style::{Color, Modifier};
 
   use super::kill::tests::FakeSys;
   use super::layout::Metric;
@@ -1489,14 +1489,14 @@ mod tests {
       })
     };
     // (box width, title): each from the width where it fits whole (its text + 6 cells); the GB
-    // figures go first, then the swap and the RAM percent
+    // figures go first, then the swap, then `PRESSURE` gives way to `PR`, then the RAM percent
     let swap = [
       (62, "RAM 28.80 GB (80.0%) · SWAP 1.00 / 2.0 GB · PRESSURE 25%"),
       (61, "RAM 80% · SWAP 50% · PRESSURE 25%"),
       (39, "RAM 80% · SWAP 50% · PRESSURE 25%"),
-      (38, "RAM 80% SW 50% PR 25%"),
-      (27, "RAM 80% SW 50% PR 25%"),
-      (26, "RAM 80% PR 25%"),
+      (38, "RAM 80% · PRESSURE 25%"),
+      (28, "RAM 80% · PRESSURE 25%"),
+      (27, "RAM 80% PR 25%"),
       (20, "RAM 80% PR 25%"),
       (19, "PR 25%"),
       (12, "PR 25%"),
@@ -1524,62 +1524,120 @@ mod tests {
     }
   }
 
+  /// `test_app` with `ram` percent of the RAM in use and the given pressure.
+  fn pressure_app(ram: u64, level: Option<u8>, percent: Option<u8>) -> App {
+    test_app_with(|m| {
+      m.memory.ram_usage = m.memory.ram_total / 100 * ram;
+      m.memory.pressure_level = level;
+      m.memory.pressure_percent = percent;
+    })
+  }
+
+  /// Frame of `app` with the RAM box `width` cells wide, and that box.
+  fn ram_frame(app: &mut App, width: u16) -> (Buffer, Rect) {
+    let buf = render_buffer(app, width * 4 + 2, 50);
+    let boxes = app.layout(buf.area).boxes;
+    let (_, area) = boxes.into_iter().find(|(m, _)| *m == Metric::Ram).expect("metric box");
+    (buf, area)
+  }
+
+  /// Color of `text` on the top border of the RAM box in `buf`, when it is there.
+  fn ram_title_color(buf: &Buffer, area: Rect, text: &str) -> Option<Color> {
+    let top: Vec<String> =
+      (area.left()..area.right()).map(|x| buf[(x, area.y)].symbol().to_string()).collect();
+    let text: Vec<String> = text.chars().map(String::from).collect();
+    let x = top.windows(text.len()).position(|x| x == text)?;
+    Some(buf[(area.x + x as u16, area.y)].fg)
+  }
+
   #[test]
-  fn ram_box_follows_memory_pressure() {
-    use ratatui::style::Color;
-
-    let load_app = |percent: u64, level, pressure| {
-      test_app_with(|m| {
-        m.memory.ram_usage = m.memory.ram_total / 100 * percent;
-        m.memory.pressure_level = level;
-        m.memory.pressure_percent = pressure;
-      })
-    };
-    // colors of the RAM box at `width`: the top left corner, the cell at its bottom right, and
-    // the pressure percent (`None` when the title has none)
-    let colors = |app: &mut App, width: u16| {
-      let buf = render_buffer(app, width * 4 + 2, 50);
-      let boxes = app.layout(buf.area).boxes;
-      let (_, area) = boxes.into_iter().find(|(m, _)| *m == Metric::Ram).expect("metric box");
-      let top = box_top(app, &buf, Metric::Ram);
-      let percent = top.chars().collect::<Vec<_>>().windows(3).position(|x| x == ['2', '5', '%']);
-      let percent = percent.map(|x| buf[(area.x + x as u16, area.y)].fg);
-      (buf[(area.x, area.y)].fg, buf[(area.right() - 2, area.bottom() - 2)].fg, percent)
-    };
-
-    // (level, border, percent): normal and no level keep the usual colors
+  fn ram_box_colors_follow_the_pressure_level() {
+    // (level, border, percent, graph): normal and no level keep the usual colors, the graph green
     let cases = [
-      (Some(0), Color::DarkGray, Color::Reset),
-      (None, Color::DarkGray, Color::Reset),
-      (Some(1), Color::Yellow, Color::Yellow),
-      (Some(2), Color::Red, Color::Red),
+      (Some(0), Color::DarkGray, Color::Reset, Color::Green),
+      (None, Color::DarkGray, Color::Reset, Color::Green),
+      (Some(1), Color::Yellow, Color::Yellow, Color::Yellow),
+      (Some(2), Color::Red, Color::Red, Color::Red),
     ];
-    for (level, border, percent) in cases {
-      // the graph keeps its load color: red at 80 %, unlike the warning color, and green at 20 %,
-      // unlike both; the colors don't depend on the width or the form of the title
-      for (load, fill) in [(80, Color::Red), (20, Color::Green)] {
-        let mut app = load_app(load, level, Some(25));
+    for (level, border, percent, fill) in cases {
+      // the RAM load doesn't matter: 80 % is red and 20 % green on the load gradient
+      for ram in [80, 20] {
+        let mut app = pressure_app(ram, level, Some(25));
         for width in [80, 30, 12] {
-          let expected = (border, fill, Some(percent));
-          assert_eq!(colors(&mut app, width), expected, "{level:?} at {load}, {width}");
+          let (buf, area) = ram_frame(&mut app, width);
+          let colors = (
+            buf[(area.x, area.y)].fg,
+            buf[(area.right() - 2, area.bottom() - 2)].fg,
+            ram_title_color(&buf, area, "25%"),
+          );
+          assert_eq!(colors, (border, fill, Some(percent)), "{level:?} at {ram}, {width}");
         }
-      }
 
-      // the gauge too
-      let mut app = load_app(80, level, Some(25));
+        // the RAM and swap percentages lose their load colors
+        let (buf, area) = ram_frame(&mut app, 45);
+        let text = format!("{ram}%");
+        assert_eq!(ram_title_color(&buf, area, &text), Some(Color::Reset));
+        assert_eq!(ram_title_color(&buf, area, "50%"), Some(Color::Reset));
+
+        // the gauge too
+        app.cfg.view_type = ViewType::Gauge;
+        let (buf, area) = ram_frame(&mut app, 80);
+        assert_eq!(buf[(area.x, area.y)].fg, border);
+        assert_eq!(buf[(area.x + 1, area.y + 1)].fg, fill);
+      }
+    }
+  }
+
+  #[test]
+  fn ram_box_plots_the_pressure_instead_of_the_ram() {
+    let filled = |buf: &Buffer, x: u16, y: u16| buf[(x, y)].symbol() != " ";
+
+    // the graph: a full column at 100 %, whatever the RAM; blank at 0 %, at any RAM
+    let mut app = pressure_app(20, Some(0), Some(100));
+    let (buf, area) = ram_frame(&mut app, 80);
+    assert!(filled(&buf, area.right() - 2, area.y + 1));
+
+    let mut app = pressure_app(100, Some(0), Some(0));
+    let (buf, area) = ram_frame(&mut app, 80);
+    assert!(!filled(&buf, area.right() - 2, area.bottom() - 2));
+
+    // the gauge: a quarter of the row at 25 %, with 80 % of the RAM in use
+    let mut app = pressure_app(80, Some(1), Some(25));
+    app.cfg.view_type = ViewType::Gauge;
+    let (buf, area) = ram_frame(&mut app, 82);
+    let cells = (area.x + 1..area.right() - 1).filter(|&x| filled(&buf, x, area.y + 1)).count();
+    assert_eq!(cells, 20);
+  }
+
+  #[test]
+  fn ram_box_without_a_pressure_reading_shows_the_ram() {
+    // the RAM graph and gauge in the load colors, the old title, the usual border
+    for (ram, color) in [(80, Color::Red), (20, Color::Green)] {
+      let mut app = pressure_app(ram, None, None);
+      let (buf, area) = ram_frame(&mut app, 80);
+      assert_eq!(buf[(area.x, area.y)].fg, Color::DarkGray);
+      assert_eq!(buf[(area.right() - 2, area.bottom() - 2)].fg, color);
+      assert!(!box_top(&app, &buf, Metric::Ram).contains("PR"));
+
+      let (buf, area) = ram_frame(&mut app, 25);
+      assert_eq!(ram_title_color(&buf, area, &format!("{ram}%")), Some(color));
+
       app.cfg.view_type = ViewType::Gauge;
-      let buf = render_buffer(&mut app, 80 * 4 + 2, 50);
-      let boxes = app.layout(buf.area).boxes;
-      let (_, area) = boxes.into_iter().find(|(m, _)| *m == Metric::Ram).expect("metric box");
-      assert_eq!(buf[(area.x, area.y)].fg, border);
-      assert_eq!(buf[(area.x + 1, area.y + 1)].fg, Color::Red);
+      let (buf, area) = ram_frame(&mut app, 80);
+      assert_eq!(buf[(area.x + 1, area.y + 1)].fg, color);
     }
 
-    // a level without a percent: the title of no reading, the border still follows the level
-    let mut app = load_app(80, Some(1), None);
-    assert_eq!(colors(&mut app, 80), (Color::Yellow, Color::Red, None));
-    let buf = render_buffer(&mut app, 80 * 4 + 2, 50);
-    assert!(!box_top(&app, &buf, Metric::Ram).contains("PRESSURE"));
+    // the graph follows the RAM: a full column with all of it in use
+    let mut app = pressure_app(100, None, None);
+    let (buf, area) = ram_frame(&mut app, 80);
+    assert_ne!(buf[(area.right() - 2, area.y + 1)].symbol(), " ");
+
+    // a level without a percent: the same box, the border follows the level
+    let mut app = pressure_app(80, Some(1), None);
+    let (buf, area) = ram_frame(&mut app, 80);
+    assert_eq!(buf[(area.x, area.y)].fg, Color::Yellow);
+    assert_eq!(buf[(area.right() - 2, area.bottom() - 2)].fg, Color::Red);
+    assert!(!box_top(&app, &buf, Metric::Ram).contains("PR"));
   }
 
   #[test]
