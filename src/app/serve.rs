@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::thread;
+use std::time::Duration;
 
 use macmon::sources::WithError;
 use macmon::{Metrics, SocInfo};
@@ -351,8 +352,23 @@ pub fn install_daemon(host: &str, port: u16) -> WithError<()> {
   std::fs::write(DAEMON_PATH, plist_text(&bin.to_string_lossy(), host, port, Some(&user)))?;
 
   let _ = Command::new("launchctl").args(["bootout", DAEMON_TARGET]).output();
-  if !Command::new("launchctl").args(["bootstrap", "system", DAEMON_PATH]).status()?.success() {
-    return Err("launchctl bootstrap failed".into());
+
+  // right after bootout launchd may still be removing the old service
+  let mut cmd = Command::new("launchctl");
+  cmd.args(["bootstrap", "system", DAEMON_PATH]);
+
+  let mut up = false;
+  for _ in 0..6 {
+    up = cmd.output()?.status.success();
+    if up {
+      break;
+    }
+
+    thread::sleep(Duration::from_millis(500));
+  }
+
+  if !up && !cmd.status()?.success() {
+    return Err(format!("launchctl bootstrap failed, {DAEMON_PATH} stays for next boot").into());
   }
 
   eprintln!("macmon service installed: {DAEMON_PATH}, runs as {user}");
