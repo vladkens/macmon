@@ -44,6 +44,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
 
   // `gauge_any!`: a gauge every Mac and VM has; `?` before the value leaves it out without a value.
   macro_rules! gauge_any {
+    // This `?` isn't Rust's `?` operator but this macro's own marker for an `Option` value: the
+    // gauge is left out when it is `None`.
     ($out:expr, $name:literal, $help:literal, ?$value:expr) => {
       if let Some(value) = $value {
         gauge_any!($out, $name, $help, value);
