@@ -220,9 +220,11 @@ pub struct Metrics {
   pub net_in: Option<u64>,
   /// Bytes per second sent by the Ethernet and Wi-Fi interfaces, or None without one.
   pub net_out: Option<u64>,
-  /// Bytes per second read from the disks, or None when unavailable.
+  /// Bytes per second read from the disks, a mounted disk image on top of the disk that holds it,
+  /// or None when unavailable.
   pub disk_read: Option<u64>,
-  /// Bytes per second written to the disks, or None when unavailable.
+  /// Bytes per second written to the disks, a mounted disk image on top of the disk that holds
+  /// it, or None when unavailable.
   pub disk_write: Option<u64>,
   /// Seconds since boot, or None when unavailable.
   pub uptime: Option<u64>,

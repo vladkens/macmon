@@ -1433,6 +1433,7 @@ mod tests {
       let bottom = row(&buf, PROC_Y - 1);
       assert!(bottom.starts_with("╰") && bottom.contains(text), "{bottom}");
     }
+
     let bottom = row(&render_buffer(&mut app, 16, 50), PROC_Y - 1);
     assert!(!bottom.contains("net"), "{bottom}");
 

@@ -500,8 +500,8 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
 
 // MARK: Network and disk
 
-/// `IFT_ETHER` of `net/if_types.h`: Ethernet and Wi-Fi. It leaves out loopback, and tunnels and
-/// bridges, whose traffic the interfaces under them count already.
+/// `IFT_ETHER` of `net/if_types.h`: Ethernet and Wi-Fi. It leaves out loopback, tunnels and
+/// bridges. VM traffic through `vmenetN` may count twice, not checked.
 const IFT_ETHER: u8 = 6;
 
 /// Reads a value of type `T` from the sysctl `mib`.
