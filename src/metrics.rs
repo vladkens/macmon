@@ -243,6 +243,13 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
   average.max(min_frequency_mhz as f64) as u32
 }
 
+/// `ram` or 0 when it is above the raw SMC total `sys`: memory can't draw more than the whole
+/// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is
+/// no reading.
+fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
+  if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
+}
+
 fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
   let (mut total_scaled, mut total_active, mut total_cores) = (0.0, 0.0, 0.0);
   for (tier, info) in rs.cpu_tiers.iter_mut().zip(&soc.cpu_tiers) {
@@ -805,10 +812,9 @@ impl Sampler {
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
-    rs.sys_power = match self.get_sys_power() {
-      Ok(val) => val.max(rs.all_power),
-      Err(_) => 0.0,
-    };
+    let sys_power = self.get_sys_power().ok();
+    rs.ram_power = checked_ram_power(rs.ram_power, sys_power);
+    rs.sys_power = sys_power.map_or(0.0, |val| val.max(rs.all_power));
 
     Ok(rs)
   }
@@ -830,14 +836,27 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
-    TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
-    cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value, temperature_average,
-    uses_cpu_ticks,
+    TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, checked_ram_power,
+    collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value,
+    temperature_average, uses_cpu_ticks,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
     tiers_from_perflevels,
   };
+
+  #[test]
+  fn ram_power_above_the_smc_total_is_dropped() {
+    let cases = [
+      (689.0, Some(12.0), 0.0),
+      (0.8, Some(12.0), 0.8),
+      (0.8, Some(0.0), 0.8),
+      (689.0, None, 689.0),
+    ];
+    for (ram, sys, expected) in cases {
+      assert_eq!(checked_ram_power(ram, sys), expected, "{ram} {sys:?}");
+    }
+  }
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
