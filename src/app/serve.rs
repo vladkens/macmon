@@ -42,8 +42,13 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
-  // `gauge_any!`: a gauge every Mac and VM has.
+  // `gauge_any!`: a gauge every Mac and VM has; `?` before the value leaves it out without a value.
   macro_rules! gauge_any {
+    ($out:expr, $name:literal, $help:literal, ?$value:expr) => {
+      if let Some(value) = $value {
+        gauge_any!($out, $name, $help, value);
+      }
+    };
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
       gauge_head!($out, $name, $help);
       let name = metric_name!($name);
@@ -84,22 +89,14 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   }
 
   let mut out = String::new();
-  if let Some(value) = m.temp.cpu_temp_avg {
-    gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
-  }
-  if let Some(value) = m.temp.gpu_temp_avg {
-    gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", value);
-  }
+  gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", ?m.temp.cpu_temp_avg);
+  gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", ?m.temp.gpu_temp_avg);
   gauge_any!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
   gauge_any!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge_any!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
-  if let Some(value) = m.memory.pressure_level {
-    gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", value);
-  }
-  if let Some(value) = m.memory.pressure_percent {
-    gauge_any!(out, "memory_pressure_percent", "Memory pressure in percent, as in Activity Monitor", value);
-  }
+  gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", ?m.memory.pressure_level);
+  gauge_any!(out, "memory_pressure_percent", "Memory pressure in percent, as in Activity Monitor", ?m.memory.pressure_percent);
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
