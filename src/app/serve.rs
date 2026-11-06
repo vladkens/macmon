@@ -1,7 +1,10 @@
 //! HTTP serving and launchd support.
 
+use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
@@ -10,6 +13,9 @@ use macmon::{Metrics, SocInfo};
 use crate::metrics_to_json_value;
 
 pub type SharedMetrics = Arc<RwLock<Option<Metrics>>>;
+
+const DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.macmon.plist";
+const DAEMON_TARGET: &str = "system/com.macmon";
 
 fn escape_label_value(value: &str) -> String {
   value.replace('\\', r"\\").replace('\n', r"\n").replace('"', r#"\""#)
@@ -210,26 +216,14 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
-pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
-  let home = std::env::var("HOME")?;
-  let plist_path = format!("{home}/Library/LaunchAgents/com.macmon.plist");
-
-  if !install {
-    let _ = std::process::Command::new("launchctl")
-      .args(["unload", &plist_path])
-      .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::null())
-      .status();
-    std::fs::remove_file(&plist_path)?;
-    eprintln!("macmon service uninstalled");
-    return Ok(());
-  }
-
-  let bin = std::env::current_exe()?;
-  let bin = bin.to_string_lossy();
-  let bin = escape_xml(&bin);
+fn plist(bin: &str, host: &str, port: u16, user: Option<&str>) -> String {
+  let bin = escape_xml(bin);
   let host_xml = escape_xml(host);
-  let plist = format!(
+  let user = user.map(escape_xml);
+  let user = user.map(|x| format!("  <key>UserName</key>\n  <string>{x}</string>\n"));
+  let user = user.unwrap_or_default();
+
+  format!(
     r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -249,10 +243,29 @@ pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::
   <true/>
   <key>KeepAlive</key>
   <true/>
-</dict>
+{user}</dict>
 </plist>
 "#
-  );
+  )
+}
+
+pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
+  let home = std::env::var("HOME")?;
+  let plist_path = format!("{home}/Library/LaunchAgents/com.macmon.plist");
+
+  if !install {
+    let _ = std::process::Command::new("launchctl")
+      .args(["unload", &plist_path])
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status();
+    std::fs::remove_file(&plist_path)?;
+    eprintln!("macmon service uninstalled");
+    return Ok(());
+  }
+
+  let bin = std::env::current_exe()?;
+  let plist = plist(&bin.to_string_lossy(), host, port, None);
 
   let agents_dir = format!("{home}/Library/LaunchAgents");
   std::fs::create_dir_all(&agents_dir)?;
@@ -268,6 +281,78 @@ pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::
   std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
   eprintln!("macmon service installed: {plist_path}");
   eprintln!("configured to serve on {}", serve_url(host, port));
+
+  Ok(())
+}
+
+fn user_home(user: &str) -> Option<String> {
+  let name = CString::new(user).ok()?;
+
+  // HOME can't tell: sudo may keep the caller's or set root's
+  let pw = unsafe { libc::getpwnam(name.as_ptr()) };
+  if pw.is_null() {
+    return None;
+  }
+
+  let dir = unsafe { CStr::from_ptr((*pw).pw_dir) };
+  Some(dir.to_string_lossy().into_owned())
+}
+
+pub fn launch_daemon(
+  host: &str,
+  port: u16,
+  install: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+  if unsafe { libc::geteuid() } != 0 {
+    let args = std::env::args().collect::<Vec<_>>().join(" ");
+    eprintln!("the macmon daemon needs root, run: sudo {args}");
+    std::process::exit(1);
+  }
+
+  // bootout silently in case it's already running
+  let _ = std::process::Command::new("launchctl")
+    .args(["bootout", DAEMON_TARGET])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status();
+
+  if !install {
+    std::fs::remove_file(DAEMON_PLIST)?;
+    eprintln!("macmon daemon uninstalled");
+    return Ok(());
+  }
+
+  let user = std::env::var("SUDO_USER").ok().filter(|x| !x.is_empty() && x != "root");
+  let bin = std::env::current_exe()?;
+  let plist = plist(&bin.to_string_lossy(), host, port, user.as_deref());
+
+  // launchd refuses a plist that isn't root-owned or is writable by others; umask can't be trusted
+  std::fs::write(DAEMON_PLIST, plist)?;
+  std::os::unix::fs::chown(DAEMON_PLIST, Some(0), Some(0))?;
+  std::fs::set_permissions(DAEMON_PLIST, std::fs::Permissions::from_mode(0o644))?;
+
+  let status =
+    std::process::Command::new("launchctl").args(["bootstrap", "system", DAEMON_PLIST]).status()?;
+  if !status.success() {
+    std::fs::remove_file(DAEMON_PLIST)?;
+    return Err(format!("launchctl bootstrap failed: {status}").into());
+  }
+
+  eprintln!("macmon daemon installed: {DAEMON_PLIST}");
+  eprintln!("configured to serve on {}", serve_url(host, port));
+
+  let Some(user) = user else {
+    eprintln!("no SUDO_USER: the daemon runs as root");
+    return Ok(());
+  };
+
+  eprintln!("the daemon runs as {user}");
+
+  let agent = user_home(&user).map(|x| format!("{x}/Library/LaunchAgents/com.macmon.plist"));
+  if agent.is_some_and(|x| Path::new(&x).exists()) {
+    eprintln!("note: {user} also has the launchd agent, both want the same port. As {user}, run:");
+    eprintln!("  macmon serve --uninstall");
+  }
 
   Ok(())
 }
@@ -297,7 +382,30 @@ pub fn run(
 mod tests {
   use macmon::{CpuTierMetrics, Metrics, SocInfo};
 
-  use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
+  use super::{escape_label_value, escape_xml, plist, serve_url, to_json, to_prometheus};
+
+  const AGENT_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.macmon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/macmon</string>
+    <string>serve</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--port</string>
+    <string>9090</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+"#;
 
   #[test]
   fn unavailable_temperature_has_no_prometheus_gauge() {
@@ -349,6 +457,26 @@ mod tests {
 
     let output = to_prometheus(&Metrics::default(), &SocInfo::default());
     assert!(!output.contains("# TYPE macmon_cpu_tier_"));
+  }
+
+  #[test]
+  fn agent_plist_stays_the_same() {
+    assert_eq!(plist("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, None), AGENT_PLIST);
+  }
+
+  #[test]
+  fn daemon_plist_names_its_user() {
+    let user = "  <key>UserName</key>\n  <string>a&amp;b</string>\n";
+    let expected = AGENT_PLIST.replace("</dict>", &format!("{user}</dict>"));
+    assert_eq!(plist("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, Some("a&b")), expected);
+  }
+
+  #[test]
+  fn plist_escapes_its_values() {
+    let output = plist("/a&b/macmon", "<host>", 8080, None);
+    assert!(output.contains("<string>/a&amp;b/macmon</string>"));
+    assert!(output.contains("<string>&lt;host&gt;</string>"));
+    assert!(output.contains("<string>8080</string>"));
   }
 
   #[test]

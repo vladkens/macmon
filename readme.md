@@ -135,6 +135,15 @@ macmon serve --uninstall                 # stop and remove
 
 This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that auto-starts on login and restarts on crash.
 
+An agent starts only after login. To start at boot with nobody logged in, for example on an always-on Mac scraped by Prometheus, install a daemon instead:
+
+```sh
+sudo macmon serve --install --daemon    # install and start (takes --host and --port too)
+sudo macmon serve --uninstall --daemon  # stop and remove
+```
+
+This creates `/Library/LaunchDaemons/com.macmon.plist`. The daemon runs as the user who called `sudo`, not as root. Remove the agent first if you have one (`macmon serve --uninstall`): both want the same port.
+
 #### Prometheus and Grafana
 
 The `/metrics` endpoint exposes metrics in Prometheus format. See [`examples/grafana`](examples/grafana) for a local demo stack with Prometheus and Grafana.

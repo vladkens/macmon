@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::parser::ValueSource;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod config;
 mod fds;
@@ -72,6 +72,7 @@ enum Commands {
   },
 
   /// Serve metrics over HTTP (JSON at /json, Prometheus at /metrics)
+  #[command(group(ArgGroup::new("service").args(["install", "uninstall"]).multiple(true)))]
   Serve {
     /// Host address to listen on
     #[arg(long, default_value = "0.0.0.0")]
@@ -88,6 +89,10 @@ enum Commands {
     /// Uninstall the launchd service
     #[arg(long, default_value_t = false)]
     uninstall: bool,
+
+    /// With --install or --uninstall: a LaunchDaemon that starts at boot, no login (needs sudo)
+    #[arg(long, default_value_t = false, requires = "service")]
+    daemon: bool,
   },
 
   /// Print debug information
@@ -270,11 +275,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { host, port, install, uninstall }) => {
+    Some(Commands::Serve { host, port, install, uninstall, daemon }) => {
+      if *daemon {
+        serve::launch_daemon(host, *port, *install)?;
+        return Ok(());
+      }
+
       if *install || *uninstall {
         serve::launchd(host, *port, *install)?;
         return Ok(());
       }
+
       let mut sampler = Sampler::new()?;
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
@@ -326,6 +337,14 @@ mod tests {
     for mode in [StressMode::Ane, StressMode::All] {
       run_stress(mode, None, Some(0), None).unwrap();
     }
+  }
+
+  #[test]
+  fn daemon_needs_install_or_uninstall() {
+    assert!(Cli::try_parse_from(["macmon", "serve", "--daemon"]).is_err());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--daemon"]).is_ok());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--daemon"]).is_ok());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--uninstall"]).is_ok());
   }
 
   #[test]
