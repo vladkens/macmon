@@ -263,6 +263,13 @@ fn launchctl_quiet(args: &[&str]) {
     .status();
 }
 
+// Fails when it isn't loaded, which is fine; loaded over SSH it sits in user/<uid>.
+fn bootout_agent(uid: u32) {
+  for domain in ["gui", "user"] {
+    launchctl_quiet(&["bootout", &format!("{domain}/{uid}/com.macmon")]);
+  }
+}
+
 fn own_args() -> String {
   std::env::args().collect::<Vec<_>>().join(" ")
 }
@@ -274,7 +281,7 @@ fn refuse(msg: &str) -> ! {
 
 fn agent_refusal(exe: &str) -> String {
   format!(
-    "the macmon daemon is installed and wants the same port, run: sudo {exe} serve --uninstall"
+    "only one macmon service at a time, to remove the daemon run: sudo {exe} serve --uninstall"
   )
 }
 
@@ -301,8 +308,8 @@ pub fn install_agent(host: &str, port: u16) -> Result<(), Box<dyn std::error::Er
   let agents_dir = format!("{home}/Library/LaunchAgents");
   std::fs::create_dir_all(&agents_dir)?;
 
-  // unload silently in case it's already running
-  launchctl_quiet(&["unload", &plist_path]);
+  // in case it's already running
+  bootout_agent(unsafe { libc::getuid() });
 
   std::fs::write(&plist_path, plist)?;
   std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
@@ -334,10 +341,7 @@ fn remove_user_agent(user: &str) -> std::io::Result<bool> {
     return Ok(false);
   }
 
-  // fails when it isn't loaded, which is fine; loaded over SSH it sits in user/<uid>
-  for domain in ["gui", "user"] {
-    launchctl_quiet(&["bootout", &format!("{domain}/{uid}/com.macmon")]);
-  }
+  bootout_agent(uid);
 
   std::fs::remove_file(plist_path)?;
   eprintln!("removed the launchd agent of {user}");
@@ -448,7 +452,7 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
   let plist_path = agent_plist(&std::env::var("HOME")?);
   let agent = Path::new(&plist_path).exists();
   if agent {
-    launchctl_quiet(&["unload", &plist_path]);
+    bootout_agent(unsafe { libc::getuid() });
     std::fs::remove_file(&plist_path)?;
     eprintln!("macmon agent uninstalled");
   }

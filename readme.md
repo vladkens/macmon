@@ -142,7 +142,7 @@ macmon serve --install --agent  # install and start (takes --host and --port too
 macmon serve --uninstall        # stop and remove
 ```
 
-This creates a LaunchAgent at `~/Library/LaunchAgents/com.macmon.plist`. It's refused while the daemon is installed: both want the same port.
+This creates a LaunchAgent at `~/Library/LaunchAgents/com.macmon.plist`. Only one macmon service at a time: it's refused while the daemon is installed.
 
 #### Prometheus and Grafana
 
