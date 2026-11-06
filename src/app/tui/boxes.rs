@@ -310,14 +310,30 @@ pub(super) fn render_bottom_border(
   }
 }
 
+/// Uptime in its two largest units: `12m`, `5h 12m`, `3d 4h`.
+fn format_uptime(secs: u64) -> String {
+  let (days, hours, mins) = (secs / 86400, secs / 3600 % 24, secs / 60 % 60);
+  match (days, hours) {
+    (0, 0) => format!("{mins}m"),
+    (0, _) => format!("{hours}h {mins}m"),
+    _ => format!("{days}d {hours}h"),
+  }
+}
+
 /// Pieces of the system line on the bottom border of the metrics box, the first kept longest.
 /// Metrics without a value are left out.
 pub(super) fn system_line(m: &Metrics) -> Vec<Span<'static>> {
   let rates = |a: &str, x: Option<u64>, b: &str, y: Option<u64>| {
     Some(format!("{a}{} {b}{}", format_mem(x?), format_mem(y?)))
   };
-  let pieces =
-    [rates("net ↓", m.net_in, "↑", m.net_out), rates("disk r", m.disk_read, "w", m.disk_write)];
+  let charging = if m.battery_charging == Some(true) { "+" } else { "" };
+  let pieces = [
+    rates("net ↓", m.net_in, "↑", m.net_out),
+    rates("disk r", m.disk_read, "w", m.disk_write),
+    m.load_avg.map(|[a, b, c]| format!("load {a:.1} {b:.1} {c:.1}")),
+    m.uptime.map(|x| format!("up {}", format_uptime(x))),
+    m.battery_percent.map(|x| format!("bat {x}%{charging}")),
+  ];
   pieces.into_iter().flatten().map(text).collect()
 }
 
@@ -571,7 +587,8 @@ mod tests {
   use ratatui::text::Span;
 
   use super::{
-    Titles, draw_box, draw_scrollbar, fit_titles, hint, place_titles, render_bottom_border,
+    Titles, draw_box, draw_scrollbar, fit_titles, format_uptime, hint, place_titles,
+    render_bottom_border,
   };
   use crate::tui::theme::{self, dim, text};
 
@@ -616,6 +633,13 @@ mod tests {
     // none fits: the last one is cut
     assert_eq!(fitted(14), "── CPU 4.50W──");
     assert_eq!(fitted(10), "── CPU 4──");
+  }
+
+  #[test]
+  fn uptime_shows_its_two_largest_units() {
+    for (secs, text) in [(59, "0m"), (720, "12m"), (18720, "5h 12m"), (273600, "3d 4h")] {
+      assert_eq!(format_uptime(secs), text);
+    }
   }
 
   #[test]

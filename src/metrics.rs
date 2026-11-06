@@ -11,9 +11,10 @@ use crate::shared::{
   zero_div,
 };
 use crate::sources::{
-  IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, cfio_get_residencies, cfio_watts,
-  cpu_load_ticks, disk_bytes, get_soc_info, libc_ram, libc_swap, memory_pressure_level,
-  memory_pressure_percent, memory_pressure_raw, memory_status_raw, net_bytes,
+  IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, battery, cfio_get_residencies,
+  cfio_watts, cpu_load_ticks, disk_bytes, get_soc_info, libc_ram, libc_swap, load_avg,
+  memory_pressure_level, memory_pressure_percent, memory_pressure_raw, memory_status_raw,
+  net_bytes, uptime_secs,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -223,6 +224,14 @@ pub struct Metrics {
   pub disk_read: Option<u64>,
   /// Bytes per second written to the disks, or None when unavailable.
   pub disk_write: Option<u64>,
+  /// Seconds since boot, or None when unavailable.
+  pub uptime: Option<u64>,
+  /// Load average over 1, 5 and 15 minutes, or None when unavailable.
+  pub load_avg: Option<[f32; 3]>,
+  /// Battery charge in percent (0–100), or None without a battery.
+  pub battery_percent: Option<u8>,
+  /// Whether the battery is charging, or None without a battery.
+  pub battery_charging: Option<bool>,
 }
 
 // MARK: Helpers
@@ -853,6 +862,10 @@ impl Sampler {
     [rs.net_in, rs.net_out] = byte_rates(bytes.net, cur.net, secs);
     [rs.disk_read, rs.disk_write] = byte_rates(bytes.disk, cur.disk, secs);
     self.bytes = Some(cur);
+
+    rs.uptime = uptime_secs();
+    rs.load_avg = load_avg();
+    (rs.battery_percent, rs.battery_charging) = battery().unzip();
 
     Ok(rs)
   }

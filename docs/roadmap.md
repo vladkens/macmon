@@ -86,7 +86,8 @@ POWER does today.
       with `UserName` the `StandardErrorPath` file must be writable by that user.
 - [x] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
       Reddit): disk read / write and network in / out, system-wide, in JSON, Prometheus and a line
-      of text on the bottom border of the TUI's metrics box.
+      of text on the bottom border of the TUI's metrics box, with the load average, uptime and
+      battery too.
 - [x] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
       `app:safari` in the filter matches the processes of an app: those running from its `.app`

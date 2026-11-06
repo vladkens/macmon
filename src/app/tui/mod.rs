@@ -1436,6 +1436,18 @@ mod tests {
     let bottom = row(&render_buffer(&mut app, 16, 50), PROC_Y - 1);
     assert!(!bottom.contains("net"), "{bottom}");
 
+    // every piece, the battery with its charging mark
+    let mut app = test_app_with(|m| {
+      (m.net_in, m.net_out) = (Some(2048), Some(1024));
+      (m.disk_read, m.disk_write) = (Some(3 << 20), Some(0));
+      m.load_avg = Some([1.94, 2.0, 1.8]);
+      m.uptime = Some(273600);
+      (m.battery_percent, m.battery_charging) = (Some(87), Some(true));
+    });
+    let bottom = row(&render_buffer(&mut app, 80, 50), PROC_Y - 1);
+    let line = "─ net ↓2K ↑1K | disk r3M w0K | load 1.9 2.0 1.8 | up 3d 4h | bat 87%+ ─";
+    assert!(bottom.contains(line), "{bottom}");
+
     // nothing without a value
     let mut app = test_app_with(|m| m.net_in = Some(2048));
     let bottom = row(&render_buffer(&mut app, 80, 50), PROC_Y - 1);

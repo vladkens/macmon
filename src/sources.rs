@@ -21,7 +21,7 @@ use std::mem::{MaybeUninit, size_of};
 use std::os::raw::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use core_foundation::array::{
   CFArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex,
@@ -31,6 +31,7 @@ use core_foundation::base::{
   CFAllocatorRef, CFGetTypeID, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
   kCFAllocatorNull,
 };
+use core_foundation::boolean::CFBoolean;
 use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataGetTypeID, CFDataRef};
 use core_foundation::dictionary::{
   CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
@@ -552,6 +553,36 @@ pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
     let bytes = |key| cfnum_get_i64(stats, key).map(|x| x as u64);
     Some([bytes("Bytes (Read)")?, bytes("Bytes (Write)")?])
   }))
+}
+
+// MARK: Uptime, load and battery
+
+/// Seconds since boot.
+pub(crate) fn uptime_secs() -> Option<u64> {
+  let boot: libc::timeval = sysctl_mib(&[libc::CTL_KERN, libc::KERN_BOOTTIME])?;
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+  now.checked_sub(boot.tv_sec as u64)
+}
+
+/// Load average over 1, 5 and 15 minutes.
+pub(crate) fn load_avg() -> Option<[f32; 3]> {
+  let mut avg = [0f64; 3];
+  let count = unsafe { libc::getloadavg(avg.as_mut_ptr(), 3) };
+  (count == 3).then(|| avg.map(|x| x as f32))
+}
+
+/// Percent and whether it is charging, from the properties of `AppleSmartBattery`. As in
+/// `pmset -g batt`: on Apple Silicon `CurrentCapacity` is the percent, not mAh.
+fn battery_from(props: CFDictionaryRef) -> Option<(u8, bool)> {
+  let percent = u8::try_from(cfnum_get_i64(props, "CurrentCapacity")?).ok()?;
+  let charging = cfdict_get_val(props, "IsCharging")?;
+  let charging = unsafe { CFBoolean::wrap_under_get_rule(charging as _) };
+  Some((percent, charging.into()))
+}
+
+/// Percent and charging state of the internal battery, or None on a desktop.
+pub(crate) fn battery() -> Option<(u8, bool)> {
+  read_services("AppleSmartBattery", battery_from).pop()
 }
 
 // MARK: SockInfo
@@ -1749,6 +1780,31 @@ impl Drop for SMC {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn battery_needs_percent_and_charging_state() {
+    let key = |x| CFString::new(x).as_CFType();
+    let percent = |x: i32| (key("CurrentCapacity"), CFNumber::from(x).as_CFType());
+    let charging = (key("IsCharging"), CFBoolean::true_value().as_CFType());
+    let read = |pairs: &[(CFType, CFType)]| {
+      battery_from(CFDictionary::from_CFType_pairs(pairs).as_concrete_TypeRef())
+    };
+
+    assert_eq!(read(&[percent(87), charging.clone()]), Some((87, true)));
+    assert_eq!(read(&[percent(87)]), None);
+    assert_eq!(read(&[percent(-1), charging]), None);
+  }
+
+  #[test]
+  fn a_missing_service_reads_nothing_as_on_a_desktop() {
+    assert!(read_services("MacmonNoSuchService", |_| Some(1)).is_empty());
+  }
+
+  #[test]
+  fn uptime_and_load_are_read() {
+    assert!(uptime_secs().is_some_and(|x| x > 0));
+    assert!(load_avg().is_some());
+  }
 
   #[test]
   fn clpc_descriptors_preserve_driver_counter_ids_and_nanojoule_units() {
