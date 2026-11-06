@@ -244,9 +244,10 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
 }
 
 /// `ram` or 0 when it is above the raw SMC total `sys`: memory can't draw more than the whole
-/// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27).
+/// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is
+/// no reading.
 fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
-  if sys.is_some_and(|sys| ram > sys) { 0.0 } else { ram }
+  if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
 }
 
 fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
@@ -846,7 +847,12 @@ mod tests {
 
   #[test]
   fn ram_power_above_the_smc_total_is_dropped() {
-    let cases = [(689.0, Some(12.0), 0.0), (0.8, Some(12.0), 0.8), (689.0, None, 689.0)];
+    let cases = [
+      (689.0, Some(12.0), 0.0),
+      (0.8, Some(12.0), 0.8),
+      (0.8, Some(0.0), 0.8),
+      (689.0, None, 689.0),
+    ];
     for (ram, sys, expected) in cases {
       assert_eq!(checked_ram_power(ram, sys), expected, "{ram} {sys:?}");
     }
