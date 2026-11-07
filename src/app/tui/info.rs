@@ -12,7 +12,7 @@ use super::boxes::{
 };
 use super::kill::{ProcSys, failure};
 use super::proc_view::{
-  ELLIPSIS, Filter, cut_middle, filter_title, scroll_offset, step, type_filter,
+  ELLIPSIS, Filter, cut_middle, filter_title, nav_code, scroll_offset, step, type_filter,
 };
 use super::theme::{self, faint, heading, text};
 use crate::fds::{Kind, OpenFile};
@@ -91,6 +91,8 @@ pub(super) struct Info {
   filter: String,
   filter_enabled: bool,
   pub(super) typing: bool,
+  /// Character of the filter the cursor stands on while typing.
+  cursor: usize,
   /// The selected row, and its key, which it follows when the rows change.
   index: usize,
   key: Option<Key>,
@@ -116,6 +118,7 @@ impl Info {
       filter,
       filter_enabled: true,
       typing,
+      cursor: 0,
       index,
       key,
       offset,
@@ -208,20 +211,22 @@ impl Info {
   /// popups.
   pub(super) fn handle_key(&mut self, key: KeyEvent, sys: &dyn ProcSys) -> bool {
     self.copied = false;
-    if let Some(index) = step(key.code, self.index, self.page.max(1), self.rows().len()) {
+    let code = nav_code(key.code, self.typing);
+    if let Some(index) = step(code, self.index, self.page.max(1), self.rows().len()) {
       self.typing = false;
       self.select(index);
       return true;
     }
     match key.code {
       _ if self.typing => {
-        if type_filter(&mut self.filter, &mut self.typing, key) {
+        if type_filter(&mut self.filter, &mut self.cursor, &mut self.typing, key) {
           self.follow();
         }
       }
       KeyCode::Char('/') => {
         self.filter_enabled = true;
         self.typing = true;
+        self.cursor = self.filter.chars().count();
         self.follow();
       }
       KeyCode::Char('f') if !self.filter.is_empty() => {
@@ -296,7 +301,8 @@ impl Info {
     let filter = match self.typing || !self.filter.is_empty() {
       true => {
         let room = title_text_room(width, &[]);
-        filter_title(&self.filter, self.typing, self.filter_enabled, room, |_| false)
+        let cursor = self.typing.then_some(self.cursor);
+        filter_title(&self.filter, cursor, self.filter_enabled, room, |_| false)
       }
       false => hint("/", "filter"),
     };

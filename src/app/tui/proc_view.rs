@@ -30,7 +30,7 @@ const NAME_MIN_WIDTH: u16 = 8;
 const NAME_USER_WIDTH: u16 = 16;
 /// Process power at the hot end of the load gradient.
 const POWER_HOT_W: f64 = 10.0;
-/// Cursor shown after the filter text while typing it.
+/// Cursor shown after the filter text while typing it; on a character it inverts that one.
 const FILTER_CURSOR: &str = "█";
 /// Stands for the cut part of a text too long for its cells.
 pub(super) const ELLIPSIS: &str = "…";
@@ -304,29 +304,89 @@ impl Group {
   }
 }
 
-/// Drops the last word of a filter and the commas and spaces after it: `claude, clan` →
-/// `claude, `, then `claude, ` → ``.
-fn delete_word(text: &mut String) {
-  let separator = |c: char| c == ',' || c.is_whitespace();
-  let kept = text.trim_end_matches(separator).trim_end_matches(|c| !separator(c)).len();
-  text.truncate(kept);
+/// What separates the words of a filter.
+fn is_separator(c: char) -> bool {
+  c == ',' || c.is_whitespace()
 }
 
-/// Filter input on `filter`: characters and Backspace edit, Ctrl-W / Alt-Backspace delete the last
-/// word, Ctrl-U (what Ghostty sends for Cmd-Backspace) and Cmd-Backspace delete the whole text,
-/// Enter keeps the filter, Esc clears it; both end the input. Returns whether the filter changed.
-pub(super) fn type_filter(filter: &mut String, typing: &mut bool, key: KeyEvent) -> bool {
+/// Start of the word before character `at`, past the commas and spaces after that word.
+fn word_start(text: &str, at: usize) -> usize {
+  let head = text[..byte_at(text, at)].trim_end_matches(is_separator);
+  head.trim_end_matches(|c| !is_separator(c)).chars().count()
+}
+
+/// End of the word after character `at`, past the commas and spaces before that word.
+fn word_end(text: &str, at: usize) -> usize {
+  let rest = &text[byte_at(text, at)..];
+  let left = rest.trim_start_matches(is_separator).trim_start_matches(|c| !is_separator(c));
+  at + rest.chars().count() - left.chars().count()
+}
+
+/// Drops the word before the cursor and the commas and spaces after that word: `claude, clan` →
+/// `claude, `, then `claude, ` → ``.
+fn delete_word(text: &mut String, cursor: &mut usize) {
+  let start = word_start(text, *cursor);
+  text.replace_range(byte_at(text, start)..byte_at(text, *cursor), "");
+  *cursor = start;
+}
+
+/// Byte offset of character `at` of `text`, its length past the last one.
+fn byte_at(text: &str, at: usize) -> usize {
+  text.char_indices().nth(at).map_or(text.len(), |(i, _)| i)
+}
+
+/// `code` for navigation: Home and End move the cursor while a filter is typed.
+pub(super) fn nav_code(code: KeyCode, typing: bool) -> KeyCode {
+  if typing && matches!(code, KeyCode::Home | KeyCode::End) { KeyCode::Null } else { code }
+}
+
+/// Filter input on `filter` at character `cursor`: ← / →, Alt-← / Alt-→ or Alt-B / Alt-F (by word),
+/// Home / End and Ctrl-A / Ctrl-E move it, characters, Backspace and Delete edit there, Ctrl-W /
+/// Alt-Backspace delete the word before it, Ctrl-U (what Ghostty sends for Cmd-Backspace) and
+/// Cmd-Backspace delete the whole text, Enter keeps the filter, Esc clears it; both end the input.
+/// Returns whether the filter changed.
+pub(super) fn type_filter(
+  filter: &mut String,
+  cursor: &mut usize,
+  typing: &mut bool,
+  key: KeyEvent,
+) -> bool {
   let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
   let alt = key.modifiers.contains(KeyModifiers::ALT);
   let cmd = key.modifiers.contains(KeyModifiers::SUPER);
+  let len = filter.chars().count();
+  let moved = match key.code {
+    KeyCode::Left | KeyCode::Char('b') if alt => Some(word_start(filter, *cursor)),
+    KeyCode::Right | KeyCode::Char('f') if alt => Some(word_end(filter, *cursor)),
+    KeyCode::Left => Some(cursor.saturating_sub(1)),
+    KeyCode::Right => Some(len.min(*cursor + 1)),
+    KeyCode::Home => Some(0),
+    KeyCode::Char('a') if ctrl => Some(0),
+    KeyCode::End => Some(len),
+    KeyCode::Char('e') if ctrl => Some(len),
+    _ => None,
+  };
+  if let Some(moved) = moved {
+    *cursor = moved;
+    return false;
+  }
+
+  let at = byte_at(filter, *cursor);
   match key.code {
     KeyCode::Char('u') if ctrl => filter.clear(),
     KeyCode::Backspace if cmd => filter.clear(),
-    KeyCode::Char('w') if ctrl => delete_word(filter),
-    KeyCode::Backspace if alt => delete_word(filter),
-    KeyCode::Char(c) if !(ctrl || alt || cmd) => filter.push(c),
-    KeyCode::Backspace => {
-      filter.pop();
+    KeyCode::Char('w') if ctrl => delete_word(filter, cursor),
+    KeyCode::Backspace if alt => delete_word(filter, cursor),
+    KeyCode::Char(c) if !(ctrl || alt || cmd) => {
+      filter.insert(at, c);
+      *cursor += 1;
+    }
+    KeyCode::Backspace if *cursor > 0 => {
+      *cursor -= 1;
+      filter.remove(byte_at(filter, *cursor));
+    }
+    KeyCode::Delete if *cursor < len => {
+      filter.remove(at);
     }
     KeyCode::Enter => {
       *typing = false;
@@ -338,27 +398,28 @@ pub(super) fn type_filter(filter: &mut String, typing: &mut bool, key: KeyEvent)
     }
     _ => return false,
   }
+  *cursor = (*cursor).min(filter.chars().count());
   true
 }
 
 /// `name`, then `/ filter`, or the filter once there is one or it is being typed. A filter too
 /// long for the border shows its end (`/ …ari█`); with no room for that next to `name`, the filter
-/// takes its place.
+/// takes its place. `cursor`: while it is typed.
 pub(super) fn filter_titles(
   name: Vec<Span<'static>>,
   filter: &str,
-  typing: bool,
+  cursor: Option<usize>,
   enabled: bool,
   width: u16,
 ) -> Titles<'static> {
-  if !typing && filter.is_empty() {
+  if cursor.is_none() && filter.is_empty() {
     return Titles::new(name).left(hint("/", "filter"));
   }
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
-    Titles::new(name).left(filter_title(filter, typing, enabled, beside, is_bad))
+    Titles::new(name).left(filter_title(filter, cursor, enabled, beside, is_bad))
   } else {
-    Titles::new(filter_title(filter, typing, enabled, title_text_room(width, &[]), is_bad))
+    Titles::new(filter_title(filter, cursor, enabled, title_text_room(width, &[]), is_bad))
   }
 }
 
@@ -373,27 +434,49 @@ fn filter_words(filter: &str, bad: fn(&str) -> bool) -> Vec<Span<'static>> {
   filter.split_inclusive([' ', ',']).flat_map(word).collect()
 }
 
-/// `/ saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end, after
-/// `…`.
+/// `spans` with one span a character, the one at `at` inverted, or the cursor block after them.
+fn with_cursor(spans: Vec<Span<'static>>, at: usize) -> Vec<Span<'static>> {
+  let chars = |span: Span<'static>| {
+    let chars = span.content.chars().map(|c| Span::styled(c.to_string(), span.style));
+    chars.collect::<Vec<_>>()
+  };
+  let mut cells: Vec<_> = spans.into_iter().flat_map(chars).collect();
+  match cells.get_mut(at) {
+    Some(cell) => cell.style = cell.style.add_modifier(Modifier::REVERSED),
+    None => cells.push(Span::styled(FILTER_CURSOR, theme::TEXT)),
+  }
+  cells
+}
+
+/// `/ saf` (with a cursor while typing) in `room` cells: a filter too long keeps its end after `…`,
+/// or with the cursor inside it the part around the cursor.
 pub(super) fn filter_title(
   filter: &str,
-  typing: bool,
+  cursor: Option<usize>,
   enabled: bool,
   room: u16,
   bad: fn(&str) -> bool,
 ) -> Vec<Span<'static>> {
   // `/ ` (two cells) and the cursor (one) around the filter text
-  let text_room = usize::from(room).saturating_sub(2 + usize::from(typing));
+  let text_room = usize::from(room).saturating_sub(2 + usize::from(cursor.is_some()));
 
   let mut spans = vec![theme::key("/ ")];
-  if Span::raw(filter).width() <= text_room {
-    spans.extend(filter_words(filter, bad));
-  } else {
-    spans.push(dim(ELLIPSIS));
-    spans.extend(filter_words(tail(filter, text_room.saturating_sub(1)), bad));
+  let (mut shown, mut skipped) = (filter, 0);
+  if Span::raw(filter).width() > text_room {
+    let room = text_room.saturating_sub(1);
+    let before = &filter[..cursor.map_or(filter.len(), |at| byte_at(filter, at))];
+    let end = head(filter, room.max(Span::raw(before).width() + room / 2));
+    shown = tail(end, room);
+    skipped = filter[..end.len() - shown.len()].chars().count();
+    if skipped > 0 {
+      spans.push(dim(ELLIPSIS));
+    }
   }
-  if typing {
-    spans.push(Span::styled(FILTER_CURSOR, theme::TEXT));
+
+  let words = filter_words(shown, bad);
+  match cursor {
+    Some(at) => spans.extend(with_cursor(words, at.saturating_sub(skipped))),
+    None => spans.extend(words),
   }
 
   if !enabled {
@@ -531,6 +614,8 @@ pub(super) struct ProcView {
   filter_enabled: bool,
   /// Filter input mode: keys edit the filter instead of acting as shortcuts.
   typing: bool,
+  /// Character of the filter the cursor stands on while typing.
+  cursor: usize,
   /// Latest sample, sorted; `None` until the first one arrives.
   procs: Option<Vec<ProcInfo>>,
   /// Indexes of `procs` that pass the filter, in display order.
@@ -567,6 +652,7 @@ impl ProcView {
       filter: String::new(),
       filter_enabled: true,
       typing: false,
+      cursor: 0,
       procs: None,
       rows: vec![],
       groups: vec![],
@@ -798,14 +884,14 @@ impl ProcView {
   /// global shortcuts; while typing a filter every key is used. A navigation key ends filter input
   /// as Enter does.
   pub(super) fn handle_key(&mut self, key: KeyEvent) -> bool {
-    if self.navigate(key.code) {
+    if self.navigate(nav_code(key.code, self.typing)) {
       self.end_typing();
       return true;
     }
 
     match key.code {
       _ if self.typing => {
-        if type_filter(&mut self.filter, &mut self.typing, key) {
+        if type_filter(&mut self.filter, &mut self.cursor, &mut self.typing, key) {
           self.refresh(false);
         }
       }
@@ -813,6 +899,7 @@ impl ProcView {
       KeyCode::Char('/') => {
         self.filter_enabled = true;
         self.typing = true;
+        self.cursor = self.filter.chars().count();
         self.refresh(false);
       }
       KeyCode::Char('f') if !self.filter.is_empty() => {
@@ -927,7 +1014,8 @@ impl ProcView {
       name.push(text(count));
     }
 
-    let titles = filter_titles(name, &self.filter, self.typing, self.filter_enabled, width);
+    let cursor = self.typing.then_some(self.cursor);
+    let titles = filter_titles(name, &self.filter, cursor, self.filter_enabled, width);
     let actions =
       || join([hint("i", "info"), hint("e", "finder"), hint("c", "copy"), hint("k", "kill")]);
     match self.typing {
@@ -1188,9 +1276,12 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use ratatui::layout::Rect;
-  use ratatui::style::Color;
+  use ratatui::style::{Color, Modifier};
 
-  use super::{ProcView, column_areas, cut_end, cut_middle, cut_start, fit_columns, format_time};
+  use super::{
+    ProcView, column_areas, cut_end, cut_middle, cut_start, filter_title, fit_columns, format_time,
+    type_filter,
+  };
   use crate::config::ProcSort;
   use crate::procs::ProcInfo;
   use crate::tui::boxes::draw_box;
@@ -1544,8 +1635,6 @@ mod tests {
 
   #[test]
   fn disabled_filter_titles_keep_the_text_faint_and_the_count_unfiltered() {
-    use ratatui::style::Modifier;
-
     let mut view = view();
     press(&mut view, KeyCode::Char('/'));
     type_str(&mut view, "a-long-filter-with-no-matches");
@@ -1709,9 +1798,7 @@ mod tests {
   fn navigation_ends_filter_input_keeping_the_filter() {
     // Safari selected, then filtered to [2301, 77]
     // ↑ wraps around to the last row
-    for (code, pid) in
-      [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::End, 77), (KeyCode::Up, 77)]
-    {
+    for (code, pid) in [(KeyCode::Down, 77), (KeyCode::PageDown, 77), (KeyCode::Up, 77)] {
       let mut view = view(); // [4410, 631, 2301, 1, 77]
       for _ in 0..3 {
         assert!(press(&mut view, KeyCode::Down));
@@ -1724,6 +1811,107 @@ mod tests {
       // keys are shortcuts again
       assert!(press(&mut view, KeyCode::Char('s')));
       assert_eq!((view.filter(), view.sort), ("saf", ProcSort::Mem), "{code:?}");
+    }
+  }
+
+  #[test]
+  fn filter_input_edits_at_the_cursor() {
+    use KeyCode::{Backspace, Char, Delete, End, Home, Left, Right};
+    use KeyModifiers as Mod;
+    let none = Mod::NONE;
+
+    // the text and the cursor, the key, then the text and the cursor
+    let cases = [
+      ("кот 🦀é", 3, Left, none, "кот 🦀é", 2),
+      ("кот 🦀é", 0, Left, none, "кот 🦀é", 0),
+      ("кот 🦀é", 4, Right, none, "кот 🦀é", 5),
+      ("кот 🦀é", 6, Right, none, "кот 🦀é", 6),
+      ("кот 🦀é", 3, Home, none, "кот 🦀é", 0),
+      ("кот 🦀é", 3, Char('a'), Mod::CONTROL, "кот 🦀é", 0),
+      ("кот 🦀é", 3, End, none, "кот 🦀é", 6),
+      ("кот 🦀é", 3, Char('e'), Mod::CONTROL, "кот 🦀é", 6),
+      // by word, as Ctrl-W deletes; plain `b` and `f` are text
+      ("кот, 🦀é x", 8, Left, Mod::ALT, "кот, 🦀é x", 5),
+      ("кот, 🦀é x", 5, Left, Mod::ALT, "кот, 🦀é x", 0),
+      ("кот, 🦀é x", 0, Left, Mod::ALT, "кот, 🦀é x", 0),
+      ("кот, 🦀é x", 6, Char('b'), Mod::ALT, "кот, 🦀é x", 5),
+      ("кот, 🦀é x", 0, Right, Mod::ALT, "кот, 🦀é x", 3),
+      ("кот, 🦀é x", 3, Right, Mod::ALT, "кот, 🦀é x", 7),
+      ("кот, 🦀é x", 7, Char('f'), Mod::ALT, "кот, 🦀é x", 9),
+      ("кот, 🦀é x", 9, Right, Mod::ALT, "кот, 🦀é x", 9),
+      ("кот", 1, Char('b'), none, "кbот", 2),
+      ("кот", 1, Char('f'), none, "кfот", 2),
+      // characters, before the one under the cursor
+      ("кот 🦀é", 1, Char('я'), none, "кяот 🦀é", 2),
+      ("кот 🦀é", 5, Char('x'), none, "кот 🦀xé", 6),
+      ("кот 🦀é", 6, Char('x'), none, "кот 🦀éx", 7),
+      ("", 0, Char('🦀'), none, "🦀", 1),
+      ("кот 🦀é", 1, Char('x'), Mod::ALT, "кот 🦀é", 1),
+      // Backspace before the cursor, Delete on it
+      ("кот 🦀é", 5, Backspace, none, "кот é", 4),
+      ("кот 🦀é", 0, Backspace, none, "кот 🦀é", 0),
+      ("кот 🦀é", 4, Delete, none, "кот é", 4),
+      ("кот 🦀é", 6, Delete, none, "кот 🦀é", 6),
+      // the word before the cursor, the rest stays
+      ("claude, клан x", 12, Char('w'), Mod::CONTROL, "claude,  x", 8),
+      ("claude, клан x", 8, Backspace, Mod::ALT, "клан x", 0),
+      ("кот 🦀é", 0, Char('w'), Mod::CONTROL, "кот 🦀é", 0),
+      // the whole text, from anywhere
+      ("кот 🦀é", 2, Char('u'), Mod::CONTROL, "", 0),
+      ("кот 🦀é", 2, Backspace, Mod::SUPER, "", 0),
+    ];
+
+    for (text, at, code, modifiers, edited, moved) in cases {
+      let (mut filter, mut cursor, mut typing) = (text.to_string(), at, true);
+      let changed =
+        type_filter(&mut filter, &mut cursor, &mut typing, KeyEvent::new(code, modifiers));
+      assert_eq!((filter.as_str(), cursor, typing), (edited, moved, true), "{text} {at} {code:?}");
+      assert!(changed || text == edited, "{text} {at} {code:?}");
+    }
+  }
+
+  #[test]
+  fn home_and_end_stay_in_the_filter_and_it_opens_at_its_end() {
+    let mut view = view();
+    type_str(&mut view, "/saf");
+    assert!(press(&mut view, KeyCode::Home));
+    type_str(&mut view, "x");
+    assert_eq!((view.filter(), view.typing()), ("xsaf", true));
+    assert!(press(&mut view, KeyCode::End));
+    type_str(&mut view, "y");
+    assert_eq!(view.filter(), "xsafy");
+    assert!(press(&mut view, KeyCode::Enter));
+    type_str(&mut view, "/z");
+    assert_eq!(view.filter(), "xsafyz");
+  }
+
+  #[test]
+  fn the_cursor_inverts_its_character_and_stays_in_a_cut_filter() {
+    let bad = |word: &str| word == "mem:";
+    // text, the inverted cell and whether the block ends it
+    let cursor = |filter, at, room| {
+      let spans = filter_title(filter, Some(at), true, room, bad);
+      let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+      let on = spans.iter().filter(|span| span.style.add_modifier.contains(Modifier::REVERSED));
+      (text, on.map(|span| span.content.to_string()).collect::<Vec<_>>())
+    };
+    assert_eq!(cursor("saf", 3, 20), ("/ saf█".to_string(), vec![]));
+    assert_eq!(cursor("saf", 1, 20), ("/ saf".to_string(), vec!["a".to_string()]));
+    assert_eq!(cursor("кот", 2, 20), ("/ кот".to_string(), vec!["т".to_string()]));
+
+    // a bad word stays red under the cursor
+    let spans = filter_title("mem: x", Some(1), true, 20, bad);
+    assert_eq!((spans[2].content.as_ref(), spans[2].style.fg), ("e", Some(Color::Red)));
+    assert!(spans[2].style.add_modifier.contains(Modifier::REVERSED));
+
+    // cut: its end as before, the start without `…`, and the cursor in view anywhere
+    let text = "abcdefghijklmnopqrstuvwxyz";
+    assert_eq!(cursor(text, 26, 12), ("/ …stuvwxyz█".to_string(), vec![]));
+    assert_eq!(cursor(text, 0, 12), ("/ abcdefgh".to_string(), vec!["a".to_string()]));
+    for at in 0..26 {
+      let (shown, on) = cursor(text, at, 12);
+      assert_eq!(on, [text[at..=at].to_string()], "{at} {shown}");
+      assert!(shown.chars().count() <= 12, "{at} {shown}");
     }
   }
 
