@@ -116,7 +116,7 @@ POWER does today.
 - [x] **21. Supported macOS versions.** Asked on Reddit, and the readme didn't say: macOS 14,
       current when macmon first came out, and later.
 - [x] **22. Filter queries.** Filter the process list by more than the name, with words like
-      `mem:>1g` and `user:root`, as fsearch does.
+      `mem:>1g` and `user:root`, as fsearch does. `port:3000` finds the process on a local port.
       Plan: [docs/plans/completed/20261106-filter-query.md](plans/completed/20261106-filter-query.md).
 - [x] **23. Process command line.** `node` and `python` differ only by their arguments: `cmd:`
       in the filter, a `cmd` row in the `i` overlay and the arguments after the name in the list,

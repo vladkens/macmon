@@ -173,6 +173,34 @@ pub fn cwd(pid: i32) -> Result<Option<String>, i32> {
   Ok(cwd.map(|cwd| c_chars_to_string(cwd.pvi_cdir.vip_path.as_flattened())))
 }
 
+/// Descriptors of a process; none when it can't be read.
+fn list_fds(pid: i32) -> Vec<libc::proc_fdinfo> {
+  // With a NULL buffer it returns the bytes needed. Reserve extra for descriptors opened between
+  // the two calls.
+  let null = std::ptr::null_mut();
+  let bytes = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, null, 0) };
+  if bytes <= 0 {
+    return Vec::new();
+  }
+
+  let entry = libc::PROC_PIDLISTFD_SIZE as usize;
+  let mut fds = vec![libc::proc_fdinfo { proc_fd: 0, proc_fdtype: 0 }; bytes as usize / entry + 32];
+  let (buf, size) = (fds.as_mut_ptr() as *mut c_void, (fds.len() * entry) as c_int);
+  let bytes = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, buf, size) };
+  fds.truncate(bytes.max(0) as usize / entry);
+  fds
+}
+
+/// Whether a process has a TCP or UDP socket on the local `port`; `false` for other users'
+/// processes (without root) and gone ones.
+pub fn has_port(pid: i32, port: u16) -> bool {
+  let sockets = list_fds(pid);
+  let sockets = sockets.iter().filter(|fd| fd.proc_fdtype as c_int == libc::PROX_FDTYPE_SOCKET);
+  sockets
+    .filter_map(|fd| unsafe { fd_info(pid, fd.proc_fd, PROC_PIDFDSOCKETINFO) })
+    .any(|info: socket_fdinfo| local_port(&info.psi) == Some(port))
+}
+
 /// Working directory first, then the command line and the descriptors in fd order. `Err(errno)`
 /// when the process can't be read: `EPERM` for other users' processes (without root), `ESRCH` when
 /// it's gone. A descriptor that can't be read is left out.
@@ -186,21 +214,7 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
     files.push(OpenFile { fd: None, kind: Kind::Cmd, text, mode: "" });
   }
 
-  // With a NULL buffer it returns the bytes needed; 0 after the cwd call succeeded means no fds.
-  // Reserve extra for descriptors opened between the two calls.
-  let null = std::ptr::null_mut();
-  let bytes = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, null, 0) };
-  if bytes <= 0 {
-    return Ok(files);
-  }
-
-  let entry = libc::PROC_PIDLISTFD_SIZE as usize;
-  let mut fds = vec![libc::proc_fdinfo { proc_fd: 0, proc_fdtype: 0 }; bytes as usize / entry + 32];
-  let (buf, size) = (fds.as_mut_ptr() as *mut c_void, (fds.len() * entry) as c_int);
-  let bytes = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, buf, size) };
-  fds.truncate(bytes.max(0) as usize / entry);
-
-  files.extend(fds.iter().filter_map(|fd| {
+  files.extend(list_fds(pid).iter().filter_map(|fd| {
     let mut mode = "";
     let (kind, text) = match fd.proc_fdtype as c_int {
       libc::PROX_FDTYPE_VNODE => {
@@ -251,6 +265,18 @@ fn socket(info: &socket_info) -> (Kind, String) {
     }
     _ => (Kind::Other, String::new()),
   }
+}
+
+/// Local port of a TCP or UDP socket.
+fn local_port(info: &socket_info) -> Option<u16> {
+  let proto = &info.soi_proto;
+  // Safety: as in `socket`.
+  let addrs = match info.soi_kind {
+    SOCKINFO_TCP => unsafe { &proto.pri_tcp.tcpsi_ini },
+    SOCKINFO_IN if info.soi_type == libc::SOCK_DGRAM => unsafe { &proto.pri_in },
+    _ => return None,
+  };
+  Some(u16::from_be(addrs.insi_lport as u16))
 }
 
 /// `local → remote` of an IP socket, without the remote side while its port is 0 (listeners,

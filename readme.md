@@ -83,7 +83,7 @@ Options:
 
 Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
-Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows the Safari app with its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory), `cmd:` (the command line, of your own processes) and `app:` (the name of the `.app` the process or its responsible process runs from). `Enter` keeps the filter, `Esc` clears it.
+Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows the Safari app with its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory), `cmd:` (the command line, of your own processes) and `app:` (the name of the `.app` the process or its responsible process runs from); or an exact local TCP or UDP port, of your own processes: `port:3000`. `Enter` keeps the filter, `Esc` clears it.
 
 Press `Space` to pause the process list: rows keep their order while values update, new processes wait until you resume, and the files list of `i` stops updating. Press `f` to turn the filter off and on without losing its text.
 
