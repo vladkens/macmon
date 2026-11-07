@@ -345,6 +345,7 @@ fn read_libproc(
   if let Some(known) = known.filter(|known| {
     (known.counters.start, known.counters.uuid) == (counters.start, counters.uuid)
       && counters.uuid != [0; 16]
+      && !known.path.is_empty()
   }) {
     return Some(raw(known.uid, known.comm.clone(), String::new(), None, known.started));
   }
@@ -1126,7 +1127,7 @@ mod tests {
       counters: Counters { start, uuid, ..raw.counters },
       comm: "known".into(),
       name: String::new(),
-      path: String::new(),
+      path: "/known".into(),
       cpu_pct: 0.0,
       started: Some((7, 8)),
     };
@@ -1134,6 +1135,10 @@ mod tests {
     let same = read(Some(&known(start, uuid)));
     let kept = (same.uid, same.comm.as_str(), same.path, same.started);
     assert_eq!(kept, (1, "known", None, Some((7, 8))));
+
+    // a path not read yet is tried again
+    let unread = Known { path: String::new(), ..known(start, uuid) };
+    assert!(read(Some(&unread)).path.is_some());
 
     for other in [known(start, [1; 16]), known(start + 1, uuid)] {
       let full = read(Some(&other));
