@@ -399,6 +399,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Creating `Sampler` inside the worker keeps its low-level macOS handles on that thread. In an async runtime, use its blocking-thread facility rather than calling `get_metrics` directly from an executor worker.
 
+## ⚖️ Compared to htop and btop
+
+htop and btop are good general monitors, and htop is lighter. On Apple Silicon, without sudo, macmon shows more:
+
+- Real CPU and memory of other users' processes, such as `WindowServer` and root services. The kernel refuses them to htop and btop, which show 0; macmon reads them through the system's `ps`.
+- CPU, ANE and total power, frequencies of each CPU cluster, and memory pressure.
+- Power and GPU use per process.
+- A process filter with queries (`mem:>1g`, `app:safari`), open files and sockets of a process.
+
+Compared with htop 3.5.3 and btop 1.4.8 on macOS 27.
+
 ## 🔍 See also
 
 - [tlkh/asitop](https://github.com/tlkh/asitop) – The original tool. Written in Python, requires sudo.
