@@ -122,9 +122,13 @@ POWER does today.
       in the filter, a `cmd` row in the `i` overlay and the arguments after the name in the list,
       from `sysctl` `KERN_PROCARGS2`, read only for these. Own processes only: other users' need
       a `ps` run per refresh, about 7 times the cost of reading the own ones.
-- [ ] **24. A cheaper process list.** macmon's own cost with the process list is 1.7 to 2 s of
-      CPU a minute at 1 s, against 0.3 for htop and 1 for btop, and 0.3 without the list. Most of
-      it is `ps`, which gives other users' processes; look for a cheaper way.
+- [x] **24. A cheaper process list.** CPU a minute with the list at 1 s, `ps` included: 1.5–1.8 s
+      → 0.6–0.7 on an M5, 3.2–3.4 → 1.8–2.0 on an M2, against 0.3 for htop and 1 for btop, which
+      read 0 for other users' processes. `ps` prints `ucomm` (`comm` reads every process'
+      arguments) and runs every 3 s, so other users' rows are up to 3 s old and their new
+      processes show up to 3 s late; the executable path and fixed fields are read once per exec.
+      No gain, left out: a GPU client's creator cached by registry entry, idle processes read
+      less often. Most of what's left is `proc_pid_rusage` and the GPU walk, every tick.
 
 Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
 the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and
