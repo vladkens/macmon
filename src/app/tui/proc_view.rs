@@ -304,14 +304,30 @@ impl Group {
   }
 }
 
+/// What separates the words of a filter.
+fn is_separator(c: char) -> bool {
+  c == ',' || c.is_whitespace()
+}
+
+/// Start of the word before character `at`, past the commas and spaces after that word.
+fn word_start(text: &str, at: usize) -> usize {
+  let head = text[..byte_at(text, at)].trim_end_matches(is_separator);
+  head.trim_end_matches(|c| !is_separator(c)).chars().count()
+}
+
+/// End of the word after character `at`, past the commas and spaces before that word.
+fn word_end(text: &str, at: usize) -> usize {
+  let rest = &text[byte_at(text, at)..];
+  let left = rest.trim_start_matches(is_separator).trim_start_matches(|c| !is_separator(c));
+  at + rest.chars().count() - left.chars().count()
+}
+
 /// Drops the word before the cursor and the commas and spaces after that word: `claude, clan` →
 /// `claude, `, then `claude, ` → ``.
 fn delete_word(text: &mut String, cursor: &mut usize) {
-  let separator = |c: char| c == ',' || c.is_whitespace();
-  let (head, rest) = text.split_at(byte_at(text, *cursor));
-  let kept = head.trim_end_matches(separator).trim_end_matches(|c| !separator(c));
-  *cursor = kept.chars().count();
-  *text = format!("{kept}{rest}");
+  let start = word_start(text, *cursor);
+  text.replace_range(byte_at(text, start)..byte_at(text, *cursor), "");
+  *cursor = start;
 }
 
 /// Byte offset of character `at` of `text`, its length past the last one.
@@ -324,10 +340,11 @@ pub(super) fn nav_code(code: KeyCode, typing: bool) -> KeyCode {
   if typing && matches!(code, KeyCode::Home | KeyCode::End) { KeyCode::Null } else { code }
 }
 
-/// Filter input on `filter` at character `cursor`: ← / →, Home / End and Ctrl-A / Ctrl-E move it,
-/// characters, Backspace and Delete edit there, Ctrl-W / Alt-Backspace delete the word before it,
-/// Ctrl-U (what Ghostty sends for Cmd-Backspace) and Cmd-Backspace delete the whole text, Enter
-/// keeps the filter, Esc clears it; both end the input. Returns whether the filter changed.
+/// Filter input on `filter` at character `cursor`: ← / →, Alt-← / Alt-→ or Alt-B / Alt-F (by word),
+/// Home / End and Ctrl-A / Ctrl-E move it, characters, Backspace and Delete edit there, Ctrl-W /
+/// Alt-Backspace delete the word before it, Ctrl-U (what Ghostty sends for Cmd-Backspace) and
+/// Cmd-Backspace delete the whole text, Enter keeps the filter, Esc clears it; both end the input.
+/// Returns whether the filter changed.
 pub(super) fn type_filter(
   filter: &mut String,
   cursor: &mut usize,
@@ -339,6 +356,8 @@ pub(super) fn type_filter(
   let cmd = key.modifiers.contains(KeyModifiers::SUPER);
   let len = filter.chars().count();
   let moved = match key.code {
+    KeyCode::Left | KeyCode::Char('b') if alt => Some(word_start(filter, *cursor)),
+    KeyCode::Right | KeyCode::Char('f') if alt => Some(word_end(filter, *cursor)),
     KeyCode::Left => Some(cursor.saturating_sub(1)),
     KeyCode::Right => Some(len.min(*cursor + 1)),
     KeyCode::Home => Some(0),
@@ -1811,6 +1830,17 @@ mod tests {
       ("кот 🦀é", 3, Char('a'), Mod::CONTROL, "кот 🦀é", 0),
       ("кот 🦀é", 3, End, none, "кот 🦀é", 6),
       ("кот 🦀é", 3, Char('e'), Mod::CONTROL, "кот 🦀é", 6),
+      // by word, as Ctrl-W deletes; plain `b` and `f` are text
+      ("кот, 🦀é x", 8, Left, Mod::ALT, "кот, 🦀é x", 5),
+      ("кот, 🦀é x", 5, Left, Mod::ALT, "кот, 🦀é x", 0),
+      ("кот, 🦀é x", 0, Left, Mod::ALT, "кот, 🦀é x", 0),
+      ("кот, 🦀é x", 6, Char('b'), Mod::ALT, "кот, 🦀é x", 5),
+      ("кот, 🦀é x", 0, Right, Mod::ALT, "кот, 🦀é x", 3),
+      ("кот, 🦀é x", 3, Right, Mod::ALT, "кот, 🦀é x", 7),
+      ("кот, 🦀é x", 7, Char('f'), Mod::ALT, "кот, 🦀é x", 9),
+      ("кот, 🦀é x", 9, Right, Mod::ALT, "кот, 🦀é x", 9),
+      ("кот", 1, Char('b'), none, "кbот", 2),
+      ("кот", 1, Char('f'), none, "кfот", 2),
       // characters, before the one under the cursor
       ("кот 🦀é", 1, Char('я'), none, "кяот 🦀é", 2),
       ("кот 🦀é", 5, Char('x'), none, "кот 🦀xé", 6),
