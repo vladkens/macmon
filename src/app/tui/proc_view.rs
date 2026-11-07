@@ -17,6 +17,7 @@ use super::App;
 use super::boxes::{
   Titles, draw_box, draw_scrollbar, hint, join, render_bottom_border, title_text_room,
 };
+use super::kill::ProcSys;
 use super::store::ratio;
 use super::theme::{self, dim, faint, gradient, heading, text};
 use crate::config::{Config, ProcSort};
@@ -537,6 +538,8 @@ pub(super) struct ProcView {
   /// Totals of `rows` for each filter term, sorted like the processes.
   groups: Vec<Group>,
   selected: Option<Selection>,
+  /// Arguments of the rows on screen since the last sample, empty when there are none to show.
+  args: HashMap<Identity, String>,
   /// First row on screen.
   offset: usize,
   /// Rows on screen at the last render, the PgUp / PgDn step.
@@ -568,6 +571,7 @@ impl ProcView {
       rows: vec![],
       groups: vec![],
       selected: None,
+      args: HashMap::new(),
       offset: 0,
       page: 0,
       targets: Targets::default(),
@@ -653,6 +657,7 @@ impl ProcView {
   /// Updates held processes by identity while paused, ignoring arrivals; the first sample
   /// initializes a sorted list even if Space was pressed during collection.
   pub(super) fn set_procs(&mut self, procs: Vec<ProcInfo>) {
+    self.args.clear();
     let first_sample = self.procs.is_none();
     if let (true, Some(held)) = (self.paused, &mut self.procs) {
       let indices: HashMap<_, _> = held.iter().enumerate().map(|(i, p)| (identity(p), i)).collect();
@@ -732,6 +737,18 @@ impl ProcView {
     self.page = height;
     self.offset =
       scroll_offset(self.offset, self.selected.map(|s| s.index), height, self.rows.len());
+  }
+
+  /// Reads the arguments of the rows on screen that have none yet: not of `ps` rows (no start
+  /// time, other users' processes) or a pid reused since the sample (another start time).
+  fn read_args(&mut self, sys: &dyn ProcSys) {
+    let rows: Vec<Identity> = self.page_rows().map(|(_, proc)| identity(proc)).collect();
+    for (pid, started) in rows {
+      self.args.entry((pid, started)).or_insert_with(|| {
+        let own = started.is_some() && sys.identity(pid) == started;
+        own.then(|| sys.args(pid)).flatten().unwrap_or_default()
+      });
+    }
   }
 
   /// Rows on screen after `fit`, with a flag for the selected one.
@@ -983,6 +1000,7 @@ impl App {
       ..inner
     };
     self.proc_view.fit(body.height as usize);
+    self.proc_view.read_args(&*self.kill.sys);
     // one blank cell between the columns and each border, as in the metrics box
     let table = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
     let columns = fit_columns(table.width, self.proc_view.sort);
@@ -1019,7 +1037,10 @@ impl App {
     for (i, (selected, proc)) in self.proc_view.page_rows().enumerate() {
       let y = body.y + i as u16;
       let cells = columns.iter().map(|&(column, _)| self.proc_cell(column, proc));
-      draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
+      let row = Rect { y, height: 1, ..table };
+      draw_row(buf, row, &columns, cells);
+      let args = self.proc_view.args.get(&identity(proc));
+      draw_args(buf, row, &columns, proc, args.map_or("", |args| args));
       if self.proc_view.exited(proc) {
         buf.set_style(Rect { y, height: 1, ..inner }, Style::new().add_modifier(Modifier::DIM));
       }
@@ -1143,6 +1164,22 @@ fn draw_row<'a>(
     };
     buf.set_stringn(cell_area.x, cell_area.y, text, usize::from(cell_area.width), cell.style);
   }
+}
+
+/// Draws `args` dim after the name of `proc` in its column, cut at the end of the column.
+fn draw_args(
+  buf: &mut Buffer,
+  row: Rect,
+  columns: &[(ProcSort, u16)],
+  proc: &ProcInfo,
+  args: &str,
+) {
+  let areas = column_areas(row, columns);
+  let Some((_, area)) = areas.iter().find(|(column, _)| *column == ProcSort::Name) else { return };
+  let name = Span::raw(&proc.name).width() + 1;
+  let Some(room) = usize::from(area.width).checked_sub(name) else { return };
+  let style = Style::new().fg(theme::DIM);
+  buf.set_stringn(area.x + name as u16, row.y, cut_end(args, room), room, style);
 }
 
 #[cfg(test)]

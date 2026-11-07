@@ -1625,6 +1625,37 @@ mod tests {
     );
   }
 
+  #[test]
+  fn the_name_column_has_the_arguments_of_own_processes() {
+    let (mut app, fake) = kill_app();
+    for (pid, args) in [(1, "no"), (631, "-daemon"), (2301, &format!("--a {}", "x".repeat(300)))] {
+      fake.0.borrow_mut().args.insert(pid, args.to_string());
+    }
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    put_procs(&mut app, varied_procs());
+
+    let buf = render_buffer(&mut app, 200, 50);
+    let rows: Vec<String> = (0..50).map(|y| row(&buf, y)).collect();
+    let find = |name: &str| rows.iter().position(|row| row.contains(name)).unwrap();
+    let server = &rows[find("WindowServer")];
+    assert!(server.contains("WindowServer -daemon  "), "{server}");
+    let x = server[..server.find("-daemon").unwrap()].chars().count() as u16;
+    assert_eq!(buf[(x, find("WindowServer") as u16)].fg, theme::DIM);
+
+    // cut at the end of the column, and none for a process of another user
+    assert!(
+      rows[find("Safari")].contains("Safari --a xxx") && rows[find("Safari")].contains("x… ")
+    );
+    assert!(!rows[find("launchd")].contains("launchd no"));
+
+    // one read a row for all the frames of a sample
+    render_buffer(&mut app, 200, 50);
+    assert_eq!(fake.0.borrow().arg_reads, 2);
+    put_procs(&mut app, varied_procs());
+    render_buffer(&mut app, 200, 50);
+    assert_eq!(fake.0.borrow().arg_reads, 4);
+  }
+
   /// `app_with_procs` of `varied_procs` with WindowServer selected, killing through a fake with
   /// their processes.
   fn kill_app() -> (App, FakeSys) {

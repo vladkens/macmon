@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_int, c_void};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::{io, mem};
 
-use crate::procs::c_chars_to_string;
+use crate::procs::{c_chars_to_string, cmd_line};
 
 const PROC_PIDFDVNODEPATHINFO: c_int = 2;
 const PROC_PIDFDSOCKETINFO: c_int = 3;
@@ -101,6 +101,8 @@ struct un_sockinfo {
 pub enum Kind {
   /// The executable, which the info overlay adds; `open_files` doesn't list it.
   Exe,
+  /// The command line, the only row without a path or a socket.
+  Cmd,
   Cwd,
   Dir,
   File,
@@ -118,18 +120,24 @@ impl Kind {
   /// The type column of the info overlay.
   pub fn label(self) -> &'static str {
     let labels =
-      ["exe", "cwd", "dir", "file", "dev", "tcp", "udp", "unix", "other", "pipe", "kqueue"];
+      ["exe", "cmd", "cwd", "dir", "file", "dev", "tcp", "udp", "unix", "other", "pipe", "kqueue"];
     labels[self as usize]
+  }
+
+  /// Whether the text is a path: the executable, the working directory, a directory or a file.
+  pub fn is_path(self) -> bool {
+    self <= Self::File && self != Self::Cmd
   }
 }
 
-/// The working directory or an open descriptor of a process.
+/// The working directory, the command line or an open descriptor of a process.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenFile {
-  /// `None` for the working directory.
+  /// `None` for the working directory and the command line.
   pub fd: Option<i32>,
   pub kind: Kind,
-  /// Path; `local → remote` for TCP (with its state) and UDP sockets; empty when there is none.
+  /// Path; the command line; `local → remote` for TCP (with its state) and UDP sockets; empty when
+  /// there is none.
   pub text: String,
   /// `r-`, `-w` or `rw` (as `ls` aligns them) for a dir, file or dev descriptor; empty for the
   /// rest.
@@ -165,13 +173,17 @@ pub fn cwd(pid: i32) -> Result<Option<String>, i32> {
   Ok(cwd.map(|cwd| c_chars_to_string(cwd.pvi_cdir.vip_path.as_flattened())))
 }
 
-/// Working directory first, then the descriptors in fd order. `Err(errno)` when the process
-/// can't be read: `EPERM` for other users' processes (without root), `ESRCH` when it's gone.
-/// A descriptor that can't be read is left out.
+/// Working directory first, then the command line and the descriptors in fd order. `Err(errno)`
+/// when the process can't be read: `EPERM` for other users' processes (without root), `ESRCH` when
+/// it's gone. A descriptor that can't be read is left out.
 pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
   let mut files = Vec::new();
   if let Some(text) = cwd(pid)? {
     files.push(OpenFile { fd: None, kind: Kind::Cwd, text, mode: "" });
+  }
+
+  if let Some(text) = cmd_line(pid) {
+    files.push(OpenFile { fd: None, kind: Kind::Cmd, text, mode: "" });
   }
 
   // With a NULL buffer it returns the bytes needed; 0 after the cwd call succeeded means no fds.

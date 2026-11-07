@@ -271,6 +271,42 @@ pub(crate) fn exe_path(pid: i32) -> Option<String> {
   Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
 }
 
+/// Command line as `ps` shows it: the arguments joined by spaces.
+pub(crate) fn cmd_line(pid: i32) -> Option<String> {
+  Some(args(pid)?.join(" "))
+}
+
+/// Arguments of a process from `argv[0]`, without the environment that follows them. `None` for
+/// other users' processes (`EINVAL` without root) and gone ones.
+pub(crate) fn args(pid: i32) -> Option<Vec<String>> {
+  let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+  let mut call = |buf: *mut u8, size: &mut usize| unsafe {
+    libc::sysctl(mib.as_mut_ptr(), 3, buf.cast(), size, std::ptr::null_mut(), 0) == 0
+  };
+
+  // With a NULL buffer it gives the size.
+  let mut size = 0;
+  call(std::ptr::null_mut(), &mut size).then_some(())?;
+  let mut buf = vec![0u8; size];
+  call(buf.as_mut_ptr(), &mut size).then_some(())?;
+  buf.truncate(size);
+  parse_args(&buf)
+}
+
+/// The arguments of a `KERN_PROCARGS2` buffer: `argc`, the executable path, then the arguments and
+/// the environment. XNU's `exec_extract_strings` pads the path with NULs to 8 bytes; `argv[0]` may
+/// be empty, so skipping NULs instead would take the first variable of the environment for an
+/// argument. `None` when the padding isn't there.
+fn parse_args(buf: &[u8]) -> Option<Vec<String>> {
+  let (argc, rest) = buf.split_first_chunk()?;
+  let path = rest.iter().position(|&b| b == 0)?;
+  let start = (path + 1).next_multiple_of(8);
+  rest.get(path..start)?.iter().all(|&b| b == 0).then_some(())?;
+
+  let args = rest[start..].split(|&b| b == 0).take(i32::from_ne_bytes(*argc) as usize);
+  Some(args.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect())
+}
+
 /// Reads a process through libproc; fails for other users' processes.
 fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<Raw> {
   let info = bsd_info(pid)?;
@@ -1001,6 +1037,31 @@ mod tests {
     assert_eq!(procs[0].cpu_pct, 0.0);
     let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100));
     assert_eq!(procs[0].cpu_pct, pct(2, 100));
+  }
+
+  #[test]
+  fn args_start_after_the_padded_path_and_stop_before_the_environment() {
+    let cases: &[(i32, &[u8], Option<&str>)] = &[
+      (2, b"/bin/sleep\0\0\0\0\0\0sleep\0x\0KEY=1\0", Some("sleep x")),
+      // the path and its NUL fill 8 bytes: no padding
+      (2, b"/bin/ls\0ls\0-l\0KEY=1\0", Some("ls -l")),
+      // an empty `argv[0]` isn't padding
+      (2, b"/bin/sleep\0\0\0\0\0\0\0x\0KEY=1\0", Some(" x")),
+      (3, b"/bin/ls\0\0\0-l\0KEY=1\0", Some("  -l")),
+      (0, b"/bin/ls\0KEY=1\0", Some("")),
+      // not the layout: no padding, or cut before the arguments
+      (2, b"/bin/sleep\0sleep\0x\0KEY=1\0", None),
+      (2, b"/bin/sleep\0\0", None),
+      (2, b"/bin/sleep", None),
+    ];
+
+    for (argc, rest, args) in cases {
+      let buf = [&argc.to_ne_bytes(), *rest].concat();
+      let joined = parse_args(&buf).map(|args| args.join(" "));
+      assert_eq!(joined.as_deref(), *args, "{}", rest.escape_ascii());
+    }
+
+    assert_eq!(parse_args(b"\0\0"), None);
   }
 
   #[test]
