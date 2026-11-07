@@ -766,7 +766,6 @@ impl ProcSampler {
   /// CPU of `ps` rows is the rate since the last `ps` run, `ps_ns` ago when this tick has one;
   /// other ticks keep it.
   fn update(&mut self, rows: Vec<Raw>, elapsed_ns: u64, ps_ns: Option<u64>) -> Vec<ProcInfo> {
-    let mut known = HashMap::with_capacity(rows.len());
     let mut procs = Vec::with_capacity(rows.len());
 
     for raw in rows {
@@ -808,10 +807,13 @@ impl ProcSampler {
       });
       let (uid, counters, comm, cpu_pct, started) =
         (raw.uid, raw.counters, raw.comm, rates.cpu_pct, raw.started);
-      known.insert(raw.pid, Known { uid, counters, comm, name, path, cpu_pct, started });
+      self.known.insert(raw.pid, Known { uid, counters, comm, name, path, cpu_pct, started });
     }
 
-    self.known = known;
+    if self.known.len() > procs.len() {
+      let alive: HashSet<i32> = procs.iter().map(|proc| proc.pid).collect();
+      self.known.retain(|pid, _| alive.contains(pid));
+    }
     procs
   }
 }
