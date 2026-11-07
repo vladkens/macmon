@@ -19,8 +19,9 @@ use core_foundation::string::{CFString, CFStringRef};
 const RUSAGE_INFO_V4: c_int = 4;
 const RUSAGE_INFO_V6: c_int = 6;
 
-/// `ps` output columns; `comm` goes last as it may contain spaces.
-const PS_COLUMNS: &str = "pid=,uid=,rss=,time=,comm=";
+/// `ps` output columns; the command goes last as it may contain spaces. `ucomm`, as `comm` makes
+/// `ps` read every process' arguments, a third of its CPU; the name comes from the executable path.
+const PS_COLUMNS: &str = "pid=,uid=,rss=,time=,ucomm=";
 /// `ps` prints CPU time in 10 ms steps, 1 % of a one-second interval: CPU % of `ps` rows is
 /// averaged over this many intervals, so idle processes don't jump between 0 % and 1 %.
 const PS_CPU_INTERVALS: usize = 3;
@@ -367,7 +368,7 @@ fn parse_uid(s: &str) -> Option<u32> {
   s.parse::<i32>().map(|uid| uid as u32).or_else(|_| s.parse()).ok()
 }
 
-/// One line of `ps -o pid=,uid=,rss=,time=,comm=`; the command is the rest of the line.
+/// One line of `ps -o pid=,uid=,rss=,time=,ucomm=`; the command is the rest of the line.
 fn parse_ps_line(line: &str) -> Option<Raw> {
   let mut rest = line.trim();
   let mut field = || {
