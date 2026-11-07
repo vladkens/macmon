@@ -146,6 +146,7 @@ unsafe extern "C" {
   fn IORegistryEntryGetName(entry: u32, name: *mut i8) -> i32;
   fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
   fn IORegistryEntryCreateCFProperties(entry: u32, properties: *mut CFMutableDictionaryRef, allocator: CFAllocatorRef, options: u32) -> i32;
+  fn IORegistryEntrySearchCFProperty(entry: u32, plane: *const i8, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
   fn IOObjectRelease(obj: u32) -> u32;
 }
 
@@ -501,8 +502,10 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
 // MARK: Network and disk
 
 /// `IFT_ETHER` of `net/if_types.h`: Ethernet and Wi-Fi. It leaves out loopback, tunnels and
-/// bridges. VM traffic through `vmenetN` may count twice, not checked.
+/// bridges.
 const IFT_ETHER: u8 = 6;
+/// `kIORegistryIterateRecursively | kIORegistryIterateParents`: the entry, then up its providers.
+const IOREGISTRY_SEARCH_PARENTS: u32 = 3;
 
 /// Reads a value of type `T` from the sysctl `mib`.
 fn sysctl_mib<T>(mib: &[i32]) -> Option<T> {
@@ -515,16 +518,16 @@ fn sysctl_mib<T>(mib: &[i32]) -> Option<T> {
   (ret == 0).then(|| unsafe { val.assume_init() })
 }
 
-/// `read` on the properties of every IORegistry service named `service`, leaving out the `None`s.
-fn read_services<T>(service: &str, read: impl Fn(CFDictionaryRef) -> Option<T>) -> Vec<T> {
+/// `read` on every IORegistry service named `service` and its properties, leaving out the `None`s.
+fn read_services<T>(service: &str, read: impl Fn(u32, CFDictionaryRef) -> Option<T>) -> Vec<T> {
   let Ok(services) = IOServiceIterator::new(service) else { return vec![] };
   let read_one = |(entry, name)| {
-    let props = cfio_get_props(entry, name);
+    let val = cfio_get_props(entry, name).ok().and_then(|props| {
+      let val = read(entry, props);
+      unsafe { CFRelease(props as _) };
+      val
+    });
     unsafe { IOObjectRelease(entry) };
-
-    let props = props.ok()?;
-    let val = read(props);
-    unsafe { CFRelease(props as _) };
     val
   };
   services.filter_map(read_one).collect()
@@ -534,6 +537,13 @@ fn sum_pairs(pairs: impl IntoIterator<Item = [u64; 2]>) -> Option<[u64; 2]> {
   pairs.into_iter().reduce(|a, b| [a[0] + b[0], a[1] + b[1]])
 }
 
+/// Whether `x` is a physical link: `vmenetN` is Ethernet too, but under a VM's bridge it repeats
+/// the traffic of the VM, which the interface the bridge goes out through counts.
+fn is_physical(x: &libc::ifmibdata) -> bool {
+  let vmenet = x.ifmd_name[..6].iter().map(|&c| c as u8).eq(*b"vmenet");
+  x.ifmd_data.ifi_type == IFT_ETHER && !vmenet
+}
+
 /// Bytes received and sent by the Ethernet and Wi-Fi interfaces since they came up, or None
 /// without one. From `IFMIB_IFDATA`, which matches `netstat -ib`: on macOS 27 `getifaddrs` and
 /// `NET_RT_IFLIST2` give the same counters cut to 32 bits and rounded down to 1 KiB.
@@ -541,14 +551,38 @@ pub(crate) fn net_bytes() -> Option<[u64; 2]> {
   let [net, link, generic] = [libc::CTL_NET, libc::PF_LINK, libc::NETLINK_GENERIC];
   let count: i32 = sysctl_mib(&[net, link, generic, libc::IFMIB_SYSTEM, libc::IFMIB_IFCOUNT])?;
   let data = |i| sysctl_mib(&[net, link, generic, libc::IFMIB_IFDATA, i, libc::IFDATA_GENERAL]);
-  let ifs = (1..=count).filter_map(data).map(|x: libc::ifmibdata| x.ifmd_data);
-  sum_pairs(ifs.filter(|x| x.ifi_type == IFT_ETHER).map(|x| [x.ifi_ibytes, x.ifi_obytes]))
+  let ifs = (1..=count).filter_map(data).filter(is_physical).map(|x| x.ifmd_data);
+  sum_pairs(ifs.map(|x| [x.ifi_ibytes, x.ifi_obytes]))
 }
 
-/// Bytes read and written by the storage drivers since they came up, as `iostat` counts them (a
-/// mounted disk image is one too), or None without one.
+/// Whether the storage `driver` is on a disk image, whose traffic the disk that holds it counts
+/// too. By `Device Characteristics`: the device's class differs by image (`...DeviceOutKernel`,
+/// `...DeviceInKernel`), and only the first has a `File` location in `Protocol Characteristics`.
+fn on_disk_image(driver: u32) -> bool {
+  let key = cfstr("Device Characteristics");
+  let val = unsafe {
+    let (plane, options) = (c"IOService".as_ptr(), IOREGISTRY_SEARCH_PARENTS);
+    IORegistryEntrySearchCFProperty(driver, plane, key, kCFAllocatorDefault, options)
+  };
+  unsafe { CFRelease(key as _) };
+  if val.is_null() {
+    return false;
+  }
+
+  let product = cfdict_get_val(val as _, "Product Name");
+  let image = product.is_some_and(|x| from_cfstr(x as _) == "Disk Image");
+  unsafe { CFRelease(val) };
+  image
+}
+
+/// Bytes read and written by the storage drivers since they came up, without disk images, or None
+/// without one.
 pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
-  sum_pairs(read_services("IOBlockStorageDriver", |props| {
+  sum_pairs(read_services("IOBlockStorageDriver", |driver, props| {
+    if on_disk_image(driver) {
+      return None;
+    }
+
     let stats = cfdict_get_val(props, "Statistics")? as CFDictionaryRef;
     let bytes = |key| cfnum_get_i64(stats, key).map(|x| x as u64);
     Some([bytes("Bytes (Read)")?, bytes("Bytes (Write)")?])
@@ -578,7 +612,7 @@ fn battery_from(props: CFDictionaryRef) -> Option<(u8, bool, bool)> {
 
 /// Percent, charging and plugged in state of the internal battery, or None on a desktop.
 pub(crate) fn battery() -> Option<(u8, bool, bool)> {
-  read_services("AppleSmartBattery", battery_from).pop()
+  read_services("AppleSmartBattery", |_, props| battery_from(props)).pop()
 }
 
 // MARK: SockInfo
@@ -1795,7 +1829,25 @@ mod tests {
 
   #[test]
   fn a_missing_service_reads_nothing_as_on_a_desktop() {
-    assert!(read_services("MacmonNoSuchService", |_| Some(1)).is_empty());
+    assert!(read_services("MacmonNoSuchService", |_, _| Some(1)).is_empty());
+  }
+
+  #[test]
+  fn only_physical_links_count() {
+    let link = |name: &[u8], kind| {
+      let mut x: libc::ifmibdata = unsafe { std::mem::zeroed() };
+      x.ifmd_name.iter_mut().zip(name).for_each(|(a, b)| *a = *b as _);
+      x.ifmd_data.ifi_type = kind;
+      is_physical(&x)
+    };
+
+    assert!(link(b"en0", IFT_ETHER) && link(b"awdl0", IFT_ETHER));
+    assert!(!link(b"vmenet0", IFT_ETHER) && !link(b"utun0", 1) && !link(b"lo0", 24));
+  }
+
+  #[test]
+  fn the_boot_disk_is_not_a_disk_image() {
+    assert!(disk_bytes().is_some());
   }
 
   #[test]

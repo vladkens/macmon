@@ -290,8 +290,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
   "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
-  "disk_read": 1048576, // Bytes per second read from the disks, a mounted disk image on top of the disk that holds it, null when unavailable
-  "disk_write": 262144, // Bytes per second written to the disks, a mounted disk image on top of the disk that holds it, null when unavailable
+  "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable
+  "disk_write": 262144, // Bytes per second written to the disks, without disk images, null when unavailable
   "uptime": 273600, // Seconds since boot, null when unavailable
   "battery_percent": 87, // Battery charge (0–100), null without a battery
   "battery_charging": true, // null without a battery
