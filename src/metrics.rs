@@ -540,15 +540,16 @@ fn init_smc() -> WithError<SmcSensors> {
 /// Hardware metrics sampler for Apple Silicon Macs.
 ///
 /// Create one sampler and call [`Sampler::get_metrics`] in a continuous polling
-/// loop. Run the sampler in a worker thread when sampling must not block the
-/// application thread.
+/// loop or from a timer on its owning thread. The caller controls any waiting
+/// between calls. Hardware reads are synchronous; a worker thread is optional
+/// if those reads affect application responsiveness.
 pub struct Sampler {
   force_clpc: bool,
   soc: SocInfo,
   ior: Option<IOReport>,
   /// CPU usage comes from the CPU ticks, see `uses_cpu_ticks`.
   use_cpu_ticks: bool,
-  /// CPU ticks at the end of the last sample; the first sample takes its own baseline.
+  /// CPU ticks at initialization or at the end of the last sample.
   cpu_ticks: Option<Vec<[u32; 4]>>,
   hid: IOHIDSensors,
   smc: Option<SMC>,
@@ -561,19 +562,21 @@ impl Sampler {
   /// Initialize hardware metric sources.
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
-    let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
+    // Capture the initial baselines after the other sources have been initialized.
+    let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
     let cpu_stats = ior.as_ref().is_some_and(|x| x.has_group("CPU Stats"));
     let use_cpu_ticks = uses_cpu_ticks(&soc, cpu_stats);
+    let cpu_ticks = use_cpu_ticks.then(cpu_load_ticks).flatten();
 
     Ok(Sampler {
       force_clpc: false,
       soc,
       ior,
       use_cpu_ticks,
-      cpu_ticks: None,
+      cpu_ticks,
       hid,
       smc: smc_sensors.smc,
       smc_cpu_keys: smc_sensors.cpu_keys,
@@ -764,14 +767,15 @@ impl Sampler {
     Ok(rs)
   }
 
-  /// Collect metrics for the next polling interval.
+  /// Collect metrics since initialization or the preceding call, without waiting.
   ///
   /// Intended to be called continuously in a polling loop. The sampler keeps
   /// an IOReport baseline between calls and derives metrics from the complete
   /// interval between consecutive samples.
   ///
-  /// `duration` is the requested polling interval in milliseconds.
-  pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
+  /// The caller controls the interval and any waiting between calls. Hardware
+  /// reads remain synchronous.
+  pub fn get_metrics(&mut self) -> WithError<Metrics> {
     // CPU Stats channel naming by chip family (see: https://github.com/vladkens/macmon/issues/47)
     //   M1-M4:  ECPU* = efficiency cores (lower tier)
     //           PCPU* = performance cores (top tier)
@@ -784,27 +788,21 @@ impl Sampler {
     //   Ultra:  Any-generation Ultra chips prefix channels with "DIE_N_"
     //           and include cluster/core separators (e.g. "DIE_0_PCPU1_CPU0").
 
-    let duration = Duration::from_millis(duration as u64);
-    // like the IOReport baseline, taken when the first interval begins
-    let ticks = self.cpu_ticks.take().or_else(|| self.use_cpu_ticks.then(cpu_load_ticks).flatten());
+    let cur_ticks = self.use_cpu_ticks.then(cpu_load_ticks).flatten();
+    let ticks = std::mem::replace(&mut self.cpu_ticks, cur_ticks);
     let mut rs = match self.ior.as_mut() {
       Some(ior) => {
-        let (sample, elapsed) = ior.get_sample_interval(duration);
+        let (sample, elapsed) = ior.get_sample();
         self.get_ioreport_metrics(sample, elapsed)?
       }
-      None => {
-        std::thread::sleep(duration);
-        self.get_ioreport_metrics([], duration)?
-      }
+      None => self.get_ioreport_metrics([], Duration::ZERO)?,
     };
 
     if let Some(prev) = ticks
-      && let Some(cur) = cpu_load_ticks()
+      && let Some(cur) = &self.cpu_ticks
+      && let Some(tier) = rs.cpu_tiers.first_mut()
     {
-      if let Some(tier) = rs.cpu_tiers.first_mut() {
-        tier.cores = cpu_cores_from_ticks(&prev, &cur);
-      }
-      self.cpu_ticks = Some(cur);
+      tier.cores = cpu_cores_from_ticks(&prev, cur);
     }
     let mut rs = aggregate_ioreport_metrics(rs, &self.soc);
 
@@ -936,7 +934,7 @@ mod tests {
       soc: SocInfo { cpu_tiers: vec![tier], ..Default::default() },
       ior: None,
       use_cpu_ticks: true,
-      cpu_ticks: None,
+      cpu_ticks: cpu_load_ticks(),
       hid: IOHIDSensors::new().unwrap(),
       smc: None,
       smc_cpu_keys: vec![],
@@ -972,10 +970,9 @@ mod tests {
   fn samples_without_ioreport_and_smc() {
     let cpus = cpu_load_ticks().unwrap().len();
     let mut sampler = sampler_without_sources(cpus as u8, false);
-    // the first call takes its own baseline (the sampler has none), so a delay before it doesn't
-    // count; the cores below come from that call alone
-    assert!(sampler.cpu_ticks.is_none());
-    let rs = sampler.get_metrics(10).unwrap();
+    assert!(sampler.cpu_ticks.is_some());
+    std::thread::sleep(Duration::from_millis(10));
+    let rs = sampler.get_metrics().unwrap();
     assert!(sampler.cpu_ticks.is_some());
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
     assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
@@ -985,7 +982,24 @@ mod tests {
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
 
     // CLPC counters are required whether IOReport has channels or not
-    assert!(sampler_without_sources(2, true).get_metrics(10).is_err());
+    assert!(sampler_without_sources(2, true).get_metrics().is_err());
+  }
+
+  #[test]
+  fn cpu_tick_samples_use_initial_and_previous_baselines() {
+    let cpus = cpu_load_ticks().unwrap().len();
+    let mut sampler = sampler_without_sources(cpus as u8, false);
+    sampler.cpu_ticks = Some(vec![[0; 4]; cpus]);
+    for _ in 0..2 {
+      let prev = sampler.cpu_ticks.clone().unwrap();
+      std::thread::sleep(Duration::from_millis(10));
+      let metrics = sampler.get_metrics().unwrap();
+      let expected = cpu_cores_from_ticks(&prev, sampler.cpu_ticks.as_ref().unwrap());
+      assert_eq!(
+        serde_json::to_value(&metrics.cpu_tiers[0].cores).unwrap(),
+        serde_json::to_value(expected).unwrap()
+      );
+    }
   }
 
   #[test]
