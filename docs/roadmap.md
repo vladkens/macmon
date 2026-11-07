@@ -84,9 +84,9 @@ POWER does today.
       `--install --agent` is the old LaunchAgent, without sudo. Tested by hand in the VM: a
       daemon running `macmon serve` starts at boot without a login, as root and with `UserName`;
       with `UserName` the `StandardErrorPath` file must be writable by that user.
-- [x] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
-      Reddit): disk read / write and network in / out, system-wide, in JSON, Prometheus and on the
-      bottom border of the TUI's metrics box, with uptime and battery in its title.
+- [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
+      Reddit): disk read / write and network in / out, system-wide. Done as data only, with uptime
+      and battery: JSON, Prometheus and `macmon debug`. Open: showing them in the TUI.
 - [x] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
       `app:safari` in the filter matches the processes of an app: those running from its `.app`

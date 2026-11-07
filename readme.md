@@ -221,7 +221,7 @@ Both the CLI and the Rust library use known CLPC counters automatically, and `Sa
 
 ### Output format
 
-The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
+The `pipe` command and the HTTP `/json` endpoint return the same metrics. Network, disk, uptime and battery are data only: there, in Prometheus and in `macmon debug`, not in the TUI. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
 
 <details>
 <summary>JSON example</summary>
