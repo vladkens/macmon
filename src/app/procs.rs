@@ -1,8 +1,8 @@
 //! Per-process resource usage (CPU, memory, energy).
 //!
 //! libproc reads the current user's processes. Other users' processes come from `/bin/ps`, which
-//! has CPU time and RSS but no energy counter. GPU time of every process comes from the GPU's user
-//! clients in the IORegistry.
+//! has CPU time and RSS but no energy counter and costs more than the rest, so it runs less often
+//! than the samples. GPU time of every process comes from the GPU's user clients in the IORegistry.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -662,6 +662,7 @@ fn gpu_times() -> HashMap<i32, u64> {
 
 /// A process seen on the previous tick.
 struct Known {
+  /// Kept with `started` until an exec, see `read_libproc`.
   uid: u32,
   counters: Counters,
   /// Changes on exec (unless cut to the same 15 bytes), invalidates `name` and `path`.
