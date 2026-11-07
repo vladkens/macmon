@@ -125,8 +125,10 @@ POWER does today.
 - [x] **24. A cheaper process list.** CPU a minute with the list at 1 s, `ps` included: 1.5–1.8 s
       → 0.6–0.7 on an M5, 3.2–3.4 → 1.8–2.0 on an M2, against 0.3 for htop and 1 for btop, which
       read 0 for other users' processes. `ps` prints `ucomm` (`comm` reads every process'
-      arguments) and runs every 3 s, so other users' rows are up to 3 s old and their new
-      processes show up to 3 s late; the executable path and fixed fields are read once per exec.
+      arguments) and runs about every 3 s, at least 3 s apart as it runs on a tick, so other
+      users' rows are that old and their new processes that late, and an own process exec-ing a
+      setuid binary is gone until the next run; the executable path and fixed fields are read once
+      per exec.
       No gain, left out: a GPU client's creator cached by registry entry, idle processes read
       less often. Most of what's left is `proc_pid_rusage` and the GPU walk, every tick.
 

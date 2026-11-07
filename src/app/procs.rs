@@ -22,8 +22,9 @@ const RUSAGE_INFO_V6: c_int = 6;
 /// `ps` output columns; the command goes last as it may contain spaces. `ucomm`, as `comm` makes
 /// `ps` read every process' arguments, a third of its CPU; the name comes from the executable path.
 const PS_COLUMNS: &str = "pid=,uid=,rss=,time=,ucomm=";
-/// How often `ps` runs, the largest cost of the list; its rows are reused in between. It prints CPU
-/// time in 10 ms steps, 1 % of a second: over this time idle processes don't jump by a whole 1 %.
+/// Least time between `ps` runs, the largest cost of the list: it runs on the first tick after
+/// this, and its rows are reused in between. It prints CPU time in 10 ms steps, 1 % of a second:
+/// over this time idle processes don't jump by a whole 1 %.
 const PS_PERIOD: Duration = Duration::from_secs(3);
 /// Wait for the second `ps` run, sooner as its rows have no CPU % before it.
 const PS_WARM_UP: Duration = Duration::from_secs(1);
@@ -313,7 +314,8 @@ fn parse_args(buf: &[u8]) -> Option<Vec<String>> {
 }
 
 /// Reads a process through libproc; fails for other users' processes. Only the counters of a
-/// `known` process that didn't exec since: the rest takes two more calls per process.
+/// `known` process, unless it exec'd an executable with another UUID since: the rest takes two more
+/// calls per process.
 fn read_libproc(
   pid: i32,
   flavor: c_int,
@@ -411,7 +413,7 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
     mem_bytes: rss_kib.saturating_mul(1024),
     // ps has no start time, a reused pid is told apart by its command.
     counters: Counters { cpu_ns, ..Counters::default() },
-    fallback: basename(&comm).unwrap_or(&comm).to_string(),
+    fallback: comm.clone(),
     comm,
     path: None,
     ps: true,
@@ -662,7 +664,8 @@ fn gpu_times() -> HashMap<i32, u64> {
 
 /// A process seen on the previous tick.
 struct Known {
-  /// Kept with `started` until an exec, see `read_libproc`.
+  /// Kept with `started` until an exec, see `read_libproc`: under `sudo macmon`, a `setuid()`
+  /// without an exec keeps the old user.
   uid: u32,
   counters: Counters,
   /// Changes on exec (unless cut to the same 15 bytes), invalidates `name` and `path`.
@@ -715,7 +718,8 @@ impl ProcSampler {
     }
   }
 
-  /// CPU and power are rates since the previous call; the first call reports them as zero.
+  /// CPU and power are rates since the previous call, other users' CPU the rate between two `ps`
+  /// runs; the first call reports them as zero.
   pub fn sample(&mut self) -> Vec<ProcInfo> {
     let now = Instant::now();
     let elapsed_ns = self.last.map_or(0, |last| now.duration_since(last).as_nanos() as u64);
@@ -759,6 +763,7 @@ impl ProcSampler {
         raw.path = exe_path(raw.pid); // the start time isn't known, `comm` may stay across an exec
       }
     }
+
     self.update(rows, elapsed_ns, ps_ns)
   }
 
@@ -815,6 +820,7 @@ impl ProcSampler {
       let alive: HashSet<i32> = procs.iter().map(|proc| proc.pid).collect();
       self.known.retain(|pid, _| alive.contains(pid));
     }
+
     procs
   }
 }
@@ -914,17 +920,17 @@ mod tests {
 
   #[test]
   fn ps_lines() {
-    let chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (GPU)";
-    let raw = parse_ps_line(&format!(" 2301   501 182976   1:02.50 {chrome}")).expect("valid");
+    let helper = "Helium Helper (A";
+    let raw = parse_ps_line(&format!(" 2301   501 182976   1:02.50 {helper}")).expect("valid");
     assert_eq!((raw.pid, raw.uid, raw.mem_bytes), (2301, 501, 182976 * 1024));
     let times = Counters { cpu_ns: 62_500_000_000, ..Counters::default() };
     assert_eq!(raw.counters, times);
-    assert_eq!((raw.comm.as_str(), raw.fallback.as_str()), (chrome, "Google Chrome Helper (GPU)"));
+    assert_eq!((raw.comm.as_str(), raw.fallback.as_str()), (helper, helper));
     assert!(raw.ps);
-    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurityd\n").expect("valid");
-    assert_eq!((raw.pid, raw.uid, raw.fallback.as_str()), (574, 0, "endpointsecurityd"));
+    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurity\n").expect("valid");
+    assert_eq!((raw.pid, raw.uid, raw.fallback.as_str()), (574, 0, "endpointsecurity"));
     // `nobody` is printed signed; its uid has the name
-    let raw = parse_ps_line("  343    -2    192   0:00.03 /usr/libexec/dhcp6d").expect("valid");
+    let raw = parse_ps_line("  343    -2    192   0:00.03 dhcp6d          ").expect("valid");
     assert_eq!((raw.pid, raw.uid, user_name(raw.uid).as_str()), (343, 4294967294, "nobody"));
     assert_eq!(parse_ps_line("1 4294967294 1 0:00.01 cmd").map(|raw| raw.uid), Some(4294967294));
 
@@ -1115,20 +1121,38 @@ mod tests {
     assert!(raw.path.is_some());
     assert_ne!(raw.counters.uuid, [0; 16]);
 
-    let known = |uuid| Known {
+    let known = |start, uuid| Known {
       uid: 1,
-      counters: Counters { uuid, ..raw.counters },
+      counters: Counters { start, uuid, ..raw.counters },
       comm: "known".into(),
       name: String::new(),
       path: String::new(),
       cpu_pct: 0.0,
-      started: None,
+      started: Some((7, 8)),
     };
-    let same = read(Some(&known(raw.counters.uuid)));
-    assert_eq!((same.uid, same.comm.as_str(), same.path, same.started), (1, "known", None, None));
+    let (start, uuid) = (raw.counters.start, raw.counters.uuid);
+    let same = read(Some(&known(start, uuid)));
+    let kept = (same.uid, same.comm.as_str(), same.path, same.started);
+    assert_eq!(kept, (1, "known", None, Some((7, 8))));
 
-    let exec = read(Some(&known([1; 16])));
-    assert_eq!((exec.comm.as_str(), exec.path.is_some()), (raw.comm.as_str(), true));
+    for other in [known(start, [1; 16]), known(start + 1, uuid)] {
+      let full = read(Some(&other));
+      assert_eq!((full.comm.as_str(), full.path.is_some()), (raw.comm.as_str(), true));
+      assert_eq!(full.started, raw.started);
+    }
+  }
+
+  #[test]
+  fn ps_rows_are_reused_until_the_next_run() {
+    let launchd_mem = |procs: Vec<ProcInfo>| procs.iter().find(|p| p.pid == 1).unwrap().mem_bytes;
+    let mut sampler = ProcSampler::new();
+
+    sampler.sample();
+    sampler.ps_rows.get_mut(&1).unwrap().mem_bytes = 1;
+    assert_eq!(launchd_mem(sampler.sample()), 1);
+
+    sampler.ps_next = Some(Instant::now());
+    assert!(launchd_mem(sampler.sample()) > 1);
   }
 
   #[test]
