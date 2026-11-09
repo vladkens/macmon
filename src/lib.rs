@@ -5,21 +5,17 @@
 //!
 //! # Examples
 //!
-//! [`Sampler::get_metrics`] reads synchronous hardware metrics without waiting.
-//! The caller controls the interval; the first delta starts at sampler creation:
+//! [`Sampler::get_metrics`] blocks the current thread while macmon collects
+//! metrics over the requested interval:
 //!
 //! ```no_run
 //! use macmon::Sampler;
-//! use std::{thread, time::{Duration, Instant}};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!   let mut sampler = Sampler::new()?;
-//!   let mut sampled_at = Instant::now();
 //!
 //!   loop {
-//!     thread::sleep(Duration::from_secs(1).saturating_sub(sampled_at.elapsed()));
-//!     sampled_at = Instant::now();
-//!     let metrics = sampler.get_metrics()?;
+//!     let metrics = sampler.get_metrics(1000)?;
 //!
 //!     println!("CPU power: {:.2} W", metrics.cpu_power);
 //!     println!("GPU power: {:.2} W", metrics.gpu_power);
@@ -32,13 +28,18 @@
 //! }
 //! ```
 //!
-//! You can also collect metrics in a worker thread and send them through a channel:
+//! To schedule samples yourself, call [`Sampler::get_metrics_now`] at each
+//! tick. It reads the hardware immediately and measures counter changes since
+//! the previous sample from either method, or since sampler initialization on
+//! the first call.
+//!
+//! To keep an application thread responsive, create the sampler inside a
+//! dedicated worker thread and send completed metrics through a channel:
 //!
 //! ```no_run
 //! use std::{
 //!   sync::mpsc::{self, Receiver, TryRecvError},
 //!   thread,
-//!   time::{Duration, Instant},
 //! };
 //!
 //! use macmon::{Metrics, Sampler};
@@ -48,12 +49,8 @@
 //!
 //!   thread::spawn(move || {
 //!     let mut sampler = Sampler::new().expect("failed to create sampler");
-//!     let mut sampled_at = Instant::now();
 //!
-//!     loop {
-//!       thread::sleep(Duration::from_millis(interval_ms.into()).saturating_sub(sampled_at.elapsed()));
-//!       sampled_at = Instant::now();
-//!       let Ok(metrics) = sampler.get_metrics() else { break };
+//!     while let Ok(metrics) = sampler.get_metrics(interval_ms) {
 //!       if tx.send(metrics).is_err() {
 //!         break;
 //!       }
@@ -77,11 +74,6 @@
 //!   }
 //! }
 //! ```
-//!
-//! Creating `Sampler` inside the worker also keeps its low-level macOS handles
-//! on that thread. `get_metrics()` consumes little CPU, but its synchronous macOS
-//! calls can block. For UI and async applications, use a worker thread to keep
-//! the event loop or executor responsive.
 
 mod clpc;
 

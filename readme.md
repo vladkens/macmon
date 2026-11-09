@@ -20,7 +20,7 @@
 - 🚫 Runs without sudo
 - ⚡ Real-time CPU / GPU / ANE power usage
 - 📊 CPU frequency-scaled and active ratios per cluster
-- 💾 RAM / Swap usage
+- 💾 RAM / Swap usage and memory pressure
 - 📈 Historical charts with average and max values
 - 🌡️ Average CPU / GPU temperature
 - 📋 Process list with per-process CPU, memory, power and GPU usage
@@ -59,6 +59,8 @@ nix-env -i macmon
 
 </details>
 
+Tested on macOS 14 and later; older versions may work too.
+
 ## 🚀 Usage
 
 ```sh
@@ -81,7 +83,9 @@ Options:
 
 Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
-Press `/` to filter the process list. A filter is a comma-separated list of terms, each matched case-insensitively against the process name or pid: `safari, cargo` shows processes matching any term, and a term starting with `!` hides its matches (`chrome, !helper`). `Enter` keeps the filter, `Esc` clears it.
+Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows the Safari app with its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory), `cmd:` (the command line, of your own processes) and `app:` (the name of the `.app` the process or its responsible process runs from); or an exact local TCP or UDP port, of your own processes: `port:3000`. `Enter` keeps the filter, `Esc` clears it.
+
+Press `Space` to pause the process list: rows keep their order while values update, new processes wait until you resume, and the files list of `i` stops updating. Press `f` to turn the filter off and on without losing its text.
 
 ### JSON output
 
@@ -122,16 +126,25 @@ Two endpoints are available:
 
 #### launchd service
 
-To start `macmon serve` automatically on login and keep it running:
+To start `macmon serve` at boot, with nobody logged in, and keep it running:
 
 ```sh
-macmon serve --install                   # install and start (default port 9090)
-macmon serve --port 8080 --install       # with custom port
-macmon serve --host 127.0.0.1 --install  # listen on localhost only
-macmon serve --uninstall                 # stop and remove
+sudo macmon serve --install                   # install and start (default port 9090)
+sudo macmon serve --port 8080 --install       # with custom port
+sudo macmon serve --host 127.0.0.1 --install  # listen on localhost only
+sudo macmon serve --uninstall                 # stop and remove
 ```
 
-This creates a launchd agent at `~/Library/LaunchAgents/com.macmon.plist` that auto-starts on login and restarts on crash.
+`--install` needs sudo: it creates a LaunchDaemon at `/Library/LaunchDaemons/com.macmon.plist` that restarts on crash. The daemon runs as the user who called `sudo`, not as root, and with FileVault on it starts after the disk is unlocked following a restart. If that user has the agent below, the daemon replaces it.
+
+To start at login instead, without sudo:
+
+```sh
+macmon serve --install --agent  # install and start (takes --host and --port too)
+macmon serve --uninstall        # stop and remove
+```
+
+This creates a LaunchAgent at `~/Library/LaunchAgents/com.macmon.plist`. Only one macmon service at a time: it's refused while the daemon is installed.
 
 #### Prometheus and Grafana
 
@@ -208,7 +221,7 @@ Both the CLI and the Rust library use known CLPC counters automatically, and `Sa
 
 ### Output format
 
-The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
+The `pipe` command and the HTTP `/json` endpoint return the same metrics. Network, disk, uptime and battery are data only: there, in Prometheus and in `macmon debug`, not in the TUI. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
 
 <details>
 <summary>JSON example</summary>
@@ -225,6 +238,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
     "ram_usage": 20985479168, // Bytes
     "swap_total": 4294967296, // Bytes
     "swap_usage": 2602434560, // Bytes
+    "pressure_level": 0, // Kernel memory pressure level: 0 normal, 1 warning, 2 critical, null when unavailable
+    "pressure_percent": 25, // Memory pressure as in Activity Monitor (0–100), null when unavailable
   },
   "fans": [
     { "name": "fan0", "rpm": 999, "max_rpm": 4900 },
@@ -273,6 +288,14 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. In a m
   "sys_power": 5.876533, // Watts
   "ram_power": 0.11635789, // Watts
   "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
+  "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
+  "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable
+  "disk_write": 262144, // Bytes per second written to the disks, without disk images, null when unavailable
+  "uptime": 273600, // Seconds since boot, null when unavailable
+  "battery_percent": 87, // Battery charge (0–100), null without a battery
+  "battery_charging": true, // null without a battery
+  "battery_plugged": true, // External power connected, charging or not, null without a battery
 }
 ```
 
@@ -329,8 +352,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sampler = Sampler::new()?;
 
     // collect metrics over a 1000ms window
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let metrics = sampler.get_metrics()?;
+    let metrics = sampler.get_metrics(1000)?;
 
     println!("CPU power:  {:.2} W", metrics.cpu_power);
     println!("GPU power:  {:.2} W", metrics.gpu_power);
@@ -347,12 +369,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`get_metrics()` performs synchronous hardware reads without waiting for a sampling interval. The caller controls when to sample, for example from a timer on the thread that owns the sampler. The first delta starts at sampler creation, and later deltas cover the time between samples, including caller processing time.
-
-A dedicated worker thread is optional. If hardware reads affect your application's responsiveness, you can create the sampler in a worker and send completed metrics through a channel:
+If your application already has a timer, create the sampler before the first tick and reuse it:
 
 ```rust
-use std::{sync::mpsc, thread, time::{Duration, Instant}};
+// Call this on each tick of your application's timer.
+let metrics = sampler.get_metrics_now()?;
+```
+
+`get_metrics_now()` reads the hardware immediately. It calculates counter-based metrics over the time since the previous sample taken by either method, or since sampler initialization on the first call.
+
+`get_metrics(duration_ms)` blocks the calling thread while collecting one IOReport delta over the complete interval. For a UI, server, or async application, create the sampler inside a dedicated worker thread and send the completed metrics back through a channel:
+
+```rust
+use std::{sync::mpsc, thread};
 
 use macmon::Sampler;
 
@@ -361,12 +390,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     thread::spawn(move || {
         let mut sampler = Sampler::new().expect("failed to create sampler");
-        let mut sampled_at = Instant::now();
 
-        loop {
-            thread::sleep(Duration::from_secs(1).saturating_sub(sampled_at.elapsed()));
-            sampled_at = Instant::now();
-            let Ok(metrics) = sampler.get_metrics() else { break };
+        while let Ok(metrics) = sampler.get_metrics(1000) {
             if tx.send(metrics).is_err() {
                 break;
             }
@@ -381,17 +406,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Creating `Sampler` inside the worker also keeps its low-level macOS handles on that thread. `get_metrics()` consumes little CPU, but its synchronous macOS calls can block. For UI and async applications, use a worker thread to keep the event loop or executor responsive.
+Creating `Sampler` inside the worker keeps its low-level macOS handles on that thread. In an async runtime, use its blocking-thread facility rather than calling `get_metrics` directly from an executor worker.
 
-## 🤝 Contributing
+## ⚖️ Compared to htop and btop
 
-All contributions are welcome! Feel free to open an issue or submit a pull request.
+htop and btop are good general monitors, and htop is lighter. On Apple Silicon, without sudo, macmon shows more:
 
-The [dev pre-release](https://github.com/vladkens/macmon/releases/tag/dev), built from `main`, shows its git version in `macmon -V` and the TUI title, e.g. `macmon 0.9.0-12-g3672a1b` (local builds show the crate version); mention it when reporting an issue.
+- Real CPU and memory of other users' processes, such as `WindowServer` and root services. The kernel refuses them to htop and btop, which show 0; macmon reads them through the system's `ps`.
+- CPU, ANE and total power, frequencies of each CPU cluster, and memory pressure.
+- Power and GPU use per process.
+- A process filter with queries (`mem:>1g`, `app:safari`), open files and sockets of a process.
 
-## 📝 License
-
-Distributed under the [MIT License](LICENSE).
+Compared with htop 3.5.3 and btop 1.4.8 on macOS 27.
 
 ## 🔍 See also
 
@@ -400,3 +426,13 @@ Distributed under the [MIT License](LICENSE).
 - [op06072/NeoAsitop](https://github.com/op06072/NeoAsitop) – Written in Swift, sudoless.
 - [graelo/pumas](https://github.com/graelo/pumas) – Written in Rust, requires sudo.
 - [context-labs/mactop](https://github.com/context-labs/mactop) – Written in Go, requires sudo.
+
+## 🤝 Contributing
+
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
+
+When reporting an issue, mention the version from `macmon -V`, and for a wrong or missing metric add the output of `macmon debug`.
+
+## 📝 License
+
+Distributed under the [MIT License](LICENSE).

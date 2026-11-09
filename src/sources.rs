@@ -21,7 +21,7 @@ use std::mem::{MaybeUninit, size_of};
 use std::os::raw::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use core_foundation::array::{
   CFArray, CFArrayAppendValue, CFArrayCreateMutable, CFArrayGetCount, CFArrayGetValueAtIndex,
@@ -31,6 +31,7 @@ use core_foundation::base::{
   CFAllocatorRef, CFGetTypeID, CFRange, CFRelease, CFType, CFTypeRef, TCFType, kCFAllocatorDefault,
   kCFAllocatorNull,
 };
+use core_foundation::boolean::CFBoolean;
 use core_foundation::data::{CFDataGetBytes, CFDataGetLength, CFDataGetTypeID, CFDataRef};
 use core_foundation::dictionary::{
   CFDictionary, CFDictionaryCreate, CFDictionaryCreateMutableCopy, CFDictionaryGetCount,
@@ -145,6 +146,7 @@ unsafe extern "C" {
   fn IORegistryEntryGetName(entry: u32, name: *mut i8) -> i32;
   fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
   fn IORegistryEntryCreateCFProperties(entry: u32, properties: *mut CFMutableDictionaryRef, allocator: CFAllocatorRef, options: u32) -> i32;
+  fn IORegistryEntrySearchCFProperty(entry: u32, plane: *const i8, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
   fn IOObjectRelease(obj: u32) -> u32;
 }
 
@@ -497,6 +499,122 @@ pub fn libc_swap() -> WithError<(u64, u64)> {
   Ok((usage, total))
 }
 
+// MARK: Network and disk
+
+/// `IFT_ETHER` of `net/if_types.h`: Ethernet and Wi-Fi. It leaves out loopback, tunnels and
+/// bridges.
+const IFT_ETHER: u8 = 6;
+/// `kIORegistryIterateRecursively | kIORegistryIterateParents`: the entry, then up its providers.
+const IOREGISTRY_SEARCH_PARENTS: u32 = 3;
+
+/// Reads a value of type `T` from the sysctl `mib`.
+fn sysctl_mib<T>(mib: &[i32]) -> Option<T> {
+  let mut val = MaybeUninit::<T>::uninit();
+  let mut size = size_of::<T>();
+  let ret = unsafe {
+    let (name, len) = (mib.as_ptr() as *mut _, mib.len() as u32);
+    libc::sysctl(name, len, val.as_mut_ptr().cast(), &mut size, null_mut(), 0)
+  };
+  (ret == 0).then(|| unsafe { val.assume_init() })
+}
+
+/// `read` on every IORegistry service named `service` and its properties, leaving out the `None`s.
+fn read_services<T>(service: &str, read: impl Fn(u32, CFDictionaryRef) -> Option<T>) -> Vec<T> {
+  let Ok(services) = IOServiceIterator::new(service) else { return vec![] };
+  let read_one = |(entry, name)| {
+    let val = cfio_get_props(entry, name).ok().and_then(|props| {
+      let val = read(entry, props);
+      unsafe { CFRelease(props as _) };
+      val
+    });
+    unsafe { IOObjectRelease(entry) };
+    val
+  };
+  services.filter_map(read_one).collect()
+}
+
+fn sum_pairs(pairs: impl IntoIterator<Item = [u64; 2]>) -> Option<[u64; 2]> {
+  pairs.into_iter().reduce(|a, b| [a[0] + b[0], a[1] + b[1]])
+}
+
+/// Whether `x` is a physical link: `vmenetN` is Ethernet too, but under a VM's bridge it repeats
+/// the traffic of the VM, which the interface the bridge goes out through counts.
+fn is_physical(x: &libc::ifmibdata) -> bool {
+  let vmenet = x.ifmd_name[..6].iter().map(|&c| c as u8).eq(*b"vmenet");
+  x.ifmd_data.ifi_type == IFT_ETHER && !vmenet
+}
+
+/// Bytes received and sent by the Ethernet and Wi-Fi interfaces since they came up, or None
+/// without one. From `IFMIB_IFDATA`, which matches `netstat -ib`: on macOS 27 `getifaddrs` and
+/// `NET_RT_IFLIST2` give the same counters cut to 32 bits and rounded down to 1 KiB.
+pub(crate) fn net_bytes() -> Option<[u64; 2]> {
+  let [net, link, generic] = [libc::CTL_NET, libc::PF_LINK, libc::NETLINK_GENERIC];
+  let count: i32 = sysctl_mib(&[net, link, generic, libc::IFMIB_SYSTEM, libc::IFMIB_IFCOUNT])?;
+  let data = |i| sysctl_mib(&[net, link, generic, libc::IFMIB_IFDATA, i, libc::IFDATA_GENERAL]);
+  let ifs = (1..=count).filter_map(data).filter(is_physical).map(|x| x.ifmd_data);
+  sum_pairs(ifs.map(|x| [x.ifi_ibytes, x.ifi_obytes]))
+}
+
+/// Whether the storage `driver` is on a disk image, whose traffic the disk that holds it counts
+/// too. By `Device Characteristics`: the device's class differs by image (`...DeviceOutKernel`,
+/// `...DeviceInKernel`), and only the first has a `File` location in `Protocol Characteristics`.
+fn on_disk_image(driver: u32) -> bool {
+  let key = cfstr("Device Characteristics");
+  let val = unsafe {
+    let (plane, options) = (c"IOService".as_ptr(), IOREGISTRY_SEARCH_PARENTS);
+    IORegistryEntrySearchCFProperty(driver, plane, key, kCFAllocatorDefault, options)
+  };
+  unsafe { CFRelease(key as _) };
+  if val.is_null() {
+    return false;
+  }
+
+  let product = cfdict_get_val(val as _, "Product Name");
+  let image = product.is_some_and(|x| from_cfstr(x as _) == "Disk Image");
+  unsafe { CFRelease(val) };
+  image
+}
+
+/// Bytes read and written by the storage drivers since they came up, without disk images, or None
+/// without one.
+pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
+  sum_pairs(read_services("IOBlockStorageDriver", |driver, props| {
+    if on_disk_image(driver) {
+      return None;
+    }
+
+    let stats = cfdict_get_val(props, "Statistics")? as CFDictionaryRef;
+    let bytes = |key| cfnum_get_i64(stats, key).map(|x| x as u64);
+    Some([bytes("Bytes (Read)")?, bytes("Bytes (Write)")?])
+  }))
+}
+
+// MARK: Uptime and battery
+
+/// Seconds since boot.
+pub(crate) fn uptime_secs() -> Option<u64> {
+  let boot: libc::timeval = sysctl_mib(&[libc::CTL_KERN, libc::KERN_BOOTTIME])?;
+  let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+  now.checked_sub(boot.tv_sec as u64)
+}
+
+/// Percent, whether it is charging and whether external power is connected, from the properties
+/// of `AppleSmartBattery`. As in `pmset -g batt`: on Apple Silicon `CurrentCapacity` is the
+/// percent, not mAh.
+fn battery_from(props: CFDictionaryRef) -> Option<(u8, bool, bool)> {
+  let flag = |key| {
+    let val = cfdict_get_val(props, key)?;
+    Some(bool::from(unsafe { CFBoolean::wrap_under_get_rule(val as _) }))
+  };
+  let percent = u8::try_from(cfnum_get_i64(props, "CurrentCapacity")?).ok()?;
+  Some((percent, flag("IsCharging")?, flag("ExternalConnected")?))
+}
+
+/// Percent, charging and plugged in state of the internal battery, or None on a desktop.
+pub(crate) fn battery() -> Option<(u8, bool, bool)> {
+  read_services("AppleSmartBattery", |_, props| battery_from(props)).pop()
+}
+
 // MARK: SockInfo
 
 /// Static Apple Silicon system information.
@@ -722,6 +840,35 @@ pub(crate) fn sysctl_u32(name: &str) -> Option<u32> {
 
 fn sysctl_u64(name: &str) -> Option<u64> {
   sysctl_buf(name).map(u64::from_ne_bytes)
+}
+
+/// `kern.memorystatus_level`, readable without root.
+pub(crate) fn memory_status_raw() -> Option<u32> {
+  sysctl_u32("kern.memorystatus_level")
+}
+
+/// Memory pressure in percent as in Activity Monitor, which reads the same level through
+/// `memorystatus_get_level()` and shows 100 minus it. `None` for a level above 100.
+pub(crate) fn memory_pressure_percent(raw: u32) -> Option<u8> {
+  u8::try_from(raw).ok().and_then(|x| 100u8.checked_sub(x))
+}
+
+/// The kernel's memory pressure level as the raw sysctl value; readable without root.
+pub(crate) fn memory_pressure_raw() -> Option<u32> {
+  sysctl_u32("kern.memorystatus_vm_pressure_level")
+}
+
+/// 0 normal, 1 warning, 2 critical from the sysctl value: XNU returns its
+/// `NOTE_MEMORYSTATUS_PRESSURE_*` flags (`bsd/sys/event_private.h`), the same as
+/// `DISPATCH_MEMORYPRESSURE_*` (1, 2, 4), see `sysctl_memorystatus_vm_pressure_level` in
+/// `bsd/kern/kern_memorystatus_notify.c`.
+pub(crate) fn memory_pressure_level(raw: u32) -> Option<u8> {
+  match raw {
+    1 => Some(0),
+    2 => Some(1),
+    4 => Some(2),
+    _ => None,
+  }
 }
 
 /// Read an integer CFNumber property from an IORegistry properties dictionary.
@@ -1150,7 +1297,7 @@ fn cfio_get_subs(
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
-  prev: (CFDictionaryRef, std::time::Instant),
+  prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
@@ -1168,8 +1315,7 @@ impl IOReport {
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    let prev = (unsafe { IOReportCreateSamples(subs, chan, null()) }, std::time::Instant::now());
-    Ok(Self { subs, chan, prev })
+    Ok(Self { subs, chan, prev: None })
   }
 
   /// Subscription to the channels `filter` selects, or None when it selects none (a VM).
@@ -1179,8 +1325,7 @@ impl IOReport {
       return Ok(None);
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    let prev = (unsafe { IOReportCreateSamples(subs, chan, null()) }, std::time::Instant::now());
-    Ok(Some(Self { subs, chan, prev }))
+    Ok(Some(Self { subs, chan, prev: None }))
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -1203,31 +1348,83 @@ impl IOReport {
     cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group)
   }
 
+  /// Collect one delta sample over `duration` milliseconds.
+  pub fn get_sample(&self, duration: u64) -> IOReportIterator {
+    unsafe {
+      let sample1 = IOReportCreateSamples(self.subs, self.chan, null());
+      std::thread::sleep(std::time::Duration::from_millis(duration));
+      let sample2 = IOReportCreateSamples(self.subs, self.chan, null());
+
+      let sample3 = IOReportCreateSamplesDelta(sample1, sample2, null());
+      CFRelease(sample1 as _);
+      CFRelease(sample2 as _);
+      IOReportIterator::from_sample(sample3)
+    }
+  }
+
   fn raw_sample(&self) -> (CFDictionaryRef, std::time::Instant) {
     (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
   }
 
   /// Replace the baseline with a fresh snapshot, without calculating a delta.
-  pub fn reset_sample(&mut self) {
-    let next = self.raw_sample();
-    unsafe { CFRelease(self.prev.0 as _) };
-    self.prev = next;
+  pub(crate) fn reset_sample(&mut self) {
+    if let Some(prev) = self.prev.replace(self.raw_sample()) {
+      unsafe { CFRelease(prev.0 as _) };
+    }
   }
 
-  /// Collect a delta since initialization, reset, or the preceding call, without waiting.
+  /// Collect a delta since the preceding call or reset, without waiting.
   ///
   /// Returns the actual interval between snapshots, with a minimum of 1 ns.
-  /// The caller controls when snapshots are taken.
-  pub fn get_sample(&mut self) -> (IOReportIterator, Duration) {
-    let prev = self.prev;
+  pub(crate) fn get_sample_now(&mut self) -> (IOReportIterator, Duration) {
+    let prev = match self.prev {
+      Some(x) => x,
+      None => self.raw_sample(),
+    };
+
     let next = self.raw_sample();
     let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
     unsafe { CFRelease(prev.0 as _) };
 
     let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
-    self.prev = next;
+    self.prev = Some(next);
 
     (IOReportIterator::from_sample(diff), elapsed)
+  }
+
+  /// Collect multiple delta samples across one sampling window.
+  pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
+    let count = count.clamp(1, 32);
+    let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
+
+    let mut prev = match self.prev {
+      Some(x) => x,
+      None => self.raw_sample(),
+    };
+
+    let started_at = prev.1;
+    for i in 1..=count {
+      // Keep the requested sampling window stable: IOReportCreateSamples time should not
+      // accumulate as drift on top of the caller's interval.
+      let target_msec = duration.saturating_mul(i as u64) / count as u64;
+      let target_at = started_at + std::time::Duration::from_millis(target_msec);
+      let now = std::time::Instant::now();
+      if target_at > now {
+        std::thread::sleep(target_at.duration_since(now));
+      }
+
+      let next = self.raw_sample();
+      let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
+      unsafe { CFRelease(prev.0 as _) };
+
+      let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
+      prev = next;
+
+      samples.push((IOReportIterator::from_sample(diff), elapsed.max(1)));
+    }
+
+    self.prev = Some(prev);
+    samples
   }
 }
 
@@ -1236,7 +1433,9 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      CFRelease(self.prev.0 as _);
+      if let Some(prev) = self.prev {
+        CFRelease(prev.0 as _);
+      }
     }
   }
 }
@@ -1617,15 +1816,60 @@ mod tests {
   use super::*;
 
   #[test]
+  fn battery_needs_percent_charging_and_plugged_state() {
+    let key = |x| CFString::new(x).as_CFType();
+    let percent = |x: i32| (key("CurrentCapacity"), CFNumber::from(x).as_CFType());
+    let charging = (key("IsCharging"), CFBoolean::false_value().as_CFType());
+    let plugged = (key("ExternalConnected"), CFBoolean::true_value().as_CFType());
+    let read = |pairs: &[(CFType, CFType)]| {
+      battery_from(CFDictionary::from_CFType_pairs(pairs).as_concrete_TypeRef())
+    };
+
+    assert_eq!(read(&[percent(87), charging.clone(), plugged.clone()]), Some((87, false, true)));
+    assert_eq!(read(&[percent(87), charging.clone()]), None);
+    assert_eq!(read(&[percent(87), plugged.clone()]), None);
+    assert_eq!(read(&[percent(-1), charging, plugged]), None);
+  }
+
+  #[test]
+  fn a_missing_service_reads_nothing_as_on_a_desktop() {
+    assert!(read_services("MacmonNoSuchService", |_, _| Some(1)).is_empty());
+  }
+
+  #[test]
+  fn only_physical_links_count() {
+    let link = |name: &[u8], kind| {
+      let mut x: libc::ifmibdata = unsafe { std::mem::zeroed() };
+      x.ifmd_name.iter_mut().zip(name).for_each(|(a, b)| *a = *b as _);
+      x.ifmd_data.ifi_type = kind;
+      is_physical(&x)
+    };
+
+    assert!(link(b"en0", IFT_ETHER) && link(b"awdl0", IFT_ETHER));
+    assert!(!link(b"vmenet0", IFT_ETHER) && !link(b"utun0", 1) && !link(b"lo0", 24));
+  }
+
+  #[test]
+  fn the_boot_disk_is_not_a_disk_image() {
+    assert!(disk_bytes().is_some());
+  }
+
+  #[test]
+  fn uptime_is_read() {
+    assert!(uptime_secs().is_some_and(|x| x > 0));
+  }
+
+  #[test]
   fn sample_duration_follows_external_waits_resets_and_consecutive_calls() {
     let mut earliest = std::time::Instant::now();
     if let Some(mut ior) =
       IOReport::with_filter(Some(crate::shared::ioreport_channels_filter)).unwrap()
     {
+      ior.reset_sample();
       for delay in [Duration::from_millis(10), Duration::from_millis(30), Duration::ZERO] {
         std::thread::sleep(delay);
         let before = std::time::Instant::now();
-        let (sample, elapsed) = ior.get_sample();
+        let (sample, elapsed) = ior.get_sample_now();
         assert!(elapsed >= delay.max(Duration::from_nanos(1)));
         assert!(elapsed <= earliest.elapsed());
         assert!(sample.count() > 0);
@@ -1635,10 +1879,11 @@ mod tests {
       earliest = std::time::Instant::now();
       ior.reset_sample();
       std::thread::sleep(Duration::from_millis(10));
-      let (sample, elapsed) = ior.get_sample();
+      let (sample, elapsed) = ior.get_sample_now();
       assert!(elapsed >= Duration::from_millis(10));
       assert!(elapsed <= earliest.elapsed());
       assert!(sample.count() > 0);
+      assert!(ior.get_sample(10).count() > 0);
     } else {
       assert!(in_vm(), "no sampling channels outside a VM");
     }
@@ -1799,6 +2044,22 @@ mod tests {
     let soc = soc_info_from(m2(), Some((vec![600, 912], vec![660, 3504], vec![444]))).unwrap();
     let freqs = soc.cpu_tiers.iter().map(|x| x.freqs.clone()).collect::<Vec<_>>();
     assert_eq!((freqs, soc.gpu_freqs), (vec![vec![600, 912], vec![660, 3504]], vec![444]));
+  }
+
+  #[test]
+  fn memory_pressure_percent_is_100_minus_the_level() {
+    let cases = [(75, Some(25)), (41, Some(59)), (0, Some(100)), (100, Some(0))];
+    for (raw, percent) in cases.into_iter().chain([(101, None), (300, None)]) {
+      assert_eq!(memory_pressure_percent(raw), percent, "{raw}");
+    }
+  }
+
+  #[test]
+  fn memory_pressure_level_maps_the_kernel_flags() {
+    let cases = [(1, Some(0)), (2, Some(1)), (4, Some(2)), (0, None), (3, None), (8, None)];
+    for (raw, level) in cases {
+      assert_eq!(memory_pressure_level(raw), level, "{raw}");
+    }
   }
 
   #[test]

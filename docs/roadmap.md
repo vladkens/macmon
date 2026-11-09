@@ -43,7 +43,7 @@ POWER does today.
       line above it (`116 fds  8 files  3 dev  96 pipes …`). Second, a process summary line
       above the counts (cpu, mem, power, threads, uptime, parent) and presets on `s` / `S` (`all`,
       `files`, `network`, `home`, `not home`) saved in `~/.config/macmon.json`.
-      Plan (first PR): [docs/plans/20261011-grouped-files.md](plans/20261011-grouped-files.md).
+      Plan (first PR): [docs/plans/completed/20261011-grouped-files.md](plans/completed/20261011-grouped-files.md).
 - [x] **8. macmon's own cost, before the release.** Measure what the TUI, `pipe` and `serve` cost
       at 1000 ms and 250 ms: CPU time per minute and power (macmon's own POWER, `powermetrics`
       task energy, Activity Monitor's Energy Impact), with the process list shown and hidden.
@@ -56,11 +56,12 @@ POWER does today.
       `c` copying the selected path (the executable in the list, the row's full text in the info
       overlay); `? | q back` on the overlay's bottom border.
       Plan: [docs/plans/completed/20261012-list-scroll.md](plans/completed/20261012-list-scroll.md).
-- [ ] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
+- [x] **10. Pause and filter off.** A key that freezes the process list and the info overlay, so
       a row can be read and selected without the list jumping (Sloth has it). The metrics keep
       updating; the title shows that the list is paused. And `f` turning the filter off and on
       again without retyping it, to look outside it for a moment: the filter text stays, faint,
       while it is off.
+      Plan: [docs/plans/completed/20261017-pause-and-filter.md](plans/completed/20261017-pause-and-filter.md).
 - [ ] **11. Who has a file open.** A view of the open files of all processes with the filter,
       to find who reads or writes a file or holds a port (Sloth's main window, `lsof <path>`).
       Without root libproc reads only the user's own processes; other users' processes are
@@ -76,42 +77,66 @@ POWER does today.
 - [ ] **13. Social preview card.** The repository still shows GitHub's template image. A
       1280×640 card from a real TUI screenshot of the current release (HTML rendered to PNG),
       uploaded by hand in the repository settings.
-- [ ] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` creates a
-      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs it
-      at boot with nobody logged in (asked on Reddit). An install option for a LaunchDaemon in
-      `/Library/LaunchDaemons` (needs sudo). Tested by hand in the VM: a daemon running `macmon
-      serve` starts at boot without a login, as root and with `UserName`; with `UserName` the
-      `StandardErrorPath` file must be writable by that user.
+- [x] **14. `serve` as a LaunchDaemon.** For the next minor release. `serve --install` created a
+      LaunchAgent, which starts only after login; an always-on Mac scraped by Prometheus needs
+      it at boot with nobody logged in (asked on Reddit). `sudo macmon serve --install` now
+      installs a LaunchDaemon in `/Library/LaunchDaemons`, replacing the user's agent, and
+      `--install --agent` is the old LaunchAgent, without sudo. Tested by hand in the VM: a
+      daemon running `macmon serve` starts at boot without a login, as root and with `UserName`;
+      with `UserName` the `StandardErrorPath` file must be writable by that user.
 - [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
-      Reddit): disk read / write and network in / out, system-wide, in the TUI, JSON and
-      Prometheus. Decision point before the plan: which of them, and where they fit in the TUI.
-- [ ] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
+      Reddit): disk read / write and network in / out, system-wide. Done as data only, with uptime
+      and battery: JSON, Prometheus and `macmon debug`. Open: showing them in the TUI.
+- [x] **16. App totals with their helpers.** Asked on Reddit: a filter term totals only the
       processes whose name matches, so Safari's `com.apple.WebKit.WebContent` tabs are left out.
-      Group an app's helper processes under it, expandable to show which ones are counted. Until
-      then, the total row could say it covers matching processes only.
-- [ ] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
+      `app:safari` in the filter matches the processes of an app: those running from its `.app`
+      bundle or with such a responsible process, so the total covers the whole app.
+- [x] **17. Memory pressure.** Asked on Reddit: RAM use on a Mac is nearly always 70%+ and says
       little; memory pressure, as Activity Monitor shows it, tells whether the Mac is short of
-      memory. Read it without root (sysctl `kern.memorystatus_vm_pressure_level` and
-      `kern.memorystatus_level`, to verify), color the RAM box by it and add it to JSON and
-      Prometheus. Decision point before the plan: next to RAM use or instead of it in the title.
+      memory. Read it without root (sysctl `kern.memorystatus_level` and
+      `kern.memorystatus_vm_pressure_level`), plot the percent in the RAM box's graph and gauge
+      instead of RAM use, colored by the level, keep the box's title and border as they were and
+      add both to JSON and Prometheus.
 - [ ] **18. Where a process works.** With agents building and testing in several projects at
       once, the busiest process is often just `rustc`, `cargo` or `node`, and the name doesn't
       say which project it belongs to. Show the working directory in the list (a column, or the
       NAME cell for such tools, `~` for home, cut from the left), so the project is visible while
-      scrolling, without opening `i`. Other users' processes show no directory (libproc needs
-      root). Decision point before the plan: a column, a second line, or a toggle.
+      scrolling, without opening `i` (asked on Reddit too: which project in Claude or ChatGPT
+      uses what). Other users' processes show no directory (libproc needs root). Decision point
+      before the plan: a column, a second line, or a toggle.
 - [ ] **19. Who is busy lately.** CPU% is one sample and jumps; TIME covers the whole life of a
       process. To find what loads the Mac right now (a runaway process, an agent's test run, a
       build), show CPU used over a recent window, e.g. the last 15 s or 1 min, from the CPU time
       already sampled, and sort by it. Decision point before the plan: a new column or a switch
       of TIME between "total" and "recent", and the window length.
+- [ ] **20. Processes in `pipe` and JSON.** The process list exists only in the TUI, so a script
+      or an LLM agent can't read it (asked on Reddit, as `top` flags for an alias; copying those
+      flags isn't the point). Decision point before the plan: a new subcommand or a field of
+      `pipe` and `serve`, and what sampling processes costs there.
+- [x] **21. Supported macOS versions.** Asked on Reddit, and the readme didn't say: macOS 14,
+      current when macmon first came out, and later.
+- [x] **22. Filter queries.** Filter the process list by more than the name, with words like
+      `mem:>1g` and `user:root`, as fsearch does. `port:3000` finds the process on a local port.
+      Plan: [docs/plans/completed/20261106-filter-query.md](plans/completed/20261106-filter-query.md).
+- [x] **23. Process command line.** `node` and `python` differ only by their arguments: `cmd:`
+      in the filter, a `cmd` row in the `i` overlay and the arguments after the name in the list,
+      from `sysctl` `KERN_PROCARGS2`, read only for these. Own processes only: other users' need
+      a `ps` run per refresh, about 7 times the cost of reading the own ones.
+- [x] **24. A cheaper process list.** CPU a minute with the list at 1 s, `ps` included: 1.5–1.8 s
+      → 0.6–0.7 on an M5, 3.2–3.4 → 1.8–2.0 on an M2, against 0.3 for htop and 1 for btop, which
+      read 0 for other users' processes. `ps` prints `ucomm` (`comm` reads every process'
+      arguments) and runs about every 3 s, at least 3 s apart as it runs on a tick, so other
+      users' rows are that old and their new processes that late, and an own process exec-ing a
+      setuid binary is gone until the next run; the executable path and fixed fields are read once
+      per exec.
+      No gain, left out: a GPU client's creator cached by registry entry, idle processes read
+      less often. Most of what's left is `proc_pid_rusage` and the GPU walk, every tick.
 
-Order for 0.11: 10, then 5 (decide which columns fit 80 cells; 6 only if too many), the second
-PR of 7, the third PR of 12. Items 11 and 4 need their decision first. Items 10, 12 and 13 are
-small and self-contained, good for an outside contributor.
+Order for 0.11: 5 (decide which columns fit 80 cells; 6 only if too many), the second PR of 7,
+the third PR of 12. Items 11 and 4 need their decision first. Items 12 and 13 are small and
+self-contained, good for an outside contributor.
 
-Later, only on request: automatic grouping of an app's processes (filter terms with totals
-cover the known-app case), per-process network (only `nettop` has it without root), history
+Later, only on request: per-process network (only `nettop` has it without root), history
 graphs per process, Activity Monitor's Memory and Statistics tabs (context switches, faults,
 Mach messages and system calls, virtual and shared/private memory), Mach port counts and recent
 hangs (need a task port or private API).

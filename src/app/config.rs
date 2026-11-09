@@ -393,6 +393,7 @@ mod tests {
       cfg.dec_interval();
       assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (100.into(), 100));
     }
+
     assert_eq!(Config::load_from(Some(file.path())).interval(), 100);
     cfg.inc_interval();
     assert_eq!((file.saved()["interval"].clone(), cfg.interval()), (250.into(), 250));
