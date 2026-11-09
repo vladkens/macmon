@@ -256,23 +256,18 @@ fn run_procs_thread<S: FnMut() -> Vec<ProcInfo>>(
       let showing = shown.wait_shown();
 
       // the first sample only sets the baseline: its CPU and power rates are zero
-      let mut sampled_at = Instant::now();
+      let started = Instant::now();
       let mut sample = new_sampler();
       sample();
-      let mut interval = PROCS_WARMUP;
+      let mut wait = PROCS_WARMUP.saturating_sub(started.elapsed());
 
-      loop {
-        let now = Instant::now();
-        while sampled_at <= now {
-          sampled_at += interval;
-        }
-        if !shown.wait_while_shown(showing, sampled_at.saturating_duration_since(now)) {
-          break;
-        }
+      while shown.wait_while_shown(showing, wait) {
+        let started = Instant::now();
         if tx.send(Event::Procs { showing, procs: sample() }).is_err() {
           return;
         }
-        interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
+        let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
+        wait = interval.saturating_sub(started.elapsed());
       }
     }
   })

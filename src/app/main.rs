@@ -11,13 +11,14 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 mod config;
 mod fds;
+mod find_clpc;
 mod procs;
 mod query;
 mod serve;
 mod stress;
 mod tui;
 
-use macmon::diagnostics::{find_clpc, print_debug};
+use macmon::diagnostics::print_debug;
 use macmon::{Metrics, Sampler};
 use tui::App;
 
@@ -244,17 +245,16 @@ fn run_stress(
   result
 }
 
-/// Advances from the previous planned tick using the current, nonzero interval.
-/// Keeps the schedule anchored so wake-up delays do not accumulate as drift.
-/// After an overrun, skips old ticks but samples the latest due tick without waiting.
-/// Consecutive calls can therefore produce short intervals when new ticks become due.
+/// Sleeps until the next tick of the nonzero `interval` after `sampled_at` that is still ahead.
+/// The schedule stays anchored, so wake-up delays don't accumulate as drift, and an overrun
+/// skips the missed ticks instead of sampling again at once.
 fn wait_until_scheduled_sample(sampled_at: &mut Instant, interval: Duration) {
   let now = Instant::now();
   *sampled_at += interval;
-  while *sampled_at + interval <= now {
+  while *sampled_at <= now {
     *sampled_at += interval;
   }
-  thread::sleep(sampled_at.saturating_duration_since(now));
+  thread::sleep(*sampled_at - now);
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -329,9 +329,7 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
     }
     Some(Commands::Debug) => print_debug()?,
-    Some(Commands::FindClpc { powermetrics }) => {
-      find_clpc(*powermetrics, wait_until_scheduled_sample)?;
-    }
+    Some(Commands::FindClpc { powermetrics }) => find_clpc::run(*powermetrics)?,
     Some(Commands::Stress { mode, workers, duration, pulse }) => {
       run_stress(*mode, *workers, *duration, *pulse)?;
     }
@@ -368,7 +366,7 @@ mod tests {
   }
 
   #[test]
-  fn scheduled_sampling_keeps_the_latest_due_tick_and_resumes_waiting() {
+  fn scheduled_sampling_skips_missed_ticks_and_waits_for_the_next() {
     let interval = Duration::from_millis(20);
     let origin = Instant::now();
     let mut sampled_at = origin;
@@ -376,12 +374,7 @@ mod tests {
       thread::sleep(delay);
       let before_wait = Instant::now();
       wait_until_scheduled_sample(&mut sampled_at, interval);
-      if delay.is_zero() {
-        assert!(sampled_at > before_wait);
-      } else {
-        assert!(sampled_at <= before_wait);
-        assert!(sampled_at + interval > before_wait);
-      }
+      assert!(sampled_at > before_wait);
       assert!(Instant::now() >= sampled_at);
       assert_eq!(sampled_at.duration_since(origin).as_nanos() % interval.as_nanos(), 0);
     }

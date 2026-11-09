@@ -1297,7 +1297,7 @@ fn cfio_get_subs(
 pub struct IOReport {
   subs: IOReportSubscriptionRef,
   chan: CFMutableDictionaryRef,
-  prev: (CFDictionaryRef, std::time::Instant),
+  prev: Option<(CFDictionaryRef, std::time::Instant)>,
 }
 
 impl IOReport {
@@ -1315,8 +1315,7 @@ impl IOReport {
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    let prev = (unsafe { IOReportCreateSamples(subs, chan, null()) }, std::time::Instant::now());
-    Ok(Self { subs, chan, prev })
+    Ok(Self { subs, chan, prev: None })
   }
 
   /// Subscription to the channels `filter` selects, or None when it selects none (a VM).
@@ -1326,8 +1325,7 @@ impl IOReport {
       return Ok(None);
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
-    let prev = (unsafe { IOReportCreateSamples(subs, chan, null()) }, std::time::Instant::now());
-    Ok(Some(Self { subs, chan, prev }))
+    Ok(Some(Self { subs, chan, prev: None }))
   }
 
   /// Subscribe to IOReport channels by group and optional subgroup.
@@ -1370,24 +1368,63 @@ impl IOReport {
 
   /// Replace the baseline with a fresh snapshot, without calculating a delta.
   pub(crate) fn reset_sample(&mut self) {
-    let next = self.raw_sample();
-    unsafe { CFRelease(self.prev.0 as _) };
-    self.prev = next;
+    if let Some(prev) = self.prev.replace(self.raw_sample()) {
+      unsafe { CFRelease(prev.0 as _) };
+    }
   }
 
-  /// Collect a delta since initialization, reset, or the preceding call, without waiting.
+  /// Collect a delta since the preceding call or reset, without waiting.
   ///
   /// Returns the actual interval between snapshots, with a minimum of 1 ns.
   pub(crate) fn get_sample_now(&mut self) -> (IOReportIterator, Duration) {
-    let prev = self.prev;
+    let prev = match self.prev {
+      Some(x) => x,
+      None => self.raw_sample(),
+    };
+
     let next = self.raw_sample();
     let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
     unsafe { CFRelease(prev.0 as _) };
 
     let elapsed = next.1.duration_since(prev.1).max(Duration::from_nanos(1));
-    self.prev = next;
+    self.prev = Some(next);
 
     (IOReportIterator::from_sample(diff), elapsed)
+  }
+
+  /// Collect multiple delta samples across one sampling window.
+  pub fn get_samples(&mut self, duration: u64, count: usize) -> Vec<(IOReportIterator, u64)> {
+    let count = count.clamp(1, 32);
+    let mut samples: Vec<(IOReportIterator, u64)> = Vec::with_capacity(count);
+
+    let mut prev = match self.prev {
+      Some(x) => x,
+      None => self.raw_sample(),
+    };
+
+    let started_at = prev.1;
+    for i in 1..=count {
+      // Keep the requested sampling window stable: IOReportCreateSamples time should not
+      // accumulate as drift on top of the caller's interval.
+      let target_msec = duration.saturating_mul(i as u64) / count as u64;
+      let target_at = started_at + std::time::Duration::from_millis(target_msec);
+      let now = std::time::Instant::now();
+      if target_at > now {
+        std::thread::sleep(target_at.duration_since(now));
+      }
+
+      let next = self.raw_sample();
+      let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
+      unsafe { CFRelease(prev.0 as _) };
+
+      let elapsed = next.1.duration_since(prev.1).as_millis() as u64;
+      prev = next;
+
+      samples.push((IOReportIterator::from_sample(diff), elapsed.max(1)));
+    }
+
+    self.prev = Some(prev);
+    samples
   }
 }
 
@@ -1396,7 +1433,9 @@ impl Drop for IOReport {
     unsafe {
       CFRelease(self.chan as _);
       CFRelease(self.subs as _);
-      CFRelease(self.prev.0 as _);
+      if let Some(prev) = self.prev {
+        CFRelease(prev.0 as _);
+      }
     }
   }
 }
@@ -1826,6 +1865,7 @@ mod tests {
     if let Some(mut ior) =
       IOReport::with_filter(Some(crate::shared::ioreport_channels_filter)).unwrap()
     {
+      ior.reset_sample();
       for delay in [Duration::from_millis(10), Duration::from_millis(30), Duration::ZERO] {
         std::thread::sleep(delay);
         let before = std::time::Instant::now();

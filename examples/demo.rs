@@ -3,9 +3,6 @@
 //!
 //! The presentation is inspired by [homm/pgauge](https://github.com/homm/pgauge).
 
-use std::thread;
-use std::time::{Duration, Instant};
-
 use macmon::Sampler;
 use owo_colors::OwoColorize;
 
@@ -13,8 +10,6 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut sampler = Sampler::new()?;
-  let interval = Duration::from_secs(1);
-  let mut sampled_at = Instant::now();
 
   // a column per CPU tier (core type), like ECPU and PCPU on M1-M4
   let tiers = &sampler.get_soc_info().cpu_tiers;
@@ -30,14 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   );
 
   loop {
-    // The application advances planned ticks, so late wakeups do not accumulate as drift.
-    let now = Instant::now();
-    sampled_at += interval;
-    while sampled_at + interval <= now {
-      sampled_at += interval;
-    }
-    thread::sleep(sampled_at.saturating_duration_since(now));
-    let metrics = sampler.get_metrics_now()?;
+    let metrics = sampler.get_metrics(1000)?;
 
     let cpus = metrics.cpu_tiers.iter().map(|tier| format!("{:5.1}%", tier.active_ratio * 100.0));
     let cpus = cpus.map(|x| x.cyan().to_string()).collect::<Vec<_>>().join(" ");
