@@ -132,6 +132,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
   gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_any!(out, "gpu_memory_alloc_bytes", "System memory allocated by the GPU in bytes", ?m.gpu_mem_alloc);
+  gauge_any!(out, "gpu_memory_in_use_bytes", "System memory in use by the GPU in bytes", ?m.gpu_mem_in_use);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -591,6 +593,17 @@ mod tests {
     // a VM: the same without the power and frequency gauges
     let expected = mac.iter().filter(|x| !power.contains(x) && !freqs.contains(&x.as_str()));
     assert_eq!(types(true), expected.cloned().collect::<Vec<_>>());
+  }
+
+  #[test]
+  fn gpu_memory_gauges_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    assert!(!to_prometheus(&metrics, &SocInfo::default()).contains("macmon_gpu_memory_"));
+
+    (metrics.gpu_mem_alloc, metrics.gpu_mem_in_use) = (Some(2000), Some(1000));
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_gpu_memory_alloc_bytes{chip=\"\"} 2000\n"));
+    assert!(output.contains("macmon_gpu_memory_in_use_bytes{chip=\"\"} 1000\n"));
   }
 
   #[test]

@@ -589,6 +589,20 @@ pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
   }))
 }
 
+// MARK: GPU memory
+
+fn gpu_memory_from(props: CFDictionaryRef) -> Option<[u64; 2]> {
+  let stats = cfdict_get_val(props, "PerformanceStatistics")? as CFDictionaryRef;
+  let bytes = |key| u64::try_from(cfnum_get_i64(stats, key)?).ok();
+  Some([bytes("Alloc system memory")?, bytes("In use system memory")?])
+}
+
+/// Bytes of system memory the GPU has allocated and has in use, from the `PerformanceStatistics`
+/// of `AGXAccelerator` (what nvtop shows), or None without one, as in a VM.
+pub(crate) fn gpu_memory() -> Option<[u64; 2]> {
+  read_services("AGXAccelerator", |_, props| gpu_memory_from(props)).pop()
+}
+
 // MARK: Uptime and battery
 
 /// Seconds since boot.
@@ -1829,6 +1843,29 @@ mod tests {
     assert_eq!(read(&[percent(87), charging.clone()]), None);
     assert_eq!(read(&[percent(87), plugged.clone()]), None);
     assert_eq!(read(&[percent(-1), charging, plugged]), None);
+  }
+
+  #[test]
+  fn gpu_memory_needs_both_statistics() {
+    let key = |x| CFString::new(x).as_CFType();
+    let alloc = (key("Alloc system memory"), CFNumber::from(2000i64).as_CFType());
+    let in_use = (key("In use system memory"), CFNumber::from(1000i64).as_CFType());
+    let read = |stats: &[(CFType, CFType)]| {
+      let stats = CFDictionary::from_CFType_pairs(stats).as_CFType();
+      let props = CFDictionary::from_CFType_pairs(&[(key("PerformanceStatistics"), stats)]);
+      gpu_memory_from(props.as_concrete_TypeRef())
+    };
+
+    assert_eq!(read(&[alloc.clone(), in_use.clone()]), Some([2000, 1000]));
+    assert_eq!(read(std::slice::from_ref(&alloc)), None);
+    assert_eq!(read(&[in_use]), None);
+    assert_eq!(
+      read(&[alloc.clone(), (key("In use system memory"), CFNumber::from(-1i64).as_CFType())]),
+      None
+    );
+
+    let no_stats = CFDictionary::from_CFType_pairs(&[alloc]);
+    assert_eq!(gpu_memory_from(no_stats.as_concrete_TypeRef()), None);
   }
 
   #[test]
