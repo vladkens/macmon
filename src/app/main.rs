@@ -245,15 +245,22 @@ fn run_stress(
   result
 }
 
-/// Sleeps until the next tick of the nonzero `interval` after `sampled_at` that is still ahead.
-/// The schedule stays anchored, so wake-up delays don't accumulate as drift, and an overrun
-/// skips the missed ticks instead of sampling again at once.
+/// The first tick of the nonzero `interval` after `sampled_at` that is still ahead of `now`. The
+/// schedule stays anchored, so wake-up delays don't accumulate as drift, and an overrun skips the
+/// missed ticks instead of sampling again at once.
+fn next_tick(sampled_at: Instant, interval: Duration, now: Instant) -> Instant {
+  let mut tick = sampled_at + interval;
+  while tick <= now {
+    tick += interval;
+  }
+
+  tick
+}
+
+/// Sleeps until the `next_tick` after `sampled_at` and moves `sampled_at` to it.
 fn wait_until_scheduled_sample(sampled_at: &mut Instant, interval: Duration) {
   let now = Instant::now();
-  *sampled_at += interval;
-  while *sampled_at <= now {
-    *sampled_at += interval;
-  }
+  *sampled_at = next_tick(*sampled_at, interval, now);
   thread::sleep(*sampled_at - now);
 }
 
