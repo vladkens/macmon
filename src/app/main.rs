@@ -245,6 +245,18 @@ fn run_stress(
   result
 }
 
+/// Sleeps until the next tick of the nonzero `interval` after `sampled_at` that is still ahead.
+/// The schedule stays anchored, so wake-up delays don't accumulate as drift, and an overrun
+/// skips the missed ticks instead of sampling again at once.
+fn wait_until_scheduled_sample(sampled_at: &mut Instant, interval: Duration) {
+  let now = Instant::now();
+  *sampled_at += interval;
+  while *sampled_at <= now {
+    *sampled_at += interval;
+  }
+  thread::sleep(*sampled_at - now);
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
 
@@ -253,12 +265,15 @@ fn main() -> Result<(), Box<dyn Error>> {
       // Debug override: require CLPC CPU/GPU/ANE counters without fallback.
       let force_clpc = std::env::var("MACMON_FORCE_CLPC").is_ok_and(|x| x == "1");
       let mut sampler = if force_clpc { Sampler::with_clpc()? } else { Sampler::new()? };
+      let interval = Duration::from_millis(args.interval.max(100).into());
+      let mut sampled_at = Instant::now();
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
 
       loop {
-        let doc = sampler.get_metrics(args.interval.max(100))?;
+        wait_until_scheduled_sample(&mut sampled_at, interval);
+        let doc = sampler.get_metrics_now()?;
 
         let mut doc = metrics_to_json_value(&doc)?;
         if let Some(ref soc) = soc_info_val {
@@ -289,6 +304,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
 
       let mut sampler = Sampler::new()?;
+      let mut sampled_at = Instant::now();
+      let interval = Duration::from_millis(args.interval.max(100).into());
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
 
@@ -304,7 +321,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       });
 
       loop {
-        match sampler.get_metrics(args.interval.max(100)) {
+        wait_until_scheduled_sample(&mut sampled_at, interval);
+        match sampler.get_metrics_now() {
           Ok(m) => *shared.write().unwrap() = Some(m),
           Err(e) => eprintln!("sampling error: {e}"),
         }
@@ -334,6 +352,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn scheduled_sampling_uses_current_intervals_without_shifting_deadlines() {
+    let mut sampled_at = Instant::now();
+    for interval in [20, 20, 40, 10].map(Duration::from_millis) {
+      let previous = sampled_at;
+      wait_until_scheduled_sample(&mut sampled_at, interval);
+      assert!(Instant::now() >= sampled_at);
+      assert!(sampled_at >= previous + interval);
+      assert_eq!(sampled_at.duration_since(previous).as_nanos() % interval.as_nanos(), 0);
+    }
+  }
+
+  #[test]
+  fn scheduled_sampling_skips_missed_ticks_and_waits_for_the_next() {
+    let interval = Duration::from_millis(20);
+    let origin = Instant::now();
+    let mut sampled_at = origin;
+    for delay in [55, 75, 0].map(Duration::from_millis) {
+      thread::sleep(delay);
+      let before_wait = Instant::now();
+      wait_until_scheduled_sample(&mut sampled_at, interval);
+      assert!(sampled_at > before_wait);
+      assert!(Instant::now() >= sampled_at);
+      assert_eq!(sampled_at.duration_since(origin).as_nanos() % interval.as_nanos(), 0);
+    }
+  }
 
   #[test]
   fn zero_duration_ane_and_all_skip_warmup() {

@@ -168,10 +168,12 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
   thread::spawn(move || {
     let sample = || -> WithError<()> {
       let mut sampler = Sampler::new()?;
+      let mut sampled_at = Instant::now();
       let mut window = 100;
 
       loop {
-        let metrics = sampler.get_metrics(window)?;
+        crate::wait_until_scheduled_sample(&mut sampled_at, Duration::from_millis(window.into()));
+        let metrics = sampler.get_metrics_now()?;
         if tx.send(Event::Update(Box::new(metrics))).is_err() {
           return Ok(());
         }

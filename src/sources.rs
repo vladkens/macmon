@@ -1366,17 +1366,21 @@ impl IOReport {
     (unsafe { IOReportCreateSamples(self.subs, self.chan, null()) }, std::time::Instant::now())
   }
 
-  pub(crate) fn get_sample_interval(&mut self, duration: Duration) -> (IOReportIterator, Duration) {
+  /// Replace the baseline with a fresh snapshot, without calculating a delta.
+  pub(crate) fn reset_sample(&mut self) {
+    if let Some(prev) = self.prev.replace(self.raw_sample()) {
+      unsafe { CFRelease(prev.0 as _) };
+    }
+  }
+
+  /// Collect a delta since the preceding call or reset, without waiting.
+  ///
+  /// Returns the actual interval between snapshots, with a minimum of 1 ns.
+  pub(crate) fn get_sample_now(&mut self) -> (IOReportIterator, Duration) {
     let prev = match self.prev {
       Some(x) => x,
       None => self.raw_sample(),
     };
-
-    let target_at = prev.1 + duration;
-    let now = std::time::Instant::now();
-    if target_at > now {
-      std::thread::sleep(target_at.duration_since(now));
-    }
 
     let next = self.raw_sample();
     let diff = unsafe { IOReportCreateSamplesDelta(prev.0, next.0, null()) };
@@ -1853,6 +1857,36 @@ mod tests {
   #[test]
   fn uptime_is_read() {
     assert!(uptime_secs().is_some_and(|x| x > 0));
+  }
+
+  #[test]
+  fn sample_duration_follows_external_waits_resets_and_consecutive_calls() {
+    let mut earliest = std::time::Instant::now();
+    if let Some(mut ior) =
+      IOReport::with_filter(Some(crate::shared::ioreport_channels_filter)).unwrap()
+    {
+      ior.reset_sample();
+      for delay in [Duration::from_millis(10), Duration::from_millis(30), Duration::ZERO] {
+        std::thread::sleep(delay);
+        let before = std::time::Instant::now();
+        let (sample, elapsed) = ior.get_sample_now();
+        assert!(elapsed >= delay.max(Duration::from_nanos(1)));
+        assert!(elapsed <= earliest.elapsed());
+        assert!(sample.count() > 0);
+        earliest = before;
+      }
+      std::thread::sleep(Duration::from_millis(30));
+      earliest = std::time::Instant::now();
+      ior.reset_sample();
+      std::thread::sleep(Duration::from_millis(10));
+      let (sample, elapsed) = ior.get_sample_now();
+      assert!(elapsed >= Duration::from_millis(10));
+      assert!(elapsed <= earliest.elapsed());
+      assert!(sample.count() > 0);
+      assert!(ior.get_sample(10).count() > 0);
+    } else {
+      assert!(in_vm(), "no sampling channels outside a VM");
+    }
   }
 
   #[test]
