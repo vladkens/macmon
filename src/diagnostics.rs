@@ -11,9 +11,9 @@ use crate::shared::{
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, battery, cfdict_data, cfdict_keys,
   cfio_get_props, cfio_get_residencies, cfio_integer_value, cfio_watts, cpu_cluster_types,
-  disk_bytes, get_dvfs_mhz, hw_from_profiler_report, hw_native, is_pmgr_node, libc_ram, libc_swap,
-  memory_pressure_level, memory_pressure_percent, memory_pressure_raw, memory_status_raw,
-  net_bytes, profiler_report, sysctl_str, sysctl_u32, uptime_secs,
+  disk_bytes, get_dvfs_mhz, gpu_memory, hw_from_profiler_report, hw_native, is_pmgr_node, libc_ram,
+  libc_swap, memory_pressure_level, memory_pressure_percent, memory_pressure_raw,
+  memory_status_raw, net_bytes, profiler_report, sysctl_str, sysctl_u32, uptime_secs,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -140,6 +140,7 @@ pub fn print_debug() -> WithError<()> {
   println!("Disk bytes read, written: {:?}", disk_bytes());
   println!("Uptime seconds: {:?}", uptime_secs());
   println!("Battery percent, charging, plugged in: {:?}", battery());
+  println!("GPU memory bytes allocated, in use: {:?}", gpu_memory());
 
   print_divider("AppleARMIODevice");
   print_section(print_pmgr());

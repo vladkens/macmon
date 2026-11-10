@@ -146,6 +146,7 @@ unsafe extern "C" {
   fn IORegistryEntryGetName(entry: u32, name: *mut i8) -> i32;
   fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
   fn IORegistryEntryCreateCFProperties(entry: u32, properties: *mut CFMutableDictionaryRef, allocator: CFAllocatorRef, options: u32) -> i32;
+  fn IORegistryEntryCreateCFProperty(entry: u32, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
   fn IORegistryEntrySearchCFProperty(entry: u32, plane: *const i8, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
   fn IOObjectRelease(obj: u32) -> u32;
 }
@@ -587,6 +588,36 @@ pub(crate) fn disk_bytes() -> Option<[u64; 2]> {
     let bytes = |key| cfnum_get_i64(stats, key).map(|x| x as u64);
     Some([bytes("Bytes (Read)")?, bytes("Bytes (Write)")?])
   }))
+}
+
+// MARK: GPU memory
+
+fn gpu_memory_from(stats: CFDictionaryRef) -> Option<[u64; 2]> {
+  let bytes = |key| u64::try_from(cfnum_get_i64(stats, key)?).ok();
+  Some([bytes("Alloc system memory")?, bytes("In use system memory")?])
+}
+
+/// Bytes of system memory the GPU has allocated and has in use, from the `PerformanceStatistics`
+/// of `AGXAccelerator` (what nvtop shows), or None without one, as in a VM.
+/// Copies only that property: all of the accelerator's properties take milliseconds to copy.
+pub(crate) fn gpu_memory() -> Option<[u64; 2]> {
+  let services = IOServiceIterator::new("AGXAccelerator").ok()?;
+  let key = cfstr("PerformanceStatistics");
+  let read = |(entry, _)| {
+    let stats = unsafe { IORegistryEntryCreateCFProperty(entry, key, kCFAllocatorDefault, 0) };
+    unsafe { IOObjectRelease(entry) };
+    if stats.is_null() {
+      return None;
+    }
+
+    let val = gpu_memory_from(stats as _);
+    unsafe { CFRelease(stats) };
+    val
+  };
+
+  let val = services.filter_map(read).last();
+  unsafe { CFRelease(key as _) };
+  val
 }
 
 // MARK: Uptime and battery
@@ -1829,6 +1860,24 @@ mod tests {
     assert_eq!(read(&[percent(87), charging.clone()]), None);
     assert_eq!(read(&[percent(87), plugged.clone()]), None);
     assert_eq!(read(&[percent(-1), charging, plugged]), None);
+  }
+
+  #[test]
+  fn gpu_memory_needs_both_statistics() {
+    let key = |x| CFString::new(x).as_CFType();
+    let alloc = (key("Alloc system memory"), CFNumber::from(2000i64).as_CFType());
+    let in_use = (key("In use system memory"), CFNumber::from(1000i64).as_CFType());
+    let read = |stats: &[(CFType, CFType)]| {
+      gpu_memory_from(CFDictionary::from_CFType_pairs(stats).as_concrete_TypeRef())
+    };
+
+    assert_eq!(read(&[alloc.clone(), in_use.clone()]), Some([2000, 1000]));
+    assert_eq!(read(std::slice::from_ref(&alloc)), None);
+    assert_eq!(read(&[in_use]), None);
+    assert_eq!(
+      read(&[alloc.clone(), (key("In use system memory"), CFNumber::from(-1i64).as_CFType())]),
+      None
+    );
   }
 
   #[test]

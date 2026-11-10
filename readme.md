@@ -188,6 +188,14 @@ macmon_cpu_tier_scaled_ratio{chip="Apple M3 Pro",tier="P"} 0.015
 # TYPE macmon_cpu_tier_active_ratio gauge
 macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="E"} 0.18
 macmon_cpu_tier_active_ratio{chip="Apple M3 Pro",tier="P"} 0.04
+
+# HELP macmon_gpu_memory_alloc_bytes System memory allocated by the GPU in bytes
+# TYPE macmon_gpu_memory_alloc_bytes gauge
+macmon_gpu_memory_alloc_bytes{chip="Apple M3 Pro"} 2902786048
+
+# HELP macmon_gpu_memory_in_use_bytes System memory in use by the GPU in bytes
+# TYPE macmon_gpu_memory_in_use_bytes gauge
+macmon_gpu_memory_in_use_bytes{chip="Apple M3 Pro"} 1056669696
 ```
 
 `macmon_ecpu_*` and `macmon_pcpu_*` are still exported for the lowest and the highest tier. In a macOS VM the power and frequency gauges are left out.
@@ -296,6 +304,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "battery_percent": 87, // Battery charge (0–100), null without a battery
   "battery_charging": true, // null without a battery
   "battery_plugged": true, // External power connected, charging or not, null without a battery
+  "gpu_mem_alloc": 2902786048, // Bytes of system memory allocated by the GPU, null when unavailable
+  "gpu_mem_in_use": 1056669696, // Bytes of system memory in use by the GPU, null when unavailable
 }
 ```
 

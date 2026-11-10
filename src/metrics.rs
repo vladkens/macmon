@@ -12,8 +12,9 @@ use crate::shared::{
 };
 use crate::sources::{
   IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, battery, cfio_get_residencies,
-  cfio_watts, cpu_load_ticks, disk_bytes, get_soc_info, libc_ram, libc_swap, memory_pressure_level,
-  memory_pressure_percent, memory_pressure_raw, memory_status_raw, net_bytes, uptime_secs,
+  cfio_watts, cpu_load_ticks, disk_bytes, get_soc_info, gpu_memory, libc_ram, libc_swap,
+  memory_pressure_level, memory_pressure_percent, memory_pressure_raw, memory_status_raw,
+  net_bytes, uptime_secs,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -231,6 +232,10 @@ pub struct Metrics {
   pub battery_charging: Option<bool>,
   /// Whether external power is connected, charging or not, or None without a battery.
   pub battery_plugged: Option<bool>,
+  /// Bytes of system memory the GPU has allocated, or None when unavailable, as in a VM.
+  pub gpu_mem_alloc: Option<u64>,
+  /// Bytes of system memory the GPU has in use, or None when unavailable, as in a VM.
+  pub gpu_mem_in_use: Option<u64>,
 }
 
 // MARK: Helpers
@@ -893,6 +898,9 @@ impl Sampler {
     rs.battery_percent = battery.map(|x| x.0);
     rs.battery_charging = battery.map(|x| x.1);
     rs.battery_plugged = battery.map(|x| x.2);
+    let gpu_mem = gpu_memory();
+    rs.gpu_mem_alloc = gpu_mem.map(|x| x[0]);
+    rs.gpu_mem_in_use = gpu_mem.map(|x| x[1]);
 
     Ok(rs)
   }
