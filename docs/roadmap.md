@@ -20,6 +20,8 @@ POWER does today.
       `proc_pidfdinfo`. The list has a filter; `e` on a file reveals it in Finder (`open -R`), Esc
       goes back to the processes.
       Plan: [docs/plans/completed/20261011-process-info.md](plans/completed/20261011-process-info.md).
+- [x] **Keep root TUI preferences in memory** (#138).
+      Plan: [docs/plans/completed/20261110-root-config-persistence.md](plans/completed/20261110-root-config-persistence.md).
 - [ ] **4. A C library for other UIs.** Ship macmon as a dylib with a C header, so Swift, Python
       or C apps sample metrics without parsing `macmon pipe`. Builds on #59 and
       [homm/macmon-bindings](https://github.com/homm/macmon-bindings) (Python and Swift today,
