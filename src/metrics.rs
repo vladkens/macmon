@@ -222,7 +222,7 @@ pub struct Metrics {
   pub ram_power: f32,
   /// DCS power in Watts, or None without a source.
   pub dcs_power: Option<f32>,
-  /// AVE + VDEC + ISP (media) power in Watts, or None without a source; unverified on hardware.
+  /// AVE + VDEC + ISP (media) power in Watts, or None without a source; only M6 so far.
   pub media_power: Option<f32>,
   /// GPU SRAM power in Watts from `Energy Model`.
   #[deprecated(
