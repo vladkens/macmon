@@ -232,9 +232,12 @@ fn print_ioreport() -> WithError<()> {
 fn print_smc() -> WithError<()> {
   print_divider("SMC system sensors");
   let mut smc = SMC::new()?;
-  match smc.read_float_val("PSTR") {
-    Ok(watts) => println!("PSTR={watts:.2}W"),
-    Err(err) => println!("PSTR error={err}"),
+  // system total, power adapter input, display backlight
+  for key in ["PSTR", "PDTR", "PBwo", "PDBR"] {
+    match smc.read_float_val(key) {
+      Ok(watts) => println!("{key}={watts:.2}W"),
+      Err(err) => println!("{key} error={err}"),
+    }
   }
 
   print_divider("SMC temp sensors");
