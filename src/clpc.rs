@@ -256,15 +256,16 @@ pub(crate) fn energy_channels(
   if os_version.split('.').next() != Some("27") {
     return None;
   }
+
   let keys = CLPC_KEYS.iter().find(|keys| keys.bundle == bundle)?;
-  let mut channels = vec![(report_id(INDICES_27.cpu, keys.cpu), "CPU Energy", "nJ")];
-  channels.push((report_id(INDICES_27.gpu, keys.gpu), "GPU Energy", "nJ"));
-  channels.extend([
+  let mut channels = vec![
+    (report_id(INDICES_27.cpu, keys.cpu), "CPU Energy", "nJ"),
+    (report_id(INDICES_27.gpu, keys.gpu), "GPU Energy", "nJ"),
     (report_id(INDICES_27.ane, keys.ane), "ANE", "nJ"),
     (report_id(INDICES_27.ram, keys.ram), "DRAM", "nJ"),
     (report_id(INDICES_27.dcs, keys.dcs), "DCS", "nJ"),
     (report_id(INDICES_27.chip, keys.chip), "Package Energy", "nJ"),
-  ]);
+  ];
   for (key, index, name) in [
     (keys.ave, Some(INDICES_27.ave), "AVE"),
     (keys.vdec, None, "VDEC"),
@@ -274,6 +275,7 @@ pub(crate) fn energy_channels(
       channels.push((report_id(index, key), name, unit));
     }
   }
+
   Some(channels)
 }
 
@@ -287,34 +289,34 @@ mod tests {
       (
         "com.apple.driver.AppleT6002CLPC",
         vec![
-          0x00000010b501816b,
-          0x000000199e2c3e8b,
-          0x0000001814d5a574,
-          0x0000001a76704b08,
-          0x0000001b2d7b7fb2,
-          0x00000009e16c1380,
+          0x0000_0010_b501_816b,
+          0x0000_0019_9e2c_3e8b,
+          0x0000_0018_14d5_a574,
+          0x0000_001a_7670_4b08,
+          0x0000_001b_2d7b_7fb2,
+          0x0000_0009_e16c_1380,
         ],
       ),
       (
         "com.apple.driver.AppleT8112CLPC",
         vec![
-          0x00000010b5435137,
-          0x00000019638d9d52,
-          0x00000018ea089c36,
-          0x0000001a8b6e0faa,
-          0x0000001b9a6e145a,
-          0x00000009824bcad4,
+          0x0000_0010_b543_5137,
+          0x0000_0019_638d_9d52,
+          0x0000_0018_ea08_9c36,
+          0x0000_001a_8b6e_0faa,
+          0x0000_001b_9a6e_145a,
+          0x0000_0009_824b_cad4,
         ],
       ),
       (
         "com.apple.driver.AppleT8142CLPC",
         vec![
-          0x0000001043708744,
-          0x000000196a010933,
-          0x00000018bc5efdf0,
-          0x0000001ae13633aa,
-          0x0000001b2b8d7fec,
-          0x00000009a65ab9a8,
+          0x0000_0010_4370_8744,
+          0x0000_0019_6a01_0933,
+          0x0000_0018_bc5e_fdf0,
+          0x0000_001a_e136_33aa,
+          0x0000_001b_2b8d_7fec,
+          0x0000_0009_a65a_b9a8,
         ],
       ),
     ] {
@@ -329,11 +331,12 @@ mod tests {
   #[test]
   fn subscribes_to_separate_media_reports_and_omits_unresolved_components() {
     let channels = energy_channels("com.apple.driver.AppleT8152CLPC", "27.2").unwrap();
-    assert!(channels.contains(&(0x0000003a65495350, "ISP", "mJ")));
-    assert!(channels.contains(&(0x0000003c65415645, "AVE", "mJ")));
+    assert!(channels.contains(&(0x0000_003a_6549_5350, "ISP", "mJ")));
+    assert!(channels.contains(&(0x0000_003c_6541_5645, "AVE", "mJ")));
     assert!(!channels.iter().any(|c| matches!(c.1, "GPU SRAM" | "VDEC")));
+
     let channels = energy_channels("com.apple.driver.AppleT6002CLPC", "27.2").unwrap();
-    assert!(channels.contains(&(0x000000199e2c3e8b, "GPU Energy", "nJ")));
+    assert!(channels.contains(&(0x0000_0019_9e2c_3e8b, "GPU Energy", "nJ")));
   }
 
   #[test]

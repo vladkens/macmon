@@ -46,27 +46,37 @@ def save(path, value):
 def rust_table(catalog):
     if not catalog["complete"]:
         raise ValueError("Cannot export an incomplete catalog")
+
     table_indices = []
     for component in CORE_COMPONENTS:
         values = {
             int(d["channels"][component]["id"], 16) >> 32
-            for d in catalog["drivers"] if component in d["channels"]
+            for d in catalog["drivers"]
+            if component in d["channels"]
         }
         if len(values) != 1:
             raise ValueError(f"Missing or inconsistent {component} table index")
+
         table_indices.append(values.pop())
+
     cpu, gpu, ane, ram, dcs, chip = table_indices
     extra_indices = []
     for component in EXTRA_COMPONENTS:
         values = {
-            (int(d["channels"][component]["id"], 16) >> 32, d["channels"][component]["unit"])
-            for d in catalog["drivers"] if component in d["channels"]
+            (
+                int(d["channels"][component]["id"], 16) >> 32,
+                d["channels"][component]["unit"],
+            )
+            for d in catalog["drivers"]
+            if component in d["channels"]
         }
         if len(values) > 1:
             raise ValueError(f"Inconsistent {component} table index or unit")
+
         if values:
             index, unit = values.pop()
             extra_indices.append(f'{component.lower()}: ({index}, "{unit}")')
+
     major = int(catalog["macos"].split(".")[0])
     lines = [
         f"// Generated from macOS {catalog['macos']} ({catalog['build']}) by scripts/clpc.py.",
@@ -79,7 +89,8 @@ def rust_table(catalog):
         for component in CORE_COMPONENTS:
             channel = driver["channels"].get(component)
             if channel is None:
-                raise ValueError(f'{driver["bundle"]}: missing {component} report')
+                raise ValueError(f"{driver['bundle']}: missing {component} report")
+
             key = int(channel["id"], 16) & 0xFFFFFFFF
             lines.append(
                 f"    {component.lower()}: 0x{key >> 16:04x}_{key & 0xFFFF:04x},"
@@ -90,6 +101,7 @@ def rust_table(catalog):
             if channel:
                 key = int(channel["id"], 16) & 0xFFFFFFFF
                 value = f"Some(0x{key >> 16:04x}_{key & 0xFFFF:04x})"
+
             lines.append(f"    {component.lower()}: {value},")
         lines.append("  },")
     return "\n".join([*lines, "];", ""])

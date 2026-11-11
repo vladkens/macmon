@@ -516,8 +516,13 @@ class Flow:
             for offset in range(0, width, 8):
                 target = a + offset
                 if target in self.reports and width - offset >= 8:
-                    value = v[offset // 4:offset // 4 + 2] if isinstance(v, tuple) else v
-                    self.report_writes[(pc, target)] = join(self.report_writes.get((pc, target)), value)
+                    value = (
+                        v[offset // 4 : offset // 4 + 2] if isinstance(v, tuple) else v
+                    )
+                    self.report_writes[(pc, target)] = join(
+                        self.report_writes.get((pc, target)), value
+                    )
+
         if isinstance(a, Ptr) and a.indexed:
             self.indexed_stores.add((pc, a, width))
         if not isinstance(a, Ptr) or a.indexed:
@@ -1063,8 +1068,12 @@ def discover(image, driver, node_rows):
                     and f"generateSimpleReport{suffix}" in channel["generate"]
                 ):
                     reports.setdefault(int(channel["storage"], 16), []).append(
-                        {**channel, "storage_type": storage_type, "value_type": "u64",
-                         "unit": "nJ" if storage_type == "u64" else "mJ"}
+                        {
+                            **channel,
+                            "storage_type": storage_type,
+                            "value_type": "u64",
+                            "unit": "nJ" if storage_type == "u64" else "mJ",
+                        }
                     )
         caller = flow(
             addr, helper=helper_outputs, inputs=inputs, indices=indices, reports=reports
@@ -1098,6 +1107,7 @@ def discover(image, driver, node_rows):
             markers = {f"counter:{target:x}"}
             if report["storage_type"] == "u64":
                 markers.add("rounded")
+
             if not markers <= dependencies:
                 continue
             dependencies -= markers | {"rounded"}
@@ -1111,7 +1121,8 @@ def discover(image, driver, node_rows):
             }
             row["candidates"].append(candidate)
             component = (
-                "CHIP" if dependencies == chip_dependencies
+                "CHIP"
+                if dependencies == chip_dependencies
                 else COMPONENTS.get(dependencies)
             )
             if component:
@@ -1129,8 +1140,10 @@ def discover(image, driver, node_rows):
             integer = [hit for hit in hits if hit["storage_type"] == "u64"]
             if len(integer) == 1:
                 row["channels"][component] = integer[0]
+
         row["unresolved"] = [
-            component for component in ("GPU", "AVE", "VDEC", "ISP")
+            component
+            for component in ("GPU", "AVE", "VDEC", "ISP")
             if component not in row["channels"]
         ]
         require(

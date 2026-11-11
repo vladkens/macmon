@@ -216,8 +216,7 @@ pub struct Metrics {
   pub gpu_power: f32,
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
-  /// Chip power in Watts: the CLPC package total, or CPU + GPU + ANE + DRAM + DCS + media
-  /// without it or when that sum is higher.
+  /// Chip power in Watts: the CLPC package total, or the sum of the parts when that is higher.
   pub chip_power: f32,
   /// The same as `chip_power`.
   #[deprecated(since = "0.12.0", note = "use `chip_power`")]
@@ -228,8 +227,7 @@ pub struct Metrics {
   pub ram_power: f32,
   /// DCS power in Watts, or None without a source.
   pub dcs_power: Option<f32>,
-  /// Video encoder, decoder and image processor (AVE + VDEC + ISP) power in Watts, or None
-  /// without a source. Unverified on hardware.
+  /// AVE + VDEC + ISP (media) power in Watts, or None without a source; unverified on hardware.
   pub media_power: Option<f32>,
   /// GPU SRAM power in Watts from `Energy Model`.
   #[deprecated(
@@ -1242,6 +1240,7 @@ mod tests {
       assert_eq!((rs.gpu_power, rs.media_power), if all { (10.0, Some(6.0)) } else { (0.0, None) });
       assert_eq!((rs.chip_power, rs.all_power), (chip, chip));
     }
+
     let empty = sampler.get_ioreport_metrics([], Duration::from_secs(1)).unwrap();
     let empty = with_power_totals(empty, None);
     assert_eq!((empty.ram_power, empty.gpu_ram_power, empty.chip_power), (0.0, 0.0, 0.0));
