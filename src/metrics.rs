@@ -30,6 +30,8 @@ struct PowerSources {
   clpc: Option<f32>,
   energy_model: Option<f32>,
   pmp: Option<f32>,
+  /// The last fallback: SMC for DRAM.
+  smc: Option<f32>,
 }
 
 impl PowerSources {
@@ -58,7 +60,9 @@ impl PowerSources {
     // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
     // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
     // Drivers with unknown CLPC IDs need the legacy sources; ANE, DRAM and DCS can use PMP.
-    Some(self.clpc.or(self.energy_model).or(self.pmp).unwrap_or_default())
+    // DRAM falls back to SMC when they read 0, as a frozen counter does.
+    let legacy = self.energy_model.or(self.pmp).filter(|x| *x > 0.0);
+    Some(self.clpc.or(legacy).or(self.smc).unwrap_or_default())
   }
 }
 
@@ -139,6 +143,7 @@ struct SmcSensors {
   cpu_keys: Vec<String>,
   gpu_keys: Vec<String>,
   fan_keys: Vec<String>,
+  ram_keys: Vec<String>,
 }
 
 /// A complete metrics snapshot returned by [`Sampler`].
@@ -281,6 +286,14 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
 /// no reading.
 fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
   if sys.is_some_and(|sys| sys > 0.0 && watts > sys) { 0.0 } else { watts }
+}
+
+/// The sum of all `watts`, None without one or when any is unreadable or invalid: a part of the
+/// total (one die of an Ultra) is no total.
+fn total_power(watts: impl IntoIterator<Item = Option<f32>>) -> Option<f32> {
+  let mut watts = watts.into_iter().peekable();
+  watts.peek()?;
+  watts.map(|x| x.filter(|x| x.is_finite() && *x >= 0.0)).sum()
 }
 
 /// Drops bad `ram_power`, `dcs_power` and package total `chip_power` readings, then sets
@@ -567,6 +580,7 @@ fn init_smc() -> WithError<SmcSensors> {
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
   let mut fan_sensors = Vec::new();
+  let mut ram_keys = Vec::new();
 
   let names = smc.read_all_keys().unwrap_or(vec![]);
   for name in &names {
@@ -574,6 +588,17 @@ fn init_smc() -> WithError<SmcSensors> {
       fan_sensors.push(name.clone());
       continue;
     }
+
+    // DRAM power, one key per die: "PZD1", "PZD2", … (after metaspartan/mactop, MIT). Selected by
+    // name and float type, not by a read: a failed read in a sample fails the whole sum.
+    if name.len() == 4 && name.starts_with("PZD") && name.as_bytes()[3].is_ascii_digit() {
+      let info = smc.read_key_info(name).ok();
+      if info.is_none_or(|x| x.data_size == 4 && x.data_type == u32::from_be_bytes(*b"flt ")) {
+        ram_keys.push(name.clone());
+      }
+      continue;
+    }
+
     // Unfortunately, it is not known which keys are responsible for what.
     // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
@@ -597,10 +622,12 @@ fn init_smc() -> WithError<SmcSensors> {
   // Sort first so fan order is stable and any duplicate keys become adjacent for dedup().
   fan_sensors.sort();
   fan_sensors.dedup();
+  ram_keys.sort();
+  ram_keys.dedup();
 
   // println!("{} {}", cpu_sensors.len(), gpu_sensors.len());
   let (cpu_keys, gpu_keys, fan_keys) = (cpu_sensors, gpu_sensors, fan_sensors);
-  Ok(SmcSensors { smc: Some(smc), cpu_keys, gpu_keys, fan_keys })
+  Ok(SmcSensors { smc: Some(smc), cpu_keys, gpu_keys, fan_keys, ram_keys })
 }
 
 // MARK: Sampler
@@ -627,6 +654,7 @@ pub struct Sampler {
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
+  smc_ram_keys: Vec<String>,
 }
 
 impl Sampler {
@@ -653,6 +681,7 @@ impl Sampler {
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
+      smc_ram_keys: smc_sensors.ram_keys,
     };
     sampler.reset_baselines();
     Ok(sampler)
@@ -767,18 +796,25 @@ impl Sampler {
     self.smc.as_mut().ok_or("SMC unavailable")?.read_float_val("PSTR")
   }
 
+  /// DRAM power from SMC: the sum of its per-die keys, None without one.
+  fn get_ram_power_smc(&mut self) -> Option<f32> {
+    let smc = self.smc.as_mut()?;
+    total_power(self.smc_ram_keys.iter().map(|x| smc.read_float_val(x).ok()))
+  }
+
   #[allow(deprecated)] // gpu_ram_power
   fn get_ioreport_metrics(
     &self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
     dt: Duration,
+    ram_smc: Option<f32>,
   ) -> WithError<Metrics> {
     let mut cpu_cores = CpuTierCores::new(&self.soc);
     let mut rs = Metrics::default();
     let mut cpu_power = PowerSources::default();
     let mut gpu_power = PowerSources::default();
     let mut ane_power = PowerSources::default();
-    let mut ram_power = PowerSources::default();
+    let mut ram_power = PowerSources { smc: ram_smc, ..Default::default() };
     let mut dcs_power = PowerSources::default();
     let mut chip_power = PowerSources::default();
     let mut media_power = PowerSources::default();
@@ -911,12 +947,13 @@ impl Sampler {
     let ticks = std::mem::replace(&mut self.cpu_ticks, cur_ticks);
     let cur = ByteCounters::read();
     let bytes = self.bytes.replace(cur).unwrap_or(cur);
+    let ram_smc = self.get_ram_power_smc();
     let mut rs = match self.ior.as_mut() {
       Some(ior) => {
         let (sample, elapsed) = ior.get_sample_now();
-        self.get_ioreport_metrics(sample, elapsed)?
+        self.get_ioreport_metrics(sample, elapsed, ram_smc)?
       }
-      None => self.get_ioreport_metrics([], Duration::ZERO)?,
+      None => self.get_ioreport_metrics([], Duration::ZERO, ram_smc)?,
     };
 
     if let Some(prev) = ticks
@@ -971,7 +1008,7 @@ mod tests {
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
     TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies, checked_power,
     collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value,
-    temperature_average, uses_cpu_ticks, with_power_totals,
+    temperature_average, total_power, uses_cpu_ticks, with_power_totals,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
@@ -1013,6 +1050,32 @@ mod tests {
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
+  }
+
+  #[test]
+  fn smc_power_is_the_last_fallback_after_zero_readings() {
+    let cases = [
+      (PowerSources { smc: Some(0.4), ..Default::default() }, 0.4),
+      (PowerSources { energy_model: Some(0.0), smc: Some(0.4), ..Default::default() }, 0.4),
+      (PowerSources { pmp: Some(0.0), smc: Some(0.4), ..Default::default() }, 0.4),
+      (PowerSources { energy_model: Some(0.5), smc: Some(0.4), ..Default::default() }, 0.5),
+      (PowerSources { pmp: Some(0.8), smc: Some(0.4), ..Default::default() }, 0.8),
+      (PowerSources { clpc: Some(0.0), smc: Some(0.4), ..Default::default() }, 0.0),
+      (PowerSources { energy_model: Some(0.0), ..Default::default() }, 0.0),
+    ];
+    for (power, expected) in cases {
+      assert_eq!(power.watts(false), Some(expected));
+    }
+  }
+
+  #[test]
+  fn total_power_needs_every_reading() {
+    assert_eq!(total_power([Some(0.4), Some(0.6)]), Some(1.0));
+    assert_eq!(total_power([Some(0.0)]), Some(0.0));
+    for watts in [vec![], vec![Some(0.4), None], vec![Some(0.4), Some(-1.0)], vec![Some(f32::NAN)]]
+    {
+      assert_eq!(total_power(watts), None);
+    }
   }
 
   #[test]
@@ -1088,6 +1151,7 @@ mod tests {
       smc_cpu_keys: vec![],
       smc_gpu_keys: vec![],
       smc_fan_keys: vec![],
+      smc_ram_keys: vec![],
     }
   }
 
@@ -1171,7 +1235,7 @@ mod tests {
     for gpu_freqs in [vec![], vec![0]] {
       let mut sampler = sampler_without_sources(4, false);
       sampler.soc.gpu_freqs = gpu_freqs;
-      let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1)).unwrap();
+      let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1), None).unwrap();
       assert_eq!((rs.gpu_freq_mhz, rs.gpu_active_ratio), (0, 0.0));
     }
   }

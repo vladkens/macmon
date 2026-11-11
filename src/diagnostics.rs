@@ -232,8 +232,10 @@ fn print_ioreport() -> WithError<()> {
 fn print_smc() -> WithError<()> {
   print_divider("SMC system sensors");
   let mut smc = SMC::new()?;
-  // system total, power adapter input, display backlight
-  for key in ["PSTR", "PDTR", "PBwo", "PDBR"] {
+  let keys = smc.read_all_keys().unwrap_or(vec![]);
+  // system total, power adapter input, power supply, display backlight, DRAM per die
+  let dram = keys.iter().filter(|x| x.starts_with("PZD")).map(String::as_str);
+  for key in ["PSTR", "PDTR", "PD0R", "PBwo", "PDBR"].into_iter().chain(dram) {
     match smc.read_float_val(key) {
       Ok(watts) => println!("{key}={watts:.2}W"),
       Err(err) => println!("{key} error={err}"),
@@ -241,7 +243,6 @@ fn print_smc() -> WithError<()> {
   }
 
   print_divider("SMC temp sensors");
-  let keys = smc.read_all_keys().unwrap_or(vec![]);
   for key in &keys {
     if !key.starts_with("T") {
       continue;
