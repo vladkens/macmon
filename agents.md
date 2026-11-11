@@ -1,6 +1,6 @@
 # macmon
 
-Rootless Apple Silicon monitor and Rust library. Sampling and metric types live in `src/metrics.rs`, macOS API access in `src/sources.rs`, the CLI in `src/app/` and the TUI in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from libproc for own processes, the setuid `/bin/ps` for other users' and the IORegistry (`IOAccelerator` children) for GPU time. [docs/roadmap.md](docs/roadmap.md) is the maintainer's idea backlog: don't add items; a PR at most ticks its item, linking its plan if any.
+Rootless Apple Silicon monitor and Rust library. Sampling and metric types live in `src/metrics.rs`, macOS API access in `src/sources.rs`, the CLI in `src/app/` and the TUI in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from libproc for own processes, the setuid `/bin/ps` for other users' and the IORegistry (`IOAccelerator` children) for GPU time. [docs/roadmap.md](docs/roadmap.md) is the maintainer's backlog of ideas: change it only when the person asks.
 
 ## Boundaries
 
