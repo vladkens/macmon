@@ -19,18 +19,6 @@ pub(crate) fn is_pmp_mem_channel(group: &str, subgroup: &str, channel: &str, uni
     && matches!(unit, "mJ" | "uJ" | "nJ")
 }
 
-/// CPU cluster power histograms of PMP, also in the per-die groups `PMP0`, `PMP1`, … of M5 Max
-/// and Ultra: "EACC0", "PACC0", "MACC1", "PACC0 SRAM" (after metaspartan/mactop, MIT).
-pub(crate) fn is_pmp_cpu_channel(group: &str, subgroup: &str, channel: &str) -> bool {
-  let die = group.strip_prefix("PMP").is_some_and(|x| x.bytes().all(|x| x.is_ascii_digit()));
-  let name = channel.strip_suffix(" SRAM").unwrap_or(channel).as_bytes();
-  let cluster = name.len() >= 4
-    && name[0].is_ascii_uppercase()
-    && &name[1..4] == b"ACC"
-    && name[4..].iter().all(u8::is_ascii_digit);
-  die && subgroup == "Energy" && cluster
-}
-
 pub(crate) fn is_clpc_energy_channel(
   group: &str,
   subgroup: &str,
@@ -75,35 +63,9 @@ pub(crate) fn ioreport_channels_filter(
   group == "GPU Stats" && subgroup == "GPU Performance States"
 }
 
-/// `ioreport_channels_filter` with the PMP CPU histograms, for CPU power without CLPC counters.
-pub(crate) fn ioreport_channels_filter_pmp_cpu(
-  group: &str,
-  subgroup: &str,
-  channel: &str,
-  unit: &str,
-) -> bool {
-  ioreport_channels_filter(group, subgroup, channel, unit)
-    || is_pmp_cpu_channel(group, subgroup, channel)
-}
-
 #[cfg(test)]
 mod tests {
-  use super::{ioreport_channels_filter, ioreport_channels_filter_pmp_cpu, is_pmp_cpu_channel};
-
-  #[test]
-  fn pmp_cpu_channels_are_cluster_power_histograms() {
-    for channel in ["EACC0", "PACC0", "MACC1", "PACC", "PACC0 SRAM", "EACC0 SRAM"] {
-      assert!(is_pmp_cpu_channel("PMP", "Energy", channel), "{channel}");
-      assert!(is_pmp_cpu_channel("PMP1", "Energy", channel), "{channel}");
-      assert!(ioreport_channels_filter_pmp_cpu("PMP", "Energy", channel, ""));
-      assert!(!ioreport_channels_filter("PMP", "Energy", channel, ""));
-    }
-    for channel in ["AGX", "AGX SRAM", "pACC0", "PACC0 DTL", "PACC0X", "ACC"] {
-      assert!(!is_pmp_cpu_channel("PMP", "Energy", channel), "{channel}");
-    }
-    assert!(!is_pmp_cpu_channel("PMPX", "Energy", "PACC0"));
-    assert!(!is_pmp_cpu_channel("PMP", "Energy Counters", "PACC0"));
-  }
+  use super::ioreport_channels_filter;
 
   #[test]
   fn subscribes_only_to_known_clpc_energy_counters() {

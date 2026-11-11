@@ -646,6 +646,11 @@ pub(crate) fn battery() -> Option<(u8, bool, bool)> {
   read_services("AppleSmartBattery", |_, props| battery_from(props)).pop()
 }
 
+/// Whether the Mac has an internal battery.
+pub(crate) fn has_battery() -> bool {
+  !read_services("AppleSmartBattery", |_, _| Some(())).is_empty()
+}
+
 // MARK: SockInfo
 
 /// Static Apple Silicon system information.

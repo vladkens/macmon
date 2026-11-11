@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use core_foundation::base::{CFRelease, CFShow};
 
+use crate::fallback::is_pmp_cpu_channel;
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_cpu_channel,
-  is_pmp_mem_channel,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_mem_channel,
 };
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, battery, cfdict_data, cfdict_keys,
@@ -214,14 +214,11 @@ fn print_ioreport() -> WithError<()> {
       x.unit,
       if subscribed { ", subscribed" } else { "" }
     );
-    // CPU power histograms count "events" in each power bin
-    if is_pmp_cpu_channel(&x.group, &x.subgroup, &x.channel) {
-      println!("{msg} {:?}", cfio_get_residencies(x.item));
-      continue;
-    }
-
     match x.unit.as_str() {
-      "24Mticks" => println!("{msg} {:?}", cfio_get_residencies(x.item)),
+      // CPU power histograms count "events" in each power bin
+      u if u == "24Mticks" || is_pmp_cpu_channel(&x.group, &x.subgroup, &x.channel) => {
+        println!("{msg} {:?}", cfio_get_residencies(x.item))
+      }
       "mJ" | "uJ" | "nJ" => {
         println!("{msg} {:.2}W", cfio_watts(x.item, &x.unit, Duration::from_millis(dur))?)
       }
