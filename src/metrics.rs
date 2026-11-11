@@ -32,7 +32,7 @@ struct PowerSources {
   pmp: Option<f32>,
   /// The last fallback, for DRAM.
   smc: Option<f32>,
-  /// The raw SMC system total, to tell catch-up spikes, see `is_spike`.
+  /// The raw SMC system total where `Energy Model` can freeze, to tell catch-up spikes.
   sys: Option<f32>,
 }
 
@@ -331,11 +331,11 @@ fn histogram_watts(residencies: &[(String, i64)]) -> Option<f32> {
 }
 
 /// Whether `watts` is a catch-up spike of a frozen `Energy Model` (617 W of CPU against an SMC
-/// total `sys` of 7 W on M2 / macOS 27). The margin keeps real readings: an interval average can be
-/// twice the lagging SMC reading at a load step (13 W of CPU against 5.7 W on M5). A total of 0 is
-/// no reading.
+/// total `sys` of 7 W on M2 / macOS 27, kW on M5 Max in metaspartan/mactop#94). `sys` lags ~1 s, so
+/// a load step reads far above it (13.6 W of CPU against 1.2 W on M1); the margin keeps such steps
+/// up to an Ultra's ~200 W GPU from an idle total of 10 W. A total of 0 is no reading.
 fn is_spike(watts: f32, sys: Option<f32>) -> bool {
-  sys.is_some_and(|sys| sys > 0.0 && watts > 2.0 * sys + 5.0)
+  sys.is_some_and(|sys| sys > 0.0 && watts > 10.0 * sys + 100.0)
 }
 
 /// `watts` or 0 when it is above the raw SMC total `sys`: no part can draw more than the whole
@@ -721,6 +721,8 @@ pub struct Sampler {
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
   smc_ram_keys: Vec<String>,
+  /// macOS 27+, where `Energy Model` can freeze and catch up in one sample.
+  em_freezes: bool,
 }
 
 impl Sampler {
@@ -731,8 +733,9 @@ impl Sampler {
     // Without a CLPC CPU counter on macOS 27+, where Energy Model can freeze, CPU power may need
     // the PMP histograms. They cost about as much as CLPC in each sample, so only then.
     let os = sysctl_str("kern.osproductversion").and_then(|x| x.split('.').next()?.parse().ok());
+    let em_freezes = os.is_some_and(|x: u32| x >= 27);
     let ior = match ior {
-      Some(x) if x.has_channel("CLPC", "CPU Energy") || os.is_none_or(|x: u32| x < 27) => Some(x),
+      Some(x) if x.has_channel("CLPC", "CPU Energy") || !em_freezes => Some(x),
       x => IOReport::with_filter(Some(ioreport_channels_filter_pmp_cpu)).ok().flatten().or(x),
     };
 
@@ -756,6 +759,7 @@ impl Sampler {
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
       smc_ram_keys: smc_sensors.ram_keys,
+      em_freezes,
     };
     sampler.reset_baselines();
     Ok(sampler)
@@ -887,6 +891,7 @@ impl Sampler {
   ) -> WithError<Metrics> {
     let mut cpu_cores = CpuTierCores::new(&self.soc);
     let mut rs = Metrics::default();
+    let sys = sys.filter(|_| self.em_freezes);
     let mut cpu_power = PowerSources { sys, ..Default::default() };
     let mut gpu_power = PowerSources { sys, ..Default::default() };
     let mut ane_power = PowerSources { sys, ..Default::default() };
@@ -1166,7 +1171,8 @@ mod tests {
       ),
       (PowerSources { energy_model: Some(617.0), sys: Some(7.0), ..Default::default() }, 0.0),
       (PowerSources { energy_model: Some(617.0), sys: Some(0.0), ..Default::default() }, 617.0),
-      (PowerSources { energy_model: Some(13.06), sys: Some(5.72), ..Default::default() }, 13.06),
+      (PowerSources { energy_model: Some(13.6), sys: Some(1.2), ..Default::default() }, 13.6),
+      (PowerSources { energy_model: Some(60.0), sys: Some(5.0), ..Default::default() }, 60.0),
       (PowerSources { clpc: Some(30.0), sys: Some(7.0), ..Default::default() }, 30.0),
       (PowerSources { clpc: Some(0.0), smc: Some(0.4), ..Default::default() }, 0.0),
       (PowerSources { energy_model: Some(0.0), ..Default::default() }, 0.0),
@@ -1298,6 +1304,7 @@ mod tests {
       smc_gpu_keys: vec![],
       smc_fan_keys: vec![],
       smc_ram_keys: vec![],
+      em_freezes: false,
     }
   }
 
