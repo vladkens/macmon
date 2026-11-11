@@ -1,35 +1,36 @@
 # Fallback sources from mactop
 
-Read the power and temperature sources that [mactop](https://github.com/metaspartan/mactop) (MIT) uses where macmon reads 0 or a wrong value today, as last fallbacks after the sources macmon already has. Four separate PRs, in this order, each on its own branch.
+A backup way to get the same power and temperature numbers if Apple breaks the sources macmon reads now, as macOS 27 broke `Energy Model`: the sources [mactop](https://github.com/metaspartan/mactop) (MIT) uses, as last resorts after the ones macmon already has. They stay unused while the current sources work. One PR; the maintainer waived the ~200-line limit for it.
 
 ## Behavior
 
-- PR 1, `ram_power`: CLPC, else `Energy Model` or PMP when they read more than 0, else the sum of SMC `PZD1`, `PZD2`, … (one key per die). `macmon debug` shows `PSTR`, `PDTR`, `PD0R` and every `PZD*` key.
-- PR 2, `sys_power`: the first of SMC `PSTR`, `PDTR`, `PD0R` that reads more than 0, still at least `chip_power`. `PDTR` and `PD0R` only on Macs without a battery: on a laptop `PD0R` includes charging, so laptops keep `PSTR` alone. Fixes `sys_power` = `chip_power` on Mac Studio, where `PSTR` and `PDTR` read 0.
-- PR 3, `cpu_power`: CLPC, else `Energy Model` when it reads more than 0, else the PMP `Energy` histograms of the CPU clusters (`EACC0`, `PACC0`, `MACCn` and their ` SRAM` channels, in the `PMP` group and the per-die `PMP0`, `PMP1`, …). Each channel's power is the residency-weighted average of its state bins (`0.250W`, `1W`, …), the lowest bin counted as 0. Today CPU reads 0 when the CLPC IDs are unknown and `Energy Model` is frozen.
-- PR 4, `cpu_temp_avg`: SMC keys that don't follow CPU load (`Ts0P`, `Ts1P` on M5) are left out, die readings below 10 °C are invalid (a GPU sensor reads ~2 °C for a second after boot, mactop#70), and an unreadable SMC key is skipped instead of failing the whole sample.
+- Power fallbacks, per sample: CLPC wins when it has the counter, also at an idle 0. Otherwise `Energy Model`, then PMP, then the new source, each only when it reads above 0 and not above the SMC system total; then the first source with any reading, so a genuine 0 still reads 0.
+- `ram_power`: last fallback, the sum of SMC `PZD1`, `PZD2`, … (one key per die), none when any of them fails to read.
+- `cpu_power`: last fallback, the PMP `Energy` histograms of the CPU clusters (`EACC0`, `PACC0`, `MACCn` and their ` SRAM` channels, in the `PMP` group and the per-die `PMP0`, `PMP1`, …). Each channel reads the residency-weighted average of its power bins (`0.250W`, `1W`, …), the lowest bin counted as 0. Subscribed only on macOS 27+ without CLPC counters.
+- `sys_power`: the first of SMC `PSTR`, `PDTR`, `PD0R` above 0, else the first readable; `PDTR` and `PD0R` only on Macs without a battery. Still at least `chip_power`.
+- `cpu_temp_avg`: without `Ts0P`, `Ts1P`, `TsOP`; readings of 10 °C and below are invalid (CPU and GPU); an unreadable SMC key is left out instead of failing the sample.
+- `macmon debug` shows `PSTR`, `PDTR`, `PD0R`, every `PZD*` key and the PMP CPU histograms.
 
-No JSON, Prometheus, library API or config change, and no new dependency: existing fields only get a value where they read 0 or wrong.
+No JSON, Prometheus, library API or config change, and no new dependency.
 
 ## Decisions
 
-- Every fallback is per sample: CLPC wins when it has the counter (also at an idle 0); `Energy Model` and PMP only when they read more than 0, since a frozen `Energy Model` reads 0 on macOS 27; the new source last. mactop instead switches to its fallback for the rest of the process on the first such sample; a latch is added only if per-sample values are seen jumping between the two sources on hardware.
-- SMC `PZD*` is an instantaneous reading, not an energy counter: fine as a last fallback, never preferred over CLPC. The `PSTR` check of `with_power_totals` still drops a reading above the system total.
-- Only `flt` SMC keys are read, as today; mactop's other number types and its 1000 W cap are taken only if a Mac shows the need.
-- `PZC0` / `PZC1` are not CPU power (they don't follow CLPC CPU under load on M5): not used.
-- PR 2 doesn't add `dc_in_power` (planned for #118 in `20261111-chip-power.md`); if #118 lands first, PR 2 reads `PDTR` through it.
-- PR 4 changes the key set only after `macmon debug` of `Ts*` idle and under `macmon stress cpu` on M1, M2 and M5: on M1–M4 `Ts*` may be other sensors, so the rule must hold on all three.
-- Ported logic carries a short comment crediting metaspartan/mactop (MIT); the PR bodies thank mactop#98 for the M5 Max/Ultra data.
+- No latch: mactop switches to its fallback for the rest of the process on the first zero; macmon decides per sample, and a frozen `Energy Model`'s catch-up (617 W CPU and 59 W DRAM in one sample on M2 / macOS 27.0.1) is dropped by the system-total check instead.
+- A zero `Energy Model` no longer hides a positive PMP reading (ANE, DRAM, DCS): on M1, M2 and M5 the two never overlap, so no reading changes there.
+- SMC `PZD*` is instantaneous, not an energy counter: only a last fallback. Present only on M5 of the three Macs; M1 and M2 have no SMC key that follows memory load alone.
+- PMP CPU histograms exist only on M5 of the three Macs. Their bins are 0.25–1 W wide: under CPU and memory load 4–6% above CLPC, at idle or light load 0.4–1.5 W high. They add channels that cost about as much as CLPC per sample (~3–7 ms on M5), hence the macOS 27+ without CLPC condition; on macOS 26 and older `Energy Model` works.
+- `PDTR` and `PD0R` only without a battery: on a laptop `PD0R` includes charging, and `PDTR` (DC in) differs from `PSTR` on the M5 laptop. No desktop was available: Mac Studio behavior is from mactop#96/#98.
+- Temperature keys: under `macmon stress cpu`, `Ts0P` and `Ts1P` stay flat on M1 and M5, `Ts1P` and `TsOP` on M2; `Ts0P` follows load on M2 but is one of 47 keys. Leaving out every `Ts*P` key holds on all three. M1's `Ts5*` keys read a flat 0, 8 or 10 °C, hence the 10 °C floor, which also covers a GPU sensor reading ~2 °C after boot (mactop#70).
+- Only `flt` SMC keys are read, as before; `PZC0` / `PZC1` are not CPU power and stay unused.
+- Ported logic carries a comment crediting metaspartan/mactop (MIT); the PR body thanks mactop#98 for the M5 Max/Ultra data.
 
 ## Checklist
 
-- [x] PR 1: SMC `PZD*` as the last `ram_power` fallback; `PSTR`, `PDTR`, `PD0R`, `PZD*` in `macmon debug`.
-- [x] PR 1: `make check`, `make test`, `make loc REF=origin/main`.
-- [x] PR 1: on M5 / macOS 27.2, M2 / macOS 27.0.1 and M1 / macOS 15.8.1: `macmon debug` (which Macs have `PZD*`), `macmon pipe` idle, under a memory-streaming load and under `macmon stress cpu`, SMC `PZD*` next to CLPC (or `Energy Model` / PMP) DRAM; the fallback path with CLPC DRAM disabled in a local build.
-- [ ] PR 2: `PSTR` → `PDTR` → `PD0R` without a battery.
-- [ ] PR 2: `make check`, `make test`, `make loc`; `macmon pipe` on the M1, M2 and M5 laptops on AC and on battery shows the same `sys_power` as before. No desktop available: ask a Mac Studio / Mac mini owner for `macmon debug` and `macmon pipe`, name it untested otherwise.
-- [ ] PR 3: PMP `Energy` CPU histograms as the last `cpu_power` fallback, per-die PMP groups.
-- [ ] PR 3: `make check`, `make test`, `make loc`, `make bench` (own cost of the extra PMP channels).
-- [ ] PR 3: on M2 and M5 with the CLPC table off in a local build, `macmon pipe` idle and under `macmon stress cpu` against CLPC and `sudo powermetrics --samplers cpu_power` (run by the person); M1 / macOS 15 unchanged.
-- [ ] PR 4: `macmon debug` `Ts*` idle and under `macmon stress cpu` on M1, M2 and M5 first; then the key rule, the 10 °C floor and skipping unreadable keys.
-- [ ] PR 4: `make check`, `make test`, `make loc`; `macmon pipe` idle and under `macmon stress cpu` on M1, M2 and M5, `cpu_temp_avg` against the per-key values.
+- [x] SMC `PZD*` as the last `ram_power` fallback; SMC power keys in `macmon debug`.
+- [x] Per-source fallback order with the system-total check.
+- [x] `PSTR` → `PDTR` → `PD0R` without a battery.
+- [x] PMP CPU histograms as the last `cpu_power` fallback, subscribed only when needed; in `macmon debug`.
+- [x] `Ts*` per key idle and under `macmon stress cpu` on M1, M2 and M5; then the key rule, the 10 °C floor and skipping unreadable keys.
+- [x] `make check`, `make test`, `make loc REF=origin/main`; own cost of the PMP channels.
+- [x] On M5 / macOS 27.2, M2 / macOS 27.0.1 and M1 / macOS 15.8.1: `macmon debug`, `macmon pipe -s 5 -i 1000` idle, under `macmon stress cpu`, `stress gpu` and a memory load; each fallback forced in a local build (CLPC off, `Energy Model` off, no battery, no `PSTR`) against the primary source; temperatures per key.
+- [ ] A Mac Studio or Mac mini owner's `macmon debug` and `macmon pipe` (desktop `sys_power`).

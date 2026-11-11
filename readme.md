@@ -229,7 +229,9 @@ The working rootless workaround we found is to read hidden energy reports from t
 
 `chip_power` is the power of the whole chip: its own total where it reports one, and never less than the sum of CPU, GPU, ANE, memory (`ram_power`), memory controller (`dcs_power`) and media power. `media_power`, the video encoder and image processor, is reported apart only on M6; on other chips it is part of `chip_power`. `all_power` is the same as `chip_power`, kept for compatibility.
 
-Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. Until then macmon estimates CPU power from rougher per-cluster statistics where the chip has them (M5; close under load, up to about 1.5 W high at light load) and memory power from the SMC (M5). On an unsupported configuration without them, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+
+On a Mac without a battery, system power (`sys_power`) comes from the power supply when the usual sensor reads 0, as on Mac Studio.
 
 ### Output format
 
