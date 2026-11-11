@@ -946,7 +946,7 @@ impl Sampler {
     rs.gpu_mem_alloc = gpu_mem.map(|x| x[0]);
     rs.gpu_mem_in_use = gpu_mem.map(|x| x[1]);
     rs.dc_in_power = self.get_smc_power("PDTR");
-    // backlight: "PBwo" on MacBook Neo, "PDBR" on M1 and M4 (exelban/stats)
+    // backlight: "PBwo" on M5 and A18 Pro, "PDBR" on M1 and M4 (exelban/stats); not on our M1, M5
     rs.display_power = self.get_smc_power("PBwo").or_else(|| self.get_smc_power("PDBR"));
 
     Ok(rs)
