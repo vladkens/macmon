@@ -670,7 +670,7 @@ impl Sampler {
     let em_freezes = os.is_some_and(|x: u32| x >= 27);
     // CPU power from the PMP histograms, which cost about as much as CLPC, only where needed
     let ior = match ior {
-      Some(x) if x.has_channel("CLPC", "CPU Energy") || !em_freezes => Some(x),
+      x if !em_freezes || x.as_ref().is_some_and(|x| x.has_channel("CLPC", "CPU Energy")) => x,
       x => {
         let filter = |g: &str, s: &str, c: &str, u: &str| {
           ioreport_channels_filter(g, s, c, u) || fallback::is_pmp_cpu_channel(g, s, c)

@@ -24,7 +24,7 @@ No JSON, Prometheus, library API or config change, and no new dependency.
 - `PDTR` and `PD0R` only without a battery: on a laptop `PD0R` includes charging, and `PDTR` (DC in) differs from `PSTR` on the M5 laptop. No desktop was available: Mac Studio behavior is from mactop#96/#98, and a desktop run is still open.
 - #118 landed first and reads `PDTR` as `dc_in_power`; `sys_power` reads it again for its own fallback, two plain SMC reads without shared code.
 - Temperature keys: under `macmon stress cpu`, `Ts0P` and `Ts1P` stay flat on M1 and M5, `Ts1P` and `TsOP` on M2; `Ts0P` follows load on M2 but is one of 47 keys. Leaving out every `Ts*P` key holds on all three. M1's `Ts5*` keys read a flat 0, 8 or 10 °C, hence the 10 °C floor, which also covers a GPU sensor reading ~2 °C after boot (mactop#70).
-- Only `flt` SMC keys are read, as before; `PZC0` / `PZC1` are not CPU power and stay unused.
+- SMC power keys are read as `flt`: a `PZD*` key of another type fails the read and voids the DRAM sum. `PZC0` / `PZC1` are not CPU power and stay unused.
 - The ported pieces live in `src/fallback.rs`, whose module comment credits metaspartan/mactop (MIT); `metrics.rs` only calls them. The PR body thanks mactop#98 for the M5 Max/Ultra data.
 
 ## Checklist
