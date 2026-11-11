@@ -1,14 +1,14 @@
 //! Per-process resource usage (CPU, memory, energy).
 //!
 //! libproc reads the current user's processes. Other users' processes come from `/bin/ps`, which
-//! has CPU time and RSS but no energy counter. GPU time of every process comes from the GPU's user
-//! clients in the IORegistry.
+//! has CPU time and RSS but no energy counter and costs more than the rest, so it runs less often
+//! than the samples. GPU time of every process comes from the GPU's user clients in the IORegistry.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFAllocatorRef, CFType, CFTypeRef, TCFType, kCFAllocatorDefault};
@@ -19,11 +19,15 @@ use core_foundation::string::{CFString, CFStringRef};
 const RUSAGE_INFO_V4: c_int = 4;
 const RUSAGE_INFO_V6: c_int = 6;
 
-/// `ps` output columns; `comm` goes last as it may contain spaces.
-const PS_COLUMNS: &str = "pid=,uid=,rss=,time=,comm=";
-/// `ps` prints CPU time in 10 ms steps, 1 % of a one-second interval: CPU % of `ps` rows is
-/// averaged over this many intervals, so idle processes don't jump between 0 % and 1 %.
-const PS_CPU_INTERVALS: usize = 3;
+/// `ps` output columns; the command goes last as it may contain spaces. `ucomm`, as `comm` makes
+/// `ps` read every process' arguments, a third of its CPU; the name comes from the executable path.
+const PS_COLUMNS: &str = "pid=,uid=,rss=,time=,ucomm=";
+/// Least time between `ps` runs, the largest cost of the list: it runs on the first tick after
+/// this, and its rows are reused in between. It prints CPU time in 10 ms steps, 1 % of a second:
+/// over this time idle processes don't jump by a whole 1 %.
+const PS_PERIOD: Duration = Duration::from_secs(3);
+/// Wait for the second `ps` run, sooner as its rows have no CPU % before it.
+const PS_WARM_UP: Duration = Duration::from_secs(1);
 
 /// `struct rusage_info_v6` from the macOS SDK `sys/resource.h`. `rusage_info_v4` is a prefix of
 /// it, so the same buffer serves both flavors.
@@ -139,6 +143,8 @@ pub struct ProcInfo {
 struct Counters {
   /// Process start time, tells a reused pid apart.
   start: u64,
+  /// UUID of the executable, changes on exec; zero in `ps` rows and for executables without one.
+  uuid: [u8; 16],
   /// User + system CPU time.
   cpu_ns: u64,
   /// Lifetime energy, None when unavailable.
@@ -261,7 +267,7 @@ fn rusage(pid: i32, flavor: c_int) -> Option<rusage_info_v6> {
 }
 
 /// Executable path; readable for processes of any user.
-fn exe_path(pid: i32) -> Option<String> {
+pub(crate) fn exe_path(pid: i32) -> Option<String> {
   let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
   let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
   if len <= 0 {
@@ -271,29 +277,85 @@ fn exe_path(pid: i32) -> Option<String> {
   Some(String::from_utf8_lossy(&buf[..len as usize]).into_owned())
 }
 
-/// Reads a process through libproc; fails for other users' processes.
-fn read_libproc(pid: i32, flavor: c_int, (numer, denom): (u32, u32)) -> Option<Raw> {
-  let info = bsd_info(pid)?;
+/// Command line as `ps` shows it: the arguments joined by spaces.
+pub(crate) fn cmd_line(pid: i32) -> Option<String> {
+  Some(args(pid)?.join(" "))
+}
+
+/// Arguments of a process from `argv[0]`, without the environment that follows them. `None` for
+/// other users' processes (`EINVAL` without root) and gone ones.
+pub(crate) fn args(pid: i32) -> Option<Vec<String>> {
+  let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+  let mut call = |buf: *mut u8, size: &mut usize| unsafe {
+    libc::sysctl(mib.as_mut_ptr(), 3, buf.cast(), size, std::ptr::null_mut(), 0) == 0
+  };
+
+  // With a NULL buffer it gives the size.
+  let mut size = 0;
+  call(std::ptr::null_mut(), &mut size).then_some(())?;
+  let mut buf = vec![0u8; size];
+  call(buf.as_mut_ptr(), &mut size).then_some(())?;
+  buf.truncate(size);
+  parse_args(&buf)
+}
+
+/// The arguments of a `KERN_PROCARGS2` buffer: `argc`, the executable path, then the arguments and
+/// the environment. XNU's `exec_extract_strings` pads the path with NULs to 8 bytes; `argv[0]` may
+/// be empty, so skipping NULs instead would take the first variable of the environment for an
+/// argument. `None` when the padding isn't there.
+fn parse_args(buf: &[u8]) -> Option<Vec<String>> {
+  let (argc, rest) = buf.split_first_chunk()?;
+  let path = rest.iter().position(|&b| b == 0)?;
+  let start = (path + 1).next_multiple_of(8);
+  rest.get(path..start)?.iter().all(|&b| b == 0).then_some(())?;
+
+  let args = rest[start..].split(|&b| b == 0).take(i32::from_ne_bytes(*argc) as usize);
+  Some(args.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect())
+}
+
+/// Reads a process through libproc; fails for other users' processes. Only the counters of a
+/// `known` process, unless it exec'd an executable with another UUID since: the rest takes two more
+/// calls per process.
+fn read_libproc(
+  pid: i32,
+  flavor: c_int,
+  (numer, denom): (u32, u32),
+  known: Option<&Known>,
+) -> Option<Raw> {
   let ru = rusage(pid, flavor)?;
+  let counters = Counters {
+    start: ru.ri_proc_start_abstime,
+    uuid: ru.ri_uuid,
+    cpu_ns: ticks_to_ns(ru.ri_user_time + ru.ri_system_time, numer, denom),
+    energy_nj: (flavor == RUSAGE_INFO_V6).then_some(ru.ri_energy_nj),
+    gpu_ns: None,
+  };
+  let raw = |uid, comm, fallback, path, started| Raw {
+    pid,
+    uid,
+    mem_bytes: ru.ri_phys_footprint,
+    counters,
+    comm,
+    path,
+    fallback,
+    ps: false,
+    started,
+  };
+
+  if let Some(known) = known.filter(|known| {
+    (known.counters.start, known.counters.uuid) == (counters.start, counters.uuid)
+      && counters.uuid != [0; 16]
+      && !known.path.is_empty()
+  }) {
+    return Some(raw(known.uid, known.comm.clone(), String::new(), None, known.started));
+  }
+
+  let info = bsd_info(pid)?;
   let comm = c_chars_to_string(&info.pbi_comm);
   let name = c_chars_to_string(&info.pbi_name);
-
-  Some(Raw {
-    pid,
-    uid: info.pbi_uid,
-    mem_bytes: ru.ri_phys_footprint,
-    counters: Counters {
-      start: ru.ri_proc_start_abstime,
-      cpu_ns: ticks_to_ns(ru.ri_user_time + ru.ri_system_time, numer, denom),
-      energy_nj: (flavor == RUSAGE_INFO_V6).then_some(ru.ri_energy_nj),
-      gpu_ns: None,
-    },
-    fallback: if name.is_empty() { comm.clone() } else { name },
-    comm,
-    path: None,
-    ps: false,
-    started: Some((info.pbi_start_tvsec, info.pbi_start_tvusec)),
-  })
+  let fallback = if name.is_empty() { comm.clone() } else { name };
+  let started = Some((info.pbi_start_tvsec, info.pbi_start_tvusec));
+  Some(raw(info.pbi_uid, comm, fallback, exe_path(pid), started))
 }
 
 // MARK: ps
@@ -331,7 +393,7 @@ fn parse_uid(s: &str) -> Option<u32> {
   s.parse::<i32>().map(|uid| uid as u32).or_else(|_| s.parse()).ok()
 }
 
-/// One line of `ps -o pid=,uid=,rss=,time=,comm=`; the command is the rest of the line.
+/// One line of `ps -o pid=,uid=,rss=,time=,ucomm=`; the command is the rest of the line.
 fn parse_ps_line(line: &str) -> Option<Raw> {
   let mut rest = line.trim();
   let mut field = || {
@@ -351,8 +413,8 @@ fn parse_ps_line(line: &str) -> Option<Raw> {
     uid,
     mem_bytes: rss_kib.saturating_mul(1024),
     // ps has no start time, a reused pid is told apart by its command.
-    counters: Counters { start: 0, cpu_ns, energy_nj: None, gpu_ns: None },
-    fallback: basename(&comm).unwrap_or(&comm).to_string(),
+    counters: Counters { cpu_ns, ..Counters::default() },
+    fallback: comm.clone(),
     comm,
     path: None,
     ps: true,
@@ -601,30 +663,20 @@ fn gpu_times() -> HashMap<i32, u64> {
 
 // MARK: Sampler
 
-/// CPU % of a `ps` row from its CPU time `cpu_ns` at `now_ns` and its earlier `(time, CPU time)`
-/// snapshots, oldest first: the average since the oldest one. Zero without a snapshot, and over
-/// the short warm-up of a new sampler (from its first sample, at time 0, to the next), which is
-/// skipped; a process that shows up later gets a rate on its second sample, as libproc rows do.
-fn averaged_cpu_pct(history: &[(u64, u64)], now_ns: u64, cpu_ns: u64) -> f32 {
-  match history {
-    [(0, _)] => 0.0,
-    [(time, cpu), ..] if now_ns > *time && cpu_ns >= *cpu => {
-      ((cpu_ns - cpu) as f64 / (now_ns - time) as f64 * 100.0) as f32
-    }
-    _ => 0.0,
-  }
-}
-
 /// A process seen on the previous tick.
 struct Known {
+  /// Kept with `started` until an exec, see `read_libproc`: under `sudo macmon`, a `setuid()`
+  /// without an exec keeps the old user.
+  uid: u32,
   counters: Counters,
   /// Changes on exec (unless cut to the same 15 bytes), invalidates `name` and `path`.
   comm: String,
   name: String,
   /// Executable path, empty when it wasn't readable; a different one is a different process.
   path: String,
-  /// `ps` rows: `(time, CPU time)` of the last `PS_CPU_INTERVALS` ticks, oldest first.
-  cpu_history: VecDeque<(u64, u64)>,
+  /// Kept between `ps` runs.
+  cpu_pct: f32,
+  started: Option<(u64, u64)>,
 }
 
 /// Samples every process: libproc for those it can read, `ps` for the rest.
@@ -635,8 +687,10 @@ pub struct ProcSampler {
   known: HashMap<i32, Known>,
   users: HashMap<u32, String>,
   last: Option<Instant>,
-  /// Time since the first sample, in ns.
-  clock_ns: u64,
+  /// Rows of the last `ps` run, without executable paths.
+  ps_rows: HashMap<i32, Raw>,
+  ps_last: Option<Instant>,
+  ps_next: Option<Instant>,
 }
 
 impl ProcSampler {
@@ -659,48 +713,67 @@ impl ProcSampler {
       known: HashMap::new(),
       users: HashMap::new(),
       last: None,
-      clock_ns: 0,
+      ps_rows: HashMap::new(),
+      ps_last: None,
+      ps_next: None,
     }
   }
 
-  /// CPU and power are rates since the previous call; the first call reports them as zero.
+  /// CPU and power are rates since the previous call, other users' CPU the rate between two `ps`
+  /// runs; the first call reports them as zero.
   pub fn sample(&mut self) -> Vec<ProcInfo> {
     let now = Instant::now();
     let elapsed_ns = self.last.map_or(0, |last| now.duration_since(last).as_nanos() as u64);
     self.last = Some(now);
     let gpu = gpu_times(); // Read next to `now`: the counters carry no timestamp of their own.
+    let ps_due = self.ps_next.is_none_or(|next| now >= next);
 
     list_pids(&mut self.pids);
     let mut rows = Vec::with_capacity(self.pids.len());
     let mut unreadable = Vec::new();
     for &pid in &self.pids {
-      match read_libproc(pid, self.flavor, self.timebase) {
+      if let (false, Some(raw)) = (ps_due, self.ps_rows.get(&pid)) {
+        rows.push(raw.clone());
+        continue;
+      }
+
+      match read_libproc(pid, self.flavor, self.timebase, self.known.get(&pid)) {
         Some(raw) => rows.push(raw),
-        None => unreadable.extend(real_uid(pid).map(|ruid| (pid, ruid))),
+        None if ps_due => unreadable.extend(real_uid(pid).map(|ruid| (pid, ruid))),
+        None => {} // a new process of another user waits for the next `ps` run
       }
     }
 
-    if !unreadable.is_empty() {
-      let users = &mut self.users;
-      let name = |uid| users.entry(uid).or_insert_with(|| user_name(uid)).clone();
-      rows = merge(rows, run_ps(&ps_selection(&unreadable, unsafe { libc::getuid() }, name)));
+    let mut ps_ns = None;
+    if ps_due {
+      ps_ns = Some(self.ps_last.map_or(0, |last| now.duration_since(last).as_nanos() as u64));
+      self.ps_next = Some(now + if self.ps_last.is_some() { PS_PERIOD } else { PS_WARM_UP });
+      self.ps_last = Some(now);
+
+      if !unreadable.is_empty() {
+        let users = &mut self.users;
+        let name = |uid| users.entry(uid).or_insert_with(|| user_name(uid)).clone();
+        rows = merge(rows, run_ps(&ps_selection(&unreadable, unsafe { libc::getuid() }, name)));
+      }
+      self.ps_rows = rows.iter().filter(|raw| raw.ps).map(|raw| (raw.pid, raw.clone())).collect();
     }
+
     for raw in &mut rows {
       raw.counters.gpu_ns = gpu.get(&raw.pid).copied();
-      // every tick, not only for new pids: the start time and `comm` can stay the same across an
-      // exec (about 1 ms for 800 processes)
-      raw.path = exe_path(raw.pid);
+      if ps_due && raw.ps {
+        raw.path = exe_path(raw.pid); // the start time isn't known, `comm` may stay across an exec
+      }
     }
-    self.update(rows, elapsed_ns)
+
+    self.update(rows, elapsed_ns, ps_ns)
   }
 
-  /// Rates against the previous tick (CPU of `ps` rows over the last `PS_CPU_INTERVALS` ticks);
-  /// a process is the same while its pid, start time, command and executable path stay the same.
-  /// A path that isn't readable on this tick keeps the last one.
-  fn update(&mut self, rows: Vec<Raw>, elapsed_ns: u64) -> Vec<ProcInfo> {
-    let mut known = HashMap::with_capacity(rows.len());
+  /// Rates against the previous tick; a process is the same while its pid, start time, command and
+  /// executable path stay the same. A path that isn't readable on this tick keeps the last one.
+  /// CPU of `ps` rows is the rate since the last `ps` run, `ps_ns` ago when this tick has one;
+  /// other ticks keep it.
+  fn update(&mut self, rows: Vec<Raw>, elapsed_ns: u64, ps_ns: Option<u64>) -> Vec<ProcInfo> {
     let mut procs = Vec::with_capacity(rows.len());
-    self.clock_ns += elapsed_ns;
 
     for raw in rows {
       let prev = self.known.remove(&raw.pid).filter(|prev| {
@@ -708,22 +781,23 @@ impl ProcSampler {
           && prev.comm == raw.comm
           && raw.path.as_ref().is_none_or(|path| *path == prev.path)
       });
-      let mut usage = usage(prev.as_ref().map(|prev| &prev.counters), &raw.counters, elapsed_ns);
-      let (name, path, mut cpu_history) = match prev {
-        Some(prev) => (prev.name, prev.path, prev.cpu_history),
+      let counters = prev.as_ref().map(|prev| &prev.counters);
+      let mut rates = usage(counters, &raw.counters, elapsed_ns);
+      if raw.ps {
+        rates.cpu_pct = match (ps_ns, &prev) {
+          (Some(ps_ns), _) => usage(counters, &raw.counters, ps_ns).cpu_pct,
+          (None, Some(prev)) => prev.cpu_pct,
+          (None, None) => 0.0,
+        };
+      }
+
+      let (name, path) = match prev {
+        Some(prev) => (prev.name, prev.path),
         None => {
           let name = raw.path.as_deref().and_then(basename).map(str::to_string);
-          (name.unwrap_or(raw.fallback), raw.path.unwrap_or_default(), VecDeque::new())
+          (name.unwrap_or(raw.fallback), raw.path.unwrap_or_default())
         }
       };
-      if raw.ps {
-        let cpu_ns = raw.counters.cpu_ns;
-        usage.cpu_pct = averaged_cpu_pct(cpu_history.make_contiguous(), self.clock_ns, cpu_ns);
-        cpu_history.push_back((self.clock_ns, cpu_ns));
-        if cpu_history.len() > PS_CPU_INTERVALS {
-          cpu_history.pop_front();
-        }
-      }
       let user = self.users.entry(raw.uid).or_insert_with(|| user_name(raw.uid)).clone();
 
       procs.push(ProcInfo {
@@ -731,18 +805,23 @@ impl ProcSampler {
         name: name.clone(),
         path: path.clone(),
         user,
-        cpu_pct: usage.cpu_pct,
+        cpu_pct: rates.cpu_pct,
         cpu_time_ns: raw.counters.cpu_ns,
         mem_bytes: raw.mem_bytes,
-        power_w: usage.power_w,
-        gpu_pct: usage.gpu_pct,
+        power_w: rates.power_w,
+        gpu_pct: rates.gpu_pct,
         started: raw.started,
       });
-      let counters = raw.counters;
-      known.insert(raw.pid, Known { counters, comm: raw.comm, name, path, cpu_history });
+      let (uid, counters, comm, cpu_pct, started) =
+        (raw.uid, raw.counters, raw.comm, rates.cpu_pct, raw.started);
+      self.known.insert(raw.pid, Known { uid, counters, comm, name, path, cpu_pct, started });
     }
 
-    self.known = known;
+    if self.known.len() > procs.len() {
+      let alive: HashSet<i32> = procs.iter().map(|proc| proc.pid).collect();
+      self.known.retain(|pid, _| alive.contains(pid));
+    }
+
     procs
   }
 }
@@ -750,7 +829,6 @@ impl ProcSampler {
 #[cfg(test)]
 mod tests {
   use std::hint::black_box;
-  use std::time::Duration;
 
   use super::*;
 
@@ -760,7 +838,7 @@ mod tests {
   const B: i32 = 1_000_002;
 
   fn counters(cpu_ns: u64, energy_nj: Option<u64>) -> Counters {
-    Counters { start: 42, cpu_ns, energy_nj, gpu_ns: None }
+    Counters { start: 42, cpu_ns, energy_nj, ..Counters::default() }
   }
 
   #[test]
@@ -843,17 +921,17 @@ mod tests {
 
   #[test]
   fn ps_lines() {
-    let chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (GPU)";
-    let raw = parse_ps_line(&format!(" 2301   501 182976   1:02.50 {chrome}")).expect("valid");
+    let helper = "Helium Helper (A";
+    let raw = parse_ps_line(&format!(" 2301   501 182976   1:02.50 {helper}")).expect("valid");
     assert_eq!((raw.pid, raw.uid, raw.mem_bytes), (2301, 501, 182976 * 1024));
-    let times = Counters { start: 0, cpu_ns: 62_500_000_000, energy_nj: None, gpu_ns: None };
+    let times = Counters { cpu_ns: 62_500_000_000, ..Counters::default() };
     assert_eq!(raw.counters, times);
-    assert_eq!((raw.comm.as_str(), raw.fallback.as_str()), (chrome, "Google Chrome Helper (GPU)"));
+    assert_eq!((raw.comm.as_str(), raw.fallback.as_str()), (helper, helper));
     assert!(raw.ps);
-    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurityd\n").expect("valid");
-    assert_eq!((raw.pid, raw.uid, raw.fallback.as_str()), (574, 0, "endpointsecurityd"));
+    let raw = parse_ps_line("574\t0 2624 0:00.03 endpointsecurity\n").expect("valid");
+    assert_eq!((raw.pid, raw.uid, raw.fallback.as_str()), (574, 0, "endpointsecurity"));
     // `nobody` is printed signed; its uid has the name
-    let raw = parse_ps_line("  343    -2    192   0:00.03 /usr/libexec/dhcp6d").expect("valid");
+    let raw = parse_ps_line("  343    -2    192   0:00.03 dhcp6d          ").expect("valid");
     assert_eq!((raw.pid, raw.uid, user_name(raw.uid).as_str()), (343, 4294967294, "nobody"));
     assert_eq!(parse_ps_line("1 4294967294 1 0:00.01 cmd").map(|raw| raw.uid), Some(4294967294));
 
@@ -882,7 +960,7 @@ mod tests {
       pid,
       uid: 0,
       mem_bytes: 1024,
-      counters: Counters { start: 0, cpu_ns, energy_nj, gpu_ns: None },
+      counters: Counters { cpu_ns, energy_nj, ..Counters::default() },
       comm: comm.to_string(),
       path: None,
       fallback: comm.to_string(),
@@ -925,20 +1003,21 @@ mod tests {
     // rows without a path take their name from the fallback.
     let mut sampler = ProcSampler::new();
 
-    let first = sampler.update(vec![row(A, SEC, None, "a"), row(B, 0, Some(0), "b")], 0);
+    let first = sampler.update(vec![row(A, SEC, None, "a"), row(B, 0, Some(0), "b")], 0, None);
     assert_eq!(first.len(), 2);
     assert_eq!((first[0].cpu_pct, first[0].power_w), (0.0, None));
     assert_eq!((first[1].cpu_pct, first[1].power_w), (0.0, Some(0.0)));
     assert_eq!((first[0].name.as_str(), first[0].path.as_str()), ("a", ""));
     assert_eq!(first[0].user, "root");
 
-    let second = sampler.update(vec![row(A, 2 * SEC, None, "a"), row(B, SEC, Some(SEC), "b")], SEC);
+    let second =
+      sampler.update(vec![row(A, 2 * SEC, None, "a"), row(B, SEC, Some(SEC), "b")], SEC, None);
     assert_eq!((second[0].cpu_pct, second[0].power_w), (100.0, None)); // no energy counter
     assert_eq!((second[1].cpu_pct, second[1].power_w), (100.0, Some(1.0)));
     assert_eq!((second[0].cpu_time_ns, second[1].cpu_time_ns), (2 * SEC, SEC)); // the totals
 
     // A new command under the same pid is a new process: no spike, fresh name.
-    let third = sampler.update(vec![row(A, 9 * SEC, None, "c")], SEC);
+    let third = sampler.update(vec![row(A, 9 * SEC, None, "c")], SEC, None);
     assert_eq!(third[0].cpu_pct, 0.0);
     assert_eq!(third[0].name, "c");
     assert_eq!(sampler.known.len(), 1); // gone processes are forgotten
@@ -958,49 +1037,151 @@ mod tests {
     let shown = |p: &[ProcInfo]| (p[0].name.clone(), p[0].path.clone(), p[0].cpu_pct);
     let mut sampler = ProcSampler::new();
 
-    let first = sampler.update(vec![at(Some(helper), 0)], 0);
+    let first = sampler.update(vec![at(Some(helper), 0)], 0, None);
     assert_eq!(shown(&first), ("Google Chrome Helper".into(), helper.into(), 0.0));
-    let same = sampler.update(vec![at(Some(helper), SEC)], SEC);
+    let same = sampler.update(vec![at(Some(helper), SEC)], SEC, None);
     assert_eq!(shown(&same), ("Google Chrome Helper".into(), helper.into(), 100.0));
 
     // the other executable: its own name and path, no spike from the CPU time before the exec
-    let exec = sampler.update(vec![at(Some(gpu), 5 * SEC)], SEC);
+    let exec = sampler.update(vec![at(Some(gpu), 5 * SEC)], SEC, None);
     assert_eq!(shown(&exec), ("Google Chrome Helper (GPU)".into(), gpu.into(), 0.0));
 
     // a path that isn't readable for a tick keeps the last one
-    let unreadable = sampler.update(vec![at(None, 6 * SEC)], SEC);
+    let unreadable = sampler.update(vec![at(None, 6 * SEC)], SEC, None);
     assert_eq!(shown(&unreadable), ("Google Chrome Helper (GPU)".into(), gpu.into(), 100.0));
   }
 
   #[test]
-  fn ps_rows_average_cpu_over_three_intervals() {
+  fn ps_rows_keep_cpu_between_ps_runs() {
     let mut sampler = ProcSampler::new();
-    // (elapsed, CPU time of A from ps, CPU time of B from libproc), all in 10 ms
-    let ticks = [(0, 0, 0), (25, 1, 1), (100, 1, 2), (100, 2, 4), (100, 2, 6), (100, 6, 8)];
+    // (elapsed, CPU time of A from ps, ps run, CPU time of B from libproc), all in 10 ms
     let ms = |tens: u64| tens * 10_000_000;
+    let ticks = [
+      (0, 0, Some(0), 0),
+      (100, 0, None, 1),
+      (100, 0, None, 3),
+      (100, 6, Some(300), 4),
+      (100, 6, None, 5),
+      (100, 6, Some(200), 6),
+    ];
     let cpu: Vec<(f32, f32)> = ticks
       .iter()
-      .map(|&(elapsed, a, b)| {
+      .map(|&(elapsed, a, ps, b)| {
         let rows = vec![ps_row(A, ms(a), "a"), row(B, ms(b), Some(0), "b")];
-        let procs = sampler.update(rows, ms(elapsed));
+        let procs = sampler.update(rows, ms(elapsed), ps.map(ms));
         (procs[0].cpu_pct, procs[1].cpu_pct)
       })
       .collect();
 
-    // libproc: every interval on its own; ps: nothing for the baseline and the 250 ms warm-up
-    // (a 10 ms step there reads 4 %), then the average since up to 3 intervals back
-    let pct = |tens: u64, over: u64| (tens as f64 / over as f64 * 100.0) as f32;
-    let expected =
-      [(0.0, 0.0), (0.0, 4.0), (pct(1, 125), 1.0), (pct(2, 225), 2.0), (pct(1, 300), 2.0)];
-    assert_eq!(cpu[..5], expected);
-    assert_eq!(cpu[5].0, pct(5, 300), "the oldest interval left the average");
+    // libproc: every interval on its own; ps: the rate between two runs, kept in between
+    let expected = [(0.0, 0.0), (0.0, 1.0), (0.0, 2.0), (2.0, 1.0), (2.0, 1.0), (0.0, 1.0)];
+    assert_eq!(cpu, expected);
 
-    // a reused pid starts over, and, past the warm-up, gets a rate on its second sample, as a
-    // libproc row does
-    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100));
+    // a reused pid starts over and gets a rate on its second run, as a libproc row does
+    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100), Some(ms(100)));
     assert_eq!(procs[0].cpu_pct, 0.0);
-    let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100));
-    assert_eq!(procs[0].cpu_pct, pct(2, 100));
+    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100), None);
+    assert_eq!(procs[0].cpu_pct, 0.0);
+    let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100), Some(ms(200)));
+    assert_eq!(procs[0].cpu_pct, 1.0);
+  }
+
+  #[test]
+  fn args_start_after_the_padded_path_and_stop_before_the_environment() {
+    let cases: &[(i32, &[u8], Option<&str>)] = &[
+      (2, b"/bin/sleep\0\0\0\0\0\0sleep\0x\0KEY=1\0", Some("sleep x")),
+      // the path and its NUL fill 8 bytes: no padding
+      (2, b"/bin/ls\0ls\0-l\0KEY=1\0", Some("ls -l")),
+      // an empty `argv[0]` isn't padding
+      (2, b"/bin/sleep\0\0\0\0\0\0\0x\0KEY=1\0", Some(" x")),
+      (3, b"/bin/ls\0\0\0-l\0KEY=1\0", Some("  -l")),
+      (0, b"/bin/ls\0KEY=1\0", Some("")),
+      // not the layout: no padding, or cut before the arguments
+      (2, b"/bin/sleep\0sleep\0x\0KEY=1\0", None),
+      (2, b"/bin/sleep\0\0", None),
+      (2, b"/bin/sleep", None),
+    ];
+
+    for (argc, rest, args) in cases {
+      let buf = [&argc.to_ne_bytes(), *rest].concat();
+      let joined = parse_args(&buf).map(|args| args.join(" "));
+      assert_eq!(joined.as_deref(), *args, "{}", rest.escape_ascii());
+    }
+
+    assert_eq!(parse_args(b"\0\0"), None);
+  }
+
+  #[test]
+  fn known_processes_keep_what_only_an_exec_changes() {
+    let pid = std::process::id() as i32;
+    let sampler = ProcSampler::new();
+    let read =
+      |known: Option<&Known>| read_libproc(pid, sampler.flavor, sampler.timebase, known).unwrap();
+
+    let raw = read(None);
+    assert!(raw.path.is_some());
+    assert_ne!(raw.counters.uuid, [0; 16]);
+
+    let known = |start, uuid| Known {
+      uid: 1,
+      counters: Counters { start, uuid, ..raw.counters },
+      comm: "known".into(),
+      name: String::new(),
+      path: "/known".into(),
+      cpu_pct: 0.0,
+      started: Some((7, 8)),
+    };
+    let (start, uuid) = (raw.counters.start, raw.counters.uuid);
+    let same = read(Some(&known(start, uuid)));
+    let kept = (same.uid, same.comm.as_str(), same.path, same.started);
+    assert_eq!(kept, (1, "known", None, Some((7, 8))));
+
+    // a path not read yet is tried again
+    let unread = Known { path: String::new(), ..known(start, uuid) };
+    assert!(read(Some(&unread)).path.is_some());
+
+    for other in [known(start, [1; 16]), known(start + 1, uuid)] {
+      let full = read(Some(&other));
+      assert_eq!((full.comm.as_str(), full.path.is_some()), (raw.comm.as_str(), true));
+      assert_eq!(full.started, raw.started);
+    }
+  }
+
+  #[test]
+  fn ps_rows_are_reused_until_the_next_run() {
+    let launchd_mem = |procs: Vec<ProcInfo>| procs.iter().find(|p| p.pid == 1).unwrap().mem_bytes;
+    let mut sampler = ProcSampler::new();
+
+    sampler.sample();
+    sampler.ps_rows.get_mut(&1).unwrap().mem_bytes = 1;
+    assert_eq!(launchd_mem(sampler.sample()), 1);
+
+    sampler.ps_next = Some(Instant::now());
+    assert!(launchd_mem(sampler.sample()) > 1);
+  }
+
+  #[test]
+  fn an_exec_shows_on_the_next_sample() {
+    let (cmd, sleep) = ("read _; exec /bin/sleep 5", "/bin/sleep");
+    let mut child =
+      Command::new("/bin/sh").args(["-c", cmd]).stdin(Stdio::piped()).spawn().unwrap();
+    let pid = child.id() as i32;
+    let mut sampler = ProcSampler::new();
+    let path = |sampler: &mut ProcSampler| {
+      sampler.sample().into_iter().find(|p| p.pid == pid).map(|p| p.path)
+    };
+
+    let shell = path(&mut sampler).unwrap();
+    assert_ne!(shell, sleep);
+
+    drop(child.stdin.take()); // `read` returns at the end of its input
+    let started = Instant::now();
+    while path(&mut sampler).unwrap() != sleep {
+      assert!(started.elapsed() < Duration::from_secs(5), "no exec seen");
+    }
+
+    child.kill().unwrap();
+    child.wait().unwrap();
   }
 
   #[test]

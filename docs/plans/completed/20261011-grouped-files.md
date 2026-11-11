@@ -1,3 +1,5 @@
+Done: 2026-10-12, PR #97
+
 # Files list in the info overlay (roadmap item 7, first PR)
 
 The info overlay (`i`) lists the open files of a process in fd order today. This PR makes the
@@ -97,3 +99,7 @@ counted. Aim ≤ 200 production lines (`make loc REF=origin/main`), stop and rep
 - [x] `info.rs`: the filter and the typing keys on a divider above the list, the top border with
       the name and `finder` only; `boxes.rs`: a divider drawn with titles.
 - [x] `make check`, `make test`; commit `feat: filter on the divider of the info overlay`.
+
+## Result
+
++194 production lines. The overlay lists `exe` and `cwd` first, then files sorted by directory with their open mode, equal rows collapsed into `×N`, and devices, pipes and kqueues only counted, under a counts line and a divider that carries the filter. The directory rows of the first version were dropped after trying them, and reaching a cut row's full path moved to the next PR (#98: `c` copies it).

@@ -1,15 +1,23 @@
 //! HTTP serving and launchd support.
 
+use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::thread;
+use std::time::Duration;
 
+use macmon::sources::WithError;
 use macmon::{Metrics, SocInfo};
 
 use crate::metrics_to_json_value;
 
 pub type SharedMetrics = Arc<RwLock<Option<Metrics>>>;
+
+const DAEMON_PATH: &str = "/Library/LaunchDaemons/com.macmon.plist";
+const DAEMON_TARGET: &str = "system/com.macmon";
 
 fn escape_label_value(value: &str) -> String {
   value.replace('\\', r"\\").replace('\n', r"\n").replace('"', r#"\""#)
@@ -34,8 +42,15 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
     };
   }
 
-  // `gauge_any!`: a gauge every Mac and VM has.
+  // `gauge_any!`: a gauge every Mac and VM has; `?` before the value leaves it out without a value.
   macro_rules! gauge_any {
+    // This `?` isn't Rust's `?` operator but this macro's own marker for an `Option` value: the
+    // gauge is left out when it is `None`.
+    ($out:expr, $name:literal, $help:literal, ?$value:expr) => {
+      if let Some(value) = $value {
+        gauge_any!($out, $name, $help, value);
+      }
+    };
     ($out:expr, $name:literal, $help:literal, $value:expr) => {
       gauge_head!($out, $name, $help);
       let name = metric_name!($name);
@@ -76,16 +91,22 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   }
 
   let mut out = String::new();
-  if let Some(value) = m.temp.cpu_temp_avg {
-    gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", value);
-  }
-  if let Some(value) = m.temp.gpu_temp_avg {
-    gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", value);
-  }
+  gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", ?m.temp.cpu_temp_avg);
+  gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", ?m.temp.gpu_temp_avg);
   gauge_any!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
   gauge_any!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge_any!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
+  gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", ?m.memory.pressure_level);
+  gauge_any!(out, "memory_pressure_percent", "Memory pressure in percent, as in Activity Monitor", ?m.memory.pressure_percent);
+  gauge_any!(out, "net_in_bytes_per_second", "Bytes per second received by the Ethernet and Wi-Fi interfaces", ?m.net_in);
+  gauge_any!(out, "net_out_bytes_per_second", "Bytes per second sent by the Ethernet and Wi-Fi interfaces", ?m.net_out);
+  gauge_any!(out, "disk_read_bytes_per_second", "Bytes per second read from the disks", ?m.disk_read);
+  gauge_any!(out, "disk_write_bytes_per_second", "Bytes per second written to the disks", ?m.disk_write);
+  gauge_any!(out, "uptime_seconds", "Seconds since boot", ?m.uptime);
+  gauge_any!(out, "battery_percent", "Battery charge in percent", ?m.battery_percent);
+  gauge_any!(out, "battery_charging", "1 while the battery is charging, 0 otherwise", ?m.battery_charging.map(u8::from));
+  gauge_any!(out, "battery_plugged", "1 while external power is connected, 0 on battery", ?m.battery_plugged.map(u8::from));
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
@@ -107,13 +128,15 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE+DRAM+GPU SRAM power consumption in Watts", m.all_power);
+  gauge_mac!(out, "chip_power_watts", "Chip power consumption in Watts", m.chip_power);
+  gauge_mac!(out, "all_power_watts", "DEPRECATED: use macmon_chip_power_watts", m.all_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-  gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
-  gauge_mac!(out, "display_power_watts", "Built-in display backlight power in Watts", m.display_power);
-  gauge_mac!(out, "battery_power_watts", "Battery rail power in Watts", m.battery_power);
-  gauge_mac!(out, "dc_in_power_watts", "External DC input power in Watts", m.dc_in_power);
+  gauge_mac!(out, "dcs_power_watts", "DCS power consumption in Watts", ?m.dcs_power);
+  gauge_mac!(out, "media_power_watts", "Video encoder and image processor power consumption in Watts", ?m.media_power);
+  gauge_mac!(out, "gpu_ram_power_watts", "DEPRECATED: GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_any!(out, "gpu_memory_alloc_bytes", "System memory allocated by the GPU in bytes", ?m.gpu_mem_alloc);
+  gauge_any!(out, "gpu_memory_in_use_bytes", "System memory in use by the GPU in bytes", ?m.gpu_mem_in_use);
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -213,26 +236,32 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
-pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::error::Error>> {
-  let home = std::env::var("HOME")?;
-  let plist_path = format!("{home}/Library/LaunchAgents/com.macmon.plist");
+pub fn run(host: &str, port: u16, shared: SharedMetrics, soc: Arc<SocInfo>) -> WithError<()> {
+  let listener = TcpListener::bind((host, port))?;
+  eprintln!("macmon serving on http://{}", listener.local_addr()?);
+  eprintln!("  GET /json    → JSON metrics");
+  eprintln!("  GET /metrics → Prometheus format");
 
-  if !install {
-    let _ = std::process::Command::new("launchctl")
-      .args(["unload", &plist_path])
-      .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::null())
-      .status();
-    std::fs::remove_file(&plist_path)?;
-    eprintln!("macmon service uninstalled");
-    return Ok(());
+  for stream in listener.incoming() {
+    let Ok(stream) = stream else { continue };
+    let shared = Arc::clone(&shared);
+    let soc = Arc::clone(&soc);
+    thread::spawn(move || handle_conn(stream, shared, soc));
   }
 
-  let bin = std::env::current_exe()?;
-  let bin = bin.to_string_lossy();
-  let bin = escape_xml(&bin);
+  Ok(())
+}
+
+// MARK: launchd
+
+fn plist_text(bin: &str, host: &str, port: u16, user: Option<&str>) -> String {
+  let bin = escape_xml(bin);
   let host_xml = escape_xml(host);
-  let plist = format!(
+  let user = user.map(escape_xml);
+  let user = user.map(|x| format!("  <key>UserName</key>\n  <string>{x}</string>\n"));
+  let user = user.unwrap_or_default();
+
+  format!(
     r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -252,46 +281,151 @@ pub fn launchd(host: &str, port: u16, install: bool) -> Result<(), Box<dyn std::
   <true/>
   <key>KeepAlive</key>
   <true/>
-</dict>
+{user}</dict>
 </plist>
 "#
-  );
+  )
+}
 
-  let agents_dir = format!("{home}/Library/LaunchAgents");
-  std::fs::create_dir_all(&agents_dir)?;
+fn agent_path(home: &str) -> String {
+  format!("{home}/Library/LaunchAgents/com.macmon.plist")
+}
 
-  // unload silently in case it's already running
-  let _ = std::process::Command::new("launchctl")
-    .args(["unload", &plist_path])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status();
+fn is_root() -> bool {
+  unsafe { libc::geteuid() == 0 }
+}
 
-  std::fs::write(&plist_path, plist)?;
-  std::process::Command::new("launchctl").args(["load", &plist_path]).status()?;
-  eprintln!("macmon service installed: {plist_path}");
+/// A plain root shell has no SUDO_USER, or has root in it: a daemon must never run as root.
+fn daemon_user(sudo_user: Option<String>) -> Option<String> {
+  sudo_user.filter(|x| !x.is_empty() && x != "root")
+}
+
+/// HOME can't tell: sudo may keep the caller's or set root's.
+fn user_info(user: &str) -> Option<(u32, String)> {
+  let name = CString::new(user).ok()?;
+
+  let pw = unsafe { libc::getpwnam(name.as_ptr()) };
+  if pw.is_null() {
+    return None;
+  }
+
+  let dir = unsafe { CStr::from_ptr((*pw).pw_dir) };
+  Some((unsafe { (*pw).pw_uid }, dir.to_string_lossy().into_owned()))
+}
+
+/// Bootout fails when it isn't loaded, which is fine; loaded over SSH it sits in user/<uid>.
+fn remove_agent(uid: u32, home: &str) -> std::io::Result<bool> {
+  for domain in ["gui", "user"] {
+    let target = format!("{domain}/{uid}/com.macmon");
+    let _ = Command::new("launchctl").args(["bootout", &target]).output();
+  }
+
+  let path = agent_path(home);
+  let found = Path::new(&path).exists();
+  if found {
+    std::fs::remove_file(&path)?;
+  }
+
+  Ok(found)
+}
+
+pub fn install_agent(host: &str, port: u16) -> WithError<()> {
+  if is_root() {
+    return Err("the macmon agent belongs to your user, run without sudo".into());
+  }
+
+  if Path::new(DAEMON_PATH).exists() {
+    return Err(
+      "only one macmon service at a time, first run: sudo macmon serve --uninstall".into(),
+    );
+  }
+
+  let home = std::env::var("HOME")?;
+  let path = agent_path(&home);
+
+  let bin = std::env::current_exe()?;
+  let plist = plist_text(&bin.to_string_lossy(), host, port, None);
+
+  std::fs::create_dir_all(format!("{home}/Library/LaunchAgents"))?;
+  remove_agent(unsafe { libc::getuid() }, &home)?;
+
+  std::fs::write(&path, plist)?;
+  Command::new("launchctl").args(["load", &path]).status()?;
+  eprintln!("macmon service installed: {path}");
   eprintln!("configured to serve on {}", serve_url(host, port));
 
   Ok(())
 }
 
-pub fn run(
-  host: &str,
-  port: u16,
-  shared: SharedMetrics,
-  soc: Arc<SocInfo>,
-) -> Result<(), Box<dyn std::error::Error>> {
-  let listener = TcpListener::bind((host, port))?;
-  eprintln!("macmon serving on http://{}", listener.local_addr()?);
-  eprintln!("  GET /json    → JSON metrics");
-  eprintln!("  GET /metrics → Prometheus format");
-
-  for stream in listener.incoming() {
-    let Ok(stream) = stream else { continue };
-    let shared = Arc::clone(&shared);
-    let soc = Arc::clone(&soc);
-    thread::spawn(move || handle_conn(stream, shared, soc));
+pub fn install_daemon(host: &str, port: u16) -> WithError<()> {
+  if !is_root() {
+    return Err("installing needs sudo, or --agent to start at login without it".into());
   }
+
+  let Some(user) = daemon_user(std::env::var("SUDO_USER").ok()) else {
+    return Err("the macmon daemon must not run as root, use sudo from your account".into());
+  };
+
+  let bin = std::env::current_exe()?;
+  std::fs::write(DAEMON_PATH, plist_text(&bin.to_string_lossy(), host, port, Some(&user)))?;
+
+  let _ = Command::new("launchctl").args(["bootout", DAEMON_TARGET]).output();
+
+  // right after bootout launchd may still be removing the old service
+  let mut cmd = Command::new("launchctl");
+  cmd.args(["bootstrap", "system", DAEMON_PATH]);
+
+  let mut up = false;
+  for _ in 0..6 {
+    up = cmd.output()?.status.success();
+    if up {
+      break;
+    }
+
+    thread::sleep(Duration::from_millis(500));
+  }
+
+  if !up && !cmd.status()?.success() {
+    return Err(format!("launchctl bootstrap failed, {DAEMON_PATH} stays for next boot").into());
+  }
+
+  eprintln!("macmon service installed: {DAEMON_PATH}, runs as {user}");
+  eprintln!("configured to serve on {}", serve_url(host, port));
+
+  // after the daemon is up, so a failed install keeps the agent; launchd retries the port meanwhile
+  match user_info(&user).map(|(uid, home)| remove_agent(uid, &home)) {
+    Some(Ok(true)) => eprintln!("macmon agent of {user} removed"),
+    Some(Err(e)) => eprintln!("macmon agent of {user} not removed: {e}"),
+    _ => {}
+  }
+
+  Ok(())
+}
+
+pub fn uninstall() -> WithError<()> {
+  let daemon = Path::new(DAEMON_PATH).exists();
+
+  if daemon && is_root() {
+    let _ = Command::new("launchctl").args(["bootout", DAEMON_TARGET]).output();
+    std::fs::remove_file(DAEMON_PATH)?;
+  }
+
+  let owner = match is_root() {
+    true => daemon_user(std::env::var("SUDO_USER").ok()).and_then(|x| user_info(&x)),
+    false => Some((unsafe { libc::getuid() }, std::env::var("HOME")?)),
+  };
+
+  let agent = owner.map(|(uid, home)| remove_agent(uid, &home)).transpose()?.unwrap_or(false);
+
+  if daemon && !is_root() {
+    return Err("the macmon daemon needs root, run: sudo macmon serve --uninstall".into());
+  }
+
+  if !daemon && !agent {
+    return Err("the macmon service is not installed".into());
+  }
+
+  eprintln!("macmon service uninstalled");
 
   Ok(())
 }
@@ -300,7 +434,43 @@ pub fn run(
 mod tests {
   use macmon::{CpuTierMetrics, Metrics, SocInfo};
 
-  use super::{escape_label_value, escape_xml, serve_url, to_json, to_prometheus};
+  use super::{
+    daemon_user, escape_label_value, escape_xml, plist_text, serve_url, to_json, to_prometheus,
+  };
+
+  const AGENT_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.macmon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/macmon</string>
+    <string>serve</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--port</string>
+    <string>9090</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+"#;
+
+  #[test]
+  fn optional_power_is_null_without_a_source() {
+    let metrics = Metrics { dcs_power: Some(0.25), ..Default::default() };
+    let json = to_json(&metrics, &SocInfo::default());
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!((&json["dcs_power"], &json["media_power"]), (&0.25.into(), &().into()));
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_dcs_power_watts{chip=\"\"} 0.25\n"));
+    assert!(!output.contains("macmon_media_"));
+  }
 
   #[test]
   fn unavailable_temperature_has_no_prometheus_gauge() {
@@ -313,16 +483,106 @@ mod tests {
   }
 
   #[test]
-  fn smc_power_gauges_include_zero_and_measured_values() {
-    let metrics = Metrics { battery_power: 1.25, dc_in_power: 10.0, ..Default::default() };
+  fn memory_pressure_gauge_only_with_a_value() {
+    let mut metrics = Metrics::default();
     let output = to_prometheus(&metrics, &SocInfo::default());
-    assert!(output.contains("macmon_display_power_watts{chip=\"\"} 0\n"));
-    assert!(output.contains("macmon_battery_power_watts{chip=\"\"} 1.25\n"));
-    assert!(output.contains("macmon_dc_in_power_watts{chip=\"\"} 10\n"));
-    let output = to_prometheus(&metrics, &SocInfo { vm: true, ..Default::default() });
-    for field in ["display", "battery", "dc_in"] {
-      assert!(!output.contains(&format!("macmon_{field}_power_watts")));
+    assert!(!output.contains("macmon_memory_pressure_"));
+
+    metrics.memory.pressure_level = Some(1);
+    metrics.memory.pressure_percent = Some(25);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("# TYPE macmon_memory_pressure_level gauge\n"));
+    assert!(output.contains("macmon_memory_pressure_level{chip=\"\"} 1\n"));
+    assert!(output.contains("# TYPE macmon_memory_pressure_percent gauge\n"));
+    assert!(output.contains("macmon_memory_pressure_percent{chip=\"\"} 25\n"));
+  }
+
+  #[test]
+  fn net_and_disk_gauges_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(!output.contains("macmon_net_") && !output.contains("macmon_disk_"));
+
+    metrics.net_in = Some(1000);
+    metrics.disk_write = Some(2000);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_net_in_bytes_per_second{chip=\"\"} 1000\n"));
+    assert!(output.contains("macmon_disk_write_bytes_per_second{chip=\"\"} 2000\n"));
+    assert!(!output.contains("macmon_net_out") && !output.contains("macmon_disk_read"));
+  }
+
+  #[test]
+  fn net_and_disk_in_json_are_numbers_or_null() {
+    let metrics = Metrics { net_out: Some(1000), ..Default::default() };
+    let json = to_json(&metrics, &SocInfo::default());
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json.get("net_in"), Some(&serde_json::Value::Null));
+    assert_eq!(json.get("net_out"), Some(&serde_json::json!(1000)));
+    assert_eq!(json.get("disk_read"), Some(&serde_json::Value::Null));
+  }
+
+  #[test]
+  fn uptime_and_battery_gauges_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    for name in ["uptime", "battery"] {
+      assert!(!output.contains(&format!("macmon_{name}")), "{name}");
     }
+
+    metrics.uptime = Some(3600);
+    (metrics.battery_percent, metrics.battery_charging) = (Some(87), Some(true));
+    metrics.battery_plugged = Some(false);
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    for line in [
+      "macmon_uptime_seconds{chip=\"\"} 3600\n",
+      "macmon_battery_percent{chip=\"\"} 87\n",
+      "macmon_battery_charging{chip=\"\"} 1\n",
+      "macmon_battery_plugged{chip=\"\"} 0\n",
+    ] {
+      assert!(output.contains(line), "{line}");
+    }
+  }
+
+  #[test]
+  fn uptime_and_battery_in_json_are_values_or_null() {
+    let null = Some(serde_json::Value::Null);
+    let fields = |metrics: &Metrics| {
+      let json = to_json(metrics, &SocInfo::default());
+      let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+      ["uptime", "battery_percent", "battery_charging", "battery_plugged"]
+        .map(|x| json.get(x).cloned())
+    };
+    assert_eq!(fields(&Metrics::default()), [null.clone(), null.clone(), null.clone(), null]);
+
+    let metrics = Metrics {
+      uptime: Some(3600),
+      battery_percent: Some(87),
+      battery_charging: Some(false),
+      battery_plugged: Some(true),
+      ..Default::default()
+    };
+    let values = [
+      serde_json::json!(3600),
+      serde_json::json!(87),
+      serde_json::json!(false),
+      serde_json::json!(true),
+    ];
+    assert_eq!(fields(&metrics), values.map(Some));
+  }
+
+  #[test]
+  fn memory_pressure_in_json_is_a_number_or_null() {
+    let mut metrics = Metrics::default();
+    let fields = |metrics: &Metrics| {
+      let json = to_json(metrics, &SocInfo::default());
+      let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+      ["pressure_level", "pressure_percent"].map(|x| json["memory"].get(x).cloned())
+    };
+    assert_eq!(fields(&metrics), [Some(serde_json::Value::Null), Some(serde_json::Value::Null)]);
+
+    metrics.memory.pressure_level = Some(2);
+    metrics.memory.pressure_percent = Some(59);
+    assert_eq!(fields(&metrics), [Some(serde_json::json!(2)), Some(serde_json::json!(59))]);
   }
 
   #[test]
@@ -337,17 +597,27 @@ mod tests {
     };
 
     // a Mac: every gauge, in the same order
-    let power =
-      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram", "display", "battery", "dc_in"]
-        .map(|x| format!("{x}_power_watts"));
+    let power = ["cpu", "gpu", "ane", "chip", "all", "sys", "ram", "gpu_ram"]
+      .map(|x| format!("{x}_power_watts"));
     let freqs = ["ecpu_freq_mhz", "pcpu_freq_mhz", "cpu_tier_freq_mhz", "gpu_freq_mhz"];
     let mac = types(false);
-    assert_eq!(mac.len(), 32, "{mac:?}"); // no temperature and fan gauges without readings
+    assert_eq!(mac.len(), 30, "{mac:?}"); // no temperature and fan gauges without readings
     assert!(power.iter().chain(&freqs.map(String::from)).all(|x| mac.contains(x)), "{mac:?}");
 
     // a VM: the same without the power and frequency gauges
     let expected = mac.iter().filter(|x| !power.contains(x) && !freqs.contains(&x.as_str()));
     assert_eq!(types(true), expected.cloned().collect::<Vec<_>>());
+  }
+
+  #[test]
+  fn gpu_memory_gauges_only_with_a_value() {
+    let mut metrics = Metrics::default();
+    assert!(!to_prometheus(&metrics, &SocInfo::default()).contains("macmon_gpu_memory_"));
+
+    (metrics.gpu_mem_alloc, metrics.gpu_mem_in_use) = (Some(2000), Some(1000));
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_gpu_memory_alloc_bytes{chip=\"\"} 2000\n"));
+    assert!(output.contains("macmon_gpu_memory_in_use_bytes{chip=\"\"} 1000\n"));
   }
 
   #[test]
@@ -366,6 +636,27 @@ mod tests {
 
     let output = to_prometheus(&Metrics::default(), &SocInfo::default());
     assert!(!output.contains("# TYPE macmon_cpu_tier_"));
+  }
+
+  #[test]
+  fn agent_plist_stays_the_same() {
+    assert_eq!(plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, None), AGENT_PLIST);
+  }
+
+  #[test]
+  fn daemon_plist_names_its_user() {
+    let user = "  <key>UserName</key>\n  <string>a&amp;b</string>\n";
+    let expected = AGENT_PLIST.replace("</dict>", &format!("{user}</dict>"));
+    assert_eq!(plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, Some("a&b")), expected);
+  }
+
+  #[test]
+  fn daemon_needs_a_non_root_sudo_user() {
+    assert_eq!(daemon_user(Some("user".into())), Some("user".into()));
+
+    for value in [None, Some(String::new()), Some("root".into())] {
+      assert_eq!(daemon_user(value), None);
+    }
   }
 
   #[test]

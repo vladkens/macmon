@@ -7,7 +7,7 @@ use std::ops::Range;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
@@ -313,9 +313,9 @@ pub(super) fn render_bottom_border(
 
 /// How a metric box draws its history.
 enum Scale {
-  /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load, and `v`
-  /// switches it to a gauge of the current `load` (`0.0..=1.0`).
-  Load { max: u64, load: f64 },
+  /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load or in
+  /// `color`, and `v` switches it to a gauge of the current `load` (`0.0..=1.0`).
+  Load { max: u64, load: f64, color: Option<Color> },
   /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
   /// original; no gauge.
   Power,
@@ -370,10 +370,10 @@ impl App {
       let inner = draw_box(f, r, fit_titles(r.width, metric.titles));
       let graph = Graph::new(metric.data).three_levels(self.three_level_bars);
       match metric.scale {
-        Scale::Load { load, .. } if self.cfg.view_type == ViewType::Gauge => {
-          f.render_widget(Gauge::new(load), inner)
+        Scale::Load { load, color, .. } if self.cfg.view_type == ViewType::Gauge => {
+          f.render_widget(Gauge::new(load, color), inner)
         }
-        Scale::Load { max, .. } => f.render_widget(graph.max(max), inner),
+        Scale::Load { max, color, .. } => f.render_widget(graph.max(max).color(color), inner),
         Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
       }
 
@@ -459,11 +459,12 @@ impl App {
     MetricBox {
       titles: vec![Titles::new(full), Titles::new(short)],
       data: &series.items,
-      scale: Scale::Load { max: 100, load: series.ratio },
+      scale: Scale::Load { max: 100, load: series.ratio, color: None },
     }
   }
 
-  /// RAM and swap usage over the RAM usage history scaled to the total RAM, or a gauge. The total
+  /// RAM and swap usage over the memory pressure history, or a gauge, in the color of the pressure
+  /// level; without a reading, over the RAM usage history scaled to the total RAM. The total
   /// RAM is in the chip title, so the title shows what is used: `RAM 16.81 GB (70.0%) · SWAP 2.37
   /// / 3.0 GB`, or the percentages `RAM 70% · SWAP 79%` / `RAM 70% SW 79%` when that doesn't fit
   /// (without swap only the RAM part). Narrower, the swap part drops whole (`RAM 70%`), then the
@@ -491,7 +492,15 @@ impl App {
 
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
     titles.push(Titles::default());
-    MetricBox { titles, data: &mem.items, scale: Scale::Load { max: mem.ram_total, load } }
+    let scale = match mem.pressure_percent {
+      // the levels 0, 1, 2 are the green, yellow and red of the gradient
+      Some(x) => {
+        let color = Some(gradient(f64::from(mem.pressure_level.unwrap_or(0)) / 2.0));
+        Scale::Load { max: 100, load: f64::from(x) / 100.0, color }
+      }
+      None => Scale::Load { max: mem.ram_total, load, color: None },
+    };
+    MetricBox { titles, data: &mem.items, scale }
   }
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
@@ -528,7 +537,7 @@ impl App {
     if self.sys_power.items.first().is_some_and(|&mw| mw > 0) {
       self.power_box("Total", &self.sys_power, None)
     } else {
-      self.power_box("Power", &self.all_power, None)
+      self.power_box("Power", &self.chip_power, None)
     }
   }
 }

@@ -14,7 +14,7 @@ use std::io::{self, Stdout, Write, stdout};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use info::Info;
@@ -108,14 +108,13 @@ fn set_mouse_capture(out: &mut impl Write, on: bool, want: bool) -> io::Result<b
 // MARK: Threads
 
 enum Event {
-  Update(Box<Metrics>),
+  /// Metrics with the processes sampled on the same tick, if any, and the showing they are of.
+  Update {
+    metrics: Box<Metrics>,
+    procs: Option<(u64, Vec<ProcInfo>)>,
+  },
   /// The sampler failed: the app ends with this error.
   Failed(String),
-  /// A process sample with the number of the panel showing it was started in.
-  Procs {
-    showing: u64,
-    procs: Vec<ProcInfo>,
-  },
   Key(KeyEvent),
   Mouse(MouseEvent),
   /// The terminal window lost focus.
@@ -145,8 +144,15 @@ fn input_event(event: event::Event) -> Option<Event> {
   }
 }
 
-/// Window of the first process sample after the panel shows up, so the list fills in quickly.
-const PROCS_WARMUP: Duration = Duration::from_millis(TUI_MIN_MS as u64);
+/// Least time between process samples, the baseline included: the first list comes this long
+/// after the panel shows up, and at shorter intervals the list skips ticks.
+const PROCS_MIN_GAP: Duration = Duration::from_millis(250);
+
+/// Whether processes sampled at `at` are at least `PROCS_MIN_GAP` after the previous sample at
+/// `last`.
+fn procs_due(last: Instant, at: Instant) -> bool {
+  at.saturating_duration_since(last) >= PROCS_MIN_GAP
+}
 
 /// Sends input events; stops once the app is gone. Nothing redraws on a timer: every frame
 /// follows an event (a sample, an input, a resize), as nothing on screen changes without one.
@@ -162,38 +168,17 @@ fn run_inputs_thread(tx: mpsc::Sender<Event>) {
   });
 }
 
-/// Sends metrics: the first sample after 100 ms, then one per interval; stops once the app is
-/// gone or after an error.
-fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>) {
-  thread::spawn(move || {
-    let sample = || -> WithError<()> {
-      let mut sampler = Sampler::new()?;
-      let mut window = 100;
-
-      loop {
-        let metrics = sampler.get_metrics(window)?;
-        if tx.send(Event::Update(Box::new(metrics))).is_err() {
-          return Ok(());
-        }
-        window = msec.read().map_or(TUI_MIN_MS, |x| *x).max(TUI_MIN_MS);
-      }
-    };
-    if let Err(err) = sample() {
-      let _ = tx.send(Event::Failed(err.to_string()));
-    }
-  });
-}
-
-/// Whether the process panel is on screen, shared with the process thread, which samples only
-/// while it is. Every change wakes the thread, and every show starts a new showing, so the thread
-/// also notices a hide when the panel is back before it gets to look.
+/// Whether the process panel is on screen, shared with the sampling thread, which samples
+/// processes only while it is. Every change, and a new interval, wakes the thread, and every show
+/// starts a new showing, so the thread also notices a hide when the panel is back before it gets
+/// to look.
 #[derive(Debug, Default)]
 struct ProcsShown {
   state: Mutex<Showing>,
   changed: Condvar,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default)]
 struct Showing {
   /// The panel is on screen.
   on: bool,
@@ -216,59 +201,105 @@ impl ProcsShown {
     }
   }
 
-  /// Blocks until the panel is on screen; returns the number of that showing.
-  fn wait_shown(&self) -> u64 {
-    let state = self.changed.wait_while(self.state.lock().unwrap(), |state| !state.on);
-    state.unwrap().count
-  }
-
-  /// Waits `timeout`, or less once the showing `count` ends (a hide, also with a show right
-  /// after it); returns whether it goes on.
-  fn wait_while_shown(&self, count: u64, timeout: Duration) -> bool {
-    let same = |state: &mut Showing| *state == Showing { on: true, count };
-    let state = self.state.lock().unwrap();
-    let (mut state, _) = self.changed.wait_timeout_while(state, timeout, same).unwrap();
-    same(&mut state)
-  }
-}
-
-/// Sampler of a showing in `run_procs_thread`: samples processes with a new `ProcSampler`.
-fn proc_sampler() -> impl FnMut() -> Vec<ProcInfo> {
-  let mut sampler = ProcSampler::new();
-  move || sampler.sample()
-}
-
-/// Sends `Event::Procs` every `msec` while the process panel is `shown` and blocks otherwise.
-/// Each showing gets a new sampler from `new_sampler`, so rates after a hide don't average over
-/// the hidden time; a hide ends the wait for the next sample at once, also during a long
-/// interval. Every sample carries the showing it was started in, so the app can drop one that
-/// a hide (and maybe a show) overtook while it ran. Exits when the receiver is gone.
-fn run_procs_thread<S: FnMut() -> Vec<ProcInfo>>(
-  tx: mpsc::Sender<Event>,
-  msec: Arc<RwLock<u32>>,
-  shown: Arc<ProcsShown>,
-  new_sampler: impl Fn() -> S + Send + 'static,
-) -> JoinHandle<()> {
-  thread::spawn(move || {
-    loop {
-      let showing = shown.wait_shown();
-
-      // the first sample only sets the baseline: its CPU and power rates are zero
-      let started = Instant::now();
-      let mut sample = new_sampler();
-      sample();
-      let mut wait = PROCS_WARMUP.saturating_sub(started.elapsed());
-
-      while shown.wait_while_shown(showing, wait) {
-        let started = Instant::now();
-        if tx.send(Event::Procs { showing, procs: sample() }).is_err() {
-          return;
-        }
-        let interval = Duration::from_millis((*msec.read().unwrap()).max(TUI_MIN_MS).into());
-        wait = interval.saturating_sub(started.elapsed());
-      }
+  /// Sets the interval in `msec`; a change wakes the sampling thread. Under the lock of the
+  /// state, so the thread can't miss it between its check and its wait.
+  fn set_interval(&self, msec: &RwLock<u32>, interval: u32) {
+    let _state = self.state.lock().unwrap();
+    let mut msec = msec.write().unwrap();
+    if *msec != interval {
+      *msec = interval;
+      self.changed.notify_all();
     }
-  })
+  }
+
+  /// Waits until `deadline`, or less once the showing isn't `showing` any more (also a hide with
+  /// a show right after it) or `msec` isn't `interval`; returns the showing then.
+  fn wait_change(
+    &self,
+    showing: Option<u64>,
+    msec: &RwLock<u32>,
+    interval: u32,
+    deadline: Instant,
+  ) -> Option<u64> {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    let same = |state: &mut Showing| {
+      state.on.then_some(state.count) == showing && *msec.read().unwrap() == interval
+    };
+    let (state, _) =
+      self.changed.wait_timeout_while(self.state.lock().unwrap(), timeout, same).unwrap();
+    state.on.then_some(state.count)
+  }
+}
+
+/// Sends `Event::Update` with metrics on every tick of the interval in `msec`: the first after
+/// 100 ms, then anchored on the previous tick. A shorter interval moves the pending tick closer
+/// at once, a longer one applies after it. While the panel is `shown` the update also carries
+/// processes, when the tick is at least `PROCS_MIN_GAP` after the previous process sample. Each
+/// showing gets a new process sampler with a baseline, so rates don't span the hidden time, and
+/// moves the next tick to `PROCS_MIN_GAP` after it, so the list fills in quickly (also the first
+/// tick, as the panel shows on the first frame). Process samples carry their showing, so the app
+/// can drop one a hide overtook. Stops once the app is gone or after a metrics error.
+fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Arc<ProcsShown>) {
+  thread::spawn(move || {
+    let sample = || -> WithError<()> {
+      let period = |interval: u32| Duration::from_millis(interval.max(TUI_MIN_MS).into());
+      let mut sampler = Sampler::new()?;
+      let mut interval = *msec.read().unwrap();
+      let mut last_tick = Instant::now();
+      let mut tick = last_tick + Duration::from_millis(100);
+      // the showing, its sampler and the start of its last sample
+      let mut procs: Option<(u64, ProcSampler, Instant)> = None;
+
+      loop {
+        let showing = procs.as_ref().map(|p| p.0);
+        let now_showing = shown.wait_change(showing, &msec, interval, tick);
+        if now_showing != showing {
+          match now_showing {
+            // the panel was hidden: stop sampling processes
+            None => procs = None,
+            // the panel was shown (or hidden and shown again): a new sampler and its baseline,
+            // which has no rates yet, and the first list `PROCS_MIN_GAP` later
+            Some(showing) => {
+              let (started, mut sampler) = (Instant::now(), ProcSampler::new());
+              sampler.sample();
+              procs = Some((showing, sampler, started));
+              tick = started + PROCS_MIN_GAP;
+            }
+          }
+
+          continue;
+        }
+
+        let new_interval = *msec.read().unwrap();
+        if new_interval != interval {
+          interval = new_interval;
+          tick = tick.min(crate::next_tick(last_tick, period(interval), Instant::now()));
+          continue;
+        }
+
+        // metrics first, so they stay on the tick and their windows even; processes after, as
+        // their windows are coarse (>= 250 ms) and a slow `ps` delays only the list
+        let metrics = Box::new(sampler.get_metrics_now()?);
+        let list = match &mut procs {
+          Some((showing, sampler, last)) if procs_due(*last, tick) => {
+            *last = tick;
+            Some((*showing, sampler.sample()))
+          }
+          _ => None,
+        };
+        if tx.send(Event::Update { metrics, procs: list }).is_err() {
+          return Ok(());
+        }
+
+        last_tick = tick;
+        tick = crate::next_tick(tick, period(interval), Instant::now());
+      }
+    };
+
+    if let Err(err) = sample() {
+      let _ = tx.send(Event::Failed(err.to_string()));
+    }
+  });
 }
 
 // MARK: App
@@ -286,7 +317,7 @@ pub struct App {
   cpu_power: PowerStore,
   gpu_power: PowerStore,
   ane_power: PowerStore,
-  all_power: PowerStore,
+  chip_power: PowerStore,
   sys_power: PowerStore,
 
   cpu_temp: TempStore,
@@ -300,7 +331,7 @@ pub struct App {
 
   /// Process panel state with the latest process list (none until the first sample with rates).
   proc_view: ProcView,
-  /// Whether the process panel is on screen; the process thread samples only then.
+  /// Whether the process panel is on screen; the sampling thread samples processes only then.
   procs_shown: Arc<ProcsShown>,
   /// The window of the last frame has room for the process list, whether it is shown or not;
   /// `p` works only then (no room before the first frame).
@@ -331,7 +362,7 @@ impl App {
     self.cpu_power.push(data.cpu_power as f64);
     self.gpu_power.push(data.gpu_power as f64);
     self.ane_power.push(data.ane_power as f64);
-    self.all_power.push(data.all_power as f64);
+    self.chip_power.push(data.chip_power as f64);
     self.sys_power.push(data.sys_power as f64);
 
     self.clusters.push(&data);
@@ -371,7 +402,9 @@ impl App {
     }
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
-      if let Some(info) = &mut self.info {
+      if let Some(info) = &mut self.info
+        && !self.proc_view.paused
+      {
         info.update_proc(self.proc_view.procs().unwrap_or_default());
         info.refresh(&*self.kill.sys);
       }
@@ -379,7 +412,7 @@ impl App {
   }
 
   /// Applies one event. Returns `Break` when the app should quit. Keys can change the interval,
-  /// which `msec` hands on to the sampling threads.
+  /// which `msec` hands on to the sampling thread.
   fn handle_event(&mut self, event: Event, msec: &RwLock<u32>) -> ControlFlow<()> {
     let flow = match event {
       Event::Key(key) => self.handle_key(key),
@@ -387,12 +420,12 @@ impl App {
         self.handle_mouse(mouse);
         return ControlFlow::Continue(());
       }
-      Event::Update(data) => {
-        self.update_metrics(*data);
-        return ControlFlow::Continue(());
-      }
-      Event::Procs { showing, procs } => {
-        self.update_procs(showing, procs);
+      Event::Update { metrics, procs } => {
+        self.update_metrics(*metrics);
+        if let Some((showing, procs)) = procs {
+          self.update_procs(showing, procs);
+        }
+
         return ControlFlow::Continue(());
       }
       // switching away is done typing: keys back as shortcuts, the filter stays
@@ -405,7 +438,7 @@ impl App {
       Event::Failed(_) => return ControlFlow::Break(()),
     };
 
-    *msec.write().unwrap() = self.cfg.interval();
+    self.procs_shown.set_interval(msec, self.cfg.interval());
     flow
   }
 
@@ -433,6 +466,10 @@ impl App {
     if let Some(mut info) = self.info.take() {
       // the help opens over it, unless `?` is typed into its filter; the overlay sees the key
       // too (it clears `copied`)
+      if key.code == KeyCode::Char(' ') && !info.typing {
+        self.proc_view.toggle_pause();
+      }
+
       let help = key.code == KeyCode::Char('?') && !info.typing;
       self.help = help.then_some(0);
       self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
@@ -460,8 +497,10 @@ impl App {
       KeyCode::Char('v') => self.cfg.toggle_view_type(),
       // the last `Char` arm: it takes every character left while the list is on screen
       KeyCode::Char(c) if self.procs_visible() => match (c, self.proc_view.selected()) {
-        ('i', Some(proc)) => self.info = Some(Info::new(proc, &*self.kill.sys)),
-        ('k', Some(proc)) => self.kill.open(proc),
+        ('i', Some(proc)) if !self.proc_view.exited(proc) => {
+          self.info = Some(Info::new(proc, &*self.kill.sys))
+        }
+        ('k', Some(proc)) if !self.proc_view.exited(proc) => self.kill.open(proc),
         ('e', Some(proc)) if !proc.path.is_empty() => self.kill.sys.reveal(&proc.path),
         ('c', Some(proc)) if !proc.path.is_empty() => {
           self.kill.sys.copy(&proc.path);
@@ -530,7 +569,7 @@ impl App {
     self.render_metrics_box(f, &plan);
     if let Some(r) = plan.proc {
       self.render_proc_box(f, r);
-      self.info.iter_mut().for_each(|info| info.render(f, r));
+      self.info.iter_mut().for_each(|info| info.render(f, r, self.proc_view.paused));
       self.kill.render(f, r);
     }
     if let Some(scroll) = self.help {
@@ -546,8 +585,7 @@ impl App {
     let msec = Arc::new(RwLock::new(self.cfg.interval()));
 
     let (tx, rx) = mpsc::channel::<Event>();
-    run_sampler_thread(tx.clone(), msec.clone());
-    run_procs_thread(tx.clone(), msec.clone(), self.procs_shown.clone(), proc_sampler);
+    run_sampler_thread(tx.clone(), msec.clone(), self.procs_shown.clone());
 
     // the guard restores the terminal on every way out of here, `?` included
     let (mut term, _guard) = enter_term()?;
@@ -575,9 +613,9 @@ impl App {
 mod tests {
   use std::num::NonZeroU16;
   use std::ops::ControlFlow;
+  use std::sync::RwLock;
   use std::sync::atomic::AtomicBool;
-  use std::sync::{Arc, Mutex, RwLock, mpsc};
-  use std::time::Duration;
+  use std::time::{Duration, Instant};
 
   use macmon::{CpuTierInfo, CpuTierMetrics, FanMetric, MemMetrics, Metrics, SocInfo, TempMetrics};
   use ratatui::Terminal;
@@ -593,7 +631,7 @@ mod tests {
   use super::kill::tests::FakeSys;
   use super::layout::Metric;
   use super::theme::{self, gradient};
-  use super::{App, Event, restore_term_once, run_procs_thread};
+  use super::{App, Event, ProcsShown, procs_due, restore_term_once};
   use crate::config::{Config, ProcSort, RatioMode, TUI_MAX_MS, TUI_MIN_MS, TempConfig, ViewType};
   use crate::fds::{Kind, OpenFile};
   use crate::procs::ProcInfo;
@@ -645,6 +683,7 @@ mod tests {
         ram_usage: 20 << 30,
         swap_total: 2 << 30,
         swap_usage: 1 << 30,
+        ..Default::default()
       },
       fans: vec![FanMetric { name: "fan0".to_string(), rpm: 1200, max_rpm: Some(6000) }],
       cpu_tiers: vec![cpu_tier("E", 1800, 0.42, 0.5), cpu_tier("P", 3200, 0.77, 0.8)],
@@ -654,7 +693,7 @@ mod tests {
       cpu_power: 4.5,
       gpu_power: 2.0,
       ane_power: 0.1,
-      all_power: 6.6,
+      chip_power: 6.6,
       sys_power: 12.0,
       ..Default::default()
     }
@@ -994,6 +1033,24 @@ mod tests {
     assert!(press(&mut app, KeyCode::Esc).is_continue());
     assert_eq!(app.proc_view.selected_pid(), None);
     assert!(app.wants_mouse());
+  }
+
+  #[test]
+  fn disabling_a_saved_filter_does_not_report_no_match_for_an_empty_sample() {
+    let mut app = app_with_procs(varied_procs());
+    for c in "/nothing-matches".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+
+    assert!(press(&mut app, KeyCode::Enter).is_continue());
+    assert!(screen_text(&render_buffer(&mut app, 200, 50)).contains("no process matches"));
+    assert!(app.handle_key(key('f')).is_continue());
+    app.proc_view.set_procs(vec![]);
+    let screen = screen_text(&render_buffer(&mut app, 200, 50));
+    assert!(!screen.contains("no process matches"));
+    assert!(screen.contains("proc 0 ─ / nothing-matches"));
+    assert!(app.handle_key(key('f')).is_continue());
+    assert!(screen_text(&render_buffer(&mut app, 200, 50)).contains("no process matches"));
   }
 
   #[test]
@@ -1419,6 +1476,7 @@ mod tests {
           ram_usage: (16.81 * GIB) as u64,
           swap_total: if swap { 3 << 30 } else { 0 },
           swap_usage: if swap { (2.37 * GIB) as u64 } else { 0 },
+          ..Default::default()
         }
       })
     };
@@ -1446,6 +1504,42 @@ mod tests {
         let top = box_top(&app, &buf, Metric::Ram);
         assert_eq!(top, format!("╭{title}{dashes}╮"), "swap {has_swap} at {width}");
       }
+    }
+  }
+
+  #[test]
+  fn ram_box_plots_the_pressure_in_the_color_of_its_level() {
+    use ratatui::style::Color::{Green, Red, Yellow};
+
+    // (RAM %, level, pressure %, color of the newest bar, whether it reaches the top); the last
+    // two rows have no reading, so the RAM in its load colors
+    let cases = [
+      (20, Some(0), Some(100), Green, true),
+      (20, None, Some(100), Green, true),
+      (20, Some(1), Some(100), Yellow, true),
+      (20, Some(2), Some(100), Red, true),
+      (100, Some(0), Some(1), Green, false),
+      (100, None, None, Red, true),
+      (20, Some(2), None, Green, false),
+    ];
+    for (ram, level, percent, color, top) in cases {
+      let mut app = test_app_with(|m| {
+        m.memory.ram_usage = m.memory.ram_total / 100 * ram;
+        m.memory.pressure_level = level;
+        m.memory.pressure_percent = percent;
+      });
+      let buf = render_buffer(&mut app, 330, 50);
+      let (_, r) = app.layout(buf.area).boxes.into_iter().find(|x| x.0 == Metric::Ram).unwrap();
+      assert_eq!(buf[(r.right() - 2, r.bottom() - 2)].fg, color);
+      assert_eq!(buf[(r.right() - 2, r.y + 1)].symbol() != " ", top);
+
+      // the gauge: as many of the 80 cells as the pressure or the RAM take, in the same color
+      app.cfg.view_type = ViewType::Gauge;
+      let buf = render_buffer(&mut app, 330, 50);
+      let cells = (r.x + 1..r.right() - 1).filter(|&x| buf[(x, r.y + 1)].symbol() != " ");
+      let share = percent.map_or(ram, u64::from);
+      assert_eq!(cells.count() as u64, (share * 80 + 50) / 100);
+      assert_eq!(buf[(r.x + 1, r.y + 1)].fg, color);
     }
   }
 
@@ -1513,12 +1607,12 @@ mod tests {
       assert!(app.handle_key(key(c)).is_continue());
     }
     let typing = title(&mut app, 200);
-    assert!(typing.starts_with("╭─ proc 1/3 ─ /saf█ ───") && !typing.contains("sort"), "{typing}");
+    assert!(typing.starts_with("╭─ proc 1/3 ─ / saf█ ───") && !typing.contains("sort"), "{typing}");
     assert!(!typing.contains("kill"), "{typing}");
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let filtered = title(&mut app, 200);
     assert!(
-      filtered.starts_with("╭─ proc 1/3 ─ /saf ─ sort ───")
+      filtered.starts_with("╭─ proc 1/3 ─ / saf ─ sort ───")
         && filtered.ends_with(" info | finder | copy | kill ─╮")
     );
   }
@@ -1559,6 +1653,37 @@ mod tests {
       shown.starts_with("╰─ POWER: own processes only ─") && !shown.contains("631"),
       "{shown}"
     );
+  }
+
+  #[test]
+  fn the_name_column_has_the_arguments_of_own_processes() {
+    let (mut app, fake) = kill_app();
+    for (pid, args) in [(1, "no"), (631, "-daemon"), (2301, &format!("--a {}", "x".repeat(300)))] {
+      fake.0.borrow_mut().args.insert(pid, args.to_string());
+    }
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    put_procs(&mut app, varied_procs());
+
+    let buf = render_buffer(&mut app, 200, 50);
+    let rows: Vec<String> = (0..50).map(|y| row(&buf, y)).collect();
+    let find = |name: &str| rows.iter().position(|row| row.contains(name)).unwrap();
+    let server = &rows[find("WindowServer")];
+    assert!(server.contains("WindowServer -daemon  "), "{server}");
+    let x = server[..server.find("-daemon").unwrap()].chars().count() as u16;
+    assert_eq!(buf[(x, find("WindowServer") as u16)].fg, theme::DIM);
+
+    // cut at the end of the column, and none for a process of another user
+    assert!(
+      rows[find("Safari")].contains("Safari --a xxx") && rows[find("Safari")].contains("x… ")
+    );
+    assert!(!rows[find("launchd")].contains("launchd no"));
+
+    // one read a row for all the frames of a sample
+    render_buffer(&mut app, 200, 50);
+    assert_eq!(fake.0.borrow().arg_reads, 2);
+    put_procs(&mut app, varied_procs());
+    render_buffer(&mut app, 200, 50);
+    assert_eq!(fake.0.borrow().arg_reads, 4);
   }
 
   /// `app_with_procs` of `varied_procs` with WindowServer selected, killing through a fake with
@@ -1631,6 +1756,118 @@ mod tests {
       OpenFile { fd: Some(3), kind: Kind::File, text: "/var/log/system.log".into(), mode: "r-" };
     fake.0.borrow_mut().files.insert(631, Ok(vec![cwd, log]));
     (app, fake)
+  }
+
+  #[test]
+  fn paused_overlay_holds_files_and_metrics_keep_updating() {
+    let (mut app, fake) = info_app();
+    assert!(app.handle_key(key('i')).is_continue());
+    assert!(app.handle_key(key(' ')).is_continue());
+    let before = proc_row(&render_buffer(&mut app, 200, 50), 1);
+    fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().clear();
+    let mut procs = varied_procs();
+    procs[1].cpu_pct = 99.0;
+    put_procs(&mut app, procs);
+    assert_eq!(proc_row(&render_buffer(&mut app, 200, 50), 1), before);
+    let metrics = Metrics { sys_power: 42.0, ..test_metrics() };
+    assert!(
+      app
+        .handle_event(
+          Event::Update { metrics: Box::new(metrics), procs: None },
+          &RwLock::new(TUI_MIN_MS)
+        )
+        .is_continue()
+    );
+    assert_eq!(app.sys_power.items[0], 42000);
+    assert!(app.handle_key(key('q')).is_continue());
+    assert_eq!(app.proc_view.selected().unwrap().cpu_pct, 99.0);
+    assert!(app.handle_key(key('i')).is_continue());
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 1).contains("0 fds"));
+    assert!(app.handle_key(key('/')).is_continue());
+    assert!(app.handle_key(key(' ')).is_continue());
+    assert!(app.proc_view.paused, "Space in a filter is text");
+    let mut term = Terminal::new(TestBackend::new(20, 20)).unwrap();
+    term.draw(|f| app.info.as_mut().unwrap().render(f, f.area(), true)).unwrap();
+    assert!(row(term.backend().buffer(), 19).contains("paused"));
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    for width in [200, 60, 20] {
+      let mut term = Terminal::new(TestBackend::new(width, 20)).unwrap();
+      term.draw(|f| app.info.as_mut().unwrap().render(f, f.area(), true)).unwrap();
+      assert!(screen_text(term.backend().buffer()).contains("paused"));
+    }
+
+    assert!(app.handle_key(key(' ')).is_continue());
+    put_procs(&mut app, varied_procs());
+    assert!(!app.proc_view.paused);
+  }
+
+  #[test]
+  fn paused_rows_dim_exits_preserve_safe_actions_and_indicator_with_filters() {
+    let (mut app, fake) = info_app();
+    assert!(app.handle_key(key(' ')).is_continue());
+    let mut procs = varied_procs();
+    procs.retain(|p| p.pid != 631);
+    let mut new = procs[1].clone();
+    new.pid = 9000;
+    new.name = "new worker".into();
+    procs.push(new);
+    put_procs(&mut app, procs);
+    let buf = render_buffer(&mut app, 200, 50);
+    let exited = proc_row(&buf, 2);
+    assert!(exited.contains("WindowServer") && !exited.contains("(exited)"), "{exited}");
+    assert_eq!(exited.split_whitespace().filter(|s| *s == "-").count(), 5);
+    assert!(!screen_text(&buf).contains("new worker"));
+    let pid = &buf[(2, PROC_Y + 2)];
+    assert_eq!(pid.fg, ratatui::style::Color::Red);
+    assert!(pid.modifier.contains(Modifier::DIM));
+    assert!(!pid.modifier.contains(Modifier::REVERSED));
+    let name_x = exited[..exited.find("WindowServer").unwrap()].chars().count() as u16;
+    let name = &buf[(name_x, PROC_Y + 2)];
+    assert!(name.modifier.contains(Modifier::REVERSED));
+    assert!(!name.modifier.contains(Modifier::DIM));
+    assert_eq!(name.fg, theme::TEXT);
+    assert!(press(&mut app, KeyCode::Down).is_continue());
+    let dimmed = render_buffer(&mut app, 200, 50);
+    assert!(dimmed[(2, PROC_Y + 2)].modifier.contains(Modifier::DIM));
+    assert_ne!(dimmed[(2, PROC_Y + 2)].fg, ratatui::style::Color::Red);
+    let live_pid = &dimmed[(2, PROC_Y + 3)];
+    assert_eq!(live_pid.fg, theme::TEXT);
+    assert!(live_pid.modifier.contains(Modifier::REVERSED));
+    assert!(!live_pid.modifier.contains(Modifier::DIM));
+    assert!(press(&mut app, KeyCode::Up).is_continue());
+    for width in [200, 60, 30, 20, 12] {
+      let mut term = Terminal::new(TestBackend::new(width, 50)).unwrap();
+      term.draw(|f| app.render_proc_box(f, f.area())).unwrap();
+      let buf = term.backend().buffer();
+      let footer = row(buf, 49);
+      assert!(footer.contains("paused"), "{width}: {footer}");
+      let x = footer[..footer.find("paused").unwrap()].chars().count() as u16;
+      assert_eq!(buf[(x, 49)].fg, ratatui::style::Color::Yellow);
+      assert!(buf[(x, 49)].modifier.contains(Modifier::BOLD));
+    }
+
+    for c in ['i', 'k'] {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+
+    assert!(app.info.is_none() && !app.kill.is_open() && fake.calls().is_empty());
+    assert!(app.handle_key(key('c')).is_continue());
+    assert_eq!(fake.0.borrow().copied, [WINDOW_SERVER]);
+    let footer = row(&render_buffer(&mut app, 200, 50), 49);
+    assert!(footer.contains("copied") && footer.contains("paused"));
+    for c in "/this is a very long filter".chars() {
+      assert!(app.handle_key(key(c)).is_continue());
+    }
+
+    assert!(app.handle_key(key(' ')).is_continue());
+    assert!(app.proc_view.paused && app.proc_view.filter().ends_with(' '));
+    assert!(row(&render_buffer(&mut app, 30, 50), 49).contains("paused"));
+    assert!(press(&mut app, KeyCode::Enter).is_continue());
+    assert!(app.handle_key(key('?')).is_continue());
+    assert!(app.handle_key(key(' ')).is_continue() && app.proc_view.paused);
+    assert!(press(&mut app, KeyCode::Esc).is_continue());
+    render_buffer(&mut app, 60, 12);
+    assert!(!app.proc_view.paused);
   }
 
   #[test]
@@ -1711,7 +1948,7 @@ mod tests {
     // typed into its filter `?` is text
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('?')).is_continue());
     assert!(app.help.is_none());
-    assert!(proc_row(&render_buffer(&mut app, 200, 50), 2).starts_with("├─ /?█ "));
+    assert!(proc_row(&render_buffer(&mut app, 200, 50), 2).starts_with("├─ / ?█ "));
   }
 
   #[test]
@@ -1722,7 +1959,7 @@ mod tests {
     // typed into its filter `q` is text
     assert!(app.handle_key(key('/')).is_continue() && app.handle_key(key('q')).is_continue());
     assert!(press(&mut app, KeyCode::Enter).is_continue());
-    assert!(row(&mut app, 2).starts_with("├─ /q ───"), "{}", row(&mut app, 2));
+    assert!(row(&mut app, 2).starts_with("├─ / q ───"), "{}", row(&mut app, 2));
     // then it closes the overlay, with the filter set too
     assert!(app.handle_key(key('q')).is_continue());
     assert!(app.info.is_none());
@@ -1801,50 +2038,66 @@ mod tests {
   fn a_sample_started_before_a_hide_and_show_never_reaches_the_list() {
     let mut app = test_app();
     render_buffer(&mut app, 200, 50);
-
-    // a sampler that reports each sample as it starts and finishes it only when released
-    let (started_tx, started) = mpsc::channel();
-    let (release, gate) = mpsc::channel::<()>();
-    let gate = Arc::new(Mutex::new(gate));
-    let new_sampler = move || {
-      let (started_tx, gate) = (started_tx.clone(), gate.clone());
-      move || {
-        let _ = started_tx.send(());
-        let _ = gate.lock().unwrap().recv();
-        test_procs()
-      }
-    };
-    let (tx, rx) = mpsc::channel();
-    let msec = Arc::new(RwLock::new(TUI_MIN_MS));
-    run_procs_thread(tx, msec.clone(), app.procs_shown.clone(), new_sampler);
-
-    let timeout = Duration::from_secs(5);
-    // Lets the next sample of the process thread run to its end.
-    let finish_sample = || {
-      started.recv_timeout(timeout).expect("no sample started");
-      release.send(()).unwrap();
-    };
-    // Hands the next event of the process thread to the app.
-    let take_event = |app: &mut App| {
-      let event = rx.recv_timeout(timeout).expect("no process sample");
-      assert!(app.handle_event(event, &msec).is_continue());
+    let msec = RwLock::new(app.cfg.interval());
+    let update = |showing| Event::Update {
+      metrics: Box::new(test_metrics()),
+      procs: Some((showing, test_procs())),
     };
 
-    // the baseline, then a sample that runs while the panel is hidden and shown again
-    finish_sample();
-    started.recv_timeout(timeout).expect("no sample started");
+    // a sample started in this showing arrives after the panel was hidden and shown again
+    let stale = app.procs_shown.showing().unwrap();
     render_buffer(&mut app, 60, 12);
     render_buffer(&mut app, 200, 50);
     assert!(app.procs_visible());
-    release.send(()).unwrap();
-    take_event(&mut app);
+    assert!(app.handle_event(update(stale), &msec).is_continue());
     assert_eq!(app.proc_view.procs(), None, "a stale sample reached the list");
     assert!(render_to_string(&mut app, 200, 50).contains("collecting…"));
 
-    // the new showing: its own baseline, then its first sample fills the list
-    finish_sample();
-    finish_sample();
-    take_event(&mut app);
+    // a sample of the new showing fills the list
+    let showing = app.procs_shown.showing().unwrap();
+    assert!(app.handle_event(update(showing), &msec).is_continue());
     assert_eq!(app.proc_view.procs(), Some(test_procs().as_slice()));
+  }
+
+  #[test]
+  fn processes_join_ticks_at_least_250_ms_apart() {
+    for (msec, every) in [(100, 3), (150, 2), (250, 1), (1000, 1)] {
+      let interval = Duration::from_millis(msec);
+      let baseline = Instant::now();
+      let (mut tick, mut last, mut joined) = (baseline, baseline, vec![]);
+      for n in 1..=12 {
+        tick = crate::next_tick(tick, interval, tick);
+        if procs_due(last, tick) {
+          last = tick;
+          joined.push(n);
+        }
+      }
+
+      assert_eq!(joined, (1..=12).filter(|n| n % every == 0).collect::<Vec<_>>(), "{msec}");
+    }
+  }
+
+  #[test]
+  fn wait_change_returns_on_a_change_of_showing_or_interval_and_else_at_the_deadline() {
+    let (shown, msec) = (ProcsShown::default(), RwLock::new(1000));
+    let far = Instant::now() + Duration::from_secs(5);
+
+    // a hide with a show right after it: the new showing, at once
+    shown.set(true);
+    let first = shown.showing();
+    shown.set(false);
+    shown.set(true);
+    assert_ne!(shown.showing(), first);
+    assert_eq!(shown.wait_change(first, &msec, 1000, far), shown.showing());
+
+    // a new interval: at once
+    shown.set_interval(&msec, 100);
+    assert_eq!(shown.wait_change(shown.showing(), &msec, 1000, far), shown.showing());
+    assert!(Instant::now() < far - Duration::from_secs(4));
+
+    // no change: at the deadline
+    let deadline = Instant::now() + Duration::from_millis(50);
+    assert_eq!(shown.wait_change(shown.showing(), &msec, 100, deadline), shown.showing());
+    assert!(Instant::now() >= deadline);
   }
 }
