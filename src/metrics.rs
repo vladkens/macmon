@@ -32,7 +32,7 @@ struct PowerSources {
   pmp: Option<f32>,
   /// The last fallback, for DRAM.
   smc: Option<f32>,
-  /// The raw SMC system total: no fallback reads above it.
+  /// The raw SMC system total, to tell catch-up spikes, see `is_spike`.
   sys: Option<f32>,
 }
 
@@ -54,19 +54,23 @@ impl PowerSources {
     }
   }
 
+  /// CLPC, else the first legacy source above 0, else the first with a reading; None without one.
+  fn best(&self) -> Option<f32> {
+    // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
+    // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
+    // Drivers with unknown CLPC IDs need the legacy sources: Energy Model, then PMP (CPU, ANE,
+    // DRAM, DCS), then SMC (DRAM), each only above 0, as a frozen counter reads 0.
+    let legacy = [self.energy_model, self.pmp, self.smc].into_iter().flatten();
+    let legacy = legacy.map(|x| if is_spike(x, self.sys) { 0.0 } else { x });
+    self.clpc.or_else(|| first_positive(legacy))
+  }
+
   fn watts(self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
     }
 
-    // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
-    // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
-    // Drivers with unknown CLPC IDs need the legacy sources: Energy Model, then PMP (CPU, ANE,
-    // DRAM, DCS), then SMC (DRAM), each only above 0, as a frozen counter reads 0.
-    // A frozen Energy Model can catch up in one sample (600 W of CPU on an M2 with macOS 27).
-    let legacy = [self.energy_model, self.pmp, self.smc].into_iter().flatten();
-    let legacy = legacy.filter(|&x| !above_total(x, self.sys));
-    Some(self.clpc.or_else(|| first_positive(legacy)).unwrap_or_default())
+    Some(self.best().unwrap_or_default())
   }
 }
 
@@ -313,6 +317,10 @@ fn histogram_watts(residencies: &[(String, i64)]) -> Option<f32> {
   let mut watts = 0.0;
   for (i, (name, residency)) in residencies.iter().enumerate() {
     let bin: f64 = name.trim().strip_suffix('W')?.parse().ok()?;
+    if !bin.is_finite() || bin < 0.0 || *residency < 0 {
+      return None;
+    }
+
     total += *residency as f64;
     if i > 0 {
       watts += bin * *residency as f64;
@@ -322,15 +330,27 @@ fn histogram_watts(residencies: &[(String, i64)]) -> Option<f32> {
   Some(zero_div(watts, total) as f32)
 }
 
-/// Whether `watts` is above the raw SMC total `sys`: no part can draw more than the whole system,
-/// so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is no reading.
-fn above_total(watts: f32, sys: Option<f32>) -> bool {
-  sys.is_some_and(|sys| sys > 0.0 && watts > sys)
+/// Whether `watts` is a catch-up spike of a frozen `Energy Model` (617 W of CPU against an SMC
+/// total `sys` of 7 W on M2 / macOS 27). The margin keeps real readings: an interval average can be
+/// twice the lagging SMC reading at a load step (13 W of CPU against 5.7 W on M5). A total of 0 is
+/// no reading.
+fn is_spike(watts: f32, sys: Option<f32>) -> bool {
+  sys.is_some_and(|sys| sys > 0.0 && watts > 2.0 * sys + 5.0)
 }
 
-/// `watts` or 0 when it is above the raw SMC total `sys`, see `above_total`.
+/// `watts` or 0 when it is above the raw SMC total `sys`: no part can draw more than the whole
+/// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is
+/// no reading.
 fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
-  if above_total(watts, sys) { 0.0 } else { watts }
+  if sys.is_some_and(|sys| sys > 0.0 && watts > sys) { 0.0 } else { watts }
+}
+
+/// CPU power from the PMP histograms of the `PMP` group, else of the per-die groups: multi-die
+/// chips leave `PMP` empty (metaspartan/mactop 6585fe5), so the two are never added up. None when
+/// any channel doesn't read: part of the clusters is no total.
+fn pmp_cpu_watts(channels: &[(bool, Option<f32>)]) -> Option<f32> {
+  let bare = channels.iter().any(|x| x.0);
+  total_power(channels.iter().filter(|x| x.0 == bare).map(|x| x.1))
 }
 
 /// The sum of all `watts`, None without one or when any is unreadable or invalid: a part of the
@@ -714,7 +734,7 @@ impl Sampler {
     let os = sysctl_str("kern.osproductversion").and_then(|x| x.split('.').next()?.parse().ok());
     let ior = match ior {
       Some(x) if x.has_group("CLPC") || os.is_none_or(|x: u32| x < 27) => Some(x),
-      _ => IOReport::with_filter(Some(ioreport_channels_filter_pmp_cpu))?,
+      x => IOReport::with_filter(Some(ioreport_channels_filter_pmp_cpu)).ok().flatten().or(x),
     };
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
@@ -872,9 +892,10 @@ impl Sampler {
     let mut gpu_power = PowerSources { sys, ..Default::default() };
     let mut ane_power = PowerSources { sys, ..Default::default() };
     let mut ram_power = PowerSources { smc: ram_smc, sys, ..Default::default() };
-    let mut dcs_power = PowerSources::default();
+    let mut dcs_power = PowerSources { sys, ..Default::default() };
     let mut chip_power = PowerSources::default();
     let mut media_power = PowerSources::default();
+    let mut pmp_cpu = Vec::new();
 
     // Keep this channel handling in sync with ioreport_channels_filter.
     for x in sample {
@@ -920,10 +941,8 @@ impl Sampler {
         }
       }
 
-      if is_pmp_cpu_channel(&x.group, &x.subgroup, &x.channel)
-        && let Some(watts) = histogram_watts(&cfio_get_residencies(x.item))
-      {
-        cpu_power.add_pmp(watts);
+      if is_pmp_cpu_channel(&x.group, &x.subgroup, &x.channel) {
+        pmp_cpu.push((x.group == "PMP", histogram_watts(&cfio_get_residencies(x.item))));
       }
 
       if is_pmp_ane_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
@@ -950,6 +969,7 @@ impl Sampler {
       }
     }
 
+    cpu_power.pmp = pmp_cpu_watts(&pmp_cpu);
     rs.cpu_power = cpu_power
       .watts(self.force_clpc)
       .ok_or("CPU power unavailable from CLPC; legacy fallback is disabled")?;
@@ -960,7 +980,7 @@ impl Sampler {
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
     rs.ram_power = ram_power.watts(false).unwrap_or_default();
-    rs.dcs_power = dcs_power.clpc.or(dcs_power.energy_model).or(dcs_power.pmp);
+    rs.dcs_power = dcs_power.best();
     rs.media_power = media_power.clpc;
     rs.chip_power = chip_power.clpc.unwrap_or_default(); // completed by with_power_totals
     rs.cpu_tiers = cpu_cores.into_metrics();
@@ -1072,8 +1092,8 @@ mod tests {
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
     TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies, checked_power,
     collect_cpu_core_metrics, cpu_cores_from_ticks, first_positive, histogram_watts,
-    parse_cpu_core_channel, smc_numeric_value, temperature_average, total_power, uses_cpu_ticks,
-    with_power_totals,
+    parse_cpu_core_channel, pmp_cpu_watts, smc_numeric_value, temperature_average, total_power,
+    uses_cpu_ticks, with_power_totals,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
@@ -1135,7 +1155,7 @@ mod tests {
         0.8,
       ),
       (PowerSources { energy_model: Some(0.0), pmp: Some(0.0), ..Default::default() }, 0.0),
-      // a catch-up spike of Energy Model above the system total
+      // a catch-up spike of Energy Model, not a load step above the lagging SMC total
       (
         PowerSources {
           energy_model: Some(617.0),
@@ -1145,8 +1165,10 @@ mod tests {
         },
         0.4,
       ),
+      (PowerSources { energy_model: Some(617.0), sys: Some(7.0), ..Default::default() }, 0.0),
       (PowerSources { energy_model: Some(617.0), sys: Some(0.0), ..Default::default() }, 617.0),
-      (PowerSources { clpc: Some(9.0), sys: Some(7.0), ..Default::default() }, 9.0),
+      (PowerSources { energy_model: Some(13.06), sys: Some(5.72), ..Default::default() }, 13.06),
+      (PowerSources { clpc: Some(30.0), sys: Some(7.0), ..Default::default() }, 30.0),
       (PowerSources { clpc: Some(0.0), smc: Some(0.4), ..Default::default() }, 0.0),
       (PowerSources { energy_model: Some(0.0), ..Default::default() }, 0.0),
     ];
@@ -1164,6 +1186,25 @@ mod tests {
     assert_eq!(histogram_watts(&bins(&[("0.250W", 0), ("0.500W", 0)])), Some(0.0));
     assert_eq!(histogram_watts(&bins(&[("1W", 1)])), None);
     assert_eq!(histogram_watts(&bins(&[("IDLE", 1), ("V0P5", 1)])), None);
+    assert_eq!(histogram_watts(&bins(&[("1W", 1), ("NaNW", 1)])), None);
+    assert_eq!(histogram_watts(&bins(&[("1W", 1), ("2W", -1)])), None);
+  }
+
+  #[test]
+  fn pmp_cpu_uses_the_pmp_group_else_the_dies_and_every_channel() {
+    assert_eq!(pmp_cpu_watts(&[]), None);
+    assert_eq!(pmp_cpu_watts(&[(true, Some(1.0)), (true, Some(2.0))]), Some(3.0));
+    assert_eq!(pmp_cpu_watts(&[(true, Some(1.0)), (false, Some(5.0))]), Some(1.0));
+    assert_eq!(pmp_cpu_watts(&[(false, Some(1.0)), (false, Some(5.0))]), Some(6.0));
+    assert_eq!(pmp_cpu_watts(&[(true, Some(1.0)), (true, None)]), None);
+  }
+
+  #[test]
+  fn dcs_power_takes_the_same_order_and_stays_none_without_a_source() {
+    assert_eq!(PowerSources::default().best(), None);
+    let dcs = PowerSources { energy_model: Some(0.0), pmp: Some(0.3), ..Default::default() };
+    assert_eq!(dcs.best(), Some(0.3));
+    assert_eq!(PowerSources { energy_model: Some(0.0), ..Default::default() }.best(), Some(0.0));
   }
 
   #[test]
