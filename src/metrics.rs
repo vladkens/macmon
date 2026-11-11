@@ -657,10 +657,9 @@ fn init_smc() -> WithError<SmcSensors> {
     // DRAM power, one key per die: "PZD1", "PZD2", … (after metaspartan/mactop, MIT). Selected by
     // name and float type, not by a read: a failed read in a sample fails the whole sum.
     if name.len() == 4 && name.starts_with("PZD") && name.as_bytes()[3].is_ascii_digit() {
-      let info = smc.read_key_info(name).ok();
-      if info.is_none_or(|x| x.data_size == 4 && x.data_type == u32::from_be_bytes(*b"flt ")) {
-        ram_keys.push(name.clone());
-      }
+      let info = smc.read_key_info(name).ok().map(|x| (x.data_size, x.data_type));
+      let float = info.is_none_or(|x| x == (4, u32::from_be_bytes(*b"flt ")));
+      ram_keys.extend(float.then(|| name.clone()));
       continue;
     }
 
@@ -736,6 +735,7 @@ impl Sampler {
       Some(x) if x.has_group("CLPC") || os.is_none_or(|x: u32| x < 27) => Some(x),
       x => IOReport::with_filter(Some(ioreport_channels_filter_pmp_cpu)).ok().flatten().or(x),
     };
+
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
@@ -862,17 +862,16 @@ impl Sampler {
     })
   }
 
-  /// System power from SMC: `PSTR`, on a Mac without a battery then `PDTR` and `PD0R`, the first
-  /// above 0, else the first reading (after metaspartan/mactop, MIT). Mac Studio reads 0 from
-  /// `PSTR` and `PDTR`, and `PD0R` is its power supply's output; a laptop's `PD0R` includes
-  /// charging.
+  /// System power from SMC: `PSTR`, without a battery then `PDTR` and `PD0R`, the first above 0,
+  /// else the first reading (after metaspartan/mactop, MIT). Mac Studio reads 0 from `PSTR` and
+  /// `PDTR`; `PD0R` is its power supply's output, which on a laptop includes charging.
   fn get_sys_power(&mut self, battery: bool) -> Option<f32> {
     let smc = self.smc.as_mut()?;
     let keys = if battery { &["PSTR"][..] } else { &["PSTR", "PDTR", "PD0R"] };
     first_positive(keys.iter().filter_map(|x| smc.read_float_val(x).ok()))
   }
 
-  /// DRAM power from SMC: the sum of its per-die keys, None without one.
+  /// DRAM power from SMC: the sum of its per-die keys, see `total_power`.
   fn get_ram_power_smc(&mut self) -> Option<f32> {
     let smc = self.smc.as_mut()?;
     total_power(self.smc_ram_keys.iter().map(|x| smc.read_float_val(x).ok()))
