@@ -209,7 +209,7 @@ pub struct Metrics {
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
   /// Chip power in Watts: the CLPC package total, or CPU + GPU + ANE + DRAM + DCS + media
-  /// without it.
+  /// without it or when that sum is higher.
   pub chip_power: f32,
   /// The same as `chip_power`.
   #[deprecated(since = "0.12.0", note = "use `chip_power`")]
@@ -282,6 +282,20 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
 /// no reading.
 fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
   if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
+}
+
+/// Drops a bad `ram_power`, then sets `chip_power` to the CLPC package total it holds or the sum
+/// of the components when that is higher (a total below its parts is a bad reading), and
+/// `sys_power` to the raw SMC total `sys`, at least `chip_power`.
+#[allow(deprecated)] // all_power
+fn with_power_totals(mut rs: Metrics, sys: Option<f32>) -> Metrics {
+  rs.ram_power = checked_ram_power(rs.ram_power, sys);
+  let parts = rs.cpu_power + rs.gpu_power + rs.ane_power + rs.ram_power;
+  let parts = parts + rs.dcs_power.unwrap_or_default() + rs.media_power.unwrap_or_default();
+  rs.chip_power = rs.chip_power.max(parts);
+  rs.all_power = rs.chip_power;
+  rs.sys_power = sys.map_or(0.0, |sys| sys.max(rs.chip_power));
+  rs
 }
 
 /// Byte counters of the network and the disks at one moment.
@@ -748,7 +762,7 @@ impl Sampler {
     self.smc.as_mut().ok_or("SMC unavailable")?.read_float_val("PSTR")
   }
 
-  #[allow(deprecated)] // all_power, gpu_ram_power
+  #[allow(deprecated)] // gpu_ram_power
   fn get_ioreport_metrics(
     &self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
@@ -843,15 +857,7 @@ impl Sampler {
     rs.ram_power = ram_power.watts(false).unwrap_or_default();
     rs.dcs_power = dcs_power.clpc.or(dcs_power.energy_model);
     rs.media_power = media_power.clpc;
-    rs.chip_power = chip_power.clpc.unwrap_or(
-      rs.cpu_power
-        + rs.gpu_power
-        + rs.ane_power
-        + rs.ram_power
-        + rs.dcs_power.unwrap_or_default()
-        + rs.media_power.unwrap_or_default(),
-    );
-    rs.all_power = rs.chip_power;
+    rs.chip_power = chip_power.clpc.unwrap_or_default(); // completed by with_power_totals
     rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
@@ -919,9 +925,7 @@ impl Sampler {
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
-    let sys_power = self.get_sys_power().ok();
-    rs.ram_power = checked_ram_power(rs.ram_power, sys_power);
-    rs.sys_power = sys_power.map_or(0.0, |val| val.max(rs.chip_power));
+    let mut rs = with_power_totals(rs, self.get_sys_power().ok());
 
     let secs = (cur.at - bytes.at).as_secs_f64();
     [rs.net_in, rs.net_out] = byte_rates(bytes.net, cur.net, secs);
@@ -959,7 +963,7 @@ mod tests {
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
     TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies,
     checked_ram_power, collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel,
-    smc_numeric_value, temperature_average, uses_cpu_ticks,
+    smc_numeric_value, temperature_average, uses_cpu_ticks, with_power_totals,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
@@ -1180,27 +1184,21 @@ mod tests {
       ("CLPC", "GPU SRAM", "mJ", 250),
     ];
     let sampler = sampler_without_sources(4, false);
-    for (
-      count,
-      package_delta,
-      expected_ram,
-      expected_dcs,
-      expected_chip,
-      expected_gpu,
-      expected_media,
-      expected_sram,
-    ) in [
-      (6, None, 10.0, Some(2.0), 12.0, 0.0, None, 0.25),
-      (9, Some(30_000_000_000), 3.0, Some(4.0), 30.0, 0.0, None, 0.25),
-      (14, Some(30_000_000_000), 3.0, Some(4.0), 30.0, 10.0, Some(6.0), 0.25),
-      (14, None, 3.0, Some(4.0), 23.0, 10.0, Some(6.0), 0.25),
-      (14, Some(0), 3.0, Some(4.0), 0.0, 10.0, Some(6.0), 0.25),
-      (14, Some(-1), 3.0, Some(4.0), 23.0, 10.0, Some(6.0), 0.25),
+    // rows: Energy Model only (6), with CLPC memory (9), all (14); the package total in nJ or
+    // none; then DRAM, DCS and chip Watts. All 14 rows add GPU 10 W and media 1 + 2 + 3 W.
+    for (count, package, ram, dcs, chip) in [
+      (6, None, 10.0, 2.0, 12.0),
+      (9, Some(30_000_000_000), 3.0, 4.0, 30.0),
+      (14, Some(30_000_000_000), 3.0, 4.0, 30.0),
+      (14, None, 3.0, 4.0, 23.0),
+      (14, Some(20_000_000_000), 3.0, 4.0, 23.0), // below its parts
+      (14, Some(0), 3.0, 4.0, 23.0),
+      (14, Some(-1), 3.0, 4.0, 23.0), // invalid
     ] {
       let rows: Vec<_> = rows[..count]
         .iter()
         .filter_map(|&(group, channel, unit, value)| {
-          let value = if channel == "Package Energy" { package_delta? } else { value };
+          let value = if channel == "Package Energy" { package? } else { value };
           Some((group, channel, unit, value))
         })
         .collect();
@@ -1225,20 +1223,25 @@ mod tests {
           item: sample.as_concrete_TypeRef(),
         }
       });
-      let metrics = sampler.get_ioreport_metrics(items, Duration::from_secs(1)).unwrap();
-      assert_eq!(metrics.ram_power, expected_ram);
-      assert_eq!(metrics.dcs_power, expected_dcs);
-      assert_eq!(metrics.media_power, expected_media);
-      assert_eq!(metrics.gpu_ram_power, expected_sram);
-      assert_eq!(metrics.gpu_power, expected_gpu);
-      assert_eq!(metrics.chip_power, expected_chip);
-      assert_eq!(metrics.all_power, expected_chip);
-      let metrics = aggregate_ioreport_metrics(metrics, &sampler.soc);
-      assert_eq!(metrics.chip_power, expected_chip);
+      let rs = sampler.get_ioreport_metrics(items, Duration::from_secs(1)).unwrap();
+      let rs = with_power_totals(aggregate_ioreport_metrics(rs, &sampler.soc), None);
+      let all = count == 14;
+      assert_eq!((rs.ram_power, rs.dcs_power, rs.gpu_ram_power), (ram, Some(dcs), 0.25));
+      assert_eq!((rs.gpu_power, rs.media_power), if all { (10.0, Some(6.0)) } else { (0.0, None) });
+      assert_eq!((rs.chip_power, rs.all_power), (chip, chip));
     }
     let empty = sampler.get_ioreport_metrics([], Duration::from_secs(1)).unwrap();
+    let empty = with_power_totals(empty, None);
     assert_eq!((empty.ram_power, empty.gpu_ram_power, empty.chip_power), (0.0, 0.0, 0.0));
     assert_eq!((empty.dcs_power, empty.media_power), (None, None));
+  }
+
+  #[test]
+  fn a_ram_spike_stays_out_of_chip_and_system_power() {
+    let rs =
+      Metrics { cpu_power: 2.0, ram_power: 689.0, dcs_power: Some(0.5), ..Default::default() };
+    let rs = with_power_totals(rs, Some(12.0));
+    assert_eq!((rs.ram_power, rs.chip_power, rs.sys_power), (0.0, 2.5, 12.0));
   }
 
   #[test]

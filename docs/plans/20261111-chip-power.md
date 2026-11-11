@@ -4,7 +4,7 @@ Finish homm's PR #117 (CLPC chip aggregate, DRAM, DCS and media counters) and th
 
 ## Behavior
 
-- `chip_power`: the chip total in Watts. The CLPC package aggregate when it is valid, including a valid 0; otherwise CPU + GPU + ANE + DRAM + DCS + media from the available sources. JSON `chip_power`, Prometheus `macmon_chip_power_watts`; the TUI's "Power" box shows it when there is no system total.
+- `chip_power`: the chip total in Watts. The CLPC package aggregate when it is valid, unless the sum CPU + GPU + ANE + DRAM + DCS + media from the available sources is higher: a total below its parts is a bad reading. The sum uses `ram_power` after the #125 check, so a DRAM spike reaches neither `chip_power` nor `sys_power`. JSON `chip_power`, Prometheus `macmon_chip_power_watts`; the TUI's "Power" box shows it when there is no system total.
 - `all_power`: deprecated, the same value as `chip_power`, kept in the Rust struct (`#[deprecated]`), JSON and Prometheus (`macmon_all_power_watts`).
 - `ram_power`: DRAM only: CLPC DRAM where the driver is known, else `Energy Model` DRAM, else PMP DRAM (M1, #119). Still dropped to 0 above the SMC system total (#125).
 - `dcs_power`: new, `Option<f32>`: CLPC DCS, else `Energy Model` DCS; `null` in JSON and no Prometheus gauge without a source.
