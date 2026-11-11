@@ -227,7 +227,7 @@ macOS 27 broke the CPU/ANE/DRAM power source that macmon previously used without
 
 macmon reads hidden energy reports from the AppleCLPC driver through IOReport without root. These reports use opaque IDs instead of discoverable CPU/GPU/ANE/DRAM channel names and require driver-specific mappings with verified units.
 
-Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy CPU/GPU/ANE and memory fallbacks for older systems. `all_power` uses the driver's full package aggregate when available, otherwise CPU + GPU + ANE + RAM + media. `ram_power` sums DRAM + DCS, preferring CLPC for each component. `media_power` sums separate CLPC AVE + VDEC + ISP reports. GPU power follows the firmware's aggregate, which includes GPUSRAM on some chips. New chips or driver versions may need additional mappings. Zero readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy CPU/GPU/ANE and memory fallbacks for older systems. `chip_power` uses the driver's full package aggregate when available, otherwise CPU + GPU + ANE + DRAM + DCS + media. `ram_power` is DRAM and `dcs_power` DCS, each preferring CLPC. `media_power` sums separate CLPC AVE + VDEC + ISP reports, so far only on M6 and unverified on hardware. GPU power follows the firmware's aggregate, which includes GPUSRAM on some chips. New chips or driver versions may need additional mappings. Zero readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
 
 ### Output format
 
@@ -294,11 +294,13 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
   "ane_power": 0.0, // Watts
-  "all_power": 4.22231553, // CLPC package aggregate, or CPU + GPU + ANE + RAM + media fallback, Watts
+  "chip_power": 4.22231553, // CLPC package aggregate, or CPU + GPU + ANE + DRAM + DCS + media, Watts
+  "all_power": 4.22231553, // Deprecated, use chip_power
   "sys_power": 5.876533, // Watts
-  "ram_power": 0.11635789, // DRAM + DCS, Watts
-  "gpu_ram_power": 0.0, // Separate GPU SRAM power is unavailable, Watts
-  "media_power": 0.0, // AVE + VDEC + ISP, Watts
+  "ram_power": 0.11635789, // DRAM, Watts
+  "dcs_power": 0.0812, // Watts, null without a source
+  "media_power": null, // AVE + VDEC + ISP, Watts, null without a source
+  "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power from Energy Model, Watts
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
   "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
   "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable

@@ -35,7 +35,6 @@ pub(crate) fn is_clpc_energy_channel(
         | "DRAM"
         | "DCS"
         | "Package Energy"
-        | "GPU SRAM"
         | "AVE"
         | "VDEC"
         | "ISP"
@@ -61,7 +60,8 @@ pub(crate) fn ioreport_channels_filter(
       || channel.ends_with("CPU Energy")
       || channel.starts_with("ANE")
       || channel.starts_with("DRAM")
-      || channel.starts_with("DCS");
+      || channel.starts_with("DCS")
+      || channel.starts_with("GPU SRAM");
   }
 
   if group == "CPU Stats" {
@@ -77,18 +77,9 @@ mod tests {
 
   #[test]
   fn subscribes_only_to_known_clpc_energy_counters() {
-    for channel in [
-      "CPU Energy",
-      "GPU Energy",
-      "ANE",
-      "DRAM",
-      "DCS",
-      "Package Energy",
-      "GPU SRAM",
-      "AVE",
-      "VDEC",
-      "ISP",
-    ] {
+    for channel in
+      ["CPU Energy", "GPU Energy", "ANE", "DRAM", "DCS", "Package Energy", "AVE", "VDEC", "ISP"]
+    {
       assert!(ioreport_channels_filter("CLPC", "Energy Counters", channel, "nJ"));
       assert!(!ioreport_channels_filter("CLPC", "Energy Counters", channel, "events"));
     }
@@ -119,10 +110,10 @@ mod tests {
 
   #[test]
   fn subscribes_to_memory_and_selected_media_components() {
-    for name in ["DRAM", "DCS0"] {
+    for name in ["DRAM", "DCS0", "GPU SRAM"] {
       assert!(ioreport_channels_filter("Energy Model", "", name, "mJ"));
     }
-    for name in ["MSR", "AFR", "AMCC", "DISP", "GPUCS", "AVE", "VDEC", "ISP", "GPU SRAM"] {
+    for name in ["MSR", "AFR", "AMCC", "DISP", "GPUCS", "AVE", "VDEC", "ISP"] {
       assert!(!ioreport_channels_filter("Energy Model", "", name, "mJ"));
     }
   }

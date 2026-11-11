@@ -208,17 +208,27 @@ pub struct Metrics {
   pub gpu_power: f32,
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
-  /// CLPC package power in Watts, or CPU + GPU + ANE + RAM + media when unavailable.
-  #[serde(rename = "all_power")]
+  /// Chip power in Watts: the CLPC package total, or CPU + GPU + ANE + DRAM + DCS + media
+  /// without it.
   pub chip_power: f32,
+  /// The same as `chip_power`.
+  #[deprecated(since = "0.12.0", note = "use `chip_power`")]
+  pub all_power: f32,
   /// System power estimate in Watts, when available.
   pub sys_power: f32,
-  /// Combined DRAM and DCS power in Watts.
+  /// DRAM power in Watts.
   pub ram_power: f32,
-  /// GPU SRAM power in Watts.
+  /// DCS power in Watts, or None without a source.
+  pub dcs_power: Option<f32>,
+  /// Video encoder, decoder and image processor (AVE + VDEC + ISP) power in Watts, or None
+  /// without a source. Unverified on hardware.
+  pub media_power: Option<f32>,
+  /// GPU SRAM power in Watts from `Energy Model`.
+  #[deprecated(
+    since = "0.12.0",
+    note = "no CLPC source; CLPC `gpu_power` includes it on some chips"
+  )]
   pub gpu_ram_power: f32,
-  /// Combined AVE, VDEC, and ISP power in Watts; unavailable counters contribute zero.
-  pub media_power: f32,
   /// Bytes per second received by the Ethernet and Wi-Fi interfaces, or None without one.
   pub net_in: Option<u64>,
   /// Bytes per second sent by the Ethernet and Wi-Fi interfaces, or None without one.
@@ -738,6 +748,7 @@ impl Sampler {
     self.smc.as_mut().ok_or("SMC unavailable")?.read_float_val("PSTR")
   }
 
+  #[allow(deprecated)] // all_power, gpu_ram_power
   fn get_ioreport_metrics(
     &self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
@@ -751,7 +762,6 @@ impl Sampler {
     let mut ram_power = PowerSources::default();
     let mut dcs_power = PowerSources::default();
     let mut chip_power = PowerSources::default();
-    let mut gpu_sram_power = PowerSources::default();
     let mut media_power = PowerSources::default();
 
     // Keep this channel handling in sync with ioreport_channels_filter.
@@ -793,6 +803,7 @@ impl Sampler {
           c if c.starts_with("DCS") => {
             dcs_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
           }
+          c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
           _ => {}
         }
       }
@@ -809,7 +820,6 @@ impl Sampler {
         let power = match x.channel.as_str() {
           "CPU Energy" => &mut cpu_power,
           "GPU Energy" => &mut gpu_power,
-          "GPU SRAM" => &mut gpu_sram_power,
           "AVE" | "VDEC" | "ISP" => &mut media_power,
           "ANE" => &mut ane_power,
           "DRAM" => &mut ram_power,
@@ -830,13 +840,18 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    rs.ram_power =
-      ram_power.watts(false).unwrap_or_default() + dcs_power.watts(false).unwrap_or_default();
-    rs.gpu_ram_power = gpu_sram_power.clpc.unwrap_or_default();
-    rs.media_power = media_power.clpc.unwrap_or_default();
-    rs.chip_power = chip_power
-      .clpc
-      .unwrap_or(rs.cpu_power + rs.gpu_power + rs.ane_power + rs.ram_power + rs.media_power);
+    rs.ram_power = ram_power.watts(false).unwrap_or_default();
+    rs.dcs_power = dcs_power.clpc.or(dcs_power.energy_model);
+    rs.media_power = media_power.clpc;
+    rs.chip_power = chip_power.clpc.unwrap_or(
+      rs.cpu_power
+        + rs.gpu_power
+        + rs.ane_power
+        + rs.ram_power
+        + rs.dcs_power.unwrap_or_default()
+        + rs.media_power.unwrap_or_default(),
+    );
+    rs.all_power = rs.chip_power;
     rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
@@ -1146,6 +1161,7 @@ mod tests {
   }
 
   #[test]
+  #[allow(deprecated)] // all_power, gpu_ram_power
   fn samples_selected_power_components_without_double_counting_memory_or_sram() {
     let rows = [
       ("Energy Model", "DRAM", "mJ", 10_000i64),
@@ -1168,17 +1184,18 @@ mod tests {
       count,
       package_delta,
       expected_ram,
+      expected_dcs,
       expected_chip,
       expected_gpu,
       expected_media,
       expected_sram,
     ) in [
-      (6, None, 12.0, 12.0, 0.0, 0.0, 0.0),
-      (9, Some(30_000_000_000), 7.0, 30.0, 0.0, 0.0, 0.0),
-      (14, Some(30_000_000_000), 7.0, 30.0, 10.0, 6.0, 0.25),
-      (14, None, 7.0, 23.0, 10.0, 6.0, 0.25),
-      (14, Some(0), 7.0, 0.0, 10.0, 6.0, 0.25),
-      (14, Some(-1), 7.0, 23.0, 10.0, 6.0, 0.25),
+      (6, None, 10.0, Some(2.0), 12.0, 0.0, None, 0.25),
+      (9, Some(30_000_000_000), 3.0, Some(4.0), 30.0, 0.0, None, 0.25),
+      (14, Some(30_000_000_000), 3.0, Some(4.0), 30.0, 10.0, Some(6.0), 0.25),
+      (14, None, 3.0, Some(4.0), 23.0, 10.0, Some(6.0), 0.25),
+      (14, Some(0), 3.0, Some(4.0), 0.0, 10.0, Some(6.0), 0.25),
+      (14, Some(-1), 3.0, Some(4.0), 23.0, 10.0, Some(6.0), 0.25),
     ] {
       let rows: Vec<_> = rows[..count]
         .iter()
@@ -1210,16 +1227,18 @@ mod tests {
       });
       let metrics = sampler.get_ioreport_metrics(items, Duration::from_secs(1)).unwrap();
       assert_eq!(metrics.ram_power, expected_ram);
+      assert_eq!(metrics.dcs_power, expected_dcs);
       assert_eq!(metrics.media_power, expected_media);
       assert_eq!(metrics.gpu_ram_power, expected_sram);
       assert_eq!(metrics.gpu_power, expected_gpu);
       assert_eq!(metrics.chip_power, expected_chip);
+      assert_eq!(metrics.all_power, expected_chip);
       let metrics = aggregate_ioreport_metrics(metrics, &sampler.soc);
       assert_eq!(metrics.chip_power, expected_chip);
     }
     let empty = sampler.get_ioreport_metrics([], Duration::from_secs(1)).unwrap();
-    assert_eq!((empty.ram_power, empty.media_power, empty.gpu_ram_power), (0.0, 0.0, 0.0));
-    assert_eq!(empty.chip_power, 0.0);
+    assert_eq!((empty.ram_power, empty.gpu_ram_power, empty.chip_power), (0.0, 0.0, 0.0));
+    assert_eq!((empty.dcs_power, empty.media_power), (None, None));
   }
 
   #[test]
