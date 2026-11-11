@@ -65,6 +65,11 @@ impl PowerSources {
     self.clpc.or_else(|| first_positive(legacy))
   }
 
+  /// Whether the last fallback would be used: no CLPC and no legacy reading above 0.
+  fn needs_last(&self) -> bool {
+    self.clpc.is_none() && self.best().is_none_or(|x| x <= 0.0)
+  }
+
   fn watts(self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
@@ -886,16 +891,15 @@ impl Sampler {
     &self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
     dt: Duration,
-    ram_smc: Option<f32>,
     sys: Option<f32>,
-  ) -> WithError<Metrics> {
+  ) -> WithError<(Metrics, PowerSources)> {
     let mut cpu_cores = CpuTierCores::new(&self.soc);
     let mut rs = Metrics::default();
     let sys = sys.filter(|_| self.em_freezes);
     let mut cpu_power = PowerSources { sys, ..Default::default() };
     let mut gpu_power = PowerSources { sys, ..Default::default() };
     let mut ane_power = PowerSources { sys, ..Default::default() };
-    let mut ram_power = PowerSources { smc: ram_smc, sys, ..Default::default() };
+    let mut ram_power = PowerSources { sys, ..Default::default() };
     let mut dcs_power = PowerSources { sys, ..Default::default() };
     let mut chip_power = PowerSources::default();
     let mut media_power = PowerSources::default();
@@ -983,13 +987,13 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    rs.ram_power = ram_power.watts(false).unwrap_or_default();
     rs.dcs_power = dcs_power.best();
     rs.media_power = media_power.clpc;
     rs.chip_power = chip_power.clpc.unwrap_or_default(); // completed by with_power_totals
     rs.cpu_tiers = cpu_cores.into_metrics();
 
-    Ok(rs)
+    // DRAM: completed by get_metrics_now, which reads SMC only when it's needed
+    Ok((rs, ram_power))
   }
 
   /// Collect metrics for the next polling interval.
@@ -1034,16 +1038,21 @@ impl Sampler {
     let ticks = std::mem::replace(&mut self.cpu_ticks, cur_ticks);
     let cur = ByteCounters::read();
     let bytes = self.bytes.replace(cur).unwrap_or(cur);
-    let ram_smc = self.get_ram_power_smc();
     let battery = battery();
     let sys = self.get_sys_power(battery.is_some());
-    let mut rs = match self.ior.as_mut() {
+    let (mut rs, mut ram_power) = match self.ior.as_mut() {
       Some(ior) => {
         let (sample, elapsed) = ior.get_sample_now();
-        self.get_ioreport_metrics(sample, elapsed, ram_smc, sys)?
+        self.get_ioreport_metrics(sample, elapsed, sys)?
       }
-      None => self.get_ioreport_metrics([], Duration::ZERO, ram_smc, sys)?,
+      None => self.get_ioreport_metrics([], Duration::ZERO, sys)?,
     };
+
+    if ram_power.needs_last() {
+      ram_power.smc = self.get_ram_power_smc();
+    }
+
+    rs.ram_power = ram_power.watts(false).unwrap_or_default();
 
     if let Some(prev) = ticks
       && let Some(cur) = &self.cpu_ticks
@@ -1231,6 +1240,20 @@ mod tests {
   }
 
   #[test]
+  fn last_fallback_is_needed_only_without_another_reading() {
+    let needs = |x: PowerSources| x.needs_last();
+    assert!(needs(PowerSources::default()));
+    assert!(needs(PowerSources { energy_model: Some(0.0), pmp: Some(0.0), ..Default::default() }));
+    assert!(needs(PowerSources {
+      energy_model: Some(617.0),
+      sys: Some(7.0),
+      ..Default::default()
+    }));
+    assert!(!needs(PowerSources { clpc: Some(0.0), ..Default::default() }));
+    assert!(!needs(PowerSources { energy_model: Some(0.0), pmp: Some(0.5), ..Default::default() }));
+  }
+
+  #[test]
   fn pmp_power_skips_invalid_deltas() {
     let mut power = PowerSources::default();
     for watts in [-1.0, f32::NAN, f32::INFINITY, 1.6] {
@@ -1388,7 +1411,7 @@ mod tests {
     for gpu_freqs in [vec![], vec![0]] {
       let mut sampler = sampler_without_sources(4, false);
       sampler.soc.gpu_freqs = gpu_freqs;
-      let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1), None, None).unwrap();
+      let (rs, _) = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1), None).unwrap();
       assert_eq!((rs.gpu_freq_mhz, rs.gpu_active_ratio), (0, 0.0));
     }
   }
