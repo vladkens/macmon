@@ -1,6 +1,6 @@
 # Roadmap
 
-The maintainer's backlog of ideas: features, promotion and suggestions. Agents change it only when asked.
+The maintainer's backlog of ideas: features, promotion and suggestions. Agents change it only when the person asks.
 
 Process data beyond CPU% and memory comes from libproc, which reads only the user's own processes without root (all of them under sudo). Other users' processes show `-` there, as POWER does today.
 

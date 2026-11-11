@@ -1,10 +1,10 @@
 # macmon
 
-Rootless Apple Silicon monitor and Rust library. Sampling and metric types live in `src/metrics.rs`, macOS API access in `src/sources.rs`, the CLI in `src/app/` and the TUI in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from libproc for own processes, the setuid `/bin/ps` for other users' and the IORegistry (`IOAccelerator` children) for GPU time. [docs/roadmap.md](docs/roadmap.md) is the maintainer's backlog of ideas: change it only when the maintainer asks.
+Rootless Apple Silicon monitor and Rust library. Sampling and metric types live in `src/metrics.rs`, macOS API access in `src/sources.rs`, the CLI in `src/app/` and the TUI in `src/app/tui/`. Per-process usage (`src/app/procs.rs`) comes from libproc for own processes, the setuid `/bin/ps` for other users' and the IORegistry (`IOAccelerator` children) for GPU time. [docs/roadmap.md](docs/roadmap.md) is the maintainer's backlog of ideas: change it only when the person asks.
 
 ## Boundaries
 
-- Break JSON or Prometheus output, the library API or `~/.config/macmon.json` (same field names and values, `view_type` is `"Sparkline"` / `"Gauge"`), or add a dependency, only with the maintainer's approval. Change dependencies only via `cargo add` / `remove` / `upgrade`.
+- Break JSON or Prometheus output, the library API or `~/.config/macmon.json` (same field names and values, `view_type` is `"Sparkline"` / `"Gauge"`), or add a dependency, only with the person's approval. Change dependencies only via `cargo add` / `remove` / `upgrade`.
 - Keep CLI-only code and dependencies behind the `app` feature, so the library builds with `--no-default-features`.
 - Keep metric collection rootless, with fallbacks for older systems.
 - Everything reaches `main` as a squash-merged PR.
@@ -24,5 +24,5 @@ Rootless Apple Silicon monitor and Rust library. Sampling and metric types live 
 
 - `make check` and `make test` pass before every commit (formatting needs nightly rustfmt; `make prepare` fixes it).
 - Commits and PR titles are one line in the history's style (`feat: …`, `fix: …`, `docs: …`), no body. The PR body says what changed, its compatibility (JSON, Prometheus, library API, config), the checks run, and what was and wasn't tested by hand.
-- Write a plan in `docs/plans/yyyymmdd-<name>.md` (behavior, decisions, a checklist) only when the maintainer asks; while working, only tick its boxes. Its final PR adds the first line `Done: yyyy-mm-dd, PR #N` and a short `## Result` and moves it to `docs/plans/completed/`; never delete a plan.
-- Docs are only `readme.md`, the rustdoc, the roadmap, plans and notes in `docs/`. `changelog.md` changes only in the maintainer's `release: vX.Y.Z` PR.
+- Multi-step work follows a plan in `docs/plans/yyyymmdd-<name>.md`, agreed with the person: behavior, decisions and a checklist, with only its boxes ticked during the work. The PR that finishes it adds `Done: yyyy-mm-dd, PR #N` as the first line and a short `## Result` and moves it to `docs/plans/completed/`; never delete a plan.
+- Docs are only `readme.md`, the rustdoc, the roadmap, plans and notes in `docs/`. `changelog.md` changes only in the person's `release: vX.Y.Z` PR, which also removes the shipped items from the roadmap.
