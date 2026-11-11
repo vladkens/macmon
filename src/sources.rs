@@ -646,6 +646,11 @@ pub(crate) fn battery() -> Option<(u8, bool, bool)> {
   read_services("AppleSmartBattery", |_, props| battery_from(props)).pop()
 }
 
+/// Whether the Mac has an internal battery.
+pub(crate) fn has_battery() -> bool {
+  !read_services("AppleSmartBattery", |_, _| Some(())).is_empty()
+}
+
 // MARK: SockInfo
 
 /// Static Apple Silicon system information.
@@ -1382,6 +1387,11 @@ impl IOReport {
   /// Whether a subscribed channel is in `group`.
   pub(crate) fn has_group(&self, group: &str) -> bool {
     cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group)
+  }
+
+  /// Whether `channel` of `group` is subscribed.
+  pub(crate) fn has_channel(&self, group: &str, channel: &str) -> bool {
+    cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group && x.2 == channel)
   }
 
   /// Collect one delta sample over `duration` milliseconds.
