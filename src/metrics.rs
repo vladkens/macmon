@@ -728,11 +728,11 @@ impl Sampler {
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
     let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
-    // Without CLPC counters on macOS 27+, where Energy Model can freeze, CPU power may need the PMP
-    // histograms. They cost about as much as CLPC in each sample, so only then.
+    // Without a CLPC CPU counter on macOS 27+, where Energy Model can freeze, CPU power may need
+    // the PMP histograms. They cost about as much as CLPC in each sample, so only then.
     let os = sysctl_str("kern.osproductversion").and_then(|x| x.split('.').next()?.parse().ok());
     let ior = match ior {
-      Some(x) if x.has_group("CLPC") || os.is_none_or(|x: u32| x < 27) => Some(x),
+      Some(x) if x.has_channel("CLPC", "CPU Energy") || os.is_none_or(|x: u32| x < 27) => Some(x),
       x => IOReport::with_filter(Some(ioreport_channels_filter_pmp_cpu)).ok().flatten().or(x),
     };
 

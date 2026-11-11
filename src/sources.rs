@@ -1384,6 +1384,11 @@ impl IOReport {
     cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group)
   }
 
+  /// Whether `channel` of `group` is subscribed.
+  pub(crate) fn has_channel(&self, group: &str, channel: &str) -> bool {
+    cfio_channel_metadata(self.chan).iter().any(|x| x.0 == group && x.2 == channel)
+  }
+
   /// Collect one delta sample over `duration` milliseconds.
   pub fn get_sample(&self, duration: u64) -> IOReportIterator {
     unsafe {
