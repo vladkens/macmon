@@ -443,8 +443,6 @@ Compared with htop 3.5.3 and btop 1.4.8 on macOS 27.
 
 Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
 
-When reporting an issue, mention the version from `macmon -V`, and for a wrong or missing metric add the output of `macmon debug`.
-
 ## 📝 License
 
 Distributed under the [MIT License](LICENSE).
