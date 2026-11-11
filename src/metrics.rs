@@ -7,7 +7,7 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_dram_channel,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_memory_channel,
   zero_div,
 };
 use crate::sources::{
@@ -29,7 +29,7 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 struct PowerSources {
   clpc: Option<f32>,
   energy_model: Option<f32>,
-  pmp: f32,
+  pmp: Option<f32>,
 }
 
 impl PowerSources {
@@ -41,24 +41,32 @@ impl PowerSources {
   }
 
   fn add_energy_model(&mut self, watts: f32) {
-    *self.energy_model.get_or_insert(0.0) += watts;
+    if watts.is_finite() && watts >= 0.0 {
+      *self.energy_model.get_or_insert(0.0) += watts;
+    }
   }
 
   fn add_pmp(&mut self, watts: f32) {
     if watts.is_finite() && watts >= 0.0 {
-      self.pmp += watts;
+      *self.pmp.get_or_insert(0.0) += watts;
     }
   }
 
-  fn watts(self, force_clpc: bool) -> Option<f32> {
+  /// The first source with a reading, None without one.
+  fn reading(&self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
     }
 
     // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
     // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
-    // Drivers with unknown CLPC IDs need the legacy sources; ANE and DRAM can use PMP.
-    Some(self.clpc.or(self.energy_model).unwrap_or(self.pmp))
+    // Drivers with unknown CLPC IDs need the legacy sources; ANE, DRAM and DCS can use PMP.
+    self.clpc.or(self.energy_model).or(self.pmp)
+  }
+
+  /// The reading, 0 without one unless `force_clpc`.
+  fn watts(&self, force_clpc: bool) -> Option<f32> {
+    self.reading(force_clpc).or((!force_clpc).then_some(0.0))
   }
 }
 
@@ -277,22 +285,23 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
   average.max(min_frequency_mhz as f64) as u32
 }
 
-/// `ram` or 0 when it is above the raw SMC total `sys`: memory can't draw more than the whole
+/// `watts` or 0 when it is above the raw SMC total `sys`: no part can draw more than the whole
 /// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is
 /// no reading.
-fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
-  if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
+fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
+  if sys.is_some_and(|sys| sys > 0.0 && watts > sys) { 0.0 } else { watts }
 }
 
-/// Drops a bad `ram_power`, then sets `chip_power` to the CLPC package total it holds or the sum
-/// of the components when that is higher (a total below its parts is a bad reading), and
-/// `sys_power` to the raw SMC total `sys`, at least `chip_power`.
+/// Drops a bad `ram_power`, `dcs_power` or CLPC package total, then sets `chip_power` to that
+/// total it holds or the sum of the components when that is higher (a total below its parts is a
+/// bad reading), and `sys_power` to the raw SMC total `sys`, at least `chip_power`.
 #[allow(deprecated)] // all_power
 fn with_power_totals(mut rs: Metrics, sys: Option<f32>) -> Metrics {
-  rs.ram_power = checked_ram_power(rs.ram_power, sys);
+  rs.ram_power = checked_power(rs.ram_power, sys);
+  rs.dcs_power = rs.dcs_power.map(|x| checked_power(x, sys));
   let parts = rs.cpu_power + rs.gpu_power + rs.ane_power + rs.ram_power;
   let parts = parts + rs.dcs_power.unwrap_or_default() + rs.media_power.unwrap_or_default();
-  rs.chip_power = rs.chip_power.max(parts);
+  rs.chip_power = checked_power(rs.chip_power, sys).max(parts);
   rs.all_power = rs.chip_power;
   rs.sys_power = sys.map_or(0.0, |sys| sys.max(rs.chip_power));
   rs
@@ -823,11 +832,12 @@ impl Sampler {
       }
 
       if is_pmp_ane_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
-        ane_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
+        ane_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
       }
 
-      if is_pmp_dram_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
-        ram_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
+      if is_pmp_memory_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        let power = if x.channel.starts_with("DCS") { &mut dcs_power } else { &mut ram_power };
+        power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
       }
 
       if is_clpc_energy_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
@@ -855,7 +865,7 @@ impl Sampler {
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
     rs.ram_power = ram_power.watts(false).unwrap_or_default();
-    rs.dcs_power = dcs_power.clpc.or(dcs_power.energy_model);
+    rs.dcs_power = dcs_power.reading(self.force_clpc);
     rs.media_power = media_power.clpc;
     rs.chip_power = chip_power.clpc.unwrap_or_default(); // completed by with_power_totals
     rs.cpu_tiers = cpu_cores.into_metrics();
@@ -961,9 +971,9 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
-    TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies,
-    checked_ram_power, collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel,
-    smc_numeric_value, temperature_average, uses_cpu_ticks, with_power_totals,
+    TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies, checked_power,
+    collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value,
+    temperature_average, uses_cpu_ticks, with_power_totals,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
@@ -988,20 +998,20 @@ mod tests {
       (689.0, None, 689.0),
     ];
     for (ram, sys, expected) in cases {
-      assert_eq!(checked_ram_power(ram, sys), expected, "{ram} {sys:?}");
+      assert_eq!(checked_power(ram, sys), expected, "{ram} {sys:?}");
     }
   }
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
     assert_eq!(PowerSources::default().watts(false), Some(0.0));
-    assert_eq!(PowerSources { pmp: 0.8, ..Default::default() }.watts(false), Some(0.8));
+    assert_eq!(PowerSources { pmp: Some(0.8), ..Default::default() }.watts(false), Some(0.8));
 
-    let mut power = PowerSources { pmp: 0.8, ..Default::default() };
+    let mut power = PowerSources { pmp: Some(0.8), ..Default::default() };
     power.add_energy_model(0.0);
     assert_eq!(power.watts(false), Some(0.0));
 
-    let mut power = PowerSources { pmp: 0.8, ..Default::default() };
+    let mut power = PowerSources { pmp: Some(0.8), ..Default::default() };
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
@@ -1020,7 +1030,8 @@ mod tests {
   #[test]
   fn clpc_power_takes_precedence_without_double_counting_or_replacing_idle_zero() {
     for watts in [0.0, 0.8, 13.0] {
-      let mut power = PowerSources { energy_model: Some(2.0), pmp: 0.8, ..Default::default() };
+      let mut power =
+        PowerSources { energy_model: Some(2.0), pmp: Some(0.8), ..Default::default() };
       power.add_clpc(watts);
       assert_eq!(power.watts(false), Some(watts));
     }
@@ -1042,7 +1053,8 @@ mod tests {
   #[test]
   fn forced_clpc_rejects_legacy_fallback_but_accepts_idle_zero() {
     for watts in [None, Some(f32::NAN), Some(f32::INFINITY), Some(-1.0), Some(0.0), Some(1.2)] {
-      let mut power = PowerSources { energy_model: Some(2.0), pmp: 0.8, ..Default::default() };
+      let mut power =
+        PowerSources { energy_model: Some(2.0), pmp: Some(0.8), ..Default::default() };
       if let Some(watts) = watts {
         power.add_clpc(watts);
       }
@@ -1237,11 +1249,19 @@ mod tests {
   }
 
   #[test]
-  fn a_ram_spike_stays_out_of_chip_and_system_power() {
-    let rs =
-      Metrics { cpu_power: 2.0, ram_power: 689.0, dcs_power: Some(0.5), ..Default::default() };
-    let rs = with_power_totals(rs, Some(12.0));
-    assert_eq!((rs.ram_power, rs.chip_power, rs.sys_power), (0.0, 2.5, 12.0));
+  fn spikes_stay_out_of_chip_and_system_power() {
+    // DRAM, DCS, package total; then DRAM, DCS and chip after the check against 12 W
+    for (ram, dcs, package, expected) in [
+      (689.0, 0.5, 0.0, (0.0, 0.5, 2.5)),
+      (0.5, 689.0, 0.0, (0.5, 0.0, 2.5)),
+      (0.5, 0.5, 689.0, (0.5, 0.5, 3.0)),
+    ] {
+      let rs =
+        Metrics { cpu_power: 2.0, ram_power: ram, dcs_power: Some(dcs), ..Default::default() };
+      let rs = with_power_totals(Metrics { chip_power: package, ..rs }, Some(12.0));
+      assert_eq!((rs.ram_power, rs.dcs_power.unwrap(), rs.chip_power), expected);
+      assert_eq!(rs.sys_power, 12.0);
+    }
   }
 
   #[test]
