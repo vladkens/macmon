@@ -83,8 +83,7 @@ Options:
 
 Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
-When the TUI runs as root, preference changes apply only to that session and are not saved.
-Run without `sudo` to persist settings.
+When the TUI runs as root, preference changes apply only to that session and are not saved. Run without `sudo` to persist settings.
 
 Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows the Safari app with its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory), `cmd:` (the command line, of your own processes) and `app:` (the name of the `.app` the process or its responsible process runs from); or an exact local TCP or UDP port, of your own processes: `port:3000`. `Enter` keeps the filter, `Esc` clears it.
 
@@ -443,8 +442,6 @@ Compared with htop 3.5.3 and btop 1.4.8 on macOS 27.
 ## 🤝 Contributing
 
 Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
-
-When reporting an issue, mention the version from `macmon -V`, and for a wrong or missing metric add the output of `macmon debug`.
 
 ## 📝 License
 
