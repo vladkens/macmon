@@ -135,6 +135,8 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "dcs_power_watts", "DCS power consumption in Watts", ?m.dcs_power);
   gauge_mac!(out, "media_power_watts", "Video encoder and image processor power consumption in Watts", ?m.media_power);
   gauge_mac!(out, "gpu_ram_power_watts", "DEPRECATED: GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "dc_in_power_watts", "Power adapter input in Watts", ?m.dc_in_power);
+  gauge_mac!(out, "display_power_watts", "Built-in display backlight power in Watts", ?m.display_power);
   gauge_any!(out, "gpu_memory_alloc_bytes", "System memory allocated by the GPU in bytes", ?m.gpu_mem_alloc);
   gauge_any!(out, "gpu_memory_in_use_bytes", "System memory in use by the GPU in bytes", ?m.gpu_mem_in_use);
   if !m.fans.is_empty() {
@@ -463,13 +465,15 @@ mod tests {
 
   #[test]
   fn optional_power_is_null_without_a_source() {
-    let metrics = Metrics { dcs_power: Some(0.25), ..Default::default() };
+    let metrics = Metrics { dcs_power: Some(0.25), dc_in_power: Some(10.0), ..Default::default() };
     let json = to_json(&metrics, &SocInfo::default());
     let json: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!((&json["dcs_power"], &json["media_power"]), (&0.25.into(), &().into()));
+    assert_eq!((&json["dc_in_power"], &json["display_power"]), (&10.0.into(), &().into()));
     let output = to_prometheus(&metrics, &SocInfo::default());
     assert!(output.contains("macmon_dcs_power_watts{chip=\"\"} 0.25\n"));
-    assert!(!output.contains("macmon_media_"));
+    assert!(output.contains("macmon_dc_in_power_watts{chip=\"\"} 10\n"));
+    assert!(!output.contains("macmon_media_") && !output.contains("macmon_display_"));
   }
 
   #[test]

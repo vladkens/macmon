@@ -303,6 +303,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "dcs_power": 0.08119427, // Memory controller, Watts, null without a source
   "media_power": null, // Video encoder and image processor, Watts, null except on M6
   "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power, Watts
+  "dc_in_power": 11.56, // Power adapter input, Watts, null without a source
+  "display_power": null, // Built-in display backlight, Watts, null without a source
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
   "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
   "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable
@@ -317,6 +319,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
 ```
 
 </details>
+
+`dc_in_power` is the power coming in from the power adapter, about 0 on battery. `display_power` is the power of the built-in display's backlight. Both are data only, not in the TUI, and `null` on Macs that don't report them.
 
 ### Active and scaled ratios
 

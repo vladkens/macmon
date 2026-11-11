@@ -224,6 +224,10 @@ pub struct Metrics {
   /// GPU SRAM power in Watts.
   #[deprecated(since = "0.12.0", note = "no CLPC source; `gpu_power` includes it on some chips")]
   pub gpu_ram_power: f32,
+  /// Power adapter input in Watts, or None without a source.
+  pub dc_in_power: Option<f32>,
+  /// Built-in display backlight power in Watts, or None without a source.
+  pub display_power: Option<f32>,
   /// Bytes per second received by the Ethernet and Wi-Fi interfaces, or None without one.
   pub net_in: Option<u64>,
   /// Bytes per second sent by the Ethernet and Wi-Fi interfaces, or None without one.
@@ -739,6 +743,11 @@ impl Sampler {
     fans
   }
 
+  /// Watts of an SMC power key, or None without a finite reading.
+  fn get_smc_power(&mut self, key: &str) -> Option<f32> {
+    self.smc.as_mut()?.read_float_val(key).ok().filter(|x| x.is_finite())
+  }
+
   fn get_mem(&mut self) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
@@ -936,6 +945,9 @@ impl Sampler {
     let gpu_mem = gpu_memory();
     rs.gpu_mem_alloc = gpu_mem.map(|x| x[0]);
     rs.gpu_mem_in_use = gpu_mem.map(|x| x[1]);
+    rs.dc_in_power = self.get_smc_power("PDTR");
+    // backlight: "PBwo" on M5 and A18 Pro, "PDBR" on M1 and M4 (exelban/stats); not on our M1, M5
+    rs.display_power = self.get_smc_power("PBwo").or_else(|| self.get_smc_power("PDBR"));
 
     Ok(rs)
   }
@@ -1119,6 +1131,7 @@ mod tests {
     assert_eq!(rs.cpu_tiers.len(), 1);
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
     assert_eq!((rs.ram_power, rs.chip_power, rs.dcs_power, rs.media_power), (0.0, 0.0, None, None));
+    assert_eq!((rs.dc_in_power, rs.display_power), (None, None));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
 
     // CLPC counters are required whether IOReport has channels or not
