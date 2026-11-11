@@ -25,13 +25,13 @@ Finish homm's PR #117 (CLPC chip aggregate, DRAM, DCS and media counters) and th
 
 ## Checklist
 
-- [ ] #117: merge `main` (#119 PMP DRAM on M1, #125 RAM check) into the branch.
-- [ ] #117: `ram_power` DRAM only, `dcs_power` and `media_power` optional.
-- [ ] #117: `chip_power` with deprecated `all_power` in Rust, JSON and Prometheus.
-- [ ] #117: `gpu_ram_power` as on `main`, deprecated.
-- [ ] #117: readme power section and JSON example.
-- [ ] #117: `make check`, `make test`.
-- [ ] #117: `macmon pipe` and `macmon debug` idle and under CPU and GPU load on M5 / macOS 27.2 and M2 / macOS 27.0.1.
+- [x] #117: merge `main` (#119 PMP DRAM on M1, #125 RAM check) into the branch.
+- [x] #117: `ram_power` DRAM only, `dcs_power` and `media_power` optional.
+- [x] #117: `chip_power` with deprecated `all_power` in Rust, JSON and Prometheus.
+- [x] #117: `gpu_ram_power` as on `main`, deprecated.
+- [x] #117: readme power section and JSON example.
+- [x] #117: `make check`, `make test`.
+- [x] #117: `macmon pipe` and `macmon debug` idle and under CPU and GPU load on M5 / macOS 27.2 and M2 / macOS 27.0.1.
 - [ ] #117: the same on M1 / macOS 15.8.1 (#119's PMP DRAM path).
 - [ ] #118: `dc_in_power` and `display_power` optional, `battery_power` removed, `all_power` untouched.
 - [ ] #118: `make check`, `make test`, `macmon pipe` and `macmon debug` on M1, M2 and M5, on AC and on battery.
