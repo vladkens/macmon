@@ -22,8 +22,9 @@ struct ClpcIndices {
   ram: u32,
   dcs: u32,
   chip: u32,
-  ave: (u32, &'static str),
-  isp: (u32, &'static str),
+  ave: Option<(u32, &'static str)>,
+  vdec: Option<(u32, &'static str)>,
+  isp: Option<(u32, &'static str)>,
 }
 
 // Generated from macOS 27.2 (26B123) by scripts/clpc.py.
@@ -34,8 +35,9 @@ const INDICES_27: ClpcIndices = ClpcIndices {
   ram: 26,
   dcs: 27,
   chip: 9,
-  ave: (60, "mJ"),
-  isp: (58, "mJ"),
+  ave: Some((60, "mJ")),
+  vdec: None,
+  isp: Some((58, "mJ")),
 };
 
 const CLPC_KEYS: &[ClpcKeys] = &[
@@ -267,9 +269,9 @@ pub(crate) fn energy_channels(
     (report_id(INDICES_27.chip, keys.chip), "Package Energy", "nJ"),
   ];
   for (key, index, name) in [
-    (keys.ave, Some(INDICES_27.ave), "AVE"),
-    (keys.vdec, None, "VDEC"),
-    (keys.isp, Some(INDICES_27.isp), "ISP"),
+    (keys.ave, INDICES_27.ave, "AVE"),
+    (keys.vdec, INDICES_27.vdec, "VDEC"),
+    (keys.isp, INDICES_27.isp, "ISP"),
   ] {
     if let (Some(key), Some((index, unit))) = (key, index) {
       channels.push((report_id(index, key), name, unit));

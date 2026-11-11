@@ -4,10 +4,22 @@
 # ///
 """Regression tests for static CLPC report discovery; run with uv run."""
 
+import re
 import struct
 import unittest
+from pathlib import Path
 
-from clpc import rust_table
+from clpc import difference, rust_table
+
+RUST = (Path(__file__).resolve().parent.parent / "src" / "clpc.rs").read_text()
+
+
+def fields(text, name):
+    """Field names of a Rust struct or struct literal `name { ... }` in `text`."""
+    body = re.search(rf"{name}(?: =)? (?:ClpcIndices )?\{{(.*?)\}}", text, re.S)[1]
+    return re.findall(r"^\s*(\w+):", body, re.M)
+
+
 from clpc_binary import Flow, labels
 
 
@@ -149,9 +161,10 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn("chip: 9", output)
         self.assertNotIn("gpusram:", output)
         self.assertIn("vdec: None", output)
+        self.assertIn("ave: None, vdec: None, isp: None }", output)
         driver["channels"]["AVE"] = {"id": "0x0000003b12345678", "unit": "mJ"}
         output = rust_table(catalog)
-        self.assertIn('ave: (59, "mJ")', output)
+        self.assertIn('ave: Some((59, "mJ")), vdec: None, isp: None }', output)
         self.assertIn("ave: Some(0x1234_5678)", output)
         for channel in (
             {"id": "0x0000003c12345678", "unit": "mJ"},
@@ -169,6 +182,51 @@ class DiscoveryTests(unittest.TestCase):
         del driver["channels"]["RAM"]
         with self.assertRaises(ValueError):
             rust_table(catalog)
+
+    def test_rust_export_has_exactly_the_fields_of_the_rust_structs(self):
+        channels = {
+            c: {"id": f"0x{i:08x}12345678", "unit": "mJ"}
+            for i, c in enumerate(("CPU", "GPU", "ANE", "RAM", "DCS", "CHIP", "VDEC"))
+        }
+        catalog = {"complete": True, "macos": "27.2", "build": "26B123"}
+        catalog["drivers"] = [{"bundle": "example", "channels": channels}]
+        output = rust_table(catalog)
+        indices = re.search(r"ClpcIndices \{ (.*) \};", output)[1]
+        self.assertEqual(
+            re.findall(r"(\w+): ", indices), fields(RUST, "struct ClpcIndices")
+        )
+        self.assertEqual(fields(output, "ClpcKeys"), fields(RUST, "struct ClpcKeys"))
+
+    def test_missing_optional_ids_do_not_hide_changed_required_ids(self):
+        def driver(cpu, ave=None):
+            channels = {
+                c: {"id": f"0x{c}"} for c in ("GPU", "ANE", "RAM", "DCS", "CHIP")
+            }
+            channels["CPU"] = {"id": cpu}
+            if ave:
+                channels["AVE"] = {"id": ave}
+
+            segments = {"__TEXT_EXEC": {"sha256": "x"}}
+            return {
+                "bundle": "example",
+                "uuid": "u",
+                "segments": segments,
+                "reports": [],
+                "status": "identified",
+                "channels": channels,
+            }
+
+        self.assertIs(
+            difference(driver("0x1"), driver("0x1"))["energy_ids_changed"], False
+        )
+        self.assertIs(
+            difference(driver("0x1"), driver("0x2"))["energy_ids_changed"], True
+        )
+        changed = difference(driver("0x1"), driver("0x1", ave="0x3"))
+        self.assertIs(changed["energy_ids_changed"], True)
+        missing = driver("0x1")
+        del missing["channels"]["RAM"]
+        self.assertIsNone(difference(driver("0x1"), missing)["energy_ids_changed"])
 
     def test_duplicate_uses_selected_lane_and_64_bit_store_stops_after_two_lanes(self):
         fields = self.trace(

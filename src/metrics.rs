@@ -52,8 +52,8 @@ impl PowerSources {
     }
   }
 
-  /// The first source with a reading, None without one.
-  fn reading(&self, force_clpc: bool) -> Option<f32> {
+  /// The first source with a reading, 0 without one, or only CLPC with `force_clpc`.
+  fn watts(self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
     }
@@ -61,12 +61,7 @@ impl PowerSources {
     // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
     // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
     // Drivers with unknown CLPC IDs need the legacy sources; ANE, DRAM and DCS can use PMP.
-    self.clpc.or(self.energy_model).or(self.pmp)
-  }
-
-  /// The reading, 0 without one unless `force_clpc`.
-  fn watts(&self, force_clpc: bool) -> Option<f32> {
-    self.reading(force_clpc).or((!force_clpc).then_some(0.0))
+    Some(self.clpc.or(self.energy_model).or(self.pmp).unwrap_or_default())
   }
 }
 
@@ -863,7 +858,7 @@ impl Sampler {
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
     rs.ram_power = ram_power.watts(false).unwrap_or_default();
-    rs.dcs_power = dcs_power.reading(self.force_clpc);
+    rs.dcs_power = dcs_power.clpc.or(dcs_power.energy_model).or(dcs_power.pmp);
     rs.media_power = media_power.clpc;
     rs.chip_power = chip_power.clpc.unwrap_or_default(); // completed by with_power_totals
     rs.cpu_tiers = cpu_cores.into_metrics();

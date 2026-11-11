@@ -73,9 +73,12 @@ def rust_table(catalog):
         if len(values) > 1:
             raise ValueError(f"Inconsistent {component} table index or unit")
 
+        index = "None"
         if values:
             index, unit = values.pop()
-            extra_indices.append(f'{component.lower()}: ({index}, "{unit}")')
+            index = f'Some(({index}, "{unit}"))'
+
+        extra_indices.append(f"{component.lower()}: {index}")
 
     major = int(catalog["macos"].split(".")[0])
     lines = [
@@ -314,9 +317,9 @@ def difference(before, after):
         != [(c["id"], c["name"]) for c in after["reports"]],
         "old_ids": old,
         "new_ids": new,
+        # Optional components may be missing; a missing one compares as None.
         "energy_ids_changed": any(old[c] != new[c] for c in COMPONENTS)
-        if all(old.values())
-        and all(new.values())
+        if all(old[c] and new[c] for c in CORE_COMPONENTS)
         and before["status"] == after["status"] == "identified"
         else None,
     }
