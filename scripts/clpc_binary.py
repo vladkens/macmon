@@ -832,7 +832,6 @@ COMPONENTS = {
     frozenset({"GPU"}): "GPU",
     frozenset({"GPU", "GPUSRAM"}): "GPU",
     frozenset({"AVE"}): "AVE",
-    frozenset({"VDEC"}): "VDEC",
     frozenset({"ISP"}): "ISP",
     frozenset({"DRAM"}): "RAM",
     frozenset({"DCS"}): "DCS",
@@ -1062,18 +1061,14 @@ def discover(image, driver, node_rows):
         )
         reports = {}
         for channel in driver["channels"]:
-            for suffix, storage_type in (("IyE", "u64"), ("IdE", "f64")):
+            # Integer reports count nJ, double reports mJ.
+            for suffix, unit in (("IyE", "nJ"), ("IdE", "mJ")):
                 if (
                     f"configureSimpleReport{suffix}" in channel["configure"]
                     and f"generateSimpleReport{suffix}" in channel["generate"]
                 ):
                     reports.setdefault(int(channel["storage"], 16), []).append(
-                        {
-                            **channel,
-                            "storage_type": storage_type,
-                            "value_type": "u64",
-                            "unit": "nJ" if storage_type == "u64" else "mJ",
-                        }
+                        {**channel, "unit": unit}
                     )
         caller = flow(
             addr, helper=helper_outputs, inputs=inputs, indices=indices, reports=reports
@@ -1105,7 +1100,7 @@ def discover(image, driver, node_rows):
             dependencies = labels(value)
             report = reports[target][0]
             markers = {f"counter:{target:x}"}
-            if report["storage_type"] == "u64":
+            if report["unit"] == "nJ":
                 markers.add("rounded")
 
             if not markers <= dependencies:
@@ -1129,23 +1124,13 @@ def discover(image, driver, node_rows):
                 assignments.setdefault(component, []).append(
                     {**candidate, "identification": "automated dependency trace"}
                 )
-        row["channels"] = {
-            component: hits[0]
-            for component, hits in assignments.items()
-            if len(hits) == 1
-        }
-        # Retain integer counters when an additional double report exposes the
-        # same component; keep all candidates in the catalog for inspection.
+        row["channels"] = {}
         for component, hits in assignments.items():
-            integer = [hit for hit in hits if hit["storage_type"] == "u64"]
-            if len(integer) == 1:
-                row["channels"][component] = integer[0]
+            # A component with an additional double report keeps its integer one.
+            hits = hits if len(hits) == 1 else [x for x in hits if x["unit"] == "nJ"]
+            if len(hits) == 1:
+                row["channels"][component] = hits[0]
 
-        row["unresolved"] = [
-            component
-            for component in ("GPU", "AVE", "VDEC", "ISP")
-            if component not in row["channels"]
-        ]
         require(
             {"CPU", "GPU", "ANE", "RAM", "DCS", "CHIP"} <= row["channels"].keys(),
             "Incomplete or ambiguous component trace; inspect candidates and sample_fields",

@@ -4,13 +4,13 @@ Finish homm's PR #117 (CLPC chip aggregate, DRAM, DCS and media counters) and th
 
 ## Behavior
 
-- `chip_power`: the chip total in Watts. The CLPC package aggregate when it is valid, unless the sum CPU + GPU + ANE + DRAM + DCS + media from the available sources is higher: a total below its parts is a bad reading. The sum uses `ram_power` after the #125 check, so a DRAM spike reaches neither `chip_power` nor `sys_power`. JSON `chip_power`, Prometheus `macmon_chip_power_watts`; the TUI's "Power" box shows it when there is no system total.
-- `all_power`: deprecated, the same value as `chip_power`, kept in the Rust struct (`#[deprecated]`), JSON and Prometheus (`macmon_all_power_watts`).
-- `ram_power`: DRAM only: CLPC DRAM where the driver is known, else `Energy Model` DRAM, else PMP DRAM (M1, #119). Still dropped to 0 above the SMC system total (#125).
-- `dcs_power`: new, `Option<f32>`: CLPC DCS, else `Energy Model` DCS, else PMP DCS (M1); `null` in JSON and no Prometheus gauge without a source.
-- `media_power`: new, `Option<f32>`: CLPC AVE + VDEC + ISP where the driver has separate reports (M6 so far, unverified on hardware); `null` and no gauge otherwise.
-- `gpu_ram_power`: deprecated, read as before from `Energy Model` GPU SRAM. On macOS 27 the CLPC GPU report already includes GPU SRAM where the firmware adds it.
-- `sys_power` is unchanged.
+- `chip_power`: the chip total in Watts: the CLPC package total, at least CPU + GPU + ANE + DRAM + DCS + media. DRAM, DCS and the package total above a positive SMC total are dropped first (#125), so a spike reaches neither `chip_power` nor `sys_power`. JSON `chip_power`, Prometheus `macmon_chip_power_watts`; the TUI's "Power" box shows it when there is no system total.
+- `all_power`: deprecated, the same value as `chip_power` in Rust (`#[deprecated]`), JSON and Prometheus.
+- `ram_power`: DRAM only: CLPC, else `Energy Model`, else PMP (M1, #119).
+- `dcs_power`: new, `Option<f32>`: CLPC, else `Energy Model`, else PMP; `null` and no Prometheus gauge without a source, also with `Sampler::with_clpc()`.
+- `media_power`: new, `Option<f32>`: CLPC AVE + ISP, which only the M6 driver has (M2 and M5 checked at runtime, M6 untested); `null` and no gauge elsewhere, where media is inside `chip_power`.
+- `gpu_ram_power`: deprecated, read as before from `Energy Model` GPU SRAM.
+- `sys_power`: the SMC total, at least `chip_power`.
 - `dc_in_power` (#118): new, `Option<f32>` from SMC `PDTR`, `null` without the key.
 - `display_power` (#118): new, `Option<f32>` from SMC `PBwo`, else `PDBR`; `null` without a reading.
 - The raw sources of every new field (CLPC and `Energy Model` channels, SMC keys) appear in `macmon debug`.
@@ -20,7 +20,7 @@ Finish homm's PR #117 (CLPC chip aggregate, DRAM, DCS and media counters) and th
 - The maintainer's review of #117 and #118 (vladkens/macmon#117, comment 6671119044) sets the field split above: DRAM stays apart from DCS, `chip_power` replaces `all_power`, new fields are optional.
 - `battery_power` from #118 is dropped: it reads wrong on AC on M1, M2 and M5.
 - #118's change of `all_power` to include memory is dropped: `chip_power` covers it.
-- #117's CLPC extraction fixes, scripts and tests stay as they are.
+- No VDEC report exists in any driver; media IDs live in a separate table, not in every driver's keys.
 - Updates to homm's branch are merges from `main`, never a rebase or force push.
 
 ## Checklist

@@ -6,7 +6,7 @@ use std::time::Duration;
 use core_foundation::base::{CFRelease, CFShow};
 
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_memory_channel,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_mem_channel,
 };
 use crate::sources::{
   HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, battery, cfdict_data, cfdict_keys,
@@ -24,7 +24,7 @@ fn debug_channels(group: &str, subgroup: &str, channel: &str, unit: &str) -> boo
     || group == "CPU Stats"
     || group == "GPU Stats"
     || is_pmp_ane_channel(group, subgroup, channel, unit)
-    || is_pmp_memory_channel(group, subgroup, channel, unit)
+    || is_pmp_mem_channel(group, subgroup, channel, unit)
     || is_clpc_energy_channel(group, subgroup, channel, unit)
 }
 

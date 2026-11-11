@@ -1178,7 +1178,7 @@ fn clpc_energy_channel(
   name: &str,
   unit: &str,
 ) -> CFMutableDictionary<CFString, CFType> {
-  // IOReportTypes.h: simple integer, power category, one energy element.
+  // IOReportTypes.h: simple integer, power category, one element; energy in nJ or mJ.
   let channel_type = 1i64 | (2 << 16) | (1 << 32);
   let unit = (3i64 << 56) | ((if unit == "mJ" { 124i64 } else { 118 }) << 32);
   let legend = CFArray::from_CFTypes(&[
@@ -1973,7 +1973,7 @@ mod tests {
       .iter()
       .map(|&(id, name, unit)| clpc_energy_channel(0x1_0000_0428, id, name, unit))
       .collect();
-    for order in [vec![1], vec![3], vec![3, 2, 0, 1], vec![7, 5, 4], vec![11, 8, 10]] {
+    for order in [vec![1], vec![2, 0, 1], vec![5, 3, 4], vec![8, 6, 7]] {
       let channels: Vec<_> = order.iter().map(|&i| requested[i].clone()).collect();
       let sample = CFDictionary::from_CFType_pairs(&[(
         CFString::new("IOReportChannels"),
@@ -1984,10 +1984,8 @@ mod tests {
       unsafe { core_foundation::base::CFRetain(data as _) };
       let actual: Vec<_> =
         IOReportIterator::from_sample(data).map(|item| (item.channel, item.unit)).collect();
-      let expected: Vec<_> = order
-        .iter()
-        .map(|&i| (channel_ids[i].1.to_string(), channel_ids[i].2.to_string()))
-        .collect();
+      let expected: Vec<_> =
+        order.iter().map(|&i| (channel_ids[i].1.to_string(), "nJ".to_string())).collect();
       assert_eq!(actual, expected);
     }
   }

@@ -223,11 +223,13 @@ The default `pulse` mode generates a predictable cyclic CPU load with a fixed 50
 
 ### Power sources and macOS 27
 
-macOS 27 broke the CPU/ANE/DRAM power source that macmon previously used without root. The IOReport `Energy Model` counters can remain visible but stop updating: refreshing them now requires the private `com.apple.private.pmgr.nrg.reporting` entitlement. Apple's signed `powermetrics` has this entitlement and can keep using the named channels. Running macmon with `sudo` does not grant the same access.
+macOS 27 broke the CPU/ANE power source that macmon previously used without root. The IOReport `Energy Model` counters can remain visible but stop updating: refreshing them now requires the private `com.apple.private.pmgr.nrg.reporting` entitlement. Apple's signed `powermetrics` has this entitlement and can keep using the named channels. Running macmon with `sudo` does not grant the same access.
 
-macmon reads hidden energy reports from the AppleCLPC driver through IOReport without root. These reports use opaque IDs instead of discoverable CPU/GPU/ANE/DRAM channel names and require driver-specific mappings with verified units.
+The working rootless workaround we found is to read hidden energy reports from the AppleCLPC driver through IOReport. These reports use opaque IDs instead of discoverable CPU/GPU/ANE channel names, so macmon has to identify the counters and verify their units. This leaves macmon maintaining undocumented mappings for data that Apple's own tool can still read directly.
 
-Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy CPU/GPU/ANE and memory fallbacks for older systems. `chip_power` uses the driver's full package aggregate when available, otherwise or when it is lower, CPU + GPU + ANE + DRAM + DCS + media. `ram_power` is DRAM and `dcs_power` DCS, each preferring CLPC. `media_power` has a source only on M6, which has separate CLPC AVE and ISP reports; on other chips it is `null` and media energy stays inside `chip_power`. GPU power follows the firmware's aggregate, which includes GPUSRAM on some chips. New chips or driver versions may need additional mappings. Zero readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+`chip_power` is the power of the whole chip: its own total where it reports one, and never less than the sum of CPU, GPU, ANE, memory (`ram_power`), memory controller (`dcs_power`) and media power. `media_power`, the video encoder and image processor, is reported apart only on M6; on other chips it is part of `chip_power`. `all_power` is the same as `chip_power`, kept for compatibility.
+
+Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
 
 ### Output format
 
@@ -286,21 +288,21 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "pcpu_freq_mhz": 1800,
   "pcpu_scaled_ratio": 0.015181795,
   "pcpu_active_ratio": 0.04,
-  "ecpu_cores": [/* cores of the first tier */], // Deprecated, use cpu_tiers
-  "pcpu_cores": [/* cores of the last tier */], // Deprecated, use cpu_tiers
+  "ecpu_cores": [/* cores of the first tier */],
+  "pcpu_cores": [/* cores of the last tier */],
   "gpu_freq_mhz": 461, // GPU frequency
   "gpu_scaled_ratio": 0.021497859, // Frequency-scaled ratio (0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
   "ane_power": 0.0, // Watts
-  "chip_power": 4.22231553, // CLPC package aggregate, or CPU + GPU + ANE + DRAM + DCS + media, Watts
-  "all_power": 4.22231553, // Deprecated, use chip_power
+  "chip_power": 1.4130547, // Whole chip, Watts
+  "all_power": 1.4130547, // Deprecated, use chip_power
   "sys_power": 5.876533, // Watts
-  "ram_power": 0.11635789, // DRAM, Watts
-  "dcs_power": 0.0812, // Watts, null without a source
-  "media_power": null, // AVE + VDEC + ISP, Watts, null without a source
-  "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power from Energy Model, Watts
+  "ram_power": 0.11635789, // Memory (DRAM), Watts
+  "dcs_power": 0.08119427, // Memory controller, Watts, null without a source
+  "media_power": null, // Video encoder and image processor, Watts, null except on M6
+  "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power, Watts
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
   "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
   "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable

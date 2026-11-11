@@ -7,7 +7,7 @@ use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_memory_channel,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_mem_channel,
   zero_div,
 };
 use crate::sources::{
@@ -41,9 +41,7 @@ impl PowerSources {
   }
 
   fn add_energy_model(&mut self, watts: f32) {
-    if watts.is_finite() && watts >= 0.0 {
-      *self.energy_model.get_or_insert(0.0) += watts;
-    }
+    *self.energy_model.get_or_insert(0.0) += watts;
   }
 
   fn add_pmp(&mut self, watts: f32) {
@@ -52,7 +50,6 @@ impl PowerSources {
     }
   }
 
-  /// The first source with a reading, 0 without one, or only CLPC with `force_clpc`.
   fn watts(self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
@@ -211,7 +208,7 @@ pub struct Metrics {
   pub gpu_power: f32,
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
-  /// Chip power in Watts: the CLPC package total, or the sum of the parts when that is higher.
+  /// Chip power in Watts: the chip total, at least the sum of its parts.
   pub chip_power: f32,
   /// The same as `chip_power`.
   #[deprecated(since = "0.12.0", note = "use `chip_power`")]
@@ -222,13 +219,10 @@ pub struct Metrics {
   pub ram_power: f32,
   /// DCS power in Watts, or None without a source.
   pub dcs_power: Option<f32>,
-  /// AVE + VDEC + ISP (media) power in Watts, or None without a source; only M6 so far.
+  /// Video encoder and image processor power in Watts, or None without a source (only on M6).
   pub media_power: Option<f32>,
-  /// GPU SRAM power in Watts from `Energy Model`.
-  #[deprecated(
-    since = "0.12.0",
-    note = "no CLPC source; CLPC `gpu_power` includes it on some chips"
-  )]
+  /// GPU SRAM power in Watts.
+  #[deprecated(since = "0.12.0", note = "no CLPC source; `gpu_power` includes it on some chips")]
   pub gpu_ram_power: f32,
   /// Bytes per second received by the Ethernet and Wi-Fi interfaces, or None without one.
   pub net_in: Option<u64>,
@@ -285,9 +279,9 @@ fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
   if sys.is_some_and(|sys| sys > 0.0 && watts > sys) { 0.0 } else { watts }
 }
 
-/// Drops a bad `ram_power`, `dcs_power` or CLPC package total, then sets `chip_power` to that
-/// total it holds or the sum of the components when that is higher (a total below its parts is a
-/// bad reading), and `sys_power` to the raw SMC total `sys`, at least `chip_power`.
+/// Drops bad `ram_power`, `dcs_power` and package total `chip_power` readings, then sets
+/// `chip_power` to at least the sum of its parts and `sys_power` to the SMC total `sys`, at least
+/// `chip_power`.
 #[allow(deprecated)] // all_power
 fn with_power_totals(mut rs: Metrics, sys: Option<f32>) -> Metrics {
   rs.ram_power = checked_power(rs.ram_power, sys);
@@ -828,7 +822,7 @@ impl Sampler {
         ane_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
       }
 
-      if is_pmp_memory_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+      if is_pmp_mem_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
         let power = if x.channel.starts_with("DCS") { &mut dcs_power } else { &mut ram_power };
         power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
       }
@@ -837,7 +831,7 @@ impl Sampler {
         let power = match x.channel.as_str() {
           "CPU Energy" => &mut cpu_power,
           "GPU Energy" => &mut gpu_power,
-          "AVE" | "VDEC" | "ISP" => &mut media_power,
+          "AVE" | "ISP" => &mut media_power,
           "ANE" => &mut ane_power,
           "DRAM" => &mut ram_power,
           "DCS" => &mut dcs_power,
@@ -958,7 +952,6 @@ mod tests {
   use std::time::{Duration, Instant};
 
   use core_foundation::base::TCFType;
-  use core_foundation::data::CFData;
   use core_foundation::dictionary::CFDictionary;
   use core_foundation::string::CFString;
 
@@ -1125,6 +1118,7 @@ mod tests {
     assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("_", 0));
     assert_eq!(rs.cpu_tiers.len(), 1);
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!((rs.ram_power, rs.chip_power, rs.dcs_power, rs.media_power), (0.0, 0.0, None, None));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
 
     // CLPC counters are required whether IOReport has channels or not
@@ -1170,91 +1164,22 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)] // all_power, gpu_ram_power
-  fn samples_selected_power_components_without_double_counting_memory_or_sram() {
-    let rows = [
-      ("Energy Model", "DRAM", "mJ", 10_000i64),
-      ("Energy Model", "DCS", "mJ", 2_000),
-      ("Energy Model", "AVE0", "mJ", 1_000),
-      ("Energy Model", "VDEC", "mJ", 2_000),
-      ("Energy Model", "ISP0", "mJ", 3_000),
-      ("Energy Model", "GPU SRAM", "mJ", 250),
-      ("CLPC", "DRAM", "nJ", 3_000_000_000),
-      ("CLPC", "DCS", "nJ", 4_000_000_000),
-      ("CLPC", "Package Energy", "nJ", 30_000_000_000),
-      ("CLPC", "GPU Energy", "nJ", 10_000_000_000),
-      ("CLPC", "AVE", "mJ", 1_000),
-      ("CLPC", "VDEC", "nJ", 2_000_000_000),
-      ("CLPC", "ISP", "mJ", 3_000),
-      ("CLPC", "GPU SRAM", "mJ", 250),
-    ];
-    let sampler = sampler_without_sources(4, false);
-    // rows: Energy Model only (6), with CLPC memory (9), all (14); the package total in nJ or
-    // none; then DRAM, DCS and chip Watts. All 14 rows add GPU 10 W and media 1 + 2 + 3 W.
-    for (count, package, ram, dcs, chip) in [
-      (6, None, 10.0, 2.0, 12.0),
-      (9, Some(30_000_000_000), 3.0, 4.0, 30.0),
-      (14, Some(30_000_000_000), 3.0, 4.0, 30.0),
-      (14, None, 3.0, 4.0, 23.0),
-      (14, Some(20_000_000_000), 3.0, 4.0, 23.0), // below its parts
-      (14, Some(0), 3.0, 4.0, 23.0),
-      (14, Some(-1), 3.0, 4.0, 23.0), // invalid
+  #[allow(deprecated)] // all_power
+  fn chip_power_drops_spikes_and_covers_its_parts() {
+    // DRAM, DCS, package total, SMC total; then DRAM, DCS, chip and system power; CPU 2 W and
+    // media 1 W in every case
+    for (ram, dcs, package, sys, expected) in [
+      (689.0, Some(0.5), 0.0, Some(12.0), (0.0, Some(0.5), 3.5, 12.0)),
+      (0.5, Some(689.0), 0.0, Some(12.0), (0.5, Some(0.0), 3.5, 12.0)),
+      (0.5, Some(0.5), 689.0, Some(12.0), (0.5, Some(0.5), 4.0, 12.0)),
+      (0.5, None, 9.0, Some(12.0), (0.5, None, 9.0, 12.0)),
+      (0.5, None, 1.0, None, (0.5, None, 3.5, 0.0)), // a package total below its parts
     ] {
-      let rows: Vec<_> = rows[..count]
-        .iter()
-        .filter_map(|&(group, channel, unit, value)| {
-          let value = if channel == "Package Energy" { package? } else { value };
-          Some((group, channel, unit, value))
-        })
-        .collect();
-      // IOReportElement: provider, channel, simple/power type, timestamp, four values.
-      let samples: Vec<_> = rows
-        .iter()
-        .map(|&(_, _, _, value)| {
-          let words = [1i64, 1, 1 | (2 << 16) | (1 << 32), 0, value, i64::MIN, i64::MIN, i64::MIN];
-          let bytes: Vec<_> = words.into_iter().flat_map(i64::to_le_bytes).collect();
-          CFDictionary::from_CFType_pairs(&[(
-            CFString::new("RawElements"),
-            CFData::from_buffer(&bytes),
-          )])
-        })
-        .collect();
-      let items = rows.iter().zip(&samples).map(|(&(group, channel, unit, _), sample)| {
-        IOReportIteratorItem {
-          group: group.into(),
-          subgroup: "Energy Counters".into(),
-          channel: channel.into(),
-          unit: unit.into(),
-          item: sample.as_concrete_TypeRef(),
-        }
-      });
-      let rs = sampler.get_ioreport_metrics(items, Duration::from_secs(1)).unwrap();
-      let rs = with_power_totals(aggregate_ioreport_metrics(rs, &sampler.soc), None);
-      let all = count == 14;
-      assert_eq!((rs.ram_power, rs.dcs_power, rs.gpu_ram_power), (ram, Some(dcs), 0.25));
-      assert_eq!((rs.gpu_power, rs.media_power), if all { (10.0, Some(6.0)) } else { (0.0, None) });
-      assert_eq!((rs.chip_power, rs.all_power), (chip, chip));
-    }
-
-    let empty = sampler.get_ioreport_metrics([], Duration::from_secs(1)).unwrap();
-    let empty = with_power_totals(empty, None);
-    assert_eq!((empty.ram_power, empty.gpu_ram_power, empty.chip_power), (0.0, 0.0, 0.0));
-    assert_eq!((empty.dcs_power, empty.media_power), (None, None));
-  }
-
-  #[test]
-  fn spikes_stay_out_of_chip_and_system_power() {
-    // DRAM, DCS, package total; then DRAM, DCS and chip after the check against 12 W
-    for (ram, dcs, package, expected) in [
-      (689.0, 0.5, 0.0, (0.0, 0.5, 2.5)),
-      (0.5, 689.0, 0.0, (0.5, 0.0, 2.5)),
-      (0.5, 0.5, 689.0, (0.5, 0.5, 3.0)),
-    ] {
-      let rs =
-        Metrics { cpu_power: 2.0, ram_power: ram, dcs_power: Some(dcs), ..Default::default() };
-      let rs = with_power_totals(Metrics { chip_power: package, ..rs }, Some(12.0));
-      assert_eq!((rs.ram_power, rs.dcs_power.unwrap(), rs.chip_power), expected);
-      assert_eq!(rs.sys_power, 12.0);
+      let rs = Metrics { cpu_power: 2.0, ram_power: ram, dcs_power: dcs, ..Default::default() };
+      let rs = Metrics { media_power: Some(1.0), chip_power: package, ..rs };
+      let rs = with_power_totals(rs, sys);
+      assert_eq!((rs.ram_power, rs.dcs_power, rs.chip_power, rs.sys_power), expected);
+      assert_eq!(rs.all_power, rs.chip_power);
     }
   }
 

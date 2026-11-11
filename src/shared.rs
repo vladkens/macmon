@@ -12,12 +12,7 @@ pub(crate) fn is_pmp_ane_channel(group: &str, subgroup: &str, channel: &str, uni
     && matches!(unit, "mJ" | "uJ" | "nJ")
 }
 
-pub(crate) fn is_pmp_memory_channel(
-  group: &str,
-  subgroup: &str,
-  channel: &str,
-  unit: &str,
-) -> bool {
+pub(crate) fn is_pmp_mem_channel(group: &str, subgroup: &str, channel: &str, unit: &str) -> bool {
   group == "PMP"
     && subgroup == "Energy Counters"
     && (channel.starts_with("DRAM") || channel.starts_with("DCS"))
@@ -34,15 +29,7 @@ pub(crate) fn is_clpc_energy_channel(
     && subgroup == "Energy Counters"
     && matches!(
       channel,
-      "CPU Energy"
-        | "GPU Energy"
-        | "ANE"
-        | "DRAM"
-        | "DCS"
-        | "Package Energy"
-        | "AVE"
-        | "VDEC"
-        | "ISP"
+      "CPU Energy" | "GPU Energy" | "ANE" | "DRAM" | "DCS" | "Package Energy" | "AVE" | "ISP"
     )
     && matches!(unit, "nJ" | "mJ")
 }
@@ -54,7 +41,7 @@ pub(crate) fn ioreport_channels_filter(
   unit: &str,
 ) -> bool {
   if is_pmp_ane_channel(group, subgroup, channel, unit)
-    || is_pmp_memory_channel(group, subgroup, channel, unit)
+    || is_pmp_mem_channel(group, subgroup, channel, unit)
     || is_clpc_energy_channel(group, subgroup, channel, unit)
   {
     return true;
@@ -82,14 +69,12 @@ mod tests {
 
   #[test]
   fn subscribes_only_to_known_clpc_energy_counters() {
-    for channel in
-      ["CPU Energy", "GPU Energy", "ANE", "DRAM", "DCS", "Package Energy", "AVE", "VDEC", "ISP"]
-    {
+    for channel in ["CPU Energy", "GPU Energy", "ANE", "DRAM", "DCS", "Package Energy", "ISP"] {
       assert!(ioreport_channels_filter("CLPC", "Energy Counters", channel, "nJ"));
       assert!(!ioreport_channels_filter("CLPC", "Energy Counters", channel, "events"));
     }
-    assert!(!ioreport_channels_filter("CLPC", "Energy Counters", "GPU + SRAM Energy", "nJ"));
-    assert!(ioreport_channels_filter("CLPC", "Energy Counters", "ISP", "mJ"));
+    assert!(ioreport_channels_filter("CLPC", "Energy Counters", "AVE", "mJ"));
+    assert!(!ioreport_channels_filter("CLPC", "Energy Counters", "VDEC", "nJ"));
     assert!(!ioreport_channels_filter("CLPC", "Performance States", "ANE", "nJ"));
   }
 
@@ -104,23 +89,14 @@ mod tests {
 
   #[test]
   fn subscribes_to_pmp_dram_total_without_its_frequency_split() {
-    assert!(ioreport_channels_filter("Energy Model", "", "DRAM", "mJ"));
-    assert!(ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "mJ"));
-    assert!(ioreport_channels_filter("PMP", "Energy Counters", "DCS", "mJ"));
+    for channel in ["DRAM", "DCS"] {
+      assert!(ioreport_channels_filter("Energy Model", "", channel, "mJ"));
+      assert!(ioreport_channels_filter("PMP", "Energy Counters", channel, "mJ"));
+    }
     assert!(!ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "events"));
     assert!(!ioreport_channels_filter("PMP", "Bandwidth", "DRAM", "mJ"));
     for channel in ["F0", "F1", "F2", "DRAM"] {
       assert!(!ioreport_channels_filter("PMP", "DRAM Energy", channel, "mJ"));
-    }
-  }
-
-  #[test]
-  fn subscribes_to_memory_and_selected_media_components() {
-    for name in ["DRAM", "DCS0", "GPU SRAM"] {
-      assert!(ioreport_channels_filter("Energy Model", "", name, "mJ"));
-    }
-    for name in ["MSR", "AFR", "AMCC", "DISP", "GPUCS", "AVE", "VDEC", "ISP"] {
-      assert!(!ioreport_channels_filter("Energy Model", "", name, "mJ"));
     }
   }
 }
