@@ -9,7 +9,7 @@ A backup way to get the same power and temperature numbers if Apple breaks the s
 - `cpu_power`: last fallback, the PMP `Energy` histograms of the CPU clusters (`EACC0`, `PACC0`, `MACCn` and their ` SRAM` channels, in the `PMP` group and the per-die `PMP0`, `PMP1`, …). Each channel reads the residency-weighted average of its power bins (`0.250W`, `1W`, …), the lowest bin counted as 0; a sample with a channel that doesn't read has no PMP value. The `PMP` group's channels, else the per-die groups'. Subscribed only on macOS 27+ without CLPC counters; if that subscription fails, macmon keeps the usual one.
 - `sys_power`: the first of SMC `PSTR`, `PDTR`, `PD0R` above 0, else the first readable; `PDTR` and `PD0R` only on Macs without a battery. Still at least `chip_power`.
 - `cpu_temp_avg`: without `Ts0P`, `Ts1P`, `TsOP`; readings of 10 °C and below are invalid (CPU and GPU); an unreadable SMC key is left out instead of failing the sample.
-- `macmon debug` shows `PSTR`, `PDTR`, `PD0R`, every `PZD*` key and the PMP CPU histograms.
+- `macmon debug` adds `PD0R` and every `PZD*` key to #118's `PSTR`, `PDTR`, `PBwo`, `PDBR`, and shows the PMP CPU histograms.
 
 No JSON, Prometheus, library API or config change, and no new dependency.
 
@@ -22,6 +22,7 @@ No JSON, Prometheus, library API or config change, and no new dependency.
 - `PMP` and per-die `PMP0`, `PMP1`, …: mactop merges all of them and sums distinct group/channel pairs, relying on multi-die chips leaving the bare `PMP` group with zero channels (mactop 6585fe5: "the bare PMP group exists with zero channels" on Ultra; 53e5f90 for M5 Max). macmon takes the `PMP` group's CPU channels when it has any, else the per-die ones, so no chip can count both.
 - PMP CPU histograms exist only on M5 of the three Macs. Their bins are 0.25–1 W wide: under CPU and memory load 4–6% above CLPC, at idle or light load 0.4–1.5 W high. They add channels that cost about as much as CLPC per sample (~3–7 ms on M5), hence the macOS 27+ without CLPC condition; on macOS 26 and older `Energy Model` works.
 - `PDTR` and `PD0R` only without a battery: on a laptop `PD0R` includes charging, and `PDTR` (DC in) differs from `PSTR` on the M5 laptop. No desktop was available: Mac Studio behavior is from mactop#96/#98.
+- #118 landed first and reads `PDTR` as `dc_in_power`; `sys_power` reads it again for its own fallback, two plain SMC reads without shared code.
 - Temperature keys: under `macmon stress cpu`, `Ts0P` and `Ts1P` stay flat on M1 and M5, `Ts1P` and `TsOP` on M2; `Ts0P` follows load on M2 but is one of 47 keys. Leaving out every `Ts*P` key holds on all three. M1's `Ts5*` keys read a flat 0, 8 or 10 °C, hence the 10 °C floor, which also covers a GPU sensor reading ~2 °C after boot (mactop#70).
 - Only `flt` SMC keys are read, as before; `PZC0` / `PZC1` are not CPU power and stay unused.
 - Ported logic carries a comment crediting metaspartan/mactop (MIT); the PR body thanks mactop#98 for the M5 Max/Ultra data.
