@@ -227,6 +227,8 @@ macOS 27 broke the CPU/ANE power source that macmon previously used without root
 
 The working rootless workaround we found is to read hidden energy reports from the AppleCLPC driver through IOReport. These reports use opaque IDs instead of discoverable CPU/GPU/ANE channel names, so macmon has to identify the counters and verify their units. This leaves macmon maintaining undocumented mappings for data that Apple's own tool can still read directly.
 
+`chip_power` is the power of the whole chip: its own total where it reports one, and never less than the sum of CPU, GPU, ANE, memory (`ram_power`), memory controller (`dcs_power`) and media power. `media_power`, the video encoder and image processor, is reported apart only on M6; on other chips it is part of `chip_power`. `all_power` is the same as `chip_power`, kept for compatibility.
+
 Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
 
 ### Output format
@@ -294,10 +296,13 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
   "ane_power": 0.0, // Watts
-  "all_power": 0.22231553, // Watts
+  "chip_power": 1.4130547, // Whole chip, Watts
+  "all_power": 1.4130547, // Deprecated, use chip_power
   "sys_power": 5.876533, // Watts
-  "ram_power": 0.11635789, // Watts
-  "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "ram_power": 0.11635789, // Memory (DRAM), Watts
+  "dcs_power": 0.08119427, // Memory controller, Watts, null without a source
+  "media_power": null, // Video encoder and image processor, Watts, null except on M6
+  "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power, Watts
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
   "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
   "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable

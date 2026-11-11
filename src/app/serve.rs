@@ -128,10 +128,13 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge_mac!(out, "chip_power_watts", "Chip power consumption in Watts", m.chip_power);
+  gauge_mac!(out, "all_power_watts", "DEPRECATED: use macmon_chip_power_watts", m.all_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-  gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "dcs_power_watts", "DCS power consumption in Watts", ?m.dcs_power);
+  gauge_mac!(out, "media_power_watts", "Video encoder and image processor power consumption in Watts", ?m.media_power);
+  gauge_mac!(out, "gpu_ram_power_watts", "DEPRECATED: GPU RAM power consumption in Watts", m.gpu_ram_power);
   gauge_any!(out, "gpu_memory_alloc_bytes", "System memory allocated by the GPU in bytes", ?m.gpu_mem_alloc);
   gauge_any!(out, "gpu_memory_in_use_bytes", "System memory in use by the GPU in bytes", ?m.gpu_mem_in_use);
   if !m.fans.is_empty() {
@@ -459,6 +462,17 @@ mod tests {
 "#;
 
   #[test]
+  fn optional_power_is_null_without_a_source() {
+    let metrics = Metrics { dcs_power: Some(0.25), ..Default::default() };
+    let json = to_json(&metrics, &SocInfo::default());
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!((&json["dcs_power"], &json["media_power"]), (&0.25.into(), &().into()));
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_dcs_power_watts{chip=\"\"} 0.25\n"));
+    assert!(!output.contains("macmon_media_"));
+  }
+
+  #[test]
   fn unavailable_temperature_has_no_prometheus_gauge() {
     let mut metrics = Metrics::default();
     metrics.temp.cpu_temp_avg = Some(45.0);
@@ -583,11 +597,11 @@ mod tests {
     };
 
     // a Mac: every gauge, in the same order
-    let power =
-      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram"].map(|x| format!("{x}_power_watts"));
+    let power = ["cpu", "gpu", "ane", "chip", "all", "sys", "ram", "gpu_ram"]
+      .map(|x| format!("{x}_power_watts"));
     let freqs = ["ecpu_freq_mhz", "pcpu_freq_mhz", "cpu_tier_freq_mhz", "gpu_freq_mhz"];
     let mac = types(false);
-    assert_eq!(mac.len(), 29, "{mac:?}"); // no temperature and fan gauges without readings
+    assert_eq!(mac.len(), 30, "{mac:?}"); // no temperature and fan gauges without readings
     assert!(power.iter().chain(&freqs.map(String::from)).all(|x| mac.contains(x)), "{mac:?}");
 
     // a VM: the same without the power and frequency gauges

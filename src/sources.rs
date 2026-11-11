@@ -1172,10 +1172,15 @@ impl Drop for IOReportChannels {
   }
 }
 
-fn clpc_energy_channel(driver: u64, id: u64, name: &str) -> CFMutableDictionary<CFString, CFType> {
-  // IOReportTypes.h: simple integer, power category, one element; energy in nJ.
+fn clpc_energy_channel(
+  driver: u64,
+  id: u64,
+  name: &str,
+  unit: &str,
+) -> CFMutableDictionary<CFString, CFType> {
+  // IOReportTypes.h: simple integer, power category, one element; energy in nJ or mJ.
   let channel_type = 1i64 | (2 << 16) | (1 << 32);
-  let unit = (3i64 << 56) | (118 << 32);
+  let unit = (3i64 << 56) | ((if unit == "mJ" { 124i64 } else { 118 }) << 32);
   let legend = CFArray::from_CFTypes(&[
     CFNumber::from(id as i64).into_CFType(),
     CFNumber::from(channel_type).into_CFType(),
@@ -1220,11 +1225,11 @@ fn cfio_add_clpc_channels(selected: CFMutableArrayRef, filter: Option<ChannelFil
 fn cfio_append_clpc_channels(
   selected: CFMutableArrayRef,
   driver: u64,
-  channels: &[(u64, &str)],
+  channels: &[(u64, &str, &str)],
   filter: Option<ChannelFilterRef<'_>>,
 ) {
-  for &(id, name) in channels {
-    if filter.is_some_and(|f| !f("CLPC", "Energy Counters", name, "nJ")) {
+  for &(id, name, unit) in channels {
+    if filter.is_some_and(|f| !f("CLPC", "Energy Counters", name, unit)) {
       continue;
     }
 
@@ -1237,7 +1242,7 @@ fn cfio_append_clpc_channels(
       }
     });
     if !exists {
-      let channel = clpc_energy_channel(driver, id, name);
+      let channel = clpc_energy_channel(driver, id, name, unit);
       unsafe { CFArrayAppendValue(selected, channel.as_CFTypeRef()) };
     }
   }
@@ -1342,7 +1347,7 @@ impl IOReport {
     };
     let channels = cfio_get_chan(Some(&filter))?;
     for id in ids {
-      let channel = clpc_energy_channel(driver, *id, &format!("0x{id:016x}"));
+      let channel = clpc_energy_channel(driver, *id, &format!("0x{id:016x}"), "nJ");
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
     let (subs, chan) = cfio_get_subs(channels.chan)?;
@@ -1939,19 +1944,18 @@ mod tests {
   }
 
   #[test]
-  fn clpc_descriptors_preserve_driver_counter_ids_and_nanojoule_units() {
+  fn clpc_descriptors_preserve_driver_counter_ids_and_energy_units() {
     let driver = 0x1_0000_0428;
-    let channels =
-      crate::clpc::energy_channels("com.apple.driver.AppleT8112CLPC", "27.0.1").unwrap();
-    for (id, name) in channels {
-      let channel = clpc_energy_channel(driver, id, name);
+    let channels = crate::clpc::energy_channels("com.apple.driver.AppleT8152CLPC", "27.2").unwrap();
+    for (id, name, unit) in channels {
+      let channel = clpc_energy_channel(driver, id, name, unit);
       let item = channel.as_concrete_TypeRef();
       assert_eq!(unsafe { IOReportChannelGetDriverID(item) }, driver);
       assert_eq!(unsafe { IOReportChannelGetChannelID(item) }, id);
       assert_eq!(cfio_get_group(item), "CLPC");
       assert_eq!(cfio_get_subgroup(item), "Energy Counters");
       assert_eq!(cfio_get_channel(item), name);
-      assert_eq!(from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim(), "nJ");
+      assert_eq!(from_cfstr(unsafe { IOReportChannelGetUnitLabel(item) }).trim(), unit);
     }
   }
 
@@ -1965,8 +1969,10 @@ mod tests {
     .into_iter()
     .flat_map(|bundle| crate::clpc::energy_channels(bundle, "27.0.1").unwrap())
     .collect();
-    let requested: Vec<_> =
-      channel_ids.iter().map(|&(id, name)| clpc_energy_channel(0x1_0000_0428, id, name)).collect();
+    let requested: Vec<_> = channel_ids
+      .iter()
+      .map(|&(id, name, unit)| clpc_energy_channel(0x1_0000_0428, id, name, unit))
+      .collect();
     for order in [vec![1], vec![2, 0, 1], vec![5, 3, 4], vec![8, 6, 7]] {
       let channels: Vec<_> = order.iter().map(|&i| requested[i].clone()).collect();
       let sample = CFDictionary::from_CFType_pairs(&[(
@@ -1990,19 +1996,19 @@ mod tests {
     let channels =
       crate::clpc::energy_channels("com.apple.driver.AppleT8142CLPC", "27.0.1").unwrap();
     let selected = unsafe { CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks) };
-    let alias = clpc_energy_channel(driver, 0x0000_0018_6a01_0933, "GPU Energy");
+    let alias = clpc_energy_channel(driver, 0x0000_0018_6a01_0933, "GPU Energy", "nJ");
     unsafe { CFArrayAppendValue(selected, alias.as_CFTypeRef()) };
 
     cfio_append_clpc_channels(selected, driver, &channels, None);
     cfio_append_clpc_channels(selected, driver, &channels, None);
-    assert_eq!(unsafe { CFArrayGetCount(selected) }, 3);
+    assert_eq!(unsafe { CFArrayGetCount(selected) }, 6);
 
     let gpu_only = |group: &str, subgroup: &str, name: &str, unit: &str| {
       group == "CLPC" && subgroup == "Energy Counters" && name == "GPU Energy" && unit == "nJ"
     };
     cfio_append_clpc_channels(selected, driver + 1, &channels, Some(&gpu_only));
-    assert_eq!(unsafe { CFArrayGetCount(selected) }, 4);
-    let item = unsafe { CFArrayGetValueAtIndex(selected, 3) } as CFDictionaryRef;
+    assert_eq!(unsafe { CFArrayGetCount(selected) }, 7);
+    let item = unsafe { CFArrayGetValueAtIndex(selected, 6) } as CFDictionaryRef;
     assert_eq!(unsafe { IOReportChannelGetDriverID(item) }, driver + 1);
     assert_eq!(unsafe { IOReportChannelGetChannelID(item) }, 0x0000_0019_6a01_0933);
 
