@@ -3,15 +3,16 @@ name: main
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Main runs queue, so a dev release is never cut off; a release commit gets its own group.
+# PR runs cancel older ones. A main run is never cancelled mid-way (a newer push replaces only a waiting one), so a dev release is never cut off; a release commit gets its own group, so it is never replaced.
 concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -33,7 +34,7 @@ jobs:
 
   # vladkens/actions: build makes the archive; publish ships the dev pre-release, or the crate and release on a release: commit
   build:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     runs-on: macos-latest # IOKit: the build and the crates dry run need a Mac
     steps:
       - uses: actions/checkout@v7
@@ -45,6 +46,7 @@ jobs:
           dev: true
 
   publish:
+    if: github.ref == 'refs/heads/main'
     needs: [test, build]
     runs-on: ubuntu-latest # never compiles
     permissions:

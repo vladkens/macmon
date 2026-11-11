@@ -13,6 +13,7 @@ mod config;
 mod fds;
 mod find_clpc;
 mod procs;
+mod query;
 mod serve;
 mod stress;
 mod tui;
@@ -81,13 +82,17 @@ enum Commands {
     #[arg(short, long, default_value_t = 9090)]
     port: u16,
 
-    /// Install as a launchd service (auto-start on login)
+    /// Install as a LaunchDaemon that starts at boot (needs sudo)
     #[arg(long, default_value_t = false)]
     install: bool,
 
-    /// Uninstall the launchd service
+    /// Uninstall the launchd service, daemon or agent
     #[arg(long, default_value_t = false)]
     uninstall: bool,
+
+    /// With --install: a LaunchAgent that starts at login instead, no sudo
+    #[arg(long, default_value_t = false, requires = "install")]
+    agent: bool,
   },
 
   /// Print debug information
@@ -240,6 +245,25 @@ fn run_stress(
   result
 }
 
+/// The first tick of the nonzero `interval` after `sampled_at` that is still ahead of `now`. The
+/// schedule stays anchored, so wake-up delays don't accumulate as drift, and an overrun skips the
+/// missed ticks instead of sampling again at once.
+fn next_tick(sampled_at: Instant, interval: Duration, now: Instant) -> Instant {
+  let mut tick = sampled_at + interval;
+  while tick <= now {
+    tick += interval;
+  }
+
+  tick
+}
+
+/// Sleeps until the `next_tick` after `sampled_at` and moves `sampled_at` to it.
+fn wait_until_scheduled_sample(sampled_at: &mut Instant, interval: Duration) {
+  let now = Instant::now();
+  *sampled_at = next_tick(*sampled_at, interval, now);
+  thread::sleep(*sampled_at - now);
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
   let args = Cli::parse();
 
@@ -248,12 +272,15 @@ fn main() -> Result<(), Box<dyn Error>> {
       // Debug override: require CLPC CPU/GPU/ANE counters without fallback.
       let force_clpc = std::env::var("MACMON_FORCE_CLPC").is_ok_and(|x| x == "1");
       let mut sampler = if force_clpc { Sampler::with_clpc()? } else { Sampler::new()? };
+      let interval = Duration::from_millis(args.interval.max(100).into());
+      let mut sampled_at = Instant::now();
       let mut counter = 0u32;
 
       let soc_info_val = if *soc_info { Some(sampler.get_soc_info().clone()) } else { None };
 
       loop {
-        let doc = sampler.get_metrics(args.interval.max(100))?;
+        wait_until_scheduled_sample(&mut sampled_at, interval);
+        let doc = sampler.get_metrics_now()?;
 
         let mut doc = metrics_to_json_value(&doc)?;
         if let Some(ref soc) = soc_info_val {
@@ -270,12 +297,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { host, port, install, uninstall }) => {
-      if *install || *uninstall {
-        serve::launchd(host, *port, *install)?;
-        return Ok(());
+    Some(Commands::Serve { host, port, install, uninstall, agent }) => {
+      if *install && *agent {
+        return serve::install_agent(host, *port);
       }
+
+      if *install {
+        return serve::install_daemon(host, *port);
+      }
+
+      if *uninstall {
+        return serve::uninstall();
+      }
+
       let mut sampler = Sampler::new()?;
+      let mut sampled_at = Instant::now();
+      let interval = Duration::from_millis(args.interval.max(100).into());
       let soc = Arc::new(sampler.get_soc_info().clone());
       let shared: serve::SharedMetrics = Arc::new(RwLock::new(None));
 
@@ -286,11 +323,13 @@ fn main() -> Result<(), Box<dyn Error>> {
       thread::spawn(move || {
         if let Err(e) = serve::run(&host, port, shared_http, soc_http) {
           eprintln!("server error: {e}");
+          std::process::exit(1); // without HTTP there is nothing to run for; launchd retries
         }
       });
 
       loop {
-        match sampler.get_metrics(args.interval.max(100)) {
+        wait_until_scheduled_sample(&mut sampled_at, interval);
+        match sampler.get_metrics_now() {
           Ok(m) => *shared.write().unwrap() = Some(m),
           Err(e) => eprintln!("sampling error: {e}"),
         }
@@ -322,10 +361,44 @@ mod tests {
   use super::*;
 
   #[test]
+  fn scheduled_sampling_uses_current_intervals_without_shifting_deadlines() {
+    let mut sampled_at = Instant::now();
+    for interval in [20, 20, 40, 10].map(Duration::from_millis) {
+      let previous = sampled_at;
+      wait_until_scheduled_sample(&mut sampled_at, interval);
+      assert!(Instant::now() >= sampled_at);
+      assert!(sampled_at >= previous + interval);
+      assert_eq!(sampled_at.duration_since(previous).as_nanos() % interval.as_nanos(), 0);
+    }
+  }
+
+  #[test]
+  fn scheduled_sampling_skips_missed_ticks_and_waits_for_the_next() {
+    let interval = Duration::from_millis(20);
+    let origin = Instant::now();
+    let mut sampled_at = origin;
+    for delay in [55, 75, 0].map(Duration::from_millis) {
+      thread::sleep(delay);
+      let before_wait = Instant::now();
+      wait_until_scheduled_sample(&mut sampled_at, interval);
+      assert!(sampled_at > before_wait);
+      assert!(Instant::now() >= sampled_at);
+      assert_eq!(sampled_at.duration_since(origin).as_nanos() % interval.as_nanos(), 0);
+    }
+  }
+
+  #[test]
   fn zero_duration_ane_and_all_skip_warmup() {
     for mode in [StressMode::Ane, StressMode::All] {
       run_stress(mode, None, Some(0), None).unwrap();
     }
+  }
+
+  #[test]
+  fn agent_needs_install() {
+    assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--agent"]).is_ok());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--agent"]).is_err());
+    assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--agent"]).is_err());
   }
 
   #[test]

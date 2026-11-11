@@ -36,6 +36,8 @@ pub(super) trait ProcSys: fmt::Debug {
   fn identity(&self, pid: i32) -> Option<(u64, u64)>;
   /// The working directory and open descriptors of `pid`; the errno when it can't be read.
   fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32>;
+  /// The arguments of `pid` after `argv[0]`, joined by spaces; `None` when they can't be read.
+  fn args(&self, pid: i32) -> Option<String>;
   /// `open -R path`: shows it in Finder.
   fn reveal(&self, path: &str);
   /// Puts `text` on the clipboard (`pbcopy`).
@@ -59,6 +61,10 @@ impl ProcSys for LibcSys {
 
   fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32> {
     fds::open_files(pid)
+  }
+
+  fn args(&self, pid: i32) -> Option<String> {
+    Some(procs::args(pid)?.get(1..)?.join(" "))
   }
 
   /// Spawned with null stdio and reaped on a thread, so the UI never waits and no zombie stays.
@@ -269,12 +275,15 @@ pub(super) mod tests {
   type FakeProc = (Option<u64>, Option<i32>);
 
   /// The fake processes, `(pid, signal)` of every `signal` call, the open files of each pid (none
-  /// listed: `ESRCH`), the path of every `reveal` call and the text of every `copy` call.
+  /// listed: `ESRCH`), the arguments and the reads of them, the path of every `reveal` call and the
+  /// text of every `copy` call.
   #[derive(Debug, Default)]
   pub(crate) struct FakeState {
     procs: HashMap<i32, FakeProc>,
     calls: Vec<(i32, i32)>,
     pub(crate) files: HashMap<i32, Result<Vec<OpenFile>, i32>>,
+    pub(crate) args: HashMap<i32, String>,
+    pub(crate) arg_reads: usize,
     pub(crate) revealed: Vec<String>,
     pub(crate) copied: Vec<String>,
   }
@@ -322,6 +331,12 @@ pub(super) mod tests {
 
     fn open_files(&self, pid: i32) -> Result<Vec<OpenFile>, i32> {
       self.0.borrow().files.get(&pid).cloned().unwrap_or(Err(libc::ESRCH))
+    }
+
+    fn args(&self, pid: i32) -> Option<String> {
+      let state = &mut *self.0.borrow_mut();
+      state.arg_reads += 1;
+      state.args.get(&pid).cloned()
     }
 
     fn reveal(&self, path: &str) {

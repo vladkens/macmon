@@ -1,3 +1,29 @@
+## v0.11.0 – 2026-11-06
+
+### Breaking Changes
+
+- `macmon serve --install` now installs a LaunchDaemon that starts at boot with nobody logged in, and needs `sudo`; it replaces your login agent if you have one. `--install --agent` installs the login agent as before, and `--uninstall` removes whichever is there (#121)
+- `macmon serve` now exits when it can't listen on its port, instead of running with no server (#121)
+- Spaces in the process filter now combine words: `google chrome` means both words, not that exact text (#122)
+- Added `pressure_level` and `pressure_percent` to `MemMetrics` in the Rust library, so code that builds this struct or matches it exhaustively needs updating (#120)
+
+### Features
+
+- Added memory pressure: the RAM box graph shows it as Activity Monitor does, in green, yellow or red by level, with `memory.pressure_percent` and `memory.pressure_level` in JSON and Prometheus (#120)
+- Added queries to the process filter: `cpu:`, `gpu:`, `power:`, `mem:` and `time:` with a number, `user:` and `path:` with text, and `!` before any word; a word with a bad value shows in red (#122)
+- Added `dir:` to the process filter, to find processes by working directory (#123)
+- Added `app:` to the process filter, to find an app with all its processes, such as Safari with its tabs (#124)
+- Added pausing the process list with `Space` and turning a filter off and on with `f` (#108, by @ratniel)
+
+### Fixes
+
+- Fixed `ram_power` reading 0 on M1 Macs (#119)
+- Fixed rare `ram_power` spikes of hundreds of watts on macOS 27 (#125)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.10.0...v0.11.0
+
+---
+
 ## v0.10.0 – 2026-10-15
 
 ### Breaking Changes

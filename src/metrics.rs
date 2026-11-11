@@ -1,17 +1,20 @@
 //! Metrics model and hardware sampler.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, zero_div,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_dram_channel,
+  zero_div,
 };
 use crate::sources::{
-  IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, cfio_get_residencies, cfio_watts,
-  cpu_load_ticks, get_soc_info, libc_ram, libc_swap,
+  IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, battery, cfio_get_residencies,
+  cfio_watts, cpu_load_ticks, disk_bytes, get_soc_info, gpu_memory, libc_ram, libc_swap,
+  memory_pressure_level, memory_pressure_percent, memory_pressure_raw, memory_status_raw,
+  net_bytes, uptime_secs,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -41,6 +44,12 @@ impl PowerSources {
     *self.energy_model.get_or_insert(0.0) += watts;
   }
 
+  fn add_pmp(&mut self, watts: f32) {
+    if watts.is_finite() && watts >= 0.0 {
+      self.pmp += watts;
+    }
+  }
+
   fn watts(self, force_clpc: bool) -> Option<f32> {
     if force_clpc {
       return self.clpc;
@@ -48,7 +57,7 @@ impl PowerSources {
 
     // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
     // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
-    // Drivers with unknown CLPC IDs need the legacy sources; ANE can use PMP.
+    // Drivers with unknown CLPC IDs need the legacy sources; ANE and DRAM can use PMP.
     Some(self.clpc.or(self.energy_model).unwrap_or(self.pmp))
   }
 }
@@ -75,6 +84,11 @@ pub struct MemMetrics {
   pub swap_total: u64,
   /// Used swap in bytes.
   pub swap_usage: u64,
+  /// The kernel's memory pressure level: 0 normal, 1 warning, 2 critical, or None when
+  /// unavailable.
+  pub pressure_level: Option<u8>,
+  /// Memory pressure in percent as in Activity Monitor (0–100), or None when unavailable.
+  pub pressure_percent: Option<u8>,
 }
 
 /// Fan speed metrics.
@@ -205,6 +219,26 @@ pub struct Metrics {
   pub gpu_ram_power: f32,
   /// Combined AVE, VDEC, and ISP power in Watts; unavailable counters contribute zero.
   pub media_power: f32,
+  /// Bytes per second received by the Ethernet and Wi-Fi interfaces, or None without one.
+  pub net_in: Option<u64>,
+  /// Bytes per second sent by the Ethernet and Wi-Fi interfaces, or None without one.
+  pub net_out: Option<u64>,
+  /// Bytes per second read from the disks, or None when unavailable.
+  pub disk_read: Option<u64>,
+  /// Bytes per second written to the disks, or None when unavailable.
+  pub disk_write: Option<u64>,
+  /// Seconds since boot, or None when unavailable.
+  pub uptime: Option<u64>,
+  /// Battery charge in percent (0–100), or None without a battery.
+  pub battery_percent: Option<u8>,
+  /// Whether the battery is charging, or None without a battery.
+  pub battery_charging: Option<bool>,
+  /// Whether external power is connected, charging or not, or None without a battery.
+  pub battery_plugged: Option<bool>,
+  /// Bytes of system memory the GPU has allocated, or None when unavailable, as in a VM.
+  pub gpu_mem_alloc: Option<u64>,
+  /// Bytes of system memory the GPU has in use, or None when unavailable, as in a VM.
+  pub gpu_mem_in_use: Option<u64>,
 }
 
 // MARK: Helpers
@@ -231,6 +265,34 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
   let average =
     zero_div(cores.iter().map(|core| core.freq_mhz as f64).sum::<f64>(), cores.len() as f64);
   average.max(min_frequency_mhz as f64) as u32
+}
+
+/// `ram` or 0 when it is above the raw SMC total `sys`: memory can't draw more than the whole
+/// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is
+/// no reading.
+fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
+  if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
+}
+
+/// Byte counters of the network and the disks at one moment.
+#[derive(Clone, Copy)]
+struct ByteCounters {
+  at: Instant,
+  net: Option<[u64; 2]>,
+  disk: Option<[u64; 2]>,
+}
+
+impl ByteCounters {
+  fn read() -> Self {
+    Self { at: Instant::now(), net: net_bytes(), disk: disk_bytes() }
+  }
+}
+
+/// Bytes per second of both counters over `secs`. Counters go back when an interface or a disk
+/// goes away: that reads 0.
+fn byte_rates(prev: Option<[u64; 2]>, cur: Option<[u64; 2]>, secs: f64) -> [Option<u64>; 2] {
+  let rate = |i: usize| Some(zero_div(cur?[i].saturating_sub(prev?[i]) as f64, secs) as u64);
+  [rate(0), rate(1)]
 }
 
 fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
@@ -522,7 +584,8 @@ fn init_smc() -> WithError<SmcSensors> {
 /// Hardware metrics sampler for Apple Silicon Macs.
 ///
 /// Create one sampler and call [`Sampler::get_metrics`] in a continuous polling
-/// loop. Run the sampler in a worker thread when sampling must not block the
+/// loop. Use [`Sampler::get_metrics_now`] when the caller schedules samples.
+/// Run the sampler in a worker thread when sampling must not block the
 /// application thread.
 pub struct Sampler {
   force_clpc: bool,
@@ -530,8 +593,11 @@ pub struct Sampler {
   ior: Option<IOReport>,
   /// CPU usage comes from the CPU ticks, see `uses_cpu_ticks`.
   use_cpu_ticks: bool,
-  /// CPU ticks at the end of the last sample; the first sample takes its own baseline.
+  /// CPU ticks at initialization or at the end of the last sample.
   cpu_ticks: Option<Vec<[u32; 4]>>,
+  /// Byte counters at initialization or at the end of the last sample.
+  bytes: Option<ByteCounters>,
+  sampled_at: Option<Instant>,
   hid: IOHIDSensors,
   smc: Option<SMC>,
   smc_cpu_keys: Vec<String>,
@@ -550,22 +616,35 @@ impl Sampler {
     let cpu_stats = ior.as_ref().is_some_and(|x| x.has_group("CPU Stats"));
     let use_cpu_ticks = uses_cpu_ticks(&soc, cpu_stats);
 
-    Ok(Sampler {
+    let mut sampler = Sampler {
       force_clpc: false,
       soc,
       ior,
       use_cpu_ticks,
       cpu_ticks: None,
+      bytes: None,
+      sampled_at: None,
       hid,
       smc: smc_sensors.smc,
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
-    })
+    };
+    sampler.reset_baselines();
+    Ok(sampler)
+  }
+
+  /// Start a new interval for the counter-based metrics.
+  fn reset_baselines(&mut self) {
+    if let Some(ior) = &mut self.ior {
+      ior.reset_sample();
+    }
+    self.cpu_ticks = self.use_cpu_ticks.then(cpu_load_ticks).flatten();
+    self.bytes = Some(ByteCounters::read());
   }
 
   /// Require valid CLPC counters for CPU, GPU, and ANE power, without legacy fallback.
-  /// [`Self::get_metrics`] returns an error if any counter is unavailable or invalid.
+  /// Both sampling methods return an error if any counter is unavailable or invalid.
   pub fn with_clpc() -> WithError<Self> {
     let mut sampler = Self::new()?;
     sampler.force_clpc = true;
@@ -643,7 +722,16 @@ impl Sampler {
   fn get_mem(&mut self) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
-    Ok(MemMetrics { ram_total, ram_usage, swap_total, swap_usage })
+    let pressure_level = memory_pressure_raw().and_then(memory_pressure_level);
+    let pressure_percent = memory_status_raw().and_then(memory_pressure_percent);
+    Ok(MemMetrics {
+      ram_total,
+      ram_usage,
+      swap_total,
+      swap_usage,
+      pressure_level,
+      pressure_percent,
+    })
   }
 
   fn get_sys_power(&mut self) -> WithError<f32> {
@@ -713,6 +801,10 @@ impl Sampler {
         ane_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
       }
 
+      if is_pmp_dram_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        ram_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
+      }
+
       if is_clpc_energy_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
         let power = match x.channel.as_str() {
           "CPU Energy" => &mut cpu_power,
@@ -756,8 +848,24 @@ impl Sampler {
   /// an IOReport baseline between calls and derives metrics from the complete
   /// interval between consecutive samples.
   ///
-  /// `duration` is the requested polling interval in milliseconds.
+  /// `duration` is the requested polling interval in milliseconds. Waits only
+  /// for the portion of that interval that has not elapsed since the previous sample.
+  /// If this is the first sample, starts a fresh interval and waits the full duration.
   pub fn get_metrics(&mut self, duration: u32) -> WithError<Metrics> {
+    let sampled_at = self.sampled_at.unwrap_or_else(|| {
+      self.reset_baselines();
+      Instant::now()
+    });
+    std::thread::sleep(Duration::from_millis(duration as u64).saturating_sub(sampled_at.elapsed()));
+    self.get_metrics_now()
+  }
+
+  /// Take a new sample immediately, without waiting.
+  ///
+  /// Counter-based metrics cover the time since the previous sample taken by
+  /// either method, or since sampler initialization on the first call.
+  /// Hardware reads are synchronous.
+  pub fn get_metrics_now(&mut self) -> WithError<Metrics> {
     // CPU Stats channel naming by chip family (see: https://github.com/vladkens/macmon/issues/47)
     //   M1-M4:  ECPU* = efficiency cores (lower tier)
     //           PCPU* = performance cores (top tier)
@@ -770,27 +878,25 @@ impl Sampler {
     //   Ultra:  Any-generation Ultra chips prefix channels with "DIE_N_"
     //           and include cluster/core separators (e.g. "DIE_0_PCPU1_CPU0").
 
-    let duration = Duration::from_millis(duration as u64);
-    // like the IOReport baseline, taken when the first interval begins
-    let ticks = self.cpu_ticks.take().or_else(|| self.use_cpu_ticks.then(cpu_load_ticks).flatten());
+    self.sampled_at = Some(Instant::now());
+    // store the new baselines first, so an error below doesn't lose them
+    let cur_ticks = self.use_cpu_ticks.then(cpu_load_ticks).flatten();
+    let ticks = std::mem::replace(&mut self.cpu_ticks, cur_ticks);
+    let cur = ByteCounters::read();
+    let bytes = self.bytes.replace(cur).unwrap_or(cur);
     let mut rs = match self.ior.as_mut() {
       Some(ior) => {
-        let (sample, elapsed) = ior.get_sample_interval(duration);
+        let (sample, elapsed) = ior.get_sample_now();
         self.get_ioreport_metrics(sample, elapsed)?
       }
-      None => {
-        std::thread::sleep(duration);
-        self.get_ioreport_metrics([], duration)?
-      }
+      None => self.get_ioreport_metrics([], Duration::ZERO)?,
     };
 
     if let Some(prev) = ticks
-      && let Some(cur) = cpu_load_ticks()
+      && let Some(cur) = &self.cpu_ticks
+      && let Some(tier) = rs.cpu_tiers.first_mut()
     {
-      if let Some(tier) = rs.cpu_tiers.first_mut() {
-        tier.cores = cpu_cores_from_ticks(&prev, &cur);
-      }
-      self.cpu_ticks = Some(cur);
+      tier.cores = cpu_cores_from_ticks(&prev, cur);
     }
     let mut rs = aggregate_ioreport_metrics(rs, &self.soc);
 
@@ -798,10 +904,22 @@ impl Sampler {
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
-    rs.sys_power = match self.get_sys_power() {
-      Ok(val) => val.max(rs.chip_power),
-      Err(_) => 0.0,
-    };
+    let sys_power = self.get_sys_power().ok();
+    rs.ram_power = checked_ram_power(rs.ram_power, sys_power);
+    rs.sys_power = sys_power.map_or(0.0, |val| val.max(rs.chip_power));
+
+    let secs = (cur.at - bytes.at).as_secs_f64();
+    [rs.net_in, rs.net_out] = byte_rates(bytes.net, cur.net, secs);
+    [rs.disk_read, rs.disk_write] = byte_rates(bytes.disk, cur.disk, secs);
+
+    rs.uptime = uptime_secs();
+    let battery = battery();
+    rs.battery_percent = battery.map(|x| x.0);
+    rs.battery_charging = battery.map(|x| x.1);
+    rs.battery_plugged = battery.map(|x| x.2);
+    let gpu_mem = gpu_memory();
+    rs.gpu_mem_alloc = gpu_mem.map(|x| x[0]);
+    rs.gpu_mem_in_use = gpu_mem.map(|x| x[1]);
 
     Ok(rs)
   }
@@ -815,7 +933,7 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
   use std::collections::{HashMap, HashSet};
-  use std::time::Duration;
+  use std::time::{Duration, Instant};
 
   use core_foundation::base::TCFType;
   use core_foundation::data::CFData;
@@ -824,14 +942,36 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
-    TempMetrics, aggregate_ioreport_metrics, calc_freq_from_residencies, collect_cpu_core_metrics,
-    cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value, temperature_average,
-    uses_cpu_ticks,
+    TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies,
+    checked_ram_power, collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel,
+    smc_numeric_value, temperature_average, uses_cpu_ticks,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
     tiers_from_perflevels,
   };
+
+  #[test]
+  fn byte_rates_need_both_counters_and_never_go_negative() {
+    let (prev, cur) = (Some([1000, 5000]), Some([3000, 4000]));
+    assert_eq!(byte_rates(prev, cur, 2.0), [Some(1000), Some(0)]);
+    assert_eq!(byte_rates(prev, cur, 0.0), [Some(0), Some(0)]);
+    assert_eq!(byte_rates(None, cur, 2.0), [None, None]);
+    assert_eq!(byte_rates(prev, None, 2.0), [None, None]);
+  }
+
+  #[test]
+  fn ram_power_above_the_smc_total_is_dropped() {
+    let cases = [
+      (689.0, Some(12.0), 0.0),
+      (0.8, Some(12.0), 0.8),
+      (0.8, Some(0.0), 0.8),
+      (689.0, None, 689.0),
+    ];
+    for (ram, sys, expected) in cases {
+      assert_eq!(checked_ram_power(ram, sys), expected, "{ram} {sys:?}");
+    }
+  }
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
@@ -846,6 +986,16 @@ mod tests {
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
+  }
+
+  #[test]
+  fn pmp_power_skips_invalid_deltas() {
+    let mut power = PowerSources::default();
+    for watts in [-1.0, f32::NAN, f32::INFINITY, 1.6] {
+      power.add_pmp(watts);
+    }
+
+    assert_eq!(power.watts(false), Some(1.6));
   }
 
   #[test]
@@ -902,6 +1052,8 @@ mod tests {
       ior: None,
       use_cpu_ticks: true,
       cpu_ticks: None,
+      bytes: None,
+      sampled_at: None,
       hid: IOHIDSensors::new().unwrap(),
       smc: None,
       smc_cpu_keys: vec![],
@@ -940,7 +1092,9 @@ mod tests {
     // the first call takes its own baseline (the sampler has none), so a delay before it doesn't
     // count; the cores below come from that call alone
     assert!(sampler.cpu_ticks.is_none());
+    let started = Instant::now();
     let rs = sampler.get_metrics(10).unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(10));
     assert!(sampler.cpu_ticks.is_some());
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
     assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
@@ -951,6 +1105,26 @@ mod tests {
 
     // CLPC counters are required whether IOReport has channels or not
     assert!(sampler_without_sources(2, true).get_metrics(10).is_err());
+  }
+
+  #[test]
+  fn cpu_tick_samples_use_initial_and_previous_baselines() {
+    let cpus = cpu_load_ticks().unwrap().len();
+    let mut sampler = sampler_without_sources(cpus as u8, false);
+    sampler.cpu_ticks = Some(vec![[0; 4]; cpus]);
+    for duration in [None, Some(10), None] {
+      let prev = sampler.cpu_ticks.clone().unwrap();
+      let metrics = match duration {
+        Some(duration) => sampler.get_metrics(duration),
+        None => sampler.get_metrics_now(),
+      }
+      .unwrap();
+      let expected = cpu_cores_from_ticks(&prev, sampler.cpu_ticks.as_ref().unwrap());
+      assert_eq!(
+        serde_json::to_value(&metrics.cpu_tiers[0].cores).unwrap(),
+        serde_json::to_value(expected).unwrap()
+      );
+    }
   }
 
   #[test]

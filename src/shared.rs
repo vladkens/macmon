@@ -12,6 +12,13 @@ pub(crate) fn is_pmp_ane_channel(group: &str, subgroup: &str, channel: &str, uni
     && matches!(unit, "mJ" | "uJ" | "nJ")
 }
 
+pub(crate) fn is_pmp_dram_channel(group: &str, subgroup: &str, channel: &str, unit: &str) -> bool {
+  group == "PMP"
+    && subgroup == "Energy Counters"
+    && channel.starts_with("DRAM")
+    && matches!(unit, "mJ" | "uJ" | "nJ")
+}
+
 pub(crate) fn is_clpc_energy_channel(
   group: &str,
   subgroup: &str,
@@ -43,6 +50,7 @@ pub(crate) fn ioreport_channels_filter(
   unit: &str,
 ) -> bool {
   if is_pmp_ane_channel(group, subgroup, channel, unit)
+    || is_pmp_dram_channel(group, subgroup, channel, unit)
     || is_clpc_energy_channel(group, subgroup, channel, unit)
   {
     return true;
@@ -96,7 +104,17 @@ mod tests {
     assert!(!ioreport_channels_filter("PMP", "Bandwidth", "ANE RD", "events"));
     assert!(!ioreport_channels_filter("PMP", "Energy Counters", "ANE", "events"));
     assert!(!ioreport_channels_filter("H11ANE", "H11ANE Power State", "ANE Power", ""));
-    assert!(!ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "mJ"));
+  }
+
+  #[test]
+  fn subscribes_to_pmp_dram_total_without_its_frequency_split() {
+    assert!(ioreport_channels_filter("Energy Model", "", "DRAM", "mJ"));
+    assert!(ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "mJ"));
+    assert!(!ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "events"));
+    assert!(!ioreport_channels_filter("PMP", "Bandwidth", "DRAM", "mJ"));
+    for channel in ["F0", "F1", "F2", "DRAM"] {
+      assert!(!ioreport_channels_filter("PMP", "DRAM Energy", channel, "mJ"));
+    }
   }
 
   #[test]

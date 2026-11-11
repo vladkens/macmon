@@ -127,7 +127,8 @@ impl PowerStore {
   }
 }
 
-/// Latest RAM / SWAP usage with the RAM usage history (bytes, newest first).
+/// Latest RAM / SWAP usage and memory pressure with the history of the pressure (percent, newest
+/// first), or of the RAM usage (bytes) without a reading.
 #[derive(Debug, Default)]
 pub(super) struct MemoryStore {
   pub(super) items: Vec<u64>,
@@ -135,17 +136,21 @@ pub(super) struct MemoryStore {
   pub(super) ram_total: u64,
   pub(super) swap_usage: u64,
   pub(super) swap_total: u64,
+  pub(super) pressure_level: Option<u8>,
+  pub(super) pressure_percent: Option<u8>,
 }
 
 impl MemoryStore {
   pub(super) fn push(&mut self, value: MemMetrics) {
-    self.items.insert(0, value.ram_usage);
+    self.items.insert(0, value.pressure_percent.map_or(value.ram_usage, u64::from));
     self.items.truncate(HISTORY_LEN);
 
     self.ram_usage = value.ram_usage;
     self.ram_total = value.ram_total;
     self.swap_usage = value.swap_usage;
     self.swap_total = value.swap_total;
+    self.pressure_level = value.pressure_level;
+    self.pressure_percent = value.pressure_percent;
   }
 }
 
@@ -261,7 +266,7 @@ mod tests {
     for i in 0..HISTORY_LEN + 10 {
       power.push(i as f64);
       freq.push(FreqSample::new(1000, 0.25, 0.5));
-      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, swap_total: 0, swap_usage: 0 });
+      mem.push(MemMetrics { ram_total: 100, ram_usage: i as u64, ..Default::default() });
       temp.push(Some(i as f32 + 1.0));
     }
 

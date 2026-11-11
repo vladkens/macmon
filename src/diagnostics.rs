@@ -5,12 +5,15 @@ use std::time::Duration;
 
 use core_foundation::base::{CFRelease, CFShow};
 
-use crate::shared::{ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel};
+use crate::shared::{
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_dram_channel,
+};
 use crate::sources::{
-  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, cfdict_data, cfdict_keys, cfio_get_props,
-  cfio_get_residencies, cfio_integer_value, cfio_watts, cpu_cluster_types, get_dvfs_mhz,
-  hw_from_profiler_report, hw_native, is_pmgr_node, libc_ram, libc_swap, profiler_report,
-  sysctl_str, sysctl_u32,
+  HwInfo, IOHIDSensors, IOReport, IOServiceIterator, SMC, battery, cfdict_data, cfdict_keys,
+  cfio_get_props, cfio_get_residencies, cfio_integer_value, cfio_watts, cpu_cluster_types,
+  disk_bytes, get_dvfs_mhz, gpu_memory, hw_from_profiler_report, hw_native, is_pmgr_node, libc_ram,
+  libc_swap, memory_pressure_level, memory_pressure_percent, memory_pressure_raw,
+  memory_status_raw, net_bytes, profiler_report, sysctl_str, sysctl_u32, uptime_secs,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -21,6 +24,7 @@ fn debug_channels(group: &str, subgroup: &str, channel: &str, unit: &str) -> boo
     || group == "CPU Stats"
     || group == "GPU Stats"
     || is_pmp_ane_channel(group, subgroup, channel, unit)
+    || is_pmp_dram_channel(group, subgroup, channel, unit)
     || is_clpc_energy_channel(group, subgroup, channel, unit)
 }
 
@@ -71,6 +75,15 @@ fn acc_clusters_text(data: &[u8]) -> (String, String) {
   (clusters.collect::<Vec<_>>().join(", "), raw.collect::<Vec<_>>().join(" "))
 }
 
+// `level=0 (sysctl 1)` for the sysctl value `raw` of the memory pressure, read with `value`.
+fn pressure_text(name: &str, raw: Option<u32>, value: fn(u32) -> Option<u8>) -> String {
+  let Some(raw) = raw else { return format!("{name} not found") };
+  match value(raw) {
+    Some(x) => format!("{name}={x} (sysctl {raw})"),
+    None => format!("{name} unknown (sysctl {raw})"),
+  }
+}
+
 pub fn print_debug() -> WithError<()> {
   let os_ver = sysctl_str("kern.osproductversion").unwrap_or("Unknown".into());
   let os_build = sysctl_str("kern.osversion").unwrap_or("Unknown".into());
@@ -118,6 +131,16 @@ pub fn print_debug() -> WithError<()> {
     Ok((used, total)) => println!("Swap used={used} bytes total={total} bytes"),
     Err(err) => println!("Swap error={err}"),
   }
+  println!("Pressure {}", pressure_text("level", memory_pressure_raw(), memory_pressure_level));
+  let percent = pressure_text("percent", memory_status_raw(), memory_pressure_percent);
+  println!("Pressure {percent}");
+
+  print_divider("System");
+  println!("Network bytes in, out: {:?}", net_bytes());
+  println!("Disk bytes read, written: {:?}", disk_bytes());
+  println!("Uptime seconds: {:?}", uptime_secs());
+  println!("Battery percent, charging, plugged in: {:?}", battery());
+  println!("GPU memory bytes allocated, in use: {:?}", gpu_memory());
 
   print_divider("AppleARMIODevice");
   print_section(print_pmgr());
@@ -264,7 +287,8 @@ fn print_hid() -> WithError<()> {
 
 #[cfg(test)]
 mod tests {
-  use super::{acc_clusters_text, cluster_type_counts};
+  use super::{acc_clusters_text, cluster_type_counts, pressure_text};
+  use crate::sources::{memory_pressure_level, memory_pressure_percent};
 
   #[test]
   fn shows_acc_clusters() {
@@ -275,6 +299,19 @@ mod tests {
       "voltage-states22-sram type 0, voltage-states23-sram type 1, voltage-states5-sram type 2";
     assert_eq!(clusters, expected);
     assert_eq!(raw, "1600000000000000 1701000000000000 0502000000000000");
+  }
+
+  #[test]
+  fn shows_memory_pressure() {
+    let level = |raw| pressure_text("level", raw, memory_pressure_level);
+    assert_eq!(level(Some(4)), "level=2 (sysctl 4)");
+    assert_eq!(level(Some(3)), "level unknown (sysctl 3)");
+    assert_eq!(level(None), "level not found");
+
+    let percent = |raw| pressure_text("percent", raw, memory_pressure_percent);
+    assert_eq!(percent(Some(75)), "percent=25 (sysctl 75)");
+    assert_eq!(percent(Some(101)), "percent unknown (sysctl 101)");
+    assert_eq!(percent(None), "percent not found");
   }
 
   #[test]
