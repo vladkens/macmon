@@ -84,8 +84,6 @@ POWER does today.
       `--install --agent` is the old LaunchAgent, without sudo. Tested by hand in the VM: a
       daemon running `macmon serve` starts at boot without a login, as root and with `UserName`;
       with `UserName` the `StandardErrorPath` file must be writable by that user.
-- [x] **Bound HTTP connection resources** (#137).
-      Plan: [docs/plans/completed/20261110-http-connection-limits.md](plans/completed/20261110-http-connection-limits.md).
 - [ ] **15. Disk and network metrics.** What node exporter has and macmon doesn't (asked on
       Reddit): disk read / write and network in / out, system-wide. Done as data only, with uptime
       and battery: JSON, Prometheus and `macmon debug`. Open: showing them in the TUI.

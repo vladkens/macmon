@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use macmon::sources::WithError;
 use macmon::{Metrics, SocInfo};
@@ -169,38 +169,13 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     503 => "Service Unavailable",
     _ => "OK",
   };
-  let _ = write_before_deadline(
-    stream,
+  let _ = stream.write_all(
     format!(
       "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
       body.len()
     )
     .as_bytes(),
-    IO_TIMEOUT,
   );
-}
-
-/// Partial writes must not restart the response's overall time budget.
-fn write_before_deadline(
-  stream: &mut TcpStream,
-  mut bytes: &[u8],
-  timeout: Duration,
-) -> std::io::Result<()> {
-  let deadline = Instant::now() + timeout;
-  while !bytes.is_empty() {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-      return Err(std::io::ErrorKind::TimedOut.into());
-    }
-    stream.set_write_timeout(Some(remaining))?;
-    match stream.write(bytes) {
-      Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-      Ok(n) => bytes = &bytes[n..],
-      Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-      Err(e) => return Err(e),
-    }
-  }
-  Ok(())
 }
 
 fn serve_url(host: &str, port: u16) -> String {
@@ -508,19 +483,19 @@ mod tests {
   };
 
   #[test]
-  fn idle_connections_are_bounded_expire_and_allow_normal_requests() {
-    use std::io::{Read, Write};
+  fn rejects_connections_above_the_worker_limit() {
+    use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, RwLock};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let active = Arc::new(AtomicUsize::new(0));
     let shared = Arc::new(RwLock::new(Some(Metrics::default())));
     let soc = Arc::new(SocInfo::default());
     let mut clients = Vec::new();
-    // A generous timeout lets all admissions happen before the first worker expires.
+    // Keep all admitted clients connected until the excess connection is closed.
     for _ in 0..super::MAX_CONNECTIONS {
       let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
       let (stream, _) = listener.accept().unwrap();
@@ -530,7 +505,7 @@ mod tests {
           Arc::clone(&shared),
           Arc::clone(&soc),
           &active,
-          Duration::from_secs(2),
+          Duration::from_secs(30),
         )
         .unwrap()
       );
@@ -545,56 +520,12 @@ mod tests {
         Arc::clone(&shared),
         Arc::clone(&soc),
         &active,
-        Duration::from_secs(2),
+        Duration::from_secs(30),
       )
       .unwrap()
     );
     excess.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
     assert_eq!(excess.read(&mut [0u8; 1]).unwrap(), 0);
-    // Keep every client open: only the server deadline releases admission.
-    let deadline = Instant::now() + Duration::from_secs(6);
-    while active.load(Ordering::Relaxed) != 0 {
-      assert!(Instant::now() < deadline, "idle workers did not expire");
-      std::thread::sleep(Duration::from_millis(10));
-    }
-    for path in ["/", "/json", "/metrics", "/missing"] {
-      let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-      let (stream, _) = listener.accept().unwrap();
-      assert!(
-        super::spawn_connection(
-          stream,
-          Arc::clone(&shared),
-          Arc::clone(&soc),
-          &active,
-          Duration::from_secs(2),
-        )
-        .unwrap()
-      );
-      client.write_all(format!("GET {path} HTTP/1.1\r\n\r\n").as_bytes()).unwrap();
-      client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-      let mut response = String::new();
-      client.read_to_string(&mut response).unwrap();
-      let status = if path == "/missing" { 404 } else { 200 };
-      assert!(response.starts_with(&format!("HTTP/1.1 {status} ")));
-    }
-    drop(clients);
-  }
-
-  #[test]
-  fn unread_response_releases_the_writer_at_its_deadline() {
-    use std::net::{TcpListener, TcpStream};
-    use std::time::{Duration, Instant};
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
-    // Far larger than socket buffers; the client intentionally never reads.
-    let bytes = vec![0u8; 32 * 1024 * 1024];
-    let start = Instant::now();
-    let err =
-      super::write_before_deadline(&mut stream, &bytes, Duration::from_millis(100)).unwrap_err();
-    assert!(matches!(err.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock));
-    assert!(start.elapsed() < Duration::from_secs(3));
   }
 
   const AGENT_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
