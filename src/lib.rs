@@ -80,6 +80,7 @@ mod clpc;
 #[cfg(feature = "app")]
 #[doc(hidden)]
 pub mod diagnostics;
+mod fallback;
 #[doc(hidden)]
 pub mod metrics;
 mod shared;

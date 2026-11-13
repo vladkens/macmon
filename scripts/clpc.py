@@ -4,7 +4,7 @@
 # ///
 """Extract CLPC energy IDs from Apple IPSWs; see docs/clpc-discovery.md.
 
-scan [latest|VERSION|BUILD|APPLE_URL] prints discovered CPU/GPU/ANE IDs as Rust constants.
+scan [latest|VERSION|BUILD|APPLE_URL] prints component and package energy IDs as Rust constants.
 history MAJOR compares every indexed stable release in a macOS branch.
 compare OLD_JSON NEW_JSON compares two saved catalogs.
 Downloads, catalogs and comparisons stay under the repository's out/clpc-static/.
@@ -29,7 +29,9 @@ from urllib.parse import urlparse
 from clpc_binary import Image, discover
 
 OUT = Path(__file__).resolve().parent.parent / "out" / "clpc-static"
-COMPONENTS = ("CPU", "GPU", "ANE")
+COMPONENTS = ("CPU", "GPU", "ANE", "RAM", "DCS", "CHIP")
+MEDIA = ("AVE", "ISP")  # separate reports, only on some drivers
+REPORTS = (*COMPONENTS, *MEDIA)
 APPLE_CATALOG = (
     "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml"
 )
@@ -52,11 +54,11 @@ def rust_table(catalog):
         raise ValueError(
             "Drivers have different table indices; inspect JSON before updating Rust"
         )
-    cpu, gpu, ane = indices.pop()
+    cpu, gpu, ane, ram, dcs, chip = indices.pop()
     major = int(catalog["macos"].split(".")[0])
     lines = [
         f"// Generated from macOS {catalog['macos']} ({catalog['build']}) by scripts/clpc.py.",
-        f"const INDICES_{major}: ClpcIndices = ClpcIndices {{ cpu: {cpu}, gpu: {gpu}, ane: {ane} }};",
+        f"const INDICES_{major}: ClpcIndices = ClpcIndices {{ cpu: {cpu}, gpu: {gpu}, ane: {ane}, ram: {ram}, dcs: {dcs}, chip: {chip} }};",
         "",
         "const CLPC_KEYS: &[ClpcKeys] = &[",
     ]
@@ -68,6 +70,18 @@ def rust_table(catalog):
                 f"    {component.lower()}: 0x{key >> 16:04x}_{key & 0xFFFF:04x},"
             )
         lines.append("  },")
+    lines.extend(["];", "", f"const MEDIA_{major}: &[(&str, u64, &str, &str)] = &["])
+    for driver in catalog["drivers"]:
+        for component in MEDIA:
+            channel = driver["channels"].get(component)
+            if not channel:
+                continue
+
+            index, key = divmod(int(channel["id"], 16), 1 << 32)
+            key = f"0x{key >> 16:04x}_{key & 0xFFFF:04x}"
+            lines.append(
+                f'  ("{driver["bundle"]}", report_id({index}, {key}), "{component}", "{channel["unit"]}"),'
+            )
     return "\n".join([*lines, "];", ""])
 
 
@@ -244,11 +258,11 @@ def scan(release):
     )
     dest = OUT / f"catalog-{version}-{build}.json"
     save(dest, result)
-    lines = ["driver\tCPU\tGPU\tANE\tstatus"] + [
+    lines = ["driver\t" + "\t".join(REPORTS) + "\tstatus"] + [
         "\t".join(
             [
                 d["bundle"],
-                *(d["channels"].get(c, {}).get("id", "?") for c in COMPONENTS),
+                *(d["channels"].get(c, {}).get("id", "?") for c in REPORTS),
                 d["status"],
             ]
         )
@@ -262,7 +276,7 @@ def scan(release):
 
 def difference(before, after):
     def ids(driver):
-        return {c: driver["channels"].get(c, {}).get("id") for c in COMPONENTS}
+        return {c: driver["channels"].get(c, {}).get("id") for c in REPORTS}
 
     def hashes(driver):
         return {k: v["sha256"] for k, v in driver["segments"].items()}
@@ -278,9 +292,8 @@ def difference(before, after):
         != [(c["id"], c["name"]) for c in after["reports"]],
         "old_ids": old,
         "new_ids": new,
-        "energy_ids_changed": any(old[c] != new[c] for c in COMPONENTS)
-        if all(old.values())
-        and all(new.values())
+        "energy_ids_changed": old != new
+        if all(old[c] and new[c] for c in COMPONENTS)
         and before["status"] == after["status"] == "identified"
         else None,
     }
