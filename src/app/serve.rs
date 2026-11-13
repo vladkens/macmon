@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -238,17 +239,63 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
+const MAX_CONNECTIONS: usize = 32;
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Releases admission on normal completion, setup failure, or worker creation failure.
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl Drop for ConnectionPermit {
+  fn drop(&mut self) {
+    self.0.fetch_sub(1, Ordering::Relaxed);
+  }
+}
+
+fn spawn_connection(
+  stream: TcpStream,
+  shared: SharedMetrics,
+  soc: Arc<SocInfo>,
+  active: &Arc<AtomicUsize>,
+  timeout: Duration,
+) -> std::io::Result<bool> {
+  if active
+    .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
+    .is_err()
+  {
+    return Ok(false); // drop the socket before allocating another worker
+  }
+  let permit = ConnectionPermit(Arc::clone(active));
+  stream.set_read_timeout(Some(timeout))?;
+  stream.set_write_timeout(Some(timeout))?;
+  thread::Builder::new().spawn(move || {
+    let _permit = permit;
+    handle_conn(stream, shared, soc);
+  })?;
+  Ok(true)
+}
+
 pub fn run(host: &str, port: u16, shared: SharedMetrics, soc: Arc<SocInfo>) -> WithError<()> {
   let listener = TcpListener::bind((host, port))?;
   eprintln!("macmon serving on http://{}", listener.local_addr()?);
   eprintln!("  GET /json    → JSON metrics");
   eprintln!("  GET /metrics → Prometheus format");
 
+  let active = Arc::new(AtomicUsize::new(0));
   for stream in listener.incoming() {
-    let Ok(stream) = stream else { continue };
-    let shared = Arc::clone(&shared);
-    let soc = Arc::clone(&soc);
-    thread::spawn(move || handle_conn(stream, shared, soc));
+    let stream = match stream {
+      Ok(stream) => stream,
+      Err(e) => {
+        eprintln!("HTTP accept error: {e}");
+        thread::sleep(Duration::from_millis(100));
+        continue;
+      }
+    };
+    if let Err(e) =
+      spawn_connection(stream, Arc::clone(&shared), Arc::clone(&soc), &active, IO_TIMEOUT)
+    {
+      eprintln!("HTTP worker error: {e}");
+      thread::sleep(Duration::from_millis(100));
+    }
   }
 
   Ok(())
@@ -439,6 +486,52 @@ mod tests {
   use super::{
     daemon_user, escape_label_value, escape_xml, plist_text, serve_url, to_json, to_prometheus,
   };
+
+  #[test]
+  fn rejects_connections_above_the_worker_limit() {
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let shared = Arc::new(RwLock::new(Some(Metrics::default())));
+    let soc = Arc::new(SocInfo::default());
+    let mut clients = Vec::new();
+    // Keep all admitted clients connected until the excess connection is closed.
+    for _ in 0..super::MAX_CONNECTIONS {
+      let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+      let (stream, _) = listener.accept().unwrap();
+      assert!(
+        super::spawn_connection(
+          stream,
+          Arc::clone(&shared),
+          Arc::clone(&soc),
+          &active,
+          Duration::from_secs(30),
+        )
+        .unwrap()
+      );
+      clients.push(client);
+    }
+    assert_eq!(active.load(Ordering::Relaxed), super::MAX_CONNECTIONS);
+    let mut excess = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    assert!(
+      !super::spawn_connection(
+        stream,
+        Arc::clone(&shared),
+        Arc::clone(&soc),
+        &active,
+        Duration::from_secs(30),
+      )
+      .unwrap()
+    );
+    excess.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    assert_eq!(excess.read(&mut [0u8; 1]).unwrap(), 0);
+  }
 
   const AGENT_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
