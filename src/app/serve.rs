@@ -259,7 +259,7 @@ fn spawn_connection(
   timeout: Duration,
 ) -> std::io::Result<bool> {
   if active
-    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
+    .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
     .is_err()
   {
     return Ok(false); // drop the socket before allocating another worker
