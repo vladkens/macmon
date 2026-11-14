@@ -20,6 +20,7 @@ mod tui;
 
 use macmon::diagnostics::print_debug;
 use macmon::{Metrics, Sampler};
+use serde_json::{Number, Value};
 use tui::App;
 
 // JSON output keeps the v0.7 field names as deprecated aliases.
@@ -34,14 +35,30 @@ struct JsonMetrics<'a> {
 }
 
 #[allow(deprecated)]
-fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_json::Error> {
-  serde_json::to_value(JsonMetrics {
+fn metrics_to_json_value(metrics: &Metrics) -> Result<Value, serde_json::Error> {
+  let mut value = serde_json::to_value(JsonMetrics {
     metrics,
     cpu_usage_pct: metrics.cpu_scaled_ratio,
     ecpu_usage: (metrics.ecpu_freq_mhz, metrics.ecpu_scaled_ratio),
     pcpu_usage: (metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio),
     gpu_usage: (metrics.gpu_freq_mhz, metrics.gpu_scaled_ratio),
-  })
+  })?;
+  round_floats(&mut value);
+  Ok(value)
+}
+
+fn round_floats(value: &mut Value) {
+  match value {
+    Value::Number(n) => {
+      let rounded = n.as_f64().filter(|_| n.is_f64()).map(|x| (x * 1e6).round() / 1e6);
+      if let Some(x) = rounded.and_then(Number::from_f64) {
+        *n = x;
+      }
+    }
+    Value::Array(values) => values.iter_mut().for_each(round_floats),
+    Value::Object(values) => values.values_mut().for_each(round_floats),
+    _ => {}
+  }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -359,6 +376,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn json_rounds_floats_and_legacy_aliases() {
+    let metrics = Metrics {
+      cpu_scaled_ratio: 0.8613838,
+      gpu_scaled_ratio: 0.000123456,
+      gpu_freq_mhz: 123,
+      ..Default::default()
+    };
+    let value = metrics_to_json_value(&metrics).unwrap();
+    assert_eq!(value["cpu_scaled_ratio"], 0.861384);
+    assert_eq!(value["cpu_usage_pct"], 0.861384);
+    assert_eq!(value["gpu_usage"], serde_json::json!([123, 0.000123]));
+  }
 
   #[test]
   fn scheduled_sampling_uses_current_intervals_without_shifting_deadlines() {

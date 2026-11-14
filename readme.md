@@ -235,7 +235,7 @@ On a Mac without a battery, system power (`sys_power`) comes from the power supp
 
 ### Output format
 
-The `pipe` command and the HTTP `/json` endpoint return the same metrics. Network, disk, uptime and battery are data only: there, in Prometheus and in `macmon debug`, not in the TUI. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
+The `pipe` command and the HTTP `/json` endpoint return the same metrics. Floats are rounded to six decimal places. Network, disk, uptime and battery are data only: there, in Prometheus and in `macmon debug`, not in the TUI. In a macOS VM (`"vm": true` in the `soc` object of `pipe --soc-info` and `/json`) power and frequencies read 0, temperatures `null` and fans are empty:
 
 <details>
 <summary>JSON example</summary>
@@ -265,7 +265,7 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
     {
       "label": "E",
       "freq_mhz": 1100, // Tier frequency
-      "scaled_ratio": 0.082656614, // Frequency-scaled ratio (0–1)
+      "scaled_ratio": 0.082657, // Frequency-scaled ratio (0–1)
       "active_ratio": 0.18, // Active residency (not frequency-scaled, 0–1)
       "cores": [
         { "die_id": 0, "core_id": 0, "freq_mhz": 1600, "scaled_ratio": 0.14, "active_ratio": 0.24 },
@@ -275,7 +275,7 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
     {
       "label": "P",
       "freq_mhz": 1800,
-      "scaled_ratio": 0.015181795,
+      "scaled_ratio": 0.015182,
       "active_ratio": 0.04,
       "cores": [
         { "die_id": 0, "core_id": 0, "freq_mhz": 2100, "scaled_ratio": 0.05, "active_ratio": 0.08 },
@@ -285,26 +285,26 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   ],
   // Deprecated, use cpu_tiers: ecpu_* is the lowest tier, pcpu_* the highest
   "ecpu_freq_mhz": 1100,
-  "ecpu_scaled_ratio": 0.082656614,
+  "ecpu_scaled_ratio": 0.082657,
   "ecpu_active_ratio": 0.18,
   "pcpu_freq_mhz": 1800,
-  "pcpu_scaled_ratio": 0.015181795,
+  "pcpu_scaled_ratio": 0.015182,
   "pcpu_active_ratio": 0.04,
   "ecpu_cores": [/* cores of the first tier */],
   "pcpu_cores": [/* cores of the last tier */],
   "gpu_freq_mhz": 461, // GPU frequency
-  "gpu_scaled_ratio": 0.021497859, // Frequency-scaled ratio (0–1)
+  "gpu_scaled_ratio": 0.021498, // Frequency-scaled ratio (0–1)
   "gpu_active_ratio": 0.09, // GPU active residency ratio (not frequency-scaled, 0–1)
-  "cpu_power": 0.20486385, // Watts
-  "gpu_power": 0.017451683, // Watts
+  "cpu_power": 0.204864, // Watts
+  "gpu_power": 0.017452, // Watts
   "ane_power": 0.0, // Watts
-  "chip_power": 1.4130547, // Whole chip, Watts
-  "all_power": 1.4130547, // Deprecated, use chip_power
+  "chip_power": 1.413055, // Whole chip, Watts
+  "all_power": 1.413055, // Deprecated, use chip_power
   "sys_power": 5.876533, // Watts
-  "ram_power": 0.11635789, // Memory (DRAM), Watts
-  "dcs_power": 0.08119427, // Memory controller, Watts, null without a source
+  "ram_power": 0.116358, // Memory (DRAM), Watts
+  "dcs_power": 0.081194, // Memory controller, Watts, null without a source
   "media_power": null, // Video encoder and image processor, Watts, null except on M6
-  "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power, Watts
+  "gpu_ram_power": 0.000962, // Deprecated, GPU SRAM power, Watts
   "dc_in_power": 11.56, // Power adapter input, Watts, null without a source
   "display_power": null, // Built-in display backlight, Watts, null without a source
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
