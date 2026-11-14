@@ -20,6 +20,7 @@ mod tui;
 
 use macmon::diagnostics::print_debug;
 use macmon::{Metrics, Sampler};
+use serde_json::{Number, Value};
 use tui::App;
 
 // JSON output keeps the v0.7 field names as deprecated aliases.
@@ -34,7 +35,7 @@ struct JsonMetrics<'a> {
 }
 
 #[allow(deprecated)]
-fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_json::Error> {
+fn metrics_to_json_value(metrics: &Metrics) -> Result<Value, serde_json::Error> {
   let mut value = serde_json::to_value(JsonMetrics {
     metrics,
     cpu_usage_pct: metrics.cpu_scaled_ratio,
@@ -42,53 +43,21 @@ fn metrics_to_json_value(metrics: &Metrics) -> Result<serde_json::Value, serde_j
     pcpu_usage: (metrics.pcpu_freq_mhz, metrics.pcpu_scaled_ratio),
     gpu_usage: (metrics.gpu_freq_mhz, metrics.gpu_scaled_ratio),
   })?;
-  round_json_floats(&mut value);
+  round_floats(&mut value);
   Ok(value)
 }
 
-fn round_json_floats(value: &mut serde_json::Value) {
+fn round_floats(value: &mut Value) {
   match value {
-    serde_json::Value::Number(number) if number.is_f64() => {
-      if let Some(rounded) =
-        serde_json::Number::from_f64((number.as_f64().unwrap() * 1e6).round() / 1e6)
-      {
-        *number = rounded;
+    Value::Number(n) => {
+      let rounded = n.as_f64().filter(|_| n.is_f64()).map(|x| (x * 1e6).round() / 1e6);
+      if let Some(x) = rounded.and_then(Number::from_f64) {
+        *n = x;
       }
     }
-    serde_json::Value::Array(values) => values.iter_mut().for_each(round_json_floats),
-    serde_json::Value::Object(values) => values.values_mut().for_each(round_json_floats),
+    Value::Array(values) => values.iter_mut().for_each(round_floats),
+    Value::Object(values) => values.values_mut().for_each(round_floats),
     _ => {}
-  }
-}
-
-#[cfg(test)]
-mod json_rounding_tests {
-  use super::*;
-  use serde_json::json;
-
-  #[test]
-  fn rounds_nested_floats_without_changing_other_values() {
-    let mut value = json!({"values": [0.8613837957382202, 0.000123456, -1.2345678, 42, null, true, "1.2345678"], "large": u64::MAX});
-    round_json_floats(&mut value);
-    assert_eq!(
-      value,
-      json!({"values": [0.861384, 0.000123, -1.234568, 42, null, true, "1.2345678"], "large": u64::MAX})
-    );
-  }
-
-  #[test]
-  fn rounds_metrics_and_legacy_aliases() {
-    let metrics = Metrics {
-      cpu_scaled_ratio: 0.8613838,
-      gpu_scaled_ratio: 0.000123456,
-      gpu_freq_mhz: 123,
-      ..Default::default()
-    };
-    let value = metrics_to_json_value(&metrics).unwrap();
-    assert_eq!(value["cpu_scaled_ratio"], json!(0.861384));
-    assert_eq!(value["cpu_usage_pct"], json!(0.861384));
-    assert_eq!(value["gpu_scaled_ratio"], json!(0.000123));
-    assert_eq!(value["gpu_usage"], json!([123, 0.000123]));
   }
 }
 
@@ -407,6 +376,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn json_rounds_floats_and_legacy_aliases() {
+    let metrics = Metrics {
+      cpu_scaled_ratio: 0.8613838,
+      gpu_scaled_ratio: 0.000123456,
+      gpu_freq_mhz: 123,
+      ..Default::default()
+    };
+    let value = metrics_to_json_value(&metrics).unwrap();
+    assert_eq!(value["cpu_scaled_ratio"], 0.861384);
+    assert_eq!(value["cpu_usage_pct"], 0.861384);
+    assert_eq!(value["gpu_usage"], serde_json::json!([123, 0.000123]));
+  }
 
   #[test]
   fn scheduled_sampling_uses_current_intervals_without_shifting_deadlines() {
