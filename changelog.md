@@ -1,3 +1,35 @@
+## v0.12.0 – 2026-11-14
+
+### Breaking Changes
+
+- `all_power` now covers the whole chip, memory included, so it reads higher on most Macs; it is deprecated in favor of the new `chip_power`, which has the same value. `gpu_ram_power` is deprecated too (#117, by @homm)
+- `pipe` and `/json` round floats to six decimal places (#140, by @corneliusroemer-agent)
+
+### Features
+
+- Added `chip_power` for the whole chip, `dcs_power` for the memory controller and `media_power` for the video encoder and image processor on M6, in JSON and Prometheus (#117, by @homm)
+- Added `dc_in_power`, the power from the adapter, and `display_power`, the built-in display's backlight, where the Mac reports them (#118, by @homm)
+- Added `disk_read`, `disk_write`, `net_in`, `net_out` (bytes per second), `uptime`, `battery_percent`, `battery_charging` and `battery_plugged` to JSON and Prometheus (#129)
+- Added `gpu_mem_alloc` and `gpu_mem_in_use`, GPU memory in bytes, to JSON and Prometheus (#134, by @unlikelyzero)
+- New fields are in `Metrics` of the Rust library too, `Option` where a Mac may not report them
+- Added the command line to the process list: arguments after the name, `cmd:` in the filter and a `cmd` row in the `i` overlay (#127)
+- Added `port:` to the process filter, to find the process with a local TCP or UDP port (#128)
+- Added a cursor to the filter field, with word moves and deletes as in a shell (#130)
+- Added `Sampler::get_metrics_now` for library users that run their own timer; the TUI interval now goes down to 100 ms (#115, by @homm)
+- Added fallback power and temperature sources from mactop, used only when the current ones read nothing, in case Apple breaks them as it did on macOS 27 (#142)
+
+### Fixes
+
+- Fixed `cpu_temp_avg` reading a few degrees low and rare GPU temperatures around 5 °C (#142)
+- `sys_power` on desktops falls back to the adapter power when the system total reads 0, as reported on Mac Studio (#142)
+- Fixed the TUI under `sudo` saving settings through paths the user controls; as root it now keeps them for the session only (#138, by @chodorenko)
+- Fixed `macmon serve` running out of threads or hanging on idle connections: at most 32 at once, with a 5 s timeout (#137, by @chodorenko)
+- The process list uses about half the CPU it did (#131), and the TUI draws metrics and processes in one frame (#116, by @homm)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.11.0...v0.12.0
+
+---
+
 ## v0.11.0 – 2026-11-06
 
 ### Breaking Changes
