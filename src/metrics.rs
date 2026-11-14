@@ -6,15 +6,16 @@ use std::time::{Duration, Instant};
 use core_foundation::dictionary::CFDictionaryRef;
 use serde::Serialize;
 
+use crate::fallback;
 use crate::shared::{
-  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_dram_channel,
+  ioreport_channels_filter, is_clpc_energy_channel, is_pmp_ane_channel, is_pmp_mem_channel,
   zero_div,
 };
 use crate::sources::{
   IOHIDSensors, IOReport, IOReportIteratorItem, SMC, SocInfo, battery, cfio_get_residencies,
-  cfio_watts, cpu_load_ticks, disk_bytes, get_soc_info, gpu_memory, libc_ram, libc_swap,
-  memory_pressure_level, memory_pressure_percent, memory_pressure_raw, memory_status_raw,
-  net_bytes, uptime_secs,
+  cfio_watts, cpu_load_ticks, disk_bytes, get_soc_info, gpu_memory, has_battery, libc_ram,
+  libc_swap, memory_pressure_level, memory_pressure_percent, memory_pressure_raw,
+  memory_status_raw, net_bytes, sysctl_str, uptime_secs,
 };
 
 type WithError<T> = Result<T, Box<dyn std::error::Error>>;
@@ -29,7 +30,11 @@ const GPU_FREQ_DICE_SUBG: &str = "GPU Performance States";
 struct PowerSources {
   clpc: Option<f32>,
   energy_model: Option<f32>,
-  pmp: f32,
+  pmp: Option<f32>,
+  /// macOS 27+, where `Energy Model` can freeze and catch up in one sample.
+  em_freezes: bool,
+  /// The SMC system total, to tell catch-up spikes.
+  sys: Option<f32>,
 }
 
 impl PowerSources {
@@ -46,8 +51,21 @@ impl PowerSources {
 
   fn add_pmp(&mut self, watts: f32) {
     if watts.is_finite() && watts >= 0.0 {
-      self.pmp += watts;
+      *self.pmp.get_or_insert(0.0) += watts;
     }
+  }
+
+  /// The first source with a reading, None without any; `smc` is read only when needed.
+  fn best(&self, smc: impl FnOnce() -> Option<f32>) -> Option<f32> {
+    // On macOS 27 Energy Model CPU/ANE/DRAM counters can freeze without Apple's
+    // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
+    // Drivers with unknown CLPC IDs need the legacy sources; ANE, DRAM and DCS can use PMP.
+    if !self.em_freezes {
+      return self.clpc.or(self.energy_model).or(self.pmp).or_else(smc);
+    }
+
+    // a frozen Energy Model reads 0, then catches up in one spike; PMP doesn't freeze
+    self.clpc.or_else(|| fallback::first_valid([self.pmp, self.energy_model], smc, self.sys))
   }
 
   fn watts(self, force_clpc: bool) -> Option<f32> {
@@ -55,10 +73,7 @@ impl PowerSources {
       return self.clpc;
     }
 
-    // On macOS 27 Energy Model CPU/ANE counters can freeze without Apple's
-    // entitlement. Prefer readable CLPC counters, including valid idle zeroes.
-    // Drivers with unknown CLPC IDs need the legacy sources; ANE and DRAM can use PMP.
-    Some(self.clpc.or(self.energy_model).unwrap_or(self.pmp))
+    Some(self.best(|| None).unwrap_or_default())
   }
 }
 
@@ -139,6 +154,7 @@ struct SmcSensors {
   cpu_keys: Vec<String>,
   gpu_keys: Vec<String>,
   fan_keys: Vec<String>,
+  ram_keys: Vec<String>,
 }
 
 /// A complete metrics snapshot returned by [`Sampler`].
@@ -208,14 +224,26 @@ pub struct Metrics {
   pub gpu_power: f32,
   /// Apple Neural Engine power in Watts.
   pub ane_power: f32,
-  /// Sum of CPU, GPU, and ANE power in Watts.
+  /// Chip power in Watts: the chip total, at least the sum of its parts.
+  pub chip_power: f32,
+  /// The same as `chip_power`.
+  #[deprecated(since = "0.12.0", note = "use `chip_power`")]
   pub all_power: f32,
   /// System power estimate in Watts, when available.
   pub sys_power: f32,
   /// DRAM power in Watts.
   pub ram_power: f32,
+  /// DCS power in Watts, or None without a source.
+  pub dcs_power: Option<f32>,
+  /// Video encoder and image processor power in Watts, or None without a source (only on M6).
+  pub media_power: Option<f32>,
   /// GPU SRAM power in Watts.
+  #[deprecated(since = "0.12.0", note = "no CLPC source; `gpu_power` includes it on some chips")]
   pub gpu_ram_power: f32,
+  /// Power adapter input in Watts, or None without a source.
+  pub dc_in_power: Option<f32>,
+  /// Built-in display backlight power in Watts, or None without a source.
+  pub display_power: Option<f32>,
   /// Bytes per second received by the Ethernet and Wi-Fi interfaces, or None without one.
   pub net_in: Option<u64>,
   /// Bytes per second sent by the Ethernet and Wi-Fi interfaces, or None without one.
@@ -240,8 +268,9 @@ pub struct Metrics {
 
 // MARK: Helpers
 
+/// A die reading: some sensors read a few °C right after boot or when unused.
 fn is_valid_temp(val: f32) -> bool {
-  val > 0.0 && val <= 150.0
+  val > 10.0 && val <= 150.0
 }
 
 /// Average of the valid sensor readings, or None when no sensor has one.
@@ -264,11 +293,26 @@ fn aggregate_frequency(cores: &[CpuCoreMetrics], min_frequency_mhz: u32) -> u32 
   average.max(min_frequency_mhz as f64) as u32
 }
 
-/// `ram` or 0 when it is above the raw SMC total `sys`: memory can't draw more than the whole
+/// `watts` or 0 when it is above the raw SMC total `sys`: no part can draw more than the whole
 /// system, so that's a bad reading (rare spikes of `Energy Model` on macOS 27). A total of 0 is
 /// no reading.
-fn checked_ram_power(ram: f32, sys: Option<f32>) -> f32 {
-  if sys.is_some_and(|sys| sys > 0.0 && ram > sys) { 0.0 } else { ram }
+fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
+  if sys.is_some_and(|sys| sys > 0.0 && watts > sys) { 0.0 } else { watts }
+}
+
+/// Drops bad `ram_power`, `dcs_power` and package total `chip_power` readings, then sets
+/// `chip_power` to at least the sum of its parts and `sys_power` to the SMC total `sys`, at least
+/// `chip_power`.
+#[allow(deprecated)] // all_power
+fn with_power_totals(mut rs: Metrics, sys: Option<f32>) -> Metrics {
+  rs.ram_power = checked_power(rs.ram_power, sys);
+  rs.dcs_power = rs.dcs_power.map(|x| checked_power(x, sys));
+  let parts = rs.cpu_power + rs.gpu_power + rs.ane_power + rs.ram_power;
+  let parts = parts + rs.dcs_power.unwrap_or_default() + rs.media_power.unwrap_or_default();
+  rs.chip_power = checked_power(rs.chip_power, sys).max(parts);
+  rs.all_power = rs.chip_power;
+  rs.sys_power = sys.map_or(0.0, |sys| sys.max(rs.chip_power));
+  rs
 }
 
 /// Byte counters of the network and the disks at one moment.
@@ -309,7 +353,6 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
   }
   rs.cpu_scaled_ratio = zero_div(total_scaled, total_cores);
   rs.cpu_active_ratio = zero_div(total_active, total_cores);
-  rs.all_power = rs.cpu_power + rs.gpu_power + rs.ane_power;
   rs.with_deprecated_tiers()
 }
 
@@ -541,6 +584,7 @@ fn init_smc() -> WithError<SmcSensors> {
   let mut cpu_sensors = Vec::new();
   let mut gpu_sensors = Vec::new();
   let mut fan_sensors = Vec::new();
+  let mut ram_keys = Vec::new();
 
   let names = smc.read_all_keys().unwrap_or(vec![]);
   for name in &names {
@@ -548,10 +592,18 @@ fn init_smc() -> WithError<SmcSensors> {
       fan_sensors.push(name.clone());
       continue;
     }
+
+    if fallback::is_ram_key(name) {
+      ram_keys.push(name.clone());
+      continue;
+    }
+
     // Unfortunately, it is not known which keys are responsible for what.
     // Basically in the code that can be found publicly "Tp" is used for CPU and "Tg" for GPU.
 
-    let is_cpu = name.starts_with("Tp") || name.starts_with("Te") || name.starts_with("Ts");
+    // "Ts*P" keys don't follow CPU load
+    let is_ts = name.starts_with("Ts") && !name.ends_with('P');
+    let is_cpu = name.starts_with("Tp") || name.starts_with("Te") || is_ts;
     let is_gpu = name.starts_with("Tg");
     if !is_cpu && !is_gpu {
       continue;
@@ -571,10 +623,12 @@ fn init_smc() -> WithError<SmcSensors> {
   // Sort first so fan order is stable and any duplicate keys become adjacent for dedup().
   fan_sensors.sort();
   fan_sensors.dedup();
+  ram_keys.sort();
+  ram_keys.dedup();
 
   // println!("{} {}", cpu_sensors.len(), gpu_sensors.len());
   let (cpu_keys, gpu_keys, fan_keys) = (cpu_sensors, gpu_sensors, fan_sensors);
-  Ok(SmcSensors { smc: Some(smc), cpu_keys, gpu_keys, fan_keys })
+  Ok(SmcSensors { smc: Some(smc), cpu_keys, gpu_keys, fan_keys, ram_keys })
 }
 
 // MARK: Sampler
@@ -601,6 +655,10 @@ pub struct Sampler {
   smc_cpu_keys: Vec<String>,
   smc_gpu_keys: Vec<String>,
   smc_fan_keys: Vec<String>,
+  smc_ram_keys: Vec<String>,
+  /// macOS 27+, where `Energy Model` can freeze and catch up in one sample.
+  em_freezes: bool,
+  battery: bool,
 }
 
 impl Sampler {
@@ -608,6 +666,19 @@ impl Sampler {
   pub fn new() -> WithError<Self> {
     let soc = get_soc_info()?;
     let ior = IOReport::with_filter(Some(ioreport_channels_filter))?;
+    let os = sysctl_str("kern.osproductversion").and_then(|x| x.split('.').next()?.parse().ok());
+    let em_freezes = os.is_some_and(|x: u32| x >= 27);
+    // CPU power from the PMP histograms, which cost about as much as CLPC, only where needed
+    let ior = match ior {
+      x if !em_freezes || x.as_ref().is_some_and(|x| x.has_channel("CLPC", "CPU Energy")) => x,
+      x => {
+        let filter = |g: &str, s: &str, c: &str, u: &str| {
+          ioreport_channels_filter(g, s, c, u) || fallback::is_pmp_cpu_channel(g, s, c)
+        };
+        IOReport::with_filter(Some(filter)).ok().flatten().or(x)
+      }
+    };
+
     let hid = IOHIDSensors::new()?;
     let smc_sensors = init_smc()?;
 
@@ -627,6 +698,9 @@ impl Sampler {
       smc_cpu_keys: smc_sensors.cpu_keys,
       smc_gpu_keys: smc_sensors.gpu_keys,
       smc_fan_keys: smc_sensors.fan_keys,
+      smc_ram_keys: smc_sensors.ram_keys,
+      em_freezes,
+      battery: has_battery(),
     };
     sampler.reset_baselines();
     Ok(sampler)
@@ -651,15 +725,11 @@ impl Sampler {
 
   fn get_temp_smc(&mut self) -> WithError<TempMetrics> {
     let smc = self.smc.as_mut().ok_or("SMC unavailable")?;
-    let mut cpu_metrics = Vec::new();
-    for sensor in &self.smc_cpu_keys {
-      cpu_metrics.push(smc.read_float_val(sensor)?);
-    }
-
-    let mut gpu_metrics = Vec::new();
-    for sensor in &self.smc_gpu_keys {
-      gpu_metrics.push(smc.read_float_val(sensor)?);
-    }
+    // an unreadable key is left out, not the whole sample
+    let cpu_metrics: Vec<f32> =
+      self.smc_cpu_keys.iter().filter_map(|x| smc.read_float_val(x).ok()).collect();
+    let gpu_metrics: Vec<f32> =
+      self.smc_gpu_keys.iter().filter_map(|x| smc.read_float_val(x).ok()).collect();
 
     let cpu_temp_avg = temperature_average(&cpu_metrics);
     let gpu_temp_avg = temperature_average(&gpu_metrics);
@@ -717,6 +787,11 @@ impl Sampler {
     fans
   }
 
+  /// Watts of an SMC power key, or None without a finite reading.
+  fn get_smc_power(&mut self, key: &str) -> Option<f32> {
+    self.smc.as_mut()?.read_float_val(key).ok().filter(|x| x.is_finite())
+  }
+
   fn get_mem(&mut self) -> WithError<MemMetrics> {
     let (ram_usage, ram_total) = libc_ram()?;
     let (swap_usage, swap_total) = libc_swap()?;
@@ -732,21 +807,24 @@ impl Sampler {
     })
   }
 
-  fn get_sys_power(&mut self) -> WithError<f32> {
-    self.smc.as_mut().ok_or("SMC unavailable")?.read_float_val("PSTR")
-  }
-
+  #[allow(deprecated)] // gpu_ram_power
   fn get_ioreport_metrics(
-    &self,
+    &mut self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
     dt: Duration,
+    sys: Option<f32>,
   ) -> WithError<Metrics> {
     let mut cpu_cores = CpuTierCores::new(&self.soc);
     let mut rs = Metrics::default();
-    let mut cpu_power = PowerSources::default();
-    let mut gpu_power = PowerSources::default();
-    let mut ane_power = PowerSources::default();
-    let mut ram_power = PowerSources::default();
+    let new = || PowerSources { em_freezes: self.em_freezes, sys, ..Default::default() };
+    let mut cpu_power = new();
+    let mut gpu_power = new();
+    let mut ane_power = new();
+    let mut ram_power = new();
+    let mut dcs_power = new();
+    let mut chip_power = PowerSources::default();
+    let mut media_power = PowerSources::default();
+    let mut pmp_cpu = Vec::new();
 
     // Keep this channel handling in sync with ioreport_channels_filter.
     for x in sample {
@@ -784,30 +862,44 @@ impl Sampler {
           c if c.starts_with("DRAM") => {
             ram_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
           }
+          c if c.starts_with("DCS") => {
+            dcs_power.add_energy_model(cfio_watts(x.item, &x.unit, dt)?);
+          }
           c if c.starts_with("GPU SRAM") => rs.gpu_ram_power += cfio_watts(x.item, &x.unit, dt)?,
           _ => {}
         }
       }
 
-      if is_pmp_ane_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
-        ane_power.pmp += cfio_watts(x.item, &x.unit, dt)?;
+      if fallback::is_pmp_cpu_channel(&x.group, &x.subgroup, &x.channel) {
+        let watts = fallback::histogram_watts(&cfio_get_residencies(x.item));
+        pmp_cpu.push((x.group == "PMP", watts));
       }
 
-      if is_pmp_dram_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
-        ram_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
+      if is_pmp_ane_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        ane_power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
+      }
+
+      if is_pmp_mem_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
+        let power = if x.channel.starts_with("DCS") { &mut dcs_power } else { &mut ram_power };
+        power.add_pmp(cfio_watts(x.item, &x.unit, dt)?);
       }
 
       if is_clpc_energy_channel(&x.group, &x.subgroup, &x.channel, &x.unit) {
         let power = match x.channel.as_str() {
           "CPU Energy" => &mut cpu_power,
           "GPU Energy" => &mut gpu_power,
+          "AVE" | "ISP" => &mut media_power,
           "ANE" => &mut ane_power,
+          "DRAM" => &mut ram_power,
+          "DCS" => &mut dcs_power,
+          "Package Energy" => &mut chip_power,
           _ => continue,
         };
         power.add_clpc(cfio_watts(x.item, &x.unit, dt)?);
       }
     }
 
+    cpu_power.pmp = fallback::pmp_cpu_watts(&pmp_cpu);
     rs.cpu_power = cpu_power
       .watts(self.force_clpc)
       .ok_or("CPU power unavailable from CLPC; legacy fallback is disabled")?;
@@ -817,7 +909,11 @@ impl Sampler {
     rs.ane_power = ane_power
       .watts(self.force_clpc)
       .ok_or("ANE power unavailable from CLPC; legacy fallback is disabled")?;
-    rs.ram_power = ram_power.watts(false).unwrap_or_default();
+    let smc = || fallback::smc_ram_power(self.smc.as_mut()?, &self.smc_ram_keys);
+    rs.ram_power = ram_power.best(smc).unwrap_or_default();
+    rs.dcs_power = dcs_power.best(|| None);
+    rs.media_power = media_power.clpc;
+    rs.chip_power = chip_power.clpc.unwrap_or_default(); // completed by with_power_totals
     rs.cpu_tiers = cpu_cores.into_metrics();
 
     Ok(rs)
@@ -865,12 +961,13 @@ impl Sampler {
     let ticks = std::mem::replace(&mut self.cpu_ticks, cur_ticks);
     let cur = ByteCounters::read();
     let bytes = self.bytes.replace(cur).unwrap_or(cur);
+    let sys = self.smc.as_mut().and_then(|x| fallback::sys_power(x, self.battery));
     let mut rs = match self.ior.as_mut() {
       Some(ior) => {
         let (sample, elapsed) = ior.get_sample_now();
-        self.get_ioreport_metrics(sample, elapsed)?
+        self.get_ioreport_metrics(sample, elapsed, sys)?
       }
-      None => self.get_ioreport_metrics([], Duration::ZERO)?,
+      None => self.get_ioreport_metrics([], Duration::ZERO, sys)?,
     };
 
     if let Some(prev) = ticks
@@ -885,9 +982,7 @@ impl Sampler {
     rs.temp = self.get_temp()?;
     rs.fans = self.get_fans();
 
-    let sys_power = self.get_sys_power().ok();
-    rs.ram_power = checked_ram_power(rs.ram_power, sys_power);
-    rs.sys_power = sys_power.map_or(0.0, |val| val.max(rs.all_power));
+    let mut rs = with_power_totals(rs, sys);
 
     let secs = (cur.at - bytes.at).as_secs_f64();
     [rs.net_in, rs.net_out] = byte_rates(bytes.net, cur.net, secs);
@@ -901,6 +996,9 @@ impl Sampler {
     let gpu_mem = gpu_memory();
     rs.gpu_mem_alloc = gpu_mem.map(|x| x[0]);
     rs.gpu_mem_in_use = gpu_mem.map(|x| x[1]);
+    rs.dc_in_power = self.get_smc_power("PDTR");
+    // backlight: "PBwo" on M5 and A18 Pro, "PDBR" on M1 and M4 (exelban/stats); not on our M1, M5
+    rs.display_power = self.get_smc_power("PBwo").or_else(|| self.get_smc_power("PDBR"));
 
     Ok(rs)
   }
@@ -913,6 +1011,7 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::Cell;
   use std::collections::{HashMap, HashSet};
   use std::time::{Duration, Instant};
 
@@ -922,9 +1021,9 @@ mod tests {
 
   use super::{
     CpuCoreKind, CpuCoreMetrics, CpuTierCores, CpuTierMetrics, Metrics, PowerSources, Sampler,
-    TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies,
-    checked_ram_power, collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel,
-    smc_numeric_value, temperature_average, uses_cpu_ticks,
+    TempMetrics, aggregate_ioreport_metrics, byte_rates, calc_freq_from_residencies, checked_power,
+    collect_cpu_core_metrics, cpu_cores_from_ticks, parse_cpu_core_channel, smc_numeric_value,
+    temperature_average, uses_cpu_ticks, with_power_totals,
   };
   use crate::sources::{
     CpuTierInfo, IOHIDSensors, IOReportIteratorItem, SocInfo, cpu_load_ticks, cpu_tier_infos,
@@ -949,23 +1048,58 @@ mod tests {
       (689.0, None, 689.0),
     ];
     for (ram, sys, expected) in cases {
-      assert_eq!(checked_ram_power(ram, sys), expected, "{ram} {sys:?}");
+      assert_eq!(checked_power(ram, sys), expected, "{ram} {sys:?}");
     }
   }
 
   #[test]
   fn ane_power_uses_pmp_only_when_energy_model_is_absent() {
     assert_eq!(PowerSources::default().watts(false), Some(0.0));
-    assert_eq!(PowerSources { pmp: 0.8, ..Default::default() }.watts(false), Some(0.8));
+    assert_eq!(PowerSources { pmp: Some(0.8), ..Default::default() }.watts(false), Some(0.8));
 
-    let mut power = PowerSources { pmp: 0.8, ..Default::default() };
+    let mut power = PowerSources { pmp: Some(0.8), ..Default::default() };
     power.add_energy_model(0.0);
     assert_eq!(power.watts(false), Some(0.0));
 
-    let mut power = PowerSources { pmp: 0.8, ..Default::default() };
+    let mut power = PowerSources { pmp: Some(0.8), ..Default::default() };
     power.add_energy_model(0.5);
     power.add_energy_model(0.25);
     assert_eq!(power.watts(false), Some(0.75));
+  }
+
+  #[test]
+  fn power_source_order_through_macos_26_and_from_27() {
+    let n = None;
+    // macOS 27+, [CLPC, Energy Model, PMP, SMC], SMC total; watts and whether SMC is read
+    let cases = [
+      // through macOS 26: the first reading, also a 0, SMC only without one
+      (false, [n, n, n, Some(0.4)], n, Some(0.4), true),
+      (false, [n, Some(0.0), Some(0.8), Some(0.4)], n, Some(0.0), false),
+      (false, [n, n, Some(0.0), Some(0.4)], n, Some(0.0), false),
+      (false, [Some(0.0), Some(0.5), Some(0.8), n], n, Some(0.0), false),
+      (false, [n, Some(617.0), n, n], Some(7.0), Some(617.0), false),
+      (false, [n, n, n, n], n, None, true),
+      // macOS 27+: CLPC, else PMP, Energy Model, SMC above 0 and not a spike, else the first
+      (true, [Some(0.0), Some(5.0), Some(5.0), Some(0.4)], Some(7.0), Some(0.0), false),
+      (true, [n, Some(0.5), Some(0.8), Some(0.4)], n, Some(0.8), false),
+      (true, [n, Some(0.5), Some(0.0), Some(0.4)], n, Some(0.5), false),
+      (true, [n, Some(0.0), n, Some(0.4)], n, Some(0.4), true),
+      (true, [n, Some(617.0), n, Some(0.4)], Some(7.0), Some(0.4), true),
+      (true, [n, Some(617.0), n, n], Some(7.0), Some(0.0), true),
+      (true, [n, Some(617.0), n, n], Some(0.0), Some(617.0), false),
+      (true, [n, Some(13.6), n, n], Some(1.2), Some(13.6), false),
+      (true, [n, Some(0.0), Some(0.0), n], n, Some(0.0), true),
+      (true, [n, n, n, n], n, None, true),
+    ];
+    for (em_freezes, [clpc, energy_model, pmp, smc], sys, expected, read) in cases {
+      let power = PowerSources { clpc, energy_model, pmp, em_freezes, sys };
+      let smc_read = Cell::new(false);
+      let watts = power.best(|| {
+        smc_read.set(true);
+        smc
+      });
+      assert_eq!((watts, smc_read.get()), (expected, read), "{em_freezes} {clpc:?} {smc:?}");
+    }
   }
 
   #[test]
@@ -981,7 +1115,8 @@ mod tests {
   #[test]
   fn clpc_power_takes_precedence_without_double_counting_or_replacing_idle_zero() {
     for watts in [0.0, 0.8, 13.0] {
-      let mut power = PowerSources { energy_model: Some(2.0), pmp: 0.8, ..Default::default() };
+      let mut power =
+        PowerSources { energy_model: Some(2.0), pmp: Some(0.8), ..Default::default() };
       power.add_clpc(watts);
       assert_eq!(power.watts(false), Some(watts));
     }
@@ -1003,7 +1138,8 @@ mod tests {
   #[test]
   fn forced_clpc_rejects_legacy_fallback_but_accepts_idle_zero() {
     for watts in [None, Some(f32::NAN), Some(f32::INFINITY), Some(-1.0), Some(0.0), Some(1.2)] {
-      let mut power = PowerSources { energy_model: Some(2.0), pmp: 0.8, ..Default::default() };
+      let mut power =
+        PowerSources { energy_model: Some(2.0), pmp: Some(0.8), ..Default::default() };
       if let Some(watts) = watts {
         power.add_clpc(watts);
       }
@@ -1039,6 +1175,9 @@ mod tests {
       smc_cpu_keys: vec![],
       smc_gpu_keys: vec![],
       smc_fan_keys: vec![],
+      smc_ram_keys: vec![],
+      em_freezes: false,
+      battery: false,
     }
   }
 
@@ -1081,6 +1220,8 @@ mod tests {
     assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("_", 0));
     assert_eq!(rs.cpu_tiers.len(), 1);
     assert_eq!((rs.cpu_power, rs.gpu_power, rs.ane_power, rs.sys_power), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!((rs.ram_power, rs.chip_power, rs.dcs_power, rs.media_power), (0.0, 0.0, None, None));
+    assert_eq!((rs.dc_in_power, rs.display_power), (None, None));
     assert!(rs.fans.is_empty() && rs.memory.ram_total > 0);
 
     // CLPC counters are required whether IOReport has channels or not
@@ -1120,15 +1261,35 @@ mod tests {
     for gpu_freqs in [vec![], vec![0]] {
       let mut sampler = sampler_without_sources(4, false);
       sampler.soc.gpu_freqs = gpu_freqs;
-      let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1)).unwrap();
+      let rs = sampler.get_ioreport_metrics([gpuph()], Duration::from_secs(1), None).unwrap();
       assert_eq!((rs.gpu_freq_mhz, rs.gpu_active_ratio), (0, 0.0));
+    }
+  }
+
+  #[test]
+  #[allow(deprecated)] // all_power
+  fn chip_power_drops_spikes_and_covers_its_parts() {
+    // DRAM, DCS, package total, SMC total; then DRAM, DCS, chip and system power; CPU 2 W and
+    // media 1 W in every case
+    for (ram, dcs, package, sys, expected) in [
+      (689.0, Some(0.5), 0.0, Some(12.0), (0.0, Some(0.5), 3.5, 12.0)),
+      (0.5, Some(689.0), 0.0, Some(12.0), (0.5, Some(0.0), 3.5, 12.0)),
+      (0.5, Some(0.5), 689.0, Some(12.0), (0.5, Some(0.5), 4.0, 12.0)),
+      (0.5, None, 9.0, Some(12.0), (0.5, None, 9.0, 12.0)),
+      (0.5, None, 1.0, None, (0.5, None, 3.5, 0.0)), // a package total below its parts
+    ] {
+      let rs = Metrics { cpu_power: 2.0, ram_power: ram, dcs_power: dcs, ..Default::default() };
+      let rs = Metrics { media_power: Some(1.0), chip_power: package, ..rs };
+      let rs = with_power_totals(rs, sys);
+      assert_eq!((rs.ram_power, rs.dcs_power, rs.chip_power, rs.sys_power), expected);
+      assert_eq!(rs.all_power, rs.chip_power);
     }
   }
 
   #[test]
   fn temperature_average_rejects_missing_and_invalid_values() {
     assert_eq!(temperature_average(&[]), None);
-    assert_eq!(temperature_average(&[0.0, -1.0, 151.0, f32::NAN, f32::INFINITY]), None);
+    assert_eq!(temperature_average(&[0.0, 2.0, 10.0, -1.0, 151.0, f32::NAN, f32::INFINITY]), None);
     assert_eq!(temperature_average(&[0.0, 40.0, f32::NAN, 60.0]), Some(50.0));
   }
 
@@ -1197,7 +1358,6 @@ mod tests {
     assert_eq!(tiers.collect::<Vec<_>>(), [("E", 2000, 0.5, 0.5), ("P", 2000, 0.5, 0.5)]);
     assert_eq!(rs.cpu_scaled_ratio, 0.5);
     assert_eq!(rs.cpu_active_ratio, 0.5);
-    assert_eq!(rs.all_power, 4.0);
 
     // deprecated fields: the lowest and the highest tier
     assert_eq!((rs.ecpu_freq_mhz, rs.ecpu_scaled_ratio, rs.ecpu_active_ratio), (2000, 0.5, 0.5));

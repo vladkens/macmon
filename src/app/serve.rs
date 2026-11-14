@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -128,10 +129,15 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
-  gauge_mac!(out, "all_power_watts", "Combined CPU+GPU+ANE power consumption in Watts", m.all_power);
+  gauge_mac!(out, "chip_power_watts", "Chip power consumption in Watts", m.chip_power);
+  gauge_mac!(out, "all_power_watts", "DEPRECATED: use macmon_chip_power_watts", m.all_power);
   gauge_mac!(out, "sys_power_watts", "Total system power consumption in Watts", m.sys_power);
   gauge_mac!(out, "ram_power_watts", "RAM power consumption in Watts", m.ram_power);
-  gauge_mac!(out, "gpu_ram_power_watts", "GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "dcs_power_watts", "DCS power consumption in Watts", ?m.dcs_power);
+  gauge_mac!(out, "media_power_watts", "Video encoder and image processor power consumption in Watts", ?m.media_power);
+  gauge_mac!(out, "gpu_ram_power_watts", "DEPRECATED: GPU RAM power consumption in Watts", m.gpu_ram_power);
+  gauge_mac!(out, "dc_in_power_watts", "Power adapter input in Watts", ?m.dc_in_power);
+  gauge_mac!(out, "display_power_watts", "Built-in display backlight power in Watts", ?m.display_power);
   gauge_any!(out, "gpu_memory_alloc_bytes", "System memory allocated by the GPU in bytes", ?m.gpu_mem_alloc);
   gauge_any!(out, "gpu_memory_in_use_bytes", "System memory in use by the GPU in bytes", ?m.gpu_mem_in_use);
   if !m.fans.is_empty() {
@@ -233,17 +239,63 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
   }
 }
 
+const MAX_CONNECTIONS: usize = 32;
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Releases admission on normal completion, setup failure, or worker creation failure.
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl Drop for ConnectionPermit {
+  fn drop(&mut self) {
+    self.0.fetch_sub(1, Ordering::Relaxed);
+  }
+}
+
+fn spawn_connection(
+  stream: TcpStream,
+  shared: SharedMetrics,
+  soc: Arc<SocInfo>,
+  active: &Arc<AtomicUsize>,
+  timeout: Duration,
+) -> std::io::Result<bool> {
+  if active
+    .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
+    .is_err()
+  {
+    return Ok(false); // drop the socket before allocating another worker
+  }
+  let permit = ConnectionPermit(Arc::clone(active));
+  stream.set_read_timeout(Some(timeout))?;
+  stream.set_write_timeout(Some(timeout))?;
+  thread::Builder::new().spawn(move || {
+    let _permit = permit;
+    handle_conn(stream, shared, soc);
+  })?;
+  Ok(true)
+}
+
 pub fn run(host: &str, port: u16, shared: SharedMetrics, soc: Arc<SocInfo>) -> WithError<()> {
   let listener = TcpListener::bind((host, port))?;
   eprintln!("macmon serving on http://{}", listener.local_addr()?);
   eprintln!("  GET /json    → JSON metrics");
   eprintln!("  GET /metrics → Prometheus format");
 
+  let active = Arc::new(AtomicUsize::new(0));
   for stream in listener.incoming() {
-    let Ok(stream) = stream else { continue };
-    let shared = Arc::clone(&shared);
-    let soc = Arc::clone(&soc);
-    thread::spawn(move || handle_conn(stream, shared, soc));
+    let stream = match stream {
+      Ok(stream) => stream,
+      Err(e) => {
+        eprintln!("HTTP accept error: {e}");
+        thread::sleep(Duration::from_millis(100));
+        continue;
+      }
+    };
+    if let Err(e) =
+      spawn_connection(stream, Arc::clone(&shared), Arc::clone(&soc), &active, IO_TIMEOUT)
+    {
+      eprintln!("HTTP worker error: {e}");
+      thread::sleep(Duration::from_millis(100));
+    }
   }
 
   Ok(())
@@ -435,6 +487,52 @@ mod tests {
     daemon_user, escape_label_value, escape_xml, plist_text, serve_url, to_json, to_prometheus,
   };
 
+  #[test]
+  fn rejects_connections_above_the_worker_limit() {
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let shared = Arc::new(RwLock::new(Some(Metrics::default())));
+    let soc = Arc::new(SocInfo::default());
+    let mut clients = Vec::new();
+    // Keep all admitted clients connected until the excess connection is closed.
+    for _ in 0..super::MAX_CONNECTIONS {
+      let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+      let (stream, _) = listener.accept().unwrap();
+      assert!(
+        super::spawn_connection(
+          stream,
+          Arc::clone(&shared),
+          Arc::clone(&soc),
+          &active,
+          Duration::from_secs(30),
+        )
+        .unwrap()
+      );
+      clients.push(client);
+    }
+    assert_eq!(active.load(Ordering::Relaxed), super::MAX_CONNECTIONS);
+    let mut excess = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    assert!(
+      !super::spawn_connection(
+        stream,
+        Arc::clone(&shared),
+        Arc::clone(&soc),
+        &active,
+        Duration::from_secs(30),
+      )
+      .unwrap()
+    );
+    excess.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    assert_eq!(excess.read(&mut [0u8; 1]).unwrap(), 0);
+  }
+
   const AGENT_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -457,6 +555,19 @@ mod tests {
 </dict>
 </plist>
 "#;
+
+  #[test]
+  fn optional_power_is_null_without_a_source() {
+    let metrics = Metrics { dcs_power: Some(0.25), dc_in_power: Some(10.0), ..Default::default() };
+    let json = to_json(&metrics, &SocInfo::default());
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!((&json["dcs_power"], &json["media_power"]), (&0.25.into(), &().into()));
+    assert_eq!((&json["dc_in_power"], &json["display_power"]), (&10.0.into(), &().into()));
+    let output = to_prometheus(&metrics, &SocInfo::default());
+    assert!(output.contains("macmon_dcs_power_watts{chip=\"\"} 0.25\n"));
+    assert!(output.contains("macmon_dc_in_power_watts{chip=\"\"} 10\n"));
+    assert!(!output.contains("macmon_media_") && !output.contains("macmon_display_"));
+  }
 
   #[test]
   fn unavailable_temperature_has_no_prometheus_gauge() {
@@ -583,11 +694,11 @@ mod tests {
     };
 
     // a Mac: every gauge, in the same order
-    let power =
-      ["cpu", "gpu", "ane", "all", "sys", "ram", "gpu_ram"].map(|x| format!("{x}_power_watts"));
+    let power = ["cpu", "gpu", "ane", "chip", "all", "sys", "ram", "gpu_ram"]
+      .map(|x| format!("{x}_power_watts"));
     let freqs = ["ecpu_freq_mhz", "pcpu_freq_mhz", "cpu_tier_freq_mhz", "gpu_freq_mhz"];
     let mac = types(false);
-    assert_eq!(mac.len(), 29, "{mac:?}"); // no temperature and fan gauges without readings
+    assert_eq!(mac.len(), 30, "{mac:?}"); // no temperature and fan gauges without readings
     assert!(power.iter().chain(&freqs.map(String::from)).all(|x| mac.contains(x)), "{mac:?}");
 
     // a VM: the same without the power and frequency gauges

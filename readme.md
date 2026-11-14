@@ -83,6 +83,8 @@ Options:
 
 Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
+When the TUI runs as root, preference changes apply only to that session and are not saved. Run without `sudo` to persist settings.
+
 Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows the Safari app with its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory), `cmd:` (the command line, of your own processes) and `app:` (the name of the `.app` the process or its responsible process runs from); or an exact local TCP or UDP port, of your own processes: `port:3000`. `Enter` keeps the filter, `Esc` clears it.
 
 Press `Space` to pause the process list: rows keep their order while values update, new processes wait until you resume, and the files list of `i` stops updating. Press `f` to turn the filter off and on without losing its text.
@@ -225,7 +227,11 @@ macOS 27 broke the CPU/ANE power source that macmon previously used without root
 
 The working rootless workaround we found is to read hidden energy reports from the AppleCLPC driver through IOReport. These reports use opaque IDs instead of discoverable CPU/GPU/ANE channel names, so macmon has to identify the counters and verify their units. This leaves macmon maintaining undocumented mappings for data that Apple's own tool can still read directly.
 
-Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. On an unsupported configuration, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+`chip_power` is the power of the whole chip: its own total where it reports one, and never less than the sum of CPU, GPU, ANE, memory (`ram_power`), memory controller (`dcs_power`) and media power. `media_power`, the video encoder and image processor, is reported apart only on M6; on other chips it is part of `chip_power`. `all_power` is the same as `chip_power`, kept for compatibility.
+
+Both the CLI and the Rust library use known CLPC counters automatically, and `Sampler::new()` retains legacy fallbacks for older systems. New chips or driver versions may need additional mappings. Until then macmon estimates CPU power from rougher per-cluster statistics where the chip has them (M5; close under load, up to about 1.5 W high at light load) and memory power from the SMC (M5). On an unsupported configuration without them, zero CPU/ANE readings can mean unavailable counters rather than zero consumption. See [docs/clpc-discovery.md](docs/clpc-discovery.md) for details.
+
+On a Mac without a battery, system power (`sys_power`) comes from the power supply when the usual sensor reads 0, as on Mac Studio.
 
 ### Output format
 
@@ -292,10 +298,15 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
   "cpu_power": 0.20486385, // Watts
   "gpu_power": 0.017451683, // Watts
   "ane_power": 0.0, // Watts
-  "all_power": 0.22231553, // Watts
+  "chip_power": 1.4130547, // Whole chip, Watts
+  "all_power": 1.4130547, // Deprecated, use chip_power
   "sys_power": 5.876533, // Watts
-  "ram_power": 0.11635789, // Watts
-  "gpu_ram_power": 0.0009615385, // GPU SRAM power, Watts
+  "ram_power": 0.11635789, // Memory (DRAM), Watts
+  "dcs_power": 0.08119427, // Memory controller, Watts, null without a source
+  "media_power": null, // Video encoder and image processor, Watts, null except on M6
+  "gpu_ram_power": 0.0009615385, // Deprecated, GPU SRAM power, Watts
+  "dc_in_power": 11.56, // Power adapter input, Watts, null without a source
+  "display_power": null, // Built-in display backlight, Watts, null without a source
   "net_in": 148210, // Bytes per second received by the Ethernet and Wi-Fi interfaces, null without one
   "net_out": 20544, // Bytes per second sent by the Ethernet and Wi-Fi interfaces, null without one
   "disk_read": 1048576, // Bytes per second read from the disks, without disk images, null when unavailable
@@ -310,6 +321,8 @@ The `pipe` command and the HTTP `/json` endpoint return the same metrics. Networ
 ```
 
 </details>
+
+`dc_in_power` is the power coming in from the power adapter, about 0 on battery. `display_power` is the power of the built-in display's backlight. Both are data only, not in the TUI, and `null` on Macs that don't report them.
 
 ### Active and scaled ratios
 
@@ -440,8 +453,6 @@ Compared with htop 3.5.3 and btop 1.4.8 on macOS 27.
 ## 🤝 Contributing
 
 Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md).
-
-When reporting an issue, mention the version from `macmon -V`, and for a wrong or missing metric add the output of `macmon debug`.
 
 ## 📝 License
 
