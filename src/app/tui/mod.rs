@@ -826,6 +826,113 @@ mod tests {
     app
   }
 
+  // Synthetic frame for the GitHub social preview, see scripts/social-card.py
+  #[test]
+  #[ignore]
+  fn dump_card_screen() {
+    let tier = |label: &str, cores| CpuTierInfo { label: label.to_string(), cores, freqs: vec![] };
+    let soc = SocInfo {
+      chip_name: "Apple M5 Pro".to_string(),
+      memory_gb: 48,
+      cpu_tiers: vec![tier("P", 12), tier("S", 6)],
+      gpu_cores: 20,
+      ..Default::default()
+    };
+    let mut cfg = Config::default();
+    cfg.proc_sort = ProcSort::Power;
+    let mut app = App::from_parts(soc, cfg);
+    let mut seed = 7u32;
+    let mut noise = move || {
+      seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+      (seed >> 16) as f32 / 65_536.0
+    };
+    for i in 0..240 {
+      let t = i as f32;
+      let e = (0.35 + 0.2 * (t / 6.0).sin() + 0.25 * noise()).clamp(0.05, 0.95);
+      let pc = (0.6 + 0.25 * (t / 9.0).sin() + 0.2 * noise()).clamp(0.05, 0.98);
+      let g = (0.55 + 0.3 * (t / 13.0).cos() + 0.15 * noise()).clamp(0.05, 0.98);
+      let mut m = test_metrics();
+      m.temp =
+        TempMetrics { cpu_temp_avg: Some(48.0 + 30.0 * pc), gpu_temp_avg: Some(42.0 + 25.0 * g) };
+      m.memory = MemMetrics {
+        ram_total: 48 << 30,
+        ram_usage: ((28.0 + 6.0 * (t / 40.0).sin()) * (1u64 << 30) as f32) as u64,
+        swap_total: 4 << 30,
+        swap_usage: 1 << 30,
+        pressure_level: Some(0),
+        pressure_percent: Some((35.0 + 30.0 * (t / 30.0).sin().abs()) as u8),
+      };
+      m.cpu_tiers = vec![cpu_tier("P", 3900, e * 0.9, e), cpu_tier("S", 4600, pc * 0.95, pc)];
+      m.gpu_freq_mhz = 1578;
+      m.gpu_scaled_ratio = g * 0.9;
+      m.gpu_active_ratio = g;
+      m.cpu_power = 3.0 + 28.0 * pc;
+      m.gpu_power = 1.0 + 22.0 * g;
+      m.ane_power = 0.6 + 0.5 * (t / 4.0).sin().abs();
+      m.ram_power = 0.6 + 2.0 * pc;
+      m.chip_power = m.cpu_power + m.gpu_power + m.ane_power + m.ram_power;
+      m.sys_power = m.chip_power + 9.0;
+      m.fans = vec![FanMetric {
+        name: "fan0".to_string(),
+        rpm: (1800.0 + 2400.0 * pc) as u32,
+        max_rpm: Some(5800),
+      }];
+      app.update_metrics(m);
+    }
+    let (w, h) = (92, 27);
+    render_buffer(&mut app, w, h);
+    let proc =
+      |pid: i32, name: &str, user: &str, cpu: f32, mins: u64, mem_mb: u64, power, gpu| ProcInfo {
+        pid,
+        name: name.to_string(),
+        path: String::new(),
+        user: user.to_string(),
+        cpu_pct: cpu,
+        cpu_time_ns: mins * 60_000_000_000,
+        mem_bytes: mem_mb << 20,
+        power_w: power,
+        gpu_pct: gpu,
+        started: Some((pid as u64, 0)),
+      };
+    put_procs(
+      &mut app,
+      vec![
+        proc(4120, "ollama", "dev", 412.0, 95, 18_400, Some(14.2), 71.0),
+        proc(3881, "rustc", "dev", 612.0, 12, 2_150, Some(9.8), 0.0),
+        proc(3790, "cargo", "dev", 38.0, 14, 310, Some(1.1), 0.0),
+        proc(512, "WindowServer", "_windowserver", 24.0, 2_900, 640, None, 9.0),
+        proc(2210, "Safari", "dev", 11.0, 340, 1_420, Some(0.7), 3.0),
+        proc(2655, "node", "dev", 18.0, 210, 880, Some(0.6), 0.0),
+        proc(2302, "Code Helper (GPU)", "dev", 6.0, 150, 420, Some(0.4), 4.0),
+        proc(1, "launchd", "root", 0.3, 410, 24, None, 0.0),
+        proc(301, "kernel_task", "root", 9.0, 5_200, 2_048, None, 0.0),
+        proc(2811, "Docker", "dev", 4.0, 600, 3_900, Some(0.3), 0.0),
+        proc(2490, "Terminal", "dev", 2.0, 120, 180, Some(0.1), 0.5),
+        proc(1800, "mds_stores", "root", 3.0, 90, 160, None, 0.0),
+        proc(2101, "Finder", "dev", 0.8, 45, 210, Some(0.05), 0.2),
+        proc(2958, "python3", "dev", 7.5, 25, 640, Some(0.3), 0.0),
+        proc(410, "sshd", "root", 0.1, 3, 12, None, 0.0),
+        proc(2730, "git", "dev", 1.5, 1, 48, Some(0.08), 0.0),
+        proc(1650, "photoanalysisd", "dev", 0.5, 30, 150, Some(0.02), 0.0),
+      ],
+    );
+    let buf = render_buffer(&mut app, w, h);
+    let cells: Vec<_> = buf
+      .content
+      .iter()
+      .map(|c| {
+        serde_json::json!([
+          c.symbol(),
+          format!("{:?}", c.fg),
+          format!("{:?}", c.bg),
+          c.modifier.bits()
+        ])
+      })
+      .collect();
+    let out = std::env::var("CARD_OUT").unwrap();
+    std::fs::write(out, serde_json::json!({"w": w, "h": h, "cells": cells}).to_string()).unwrap();
+  }
+
   fn shown_pids(app: &App) -> Vec<i32> {
     app.proc_view.rows().map(|p| p.pid).collect()
   }
