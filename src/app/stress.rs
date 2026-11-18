@@ -74,9 +74,11 @@ impl WorkloadControl {
       if idle.is_zero() {
         return true;
       }
+
       let remaining = self.stop_at.map(|end| end.saturating_duration_since(now)).unwrap_or(idle);
       thread::sleep(idle.min(remaining).min(Duration::from_millis(50)));
     }
+
     false
   }
 }
@@ -506,6 +508,7 @@ fn run_gpu_workload(
           if cycle_at > now {
             thread::sleep(cycle_at - now);
           }
+
           cycle_at + Duration::from_secs(1)
         }
         Mode::Full => control.stop_at.unwrap_or(Instant::now() + Duration::from_secs(60)),
@@ -516,17 +519,21 @@ fn run_gpu_workload(
         if !control.running() {
           break;
         }
+
         if !control.idle_for(now).is_zero() {
           // Finish submitted commands before the shared idle phase; do not queue
           // more GPU work while CPU and ANE have stopped submitting theirs.
           for command in pending.drain(..) {
             command.wait();
           }
+
           if !control.wait_for_active() {
             break;
           }
+
           continue;
         }
+
         if matches!(mode, Mode::Cyclic) && now >= busy_until {
           break;
         }
@@ -907,6 +914,7 @@ mod tests {
       assert_eq!(control.idle_for(start + phase * 2), Duration::ZERO);
       assert_eq!(control.idle_for(start + phase * 3), phase);
     }
+
     assert_eq!(control.idle_for(start - Duration::from_secs(1)), Duration::from_secs(1));
   }
 
@@ -934,6 +942,7 @@ mod tests {
         while control.running() {
           thread::yield_now();
         }
+
         assert!(control.cancelled.load(Ordering::Relaxed));
         Ok(())
       },
@@ -954,6 +963,7 @@ mod tests {
         while control.running() {
           thread::yield_now();
         }
+
         assert!(control.cancelled.load(Ordering::Relaxed));
         Ok(())
       },
@@ -975,6 +985,7 @@ mod tests {
         while control.running() {
           thread::yield_now();
         }
+
         Ok(())
       },
       |control| {

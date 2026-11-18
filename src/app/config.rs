@@ -138,6 +138,7 @@ impl Config {
       Some(file) => Self::from_reader(BufReader::new(file)),
       None => Self::default().normalize(),
     };
+
     Self { path, ..cfg }
   }
 
@@ -150,10 +151,12 @@ impl Config {
     if euid == 0 {
       return;
     }
+
     let Some(path) = &self.path else { return };
     if let Some(dir) = path.parent() {
       let _ = fs::create_dir_all(dir);
     }
+
     if let Ok(file) = File::create(path) {
       let _ = serde_json::to_writer_pretty(BufWriter::new(file), self);
     }

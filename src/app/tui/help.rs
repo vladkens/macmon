@@ -71,8 +71,10 @@ fn key_column(keys: &'static str) -> Vec<Span<'static>> {
     if i > 0 {
       spans.push(faint(" / "));
     }
+
     spans.push(theme::key(key));
   }
+
   let width = spans.iter().map(Span::width).sum::<usize>() - 2;
   spans.push(text(" ".repeat(KEYS_WIDTH.saturating_sub(width))));
   spans
@@ -147,6 +149,7 @@ pub(super) fn render(f: &mut Frame, area: Rect, scroll: usize) -> usize {
     let y = inner.y + cells(support - scroll);
     hyperlink(buf, support_x + prefix, y, link_width, SUPPORT_URL);
   }
+
   draw_scrollbar(f, rect, inner, lines.len(), scroll);
   scroll
 }

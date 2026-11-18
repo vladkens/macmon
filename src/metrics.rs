@@ -303,7 +303,7 @@ fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
 /// Drops bad `ram_power`, `dcs_power` and package total `chip_power` readings, then sets
 /// `chip_power` to at least the sum of its parts and `sys_power` to the SMC total `sys`, at least
 /// `chip_power`.
-#[allow(deprecated)] // all_power
+#[expect(deprecated, reason = "sets all_power")]
 fn with_power_totals(mut rs: Metrics, sys: Option<f32>) -> Metrics {
   rs.ram_power = checked_power(rs.ram_power, sys);
   rs.dcs_power = rs.dcs_power.map(|x| checked_power(x, sys));
@@ -351,6 +351,7 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
     total_active += active;
     total_cores += cores;
   }
+
   rs.cpu_scaled_ratio = zero_div(total_scaled, total_cores);
   rs.cpu_active_ratio = zero_div(total_active, total_cores);
   rs.with_deprecated_tiers()
@@ -358,7 +359,7 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
 
 impl Metrics {
   // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "fills the deprecated fields")]
   fn with_deprecated_tiers(mut self) -> Self {
     if let Some(tier) = self.cpu_tiers.first() {
       self.ecpu_freq_mhz = tier.freq_mhz;
@@ -366,12 +367,14 @@ impl Metrics {
       self.ecpu_active_ratio = tier.active_ratio;
       self.ecpu_cores = tier.cores.clone();
     }
+
     if let Some(tier) = self.cpu_tiers.last() {
       self.pcpu_freq_mhz = tier.freq_mhz;
       self.pcpu_scaled_ratio = tier.scaled_ratio;
       self.pcpu_active_ratio = tier.active_ratio;
       self.pcpu_cores = tier.cores.clone();
     }
+
     self
   }
 }
@@ -518,6 +521,7 @@ impl<'a> CpuTierCores<'a> {
     if freqs_fit(residencies, freqs) {
       self.tiers[i].insert(key, calc_freq_from_residencies(residencies, freqs));
     }
+
     true
   }
 
@@ -711,6 +715,7 @@ impl Sampler {
     if let Some(ior) = &mut self.ior {
       ior.reset_sample();
     }
+
     self.cpu_ticks = self.use_cpu_ticks.then(cpu_load_ticks).flatten();
     self.bytes = Some(ByteCounters::read());
   }
@@ -782,8 +787,10 @@ impl Sampler {
         Some(prefix) => read_smc_numeric_u32(smc, &format!("{prefix}Mx")).filter(|rpm| *rpm > 0),
         None => None,
       };
+
       fans.push(FanMetric { name, rpm, max_rpm });
     }
+
     fans
   }
 
@@ -807,7 +814,7 @@ impl Sampler {
     })
   }
 
-  #[allow(deprecated)] // gpu_ram_power
+  #[expect(deprecated, reason = "sets gpu_ram_power")]
   fn get_ioreport_metrics(
     &mut self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
@@ -895,6 +902,7 @@ impl Sampler {
           "Package Energy" => &mut chip_power,
           _ => continue,
         };
+
         power.add_clpc(cfio_watts(x.item, &x.unit, dt)?);
       }
     }
@@ -1120,6 +1128,7 @@ mod tests {
       power.add_clpc(watts);
       assert_eq!(power.watts(false), Some(watts));
     }
+
     let mut power = PowerSources::default();
     power.add_clpc(1.0);
     power.add_clpc(2.0);
@@ -1143,6 +1152,7 @@ mod tests {
       if let Some(watts) = watts {
         power.add_clpc(watts);
       }
+
       assert_eq!(power.watts(true), watts.filter(|x| x.is_finite() && *x >= 0.0));
     }
   }
@@ -1208,6 +1218,7 @@ mod tests {
   fn samples_without_ioreport_and_smc() {
     let cpus = cpu_load_ticks().unwrap().len();
     let mut sampler = sampler_without_sources(cpus as u8, false);
+
     // the first call takes its own baseline (the sampler has none), so a delay before it doesn't
     // count; the cores below come from that call alone
     assert!(sampler.cpu_ticks.is_none());
@@ -1215,6 +1226,7 @@ mod tests {
     let rs = sampler.get_metrics(10).unwrap();
     assert!(started.elapsed() >= Duration::from_millis(10));
     assert!(sampler.cpu_ticks.is_some());
+
     let cores = rs.cpu_tiers[0].cores.iter().map(|x| (x.core_id, x.freq_mhz));
     assert_eq!(cores.collect::<Vec<_>>(), (0..cpus).map(|i| (i, 0)).collect::<Vec<_>>());
     assert_eq!((rs.cpu_tiers[0].label.as_str(), rs.cpu_tiers[0].freq_mhz), ("_", 0));
@@ -1267,7 +1279,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)] // all_power
+  #[expect(deprecated, reason = "checks all_power")]
   fn chip_power_drops_spikes_and_covers_its_parts() {
     // DRAM, DCS, package total, SMC total; then DRAM, DCS, chip and system power; CPU 2 W and
     // media 1 W in every case
@@ -1337,7 +1349,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "checks the deprecated fields")]
   fn aggregates_ioreport_metrics() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
@@ -1366,7 +1378,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "checks the deprecated fields")]
   fn deprecated_fields_keep_the_lowest_and_the_highest_tier() {
     // two tiers with different values, so a swapped or unfilled field shows
     let rs = aggregate_ioreport_metrics(
@@ -1405,7 +1417,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "checks the deprecated fields")]
   fn frequency_uses_minimum_floor_when_cluster_is_idle() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
@@ -1431,6 +1443,7 @@ mod tests {
     for channel in ["ECPU0", "MCPU3", "PCPU0", "DIE_1_PCPU1_CPU0"] {
       assert!(cores.add(channel, &busy), "{channel}");
     }
+
     assert!(!cores.add("GPU0", &busy));
 
     let tiers = cores.into_metrics();
@@ -1449,6 +1462,7 @@ mod tests {
       let residency = active.iter().find(|(state, _)| *state == i).map_or(0, |(_, x)| *x);
       items.push((format!("V{i}P{}", states - 1 - i), residency));
     }
+
     items
   }
 
@@ -1489,6 +1503,7 @@ mod tests {
     for (channel, states, idle, active) in channels {
       assert!(cores.add(channel, &residencies(states, idle, active)), "{channel}");
     }
+
     let rs = aggregate_ioreport_metrics(
       Metrics { cpu_tiers: cores.into_metrics(), ..Default::default() },
       &soc,
@@ -1513,6 +1528,7 @@ mod tests {
       assert_eq!((tier.label.as_str(), tier.freq_mhz), (label, freq));
       assert!(close(tier.scaled_ratio, scaled) && close(tier.active_ratio, active), "{tier:?}");
     }
+
     assert!(close(rs.cpu_scaled_ratio, 0.378863777) && close(rs.cpu_active_ratio, 0.378917580));
   }
 
@@ -1524,6 +1540,7 @@ mod tests {
     for (channel, states) in [("EACC_ECPU0", 7), ("PACC0_MCPU2", 20), ("PACC0_PCPU0", 20)] {
       assert!(cores.add(channel, &busy(states)), "{channel}");
     }
+
     let tiers = cores.into_metrics();
     let counts = tiers.iter().map(|x| (x.label.as_str(), x.cores.len())).collect::<Vec<_>>();
     assert_eq!(counts, [("E", 1), ("P", 1), ("S", 1)]);

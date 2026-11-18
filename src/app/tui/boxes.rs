@@ -115,6 +115,7 @@ fn fit_titles(width: u16, variants: Vec<Titles>) -> Titles {
       return titles;
     }
   }
+
   Titles::default()
 }
 
@@ -150,6 +151,7 @@ fn place_left(width: u16, left: &[u16]) -> (Vec<(u16, u16)>, Range<u16>) {
     slots.push((free.start, title));
     free.start = free.start.saturating_add(title).saturating_add(1);
   }
+
   (slots, free)
 }
 
@@ -188,6 +190,7 @@ pub(super) fn draw_scrollbar(f: &mut Frame, area: Rect, rows: Rect, len: usize, 
   if len <= page || page < 3 || area.width < 2 {
     return;
   }
+
   let bar = Rect { x: area.right() - 1, width: 1, ..rows };
   // scroll positions, not rows, so the thumb reaches the bottom at the last one
   let mut state =
@@ -214,9 +217,11 @@ pub(super) fn hint(key: &'static str, label: impl Into<String>) -> Vec<Span<'sta
     let (head, tail) = (label[..i].to_string(), label[i + 1..].to_string());
     return vec![faint(head), theme::key(label[i..=i].to_string()), faint(tail)];
   }
+
   if label.is_empty() {
     return vec![theme::key(key)];
   }
+
   vec![theme::key(key), faint(format!(" {label}"))]
 }
 
@@ -227,8 +232,10 @@ pub(super) fn join(items: impl IntoIterator<Item = Vec<Span<'static>>>) -> Vec<S
     if i > 0 {
       spans.push(dim(SEPARATOR));
     }
+
     spans.extend(item);
   }
+
   spans
 }
 
@@ -270,9 +277,11 @@ fn cut_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
       cut.push(Span::styled(kept.trim_end().to_string(), span.style));
       break;
     }
+
     room -= Span::raw(kept).width();
     cut.push(span);
   }
+
   cut.push(dim(ELLIPSIS));
   cut
 }
@@ -351,6 +360,7 @@ impl App {
     if self.procs_fit {
       hints.push(hint("p", "procs"));
     }
+
     let modes = [RatioMode::Scaled, RatioMode::Active].map(|mode| mode.label().len());
     let mode = format!("{:1$}", self.cfg.ratio_mode.label(), modes.into_iter().max().unwrap_or(0));
     let interval = format!("{:>1$}ms", self.cfg.interval(), TUI_MAX_MS.to_string().len());
@@ -413,6 +423,7 @@ impl App {
       if !details.is_empty() {
         details.push(' ');
       }
+
       details.push_str(&format!("{}GB", soc.memory_gb));
     }
 
@@ -422,6 +433,7 @@ impl App {
     if !details.is_empty() {
       spans.push(dim(format!(" ({details})")));
     }
+
     Line::from(spans)
   }
 
@@ -435,6 +447,7 @@ impl App {
           1 => "CPU".to_string(),
           _ => format!("{}-CPU", cluster.label),
         };
+
         self.freq_box(label, &cluster.freq)
       }
       Metric::Gpu => self.freq_box("GPU".to_string(), &self.igpu_freq),
@@ -488,6 +501,7 @@ impl App {
     } else {
       titles.push(full.into());
     }
+
     titles.push(short.into());
 
     let mut titles: Vec<Titles> = titles.into_iter().map(Titles::new).collect();
@@ -500,6 +514,7 @@ impl App {
       }
       None => Scale::Load { max: mem.ram_total, load, color: None },
     };
+
     MetricBox { titles, data: &mem.items, scale }
   }
 
@@ -649,6 +664,7 @@ mod tests {
     for (spans, text) in hints {
       assert_eq!(marked(&spans), text);
     }
+
     assert_eq!(hint("?", "").len(), 1);
   }
 
@@ -669,6 +685,7 @@ mod tests {
 
     // the hints right-aligned, the text left, a border cell next to the corners
     assert_eq!(border(60), format!("___Power_6.60W_(6.60,_6.60)_{}{help}__", blank(15)));
+
     // the keys cyan, the labels faint in the default color, the separators dim, nothing bold or
     // underlined
     let buf = draw(60);
@@ -679,10 +696,12 @@ mod tests {
     assert_eq!(cells_with((theme::DIM, Modifier::empty())), [50, 51, 52]);
     assert_eq!(theme::DIM, Color::DarkGray);
     assert!(buf.content.iter().all(|cell| Modifier::DIM.contains(cell.modifier)));
+
     // the text is cut with `…` in the room the hints leave, and left out with fewer than 8 cells
     assert_eq!(border(40), format!("___Power_6.60W_(6.60…__{help}__"));
     assert_eq!(border(30), format!("___Power_6…__{help}__"));
     assert_eq!(border(29), format!("{}{help}__", blank(12)));
+
     // hints drop from the end, the first one stays as long as it fits
     assert_eq!(border(19), format!("__{help}__"));
     assert_eq!(border(18), format!("{}_?_help___", blank(8)));

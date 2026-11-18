@@ -113,9 +113,11 @@ mod tests {
       assert!(is_pmp_cpu_channel("PMP", "Energy", channel), "{channel}");
       assert!(is_pmp_cpu_channel("PMP1", "Energy", channel), "{channel}");
     }
+
     for channel in ["AGX", "AGX SRAM", "pACC0", "PACC0 DTL", "PACC0X", "ACC"] {
       assert!(!is_pmp_cpu_channel("PMP", "Energy", channel), "{channel}");
     }
+
     assert!(!is_pmp_cpu_channel("PMPX", "Energy", "PACC0"));
     assert!(!is_pmp_cpu_channel("PMP", "Energy Counters", "PACC0"));
   }

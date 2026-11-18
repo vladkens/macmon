@@ -235,6 +235,7 @@ fn sort_groups(groups: &mut [Group], sort: ProcSort, desc: bool) {
       ProcSort::Name => a.term.cmp(&b.term),
       ProcSort::User => Ordering::Equal,
     };
+
     let ord = if desc { ord.reverse() } else { ord };
     missing(a).cmp(&missing(b)).then(ord)
   });
@@ -260,6 +261,7 @@ impl Filter {
         None => {}
       }
     }
+
     filter
   }
 
@@ -300,6 +302,7 @@ impl Group {
         None => group.power_partial = true,
       }
     }
+
     group
   }
 }
@@ -366,6 +369,7 @@ pub(super) fn type_filter(
     KeyCode::Char('e') if ctrl => Some(len),
     _ => None,
   };
+
   if let Some(moved) = moved {
     *cursor = moved;
     return false;
@@ -398,6 +402,7 @@ pub(super) fn type_filter(
     }
     _ => return false,
   }
+
   *cursor = (*cursor).min(filter.chars().count());
   true
 }
@@ -415,6 +420,7 @@ pub(super) fn filter_titles(
   if cursor.is_none() && filter.is_empty() {
     return Titles::new(name).left(hint("/", "filter"));
   }
+
   let beside = title_text_room(width, &[Line::from(name.clone())]);
   if beside >= FILTER_MIN_WIDTH {
     Titles::new(name).left(filter_title(filter, cursor, enabled, beside, is_bad))
@@ -445,6 +451,7 @@ fn with_cursor(spans: Vec<Span<'static>>, at: usize) -> Vec<Span<'static>> {
     Some(cell) => cell.style = cell.style.add_modifier(Modifier::REVERSED),
     None => cells.push(Span::styled(FILTER_CURSOR, theme::TEXT)),
   }
+
   cells
 }
 
@@ -542,6 +549,7 @@ pub(super) fn cut_middle(text: &str, max: usize) -> String {
   if Span::raw(text).width() <= max {
     return text.to_string();
   }
+
   let name = &text[text.rfind('/').unwrap_or(0)..];
   match max.saturating_sub(Span::raw(name).width() + 1) {
     0 => cut_start(text, max),
@@ -557,8 +565,10 @@ pub(super) fn head(text: &str, max: usize) -> &str {
     if Span::raw(&text[..next]).width() > max {
       break;
     }
+
     end = next;
   }
+
   &text[..end]
 }
 
@@ -569,8 +579,10 @@ fn tail(text: &str, max: usize) -> &str {
     if Span::raw(&text[i..]).width() > max {
       break;
     }
+
     start = i;
   }
+
   &text[start..]
 }
 
@@ -872,6 +884,7 @@ impl ProcView {
         KeyCode::End => self.scroll_to(usize::MAX),
         _ => return false,
       }
+
       return true;
     };
 
@@ -947,6 +960,7 @@ impl ProcView {
     while !visible.contains(&next) && next != self.sort {
       next = next.next();
     }
+
     if next != self.sort {
       self.sort_by(next);
     }
@@ -1011,6 +1025,7 @@ impl ProcView {
       } else {
         format!(" {:>width$}/{total}", self.row_count(), width = total.len())
       };
+
       name.push(text(count));
     }
 
@@ -1099,6 +1114,7 @@ impl App {
       let message = format!("no process matches \"{filter}\"");
       f.render_widget(Line::from(dim(message)).centered(), row);
     }
+
     let buf = f.buffer_mut();
 
     let (sort, desc) = (self.proc_view.sort, self.proc_view.sort_desc);
@@ -1118,6 +1134,7 @@ impl App {
           columns.iter().map(|&(column, _)| self.group_cell(column, group).patch_style(bold));
         draw_row(buf, Rect { y, height: 1, ..table }, &columns, cells);
       }
+
       let line = "─".repeat(usize::from(table.width));
       buf.set_string(table.x, body.y - 1, line, Style::new().fg(theme::BORDER));
     }
@@ -1231,6 +1248,7 @@ fn column_areas(area: Rect, columns: &[(ProcSort, u16)]) -> Vec<(ProcSort, Rect)
     areas.push((column, Rect { x, width, ..area }));
     x = x.saturating_add(width).saturating_add(1);
   }
+
   areas
 }
 
@@ -1250,6 +1268,7 @@ fn draw_row<'a>(
     } else {
       cut_end(&cell.content, usize::from(cell_area.width))
     };
+
     buf.set_stringn(cell_area.x, cell_area.y, text, usize::from(cell_area.width), cell.style);
   }
 }
@@ -1369,17 +1388,20 @@ mod tests {
     let selected = view.selected().unwrap().pid;
     let before = pids(&view);
     let offset = view.offset;
+
     press(&mut view, KeyCode::Char(' '));
     let mut next = sample();
     next.retain(|p| p.pid != selected);
     next[0].cpu_pct = 99.0;
     next.push(proc(9000, "added", 100.0, 10, None, 0.0));
     view.set_procs(next);
+
     assert_eq!(pids(&view), before);
     assert_eq!(view.selected_pid(), Some(selected));
     assert!(view.exited(view.selected().unwrap()));
     assert_eq!(view.offset, offset);
     assert_eq!(view.rows().find(|p| p.pid == 1).unwrap().cpu_pct, 99.0);
+
     view.set_procs(sample());
     press(&mut view, KeyCode::Char(' '));
     assert!(!view.paused && view.exited.is_empty());
@@ -1397,6 +1419,7 @@ mod tests {
     press(&mut view, KeyCode::Enter);
     press(&mut view, KeyCode::Down);
     press(&mut view, KeyCode::Char(' '));
+
     let mut new = old;
     new.started = Some((2, 0));
     new.cpu_pct = 50.0;
@@ -1405,11 +1428,13 @@ mod tests {
     assert_eq!(view.selected().unwrap().started, Some((1, 0)));
     assert!(view.exited(view.selected().unwrap()));
     assert_eq!((view.groups[0].count, view.groups[0].cpu_pct), (0, 0.0));
+
     press(&mut view, KeyCode::Char(' '));
     assert_eq!(view.selected(), None, "PID reuse must not steal selection");
     assert_eq!(view.procs(), Some([].as_slice()));
     view.set_procs(vec![new.clone()]);
     assert_eq!(view.procs(), Some([new].as_slice()));
+
     press(&mut view, KeyCode::Char(' '));
     view.clear();
     assert!(!view.paused && view.procs().is_none());
@@ -1440,6 +1465,7 @@ mod tests {
     press(&mut view, KeyCode::Char(' '));
     view.set_procs(sample());
     assert_eq!(pids(&view), [4410, 631, 2301, 1, 77]);
+
     press(&mut view, KeyCode::Char(' '));
     type_str(&mut view, "/safari, cargo");
     press(&mut view, KeyCode::Enter);
@@ -1447,6 +1473,7 @@ mod tests {
       view.groups.iter().map(|g| g.term.as_str()).collect::<Vec<_>>(),
       ["cargo", "safari"]
     );
+
     press(&mut view, KeyCode::Char(' '));
     let mut next = sample();
     next[2].cpu_pct = 100.0;
@@ -1456,11 +1483,13 @@ mod tests {
       ["cargo", "safari"]
     );
     assert_eq!(view.groups[1].cpu_pct, 100.0);
+
     press(&mut view, KeyCode::Char('S'));
     assert!(view.paused);
     assert_eq!(view.groups[0].term, "cargo");
     press(&mut view, KeyCode::Char('S'));
     assert_eq!(view.groups[0].term, "safari");
+
     let mut next = sample();
     next[3].cpu_pct = 200.0;
     view.set_procs(next);
@@ -1489,6 +1518,7 @@ mod tests {
     let selected = view.selected_pid();
     view.toggle_pause();
     view.targets.headers = column_areas(Rect::new(2, 1, 150, 1), &fit_columns(150, view.sort));
+
     for column in super::COLUMNS {
       let (_, rect) = view.targets.headers.iter().find(|(sort, _)| *sort == column).unwrap();
       view.handle_mouse(super::MouseEvent {
@@ -1526,6 +1556,7 @@ mod tests {
       let mut view = ProcView::new(sort, true);
       view.set_procs(sample());
       assert_eq!(pids(&view), desc, "{sort:?} desc");
+
       view.select(0);
       let selected = view.selected_pid();
       view.toggle_pause();
@@ -1553,6 +1584,7 @@ mod tests {
       assert!(press(&mut view, KeyCode::Char('s')));
       sorts.push((view.sort, view.sort_desc));
     }
+
     let expected = [
       (Mem, true),
       (Gpu, true),
@@ -1579,6 +1611,7 @@ mod tests {
       assert!(press(&mut view, KeyCode::Char('s')));
       sorts.push(view.sort);
     }
+
     assert_eq!(sorts, [Mem, Gpu, Pid, Name, Cpu]);
   }
 
@@ -1594,6 +1627,7 @@ mod tests {
     for _ in 0..3 {
       assert!(press(&mut view, KeyCode::Backspace));
     }
+
     type_str(&mut view, "1");
     assert_eq!(pids(&view), [4410, 631, 2301, 1]);
   }
@@ -1640,6 +1674,7 @@ mod tests {
     type_str(&mut view, "a-long-filter-with-no-matches");
     press(&mut view, KeyCode::Enter);
     press(&mut view, KeyCode::Char('f'));
+
     for width in [12, 80] {
       let mut term = Terminal::new(TestBackend::new(width, 3)).unwrap();
       term.draw(|f| _ = draw_box(f, f.area(), view.titles(width))).unwrap();
@@ -1791,6 +1826,7 @@ mod tests {
     for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
       assert!(view.handle_key(KeyEvent::new(KeyCode::Char('x'), modifiers)));
     }
+
     assert_eq!(view.filter(), "qcsS/1");
   }
 
@@ -1803,6 +1839,7 @@ mod tests {
       for _ in 0..3 {
         assert!(press(&mut view, KeyCode::Down));
       }
+
       assert!(press(&mut view, KeyCode::Char('/')));
       type_str(&mut view, "saf");
       assert!(press(&mut view, code));
@@ -2021,6 +2058,7 @@ mod tests {
       view.fit(2);
       view.page_rows().map(|(_, p)| p.pid).collect::<Vec<_>>()
     };
+
     // without a selection ↑ selects the top row on screen, as ↓ does
     assert!(press(&mut view, Up));
     assert_eq!(view.selected_pid(), Some(4410));
@@ -2029,6 +2067,7 @@ mod tests {
       assert!(press(&mut view, code));
       assert_eq!(view.selected_pid(), Some(pid), "{code:?}");
     }
+
     // the table follows a wrap to either end
     assert!(press(&mut view, Up));
     assert_eq!(page(&mut view), [1, 77]);
@@ -2053,6 +2092,7 @@ mod tests {
     for _ in 0..3 {
       assert!(press(&mut view, KeyCode::Down));
     }
+
     assert_eq!(page(&mut view), [(false, 631), (true, 2301)]);
     // moving up inside the page doesn't scroll
     assert!(press(&mut view, KeyCode::Up));

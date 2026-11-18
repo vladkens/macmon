@@ -33,7 +33,6 @@ const PS_WARM_UP: Duration = Duration::from_secs(1);
 /// it, so the same buffer serves both flavors.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-#[allow(dead_code)] // FFI layout, most fields are unused
 struct rusage_info_v6 {
   ri_uuid: [u8; 16],
   ri_user_time: u64,
@@ -365,6 +364,7 @@ fn digits(s: &str) -> Option<u64> {
   if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
     return None;
   }
+
   s.parse().ok()
 }
 
@@ -459,9 +459,11 @@ fn ps_selection(
   if !users.is_empty() {
     select.extend(["-U".to_string(), Vec::from_iter(users).join(",")]);
   }
+
   if !pids.is_empty() {
     select.extend(["-p".to_string(), pids.join(",")]);
   }
+
   select
 }
 
@@ -514,6 +516,7 @@ fn user_name_with(uid: u32, buf_len: usize) -> String {
         return name.into_owned();
       }
     }
+
     return uid.to_string();
   }
 }
@@ -621,6 +624,7 @@ fn read_gpu_clients() -> Option<Vec<(i32, u64)>> {
         let gpu_ns = client.property(&usage_key).map_or(0, |usage| app_usage_ns(&usage));
         clients.push((pid, gpu_ns));
       }
+
       Some(iter.is_valid())
     })?;
   }
@@ -641,8 +645,10 @@ fn walk_until_consistent<T>(
     if walk(items)? || attempt == attempts {
       break;
     }
+
     items.truncate(start);
   }
+
   Some(())
 }
 
@@ -653,6 +659,7 @@ fn sum_gpu_times(clients: impl IntoIterator<Item = (i32, u64)>) -> HashMap<i32, 
     let total: &mut u64 = times.entry(pid).or_default();
     *total = total.saturating_add(gpu_ns);
   }
+
   times
 }
 
@@ -755,6 +762,7 @@ impl ProcSampler {
         let name = |uid| users.entry(uid).or_insert_with(|| user_name(uid)).clone();
         rows = merge(rows, run_ps(&ps_selection(&unreadable, unsafe { libc::getuid() }, name)));
       }
+
       self.ps_rows = rows.iter().filter(|raw| raw.ps).map(|raw| (raw.pid, raw.clone())).collect();
     }
 
@@ -798,6 +806,7 @@ impl ProcSampler {
           (name.unwrap_or(raw.fallback), raw.path.unwrap_or_default())
         }
       };
+
       let user = self.users.entry(raw.uid).or_insert_with(|| user_name(raw.uid)).clone();
 
       procs.push(ProcInfo {
@@ -950,6 +959,7 @@ mod tests {
     for line in bad {
       assert_eq!(parse_ps_line(line), None, "{line:?}");
     }
+
     let out = "  1 0 10 0:01.00 /sbin/launchd\nbad line\n\n 88 88 20 0:02.00 /usr/sbin/a b\n";
     let pids: Vec<i32> = parse_ps(out).iter().map(|raw| raw.pid).collect();
     assert_eq!(pids, [1, 88]);

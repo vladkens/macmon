@@ -25,7 +25,7 @@ fn escape_label_value(value: &str) -> String {
 }
 
 #[rustfmt::skip]
-#[allow(deprecated)] // keeps exporting macmon_ecpu_* / macmon_pcpu_*
+#[expect(deprecated, reason = "keeps exporting macmon_ecpu_* / macmon_pcpu_*")]
 fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   let chip = escape_label_value(&soc.chip_name);
   let l = format!(r#"chip="{chip}""#);
@@ -69,6 +69,7 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
           let tier_label = escape_label_value(&tier.label);
           $out.push_str(&format!("{name}{{{l},tier=\"{tier_label}\"}} {}\n", tier.$field));
         }
+
         $out.push('\n');
       }
     };
@@ -92,22 +93,27 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   }
 
   let mut out = String::new();
+
   gauge_any!(out, "cpu_temp_celsius", "Average CPU temperature in Celsius", ?m.temp.cpu_temp_avg);
   gauge_any!(out, "gpu_temp_celsius", "Average GPU temperature in Celsius", ?m.temp.gpu_temp_avg);
+
   gauge_any!(out, "memory_ram_total_bytes", "Total RAM in bytes", m.memory.ram_total);
   gauge_any!(out, "memory_ram_used_bytes", "Used RAM in bytes", m.memory.ram_usage);
   gauge_any!(out, "memory_swap_total_bytes", "Total swap in bytes", m.memory.swap_total);
   gauge_any!(out, "memory_swap_used_bytes", "Used swap in bytes", m.memory.swap_usage);
   gauge_any!(out, "memory_pressure_level", "Memory pressure: 0 normal, 1 warning, 2 critical", ?m.memory.pressure_level);
   gauge_any!(out, "memory_pressure_percent", "Memory pressure in percent, as in Activity Monitor", ?m.memory.pressure_percent);
+
   gauge_any!(out, "net_in_bytes_per_second", "Bytes per second received by the Ethernet and Wi-Fi interfaces", ?m.net_in);
   gauge_any!(out, "net_out_bytes_per_second", "Bytes per second sent by the Ethernet and Wi-Fi interfaces", ?m.net_out);
   gauge_any!(out, "disk_read_bytes_per_second", "Bytes per second read from the disks", ?m.disk_read);
   gauge_any!(out, "disk_write_bytes_per_second", "Bytes per second written to the disks", ?m.disk_write);
   gauge_any!(out, "uptime_seconds", "Seconds since boot", ?m.uptime);
+
   gauge_any!(out, "battery_percent", "Battery charge in percent", ?m.battery_percent);
   gauge_any!(out, "battery_charging", "1 while the battery is charging, 0 otherwise", ?m.battery_charging.map(u8::from));
   gauge_any!(out, "battery_plugged", "1 while external power is connected, 0 on battery", ?m.battery_plugged.map(u8::from));
+
   gauge_any!(out, "cpu_scaled_ratio", "Combined frequency-scaled CPU ratio (0–1), weighted by core count", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_usage_ratio", "DEPRECATED: use macmon_cpu_scaled_ratio", m.cpu_scaled_ratio);
   gauge_any!(out, "cpu_active_ratio", "Combined CPU active residency ratio (not frequency-scaled, 0–1), weighted by core count", m.cpu_active_ratio);
@@ -119,13 +125,16 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_any!(out, "pcpu_scaled_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio. Highest CPU tier frequency-scaled ratio (0–1)", m.pcpu_scaled_ratio);
   gauge_any!(out, "pcpu_usage_ratio", "DEPRECATED: use macmon_cpu_tier_scaled_ratio", m.pcpu_scaled_ratio);
   gauge_any!(out, "pcpu_active_ratio", "DEPRECATED: use macmon_cpu_tier_active_ratio. Highest CPU tier active residency ratio (not frequency-scaled, 0–1)", m.pcpu_active_ratio);
+
   tiers_mac!(out, "cpu_tier_freq_mhz", "CPU tier frequency in MHz", freq_mhz);
   tiers_any!(out, "cpu_tier_scaled_ratio", "CPU tier frequency-scaled ratio (0–1)", scaled_ratio);
   tiers_any!(out, "cpu_tier_active_ratio", "CPU tier active residency ratio (not frequency-scaled, 0–1)", active_ratio);
+
   gauge_mac!(out, "gpu_freq_mhz", "GPU frequency in MHz", m.gpu_freq_mhz);
   gauge_any!(out, "gpu_scaled_ratio", "GPU frequency-scaled ratio (0–1)", m.gpu_scaled_ratio);
   gauge_any!(out, "gpu_usage_ratio", "DEPRECATED: use macmon_gpu_scaled_ratio", m.gpu_scaled_ratio);
   gauge_any!(out, "gpu_active_ratio", "GPU active residency ratio (not frequency-scaled, 0–1)", m.gpu_active_ratio);
+
   gauge_mac!(out, "cpu_power_watts", "CPU power consumption in Watts", m.cpu_power);
   gauge_mac!(out, "gpu_power_watts", "GPU power consumption in Watts", m.gpu_power);
   gauge_mac!(out, "ane_power_watts", "Apple Neural Engine power consumption in Watts", m.ane_power);
@@ -138,8 +147,10 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   gauge_mac!(out, "gpu_ram_power_watts", "DEPRECATED: GPU RAM power consumption in Watts", m.gpu_ram_power);
   gauge_mac!(out, "dc_in_power_watts", "Power adapter input in Watts", ?m.dc_in_power);
   gauge_mac!(out, "display_power_watts", "Built-in display backlight power in Watts", ?m.display_power);
+
   gauge_any!(out, "gpu_memory_alloc_bytes", "System memory allocated by the GPU in bytes", ?m.gpu_mem_alloc);
   gauge_any!(out, "gpu_memory_in_use_bytes", "System memory in use by the GPU in bytes", ?m.gpu_mem_in_use);
+
   if !m.fans.is_empty() {
     gauge_head!(out, "fan_speed_rpm", "Fan speed in revolutions per minute");
     let fan_speed_rpm = metric_name!("fan_speed_rpm");
@@ -147,8 +158,10 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
       let fan_name = escape_label_value(&fan.name);
       out.push_str(&format!("{fan_speed_rpm}{{{l},fan=\"{fan_name}\"}} {}\n", fan.rpm));
     }
+
     out.push('\n');
   }
+
   out
 }
 
@@ -174,6 +187,7 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     503 => "Service Unavailable",
     _ => "OK",
   };
+
   let _ = stream.write_all(
     format!(
       "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -290,6 +304,7 @@ pub fn run(host: &str, port: u16, shared: SharedMetrics, soc: Arc<SocInfo>) -> W
         continue;
       }
     };
+
     if let Err(e) =
       spawn_connection(stream, Arc::clone(&shared), Arc::clone(&soc), &active, IO_TIMEOUT)
     {
@@ -516,6 +531,7 @@ mod tests {
       );
       clients.push(client);
     }
+
     assert_eq!(active.load(Ordering::Relaxed), super::MAX_CONNECTIONS);
     let mut excess = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (stream, _) = listener.accept().unwrap();

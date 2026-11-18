@@ -1,15 +1,18 @@
 .PHONY: prepare check test build update
 
+LINT := uv run --script https://raw.githubusercontent.com/vladkens/lint/main/rust.py
 CARGO_FLAGS := --release --locked
 
 prepare:
 	cargo +nightly fmt
+	$(LINT) fix
 	cargo clippy $(CARGO_FLAGS) --fix --all-targets --allow-dirty -- -D warnings
 	cargo check $(CARGO_FLAGS)
 
 check:
 	cargo +nightly fmt --check
 	cargo clippy $(CARGO_FLAGS) --all-targets -- -D warnings
+	$(LINT)
 	cargo check $(CARGO_FLAGS) --bin macmon
 	cargo check $(CARGO_FLAGS) --lib --no-default-features
 

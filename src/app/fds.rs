@@ -226,6 +226,7 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
           libc::S_IFCHR => Kind::Dev,
           _ => Kind::File,
         };
+
         (kind, c_chars_to_string(info.pvip.vip_path.as_flattened()))
       }
       libc::PROX_FDTYPE_SOCKET => {
@@ -236,6 +237,7 @@ pub fn open_files(pid: i32) -> Result<Vec<OpenFile>, i32> {
       libc::PROX_FDTYPE_KQUEUE => (Kind::Kqueue, String::new()),
       _ => (Kind::Other, String::new()),
     };
+
     Some(OpenFile { fd: Some(fd.proc_fd), kind, text, mode })
   }));
   Ok(files)
@@ -276,6 +278,7 @@ fn local_port(info: &socket_info) -> Option<u16> {
     SOCKINFO_IN if info.soi_type == libc::SOCK_DGRAM => unsafe { &proto.pri_in },
     _ => return None,
   };
+
   Some(u16::from_be(addrs.insi_lport as u16))
 }
 
@@ -420,6 +423,7 @@ mod tests {
     if unsafe { libc::geteuid() } != 0 {
       assert_eq!(open_files(1), Err(libc::EPERM)); // launchd belongs to root
     }
+
     assert_eq!(open_files(i32::MAX), Err(libc::ESRCH));
   }
 }

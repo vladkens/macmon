@@ -9,10 +9,8 @@
 //! level and may change between releases as macOS, hardware generations, and
 //! metric keys change.
 
-#![allow(non_upper_case_globals)]
+#![expect(non_upper_case_globals, reason = "the names of the macOS SDK constants")]
 //! Low-level macOS metric sources.
-
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -79,7 +77,7 @@ pub fn cfstr(val: &str) -> CFStringRef {
   }
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(clippy::not_unsafe_ptr_arg_deref, reason = "an unsafe fn would break the library API")]
 /// Convert a CoreFoundation string reference into a Rust `String`.
 pub fn from_cfstr(val: CFStringRef) -> String {
   unsafe {
@@ -87,11 +85,12 @@ pub fn from_cfstr(val: CFStringRef) -> String {
     if CFStringGetCString(val, buf.as_mut_ptr(), 128, kCFStringEncodingUTF8) == 0 {
       panic!("Failed to convert CFString to CString");
     }
+
     std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string()
   }
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(clippy::not_unsafe_ptr_arg_deref, reason = "an unsafe fn would break the library API")]
 /// Return all keys from a CoreFoundation dictionary as Rust strings.
 pub fn cfdict_keys(dict: CFDictionaryRef) -> Vec<String> {
   unsafe {
@@ -106,7 +105,7 @@ pub fn cfdict_keys(dict: CFDictionaryRef) -> Vec<String> {
   }
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(clippy::not_unsafe_ptr_arg_deref, reason = "an unsafe fn would break the library API")]
 /// Look up a value in a CoreFoundation dictionary by string key.
 pub fn cfdict_get_val(dict: CFDictionaryRef, key: &str) -> Option<CFTypeRef> {
   unsafe {
@@ -222,7 +221,7 @@ pub fn cfio_get_props(entry: u32, name: String) -> WithError<CFDictionaryRef> {
   }
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(clippy::not_unsafe_ptr_arg_deref, reason = "an unsafe fn would break the library API")]
 /// Read IOReport state residency counters from a channel item.
 pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
   let count = unsafe { IOReportStateGetCount(item) };
@@ -235,13 +234,14 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
       x if x.is_null() => format!("S{i}"),
       x => from_cfstr(x),
     };
+
     res.push((name, val));
   }
 
   res
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(clippy::not_unsafe_ptr_arg_deref, reason = "an unsafe fn would break the library API")]
 /// Convert an IOReport energy counter into Watts for a sampling duration.
 pub fn cfio_watts(item: CFDictionaryRef, unit: &str, duration: Duration) -> WithError<f32> {
   let val = unsafe { IOReportSimpleGetIntegerValue(item, 0) } as f64;
@@ -258,7 +258,7 @@ fn watts_from_energy(val: f64, unit: &str, duration: Duration) -> WithError<f32>
   }
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[expect(clippy::not_unsafe_ptr_arg_deref, reason = "an unsafe fn would break the library API")]
 /// Read the integer value from an IOReport channel item.
 pub fn cfio_integer_value(item: CFDictionaryRef) -> i64 {
   unsafe { IOReportSimpleGetIntegerValue(item, 0) }
@@ -281,6 +281,7 @@ impl IOServiceIterator {
       if IOServiceGetMatchingServices(0, service, &mut existing) != 0 {
         return Err(format!("{} not found", service_name.to_string_lossy()).into());
       }
+
       existing
     };
 
@@ -388,7 +389,7 @@ impl Iterator for IOReportIterator {
 pub(crate) fn cpu_load_ticks() -> Option<Vec<[u32; 4]>> {
   let (mut count, mut info, mut info_count) = (0, null_mut(), 0);
   // todo: https://github.com/JohnTitor/mach2/issues/34
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "libc deprecates the mach API for mach2")]
   let rc = unsafe {
     let host = libc::mach_host_self();
     libc::host_processor_info(
@@ -405,7 +406,7 @@ pub(crate) fn cpu_load_ticks() -> Option<Vec<[u32; 4]>> {
 
   let ticks = unsafe { std::slice::from_raw_parts(info as *const u32, info_count as usize) };
   let cpus = ticks.as_chunks::<4>().0.iter().take(count as usize).copied().collect();
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "libc deprecates the mach API for mach2")]
   unsafe {
     libc::vm_deallocate(
       libc::mach_task_self(),
@@ -444,7 +445,7 @@ pub fn libc_ram() -> WithError<(u64, u64)> {
     let mut stats = std::mem::zeroed::<libc::vm_statistics64>();
 
     // todo: https://github.com/JohnTitor/mach2/issues/34
-    #[allow(deprecated)]
+    #[expect(deprecated, reason = "libc deprecates the mach API for mach2")]
     let ret_code = libc::host_statistics64(
       libc::mach_host_self(),
       libc::HOST_VM_INFO64,
@@ -717,18 +718,20 @@ impl SocInfo {
   }
 
   // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "fills the deprecated fields")]
   fn with_deprecated_tiers(mut self) -> Self {
     if let Some(tier) = self.cpu_tiers.first() {
       self.ecpu_cores = tier.cores;
       self.ecpu_label = tier.label.clone();
       self.ecpu_freqs = tier.freqs.clone();
     }
+
     if let Some(tier) = self.cpu_tiers.last() {
       self.pcpu_cores = tier.cores;
       self.pcpu_label = tier.label.clone();
       self.pcpu_freqs = tier.freqs.clone();
     }
+
     self
   }
 }
@@ -763,10 +766,12 @@ fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
   for chunk in data.as_chunks::<8>().0 {
     clusters.push((chunk[1], format!("voltage-states{}-sram", chunk[0])));
   }
+
   clusters.sort_by_key(|c| c.0);
   if clusters.len() < 2 {
     return None;
   }
+
   let ecpu_key = clusters[clusters.len() - 2].1.clone();
   let pcpu_key = clusters.last()?.1.clone();
   Some((ecpu_key, pcpu_key))
@@ -801,6 +806,7 @@ fn cpu_freqs(item: CFDictionaryRef, key: &str, is_ecpu: bool, scale: u32) -> Opt
   if let Some((_, freqs)) = get_dvfs_mhz(item, key) {
     return Some(to_mhz(freqs, scale));
   }
+
   let (ecpu_key, pcpu_key) = parse_acc_clusters_from(item)?;
   let key = if is_ecpu { ecpu_key } else { pcpu_key };
   let (_, freqs) = get_dvfs_mhz(item, &key)?;
@@ -977,6 +983,7 @@ pub(crate) fn hw_native() -> WithError<HwInfo> {
       if let Some(cores) = cfnum_get_i64(item, "gpu-core-count") {
         gpu_cores = cores as u8;
       }
+
       unsafe { CFRelease(item as _) }
     }
   }
@@ -1036,6 +1043,7 @@ pub(crate) fn hw_from_profiler_report(out: &serde_json::Value) -> HwInfo {
 }
 
 /// `cluster-type` of each CPU core from IORegistry (`cpuN` devices): `E`, `M` or `P`.
+#[cfg(feature = "app")]
 pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
   let mut types = Vec::new();
   for (entry, name) in IOServiceIterator::new("IOPlatformDevice")? {
@@ -1050,10 +1058,13 @@ pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
       if let Some(data) = cfdict_data(item, "cluster-type") {
         cluster_type = String::from_utf8_lossy(&data).trim_end_matches('\0').to_string();
       }
+
       unsafe { CFRelease(item as _) }
     }
+
     types.push(cluster_type);
   }
+
   Ok(types)
 }
 
@@ -1134,6 +1145,7 @@ fn soc_info_from(hw: HwInfo, freqs: Option<(Vec<u32>, Vec<u32>, Vec<u32>)>) -> W
   if freqs.as_ref().is_some_and(|(ecpu, pcpu, _)| ecpu.is_empty() || pcpu.is_empty()) {
     return Err("No CPU frequencies found".into());
   }
+
   let (ecpu_freqs, pcpu_freqs, gpu_freqs) = freqs.unwrap_or_default();
 
   let info = SocInfo {
@@ -1281,6 +1293,7 @@ fn cfio_get_chan(filter: Option<ChannelFilterRef<'_>>) -> WithError<IOReportChan
       unsafe { CFArrayAppendValue(selected, item as _) };
     }
   }
+
   cfio_add_clpc_channels(selected, filter);
 
   let key = cfstr("IOReportChannels");
@@ -1323,6 +1336,7 @@ fn cfio_get_subs(
       if !rs.is_null() {
         CFRelease(rs as _);
       }
+
       if !subscribed.is_null() {
         CFRelease(subscribed as _);
       }
@@ -1355,6 +1369,7 @@ impl IOReport {
       let channel = clpc_energy_channel(driver, *id, &format!("0x{id:016x}"), "nJ");
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
+
     let (subs, chan) = cfio_get_subs(channels.chan)?;
     Ok(Self { subs, chan, prev: None })
   }
@@ -1365,6 +1380,7 @@ impl IOReport {
     if unsafe { CFArrayGetCount(channels.selected) } == 0 {
       return Ok(None);
     }
+
     let (subs, chan) = cfio_get_subs(channels.chan)?;
     Ok(Some(Self { subs, chan, prev: None }))
   }
@@ -1506,7 +1522,6 @@ const kHIDPage_AppleVendor: i32 = 0xff00;
 const kHIDUsage_AppleVendor_TemperatureSensor: i32 = 0x0005;
 
 const kIOHIDEventTypeTemperature: i64 = 15;
-const kIOHIDEventTypePower: i64 = 25;
 
 #[link(name = "IOKit", kind = "framework")]
 #[rustfmt::skip]
@@ -1583,6 +1598,7 @@ impl IOHIDSensors {
         if temp <= 0.0 || temp > 150.0 {
           continue;
         }
+
         items.push((name, temp as f32));
       }
 
@@ -1699,7 +1715,6 @@ pub struct SensorVal {
 
 // MARK: SMC
 
-#[allow(clippy::upper_case_acronyms)]
 /// Apple System Management Controller connection.
 pub struct SMC {
   conn: u32,
@@ -1939,6 +1954,7 @@ mod tests {
         assert!(sample.count() > 0);
         earliest = before;
       }
+
       std::thread::sleep(Duration::from_millis(30));
       earliest = std::time::Instant::now();
       ior.reset_sample();

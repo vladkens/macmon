@@ -69,6 +69,7 @@ fn cut_path(path: &str, max: usize) -> String {
   if Span::raw(path).width() <= max {
     return path.to_string();
   }
+
   let parts: Vec<&str> = path.split('/').collect();
   let root = usize::from(parts[0].is_empty());
   for head in [2, 1] {
@@ -80,6 +81,7 @@ fn cut_path(path: &str, max: usize) -> String {
       }
     }
   }
+
   cut_middle(path, max)
 }
 
@@ -186,6 +188,7 @@ impl Info {
         _ => rows.push(Row { kind: f.kind, mode: f.mode, text: f.text.clone(), count: 1 }),
       }
     }
+
     rows
   }
 
@@ -217,6 +220,7 @@ impl Info {
       self.select(index);
       return true;
     }
+
     match key.code {
       _ if self.typing => {
         if type_filter(&mut self.filter, &mut self.cursor, &mut self.typing, key) {
@@ -253,6 +257,7 @@ impl Info {
       KeyCode::Char('q') if key.modifiers.is_empty() => return false,
       _ => {}
     }
+
     true
   }
 
@@ -265,6 +270,7 @@ impl Info {
       MouseEventKind::ScrollDown => self.index + 1,
       _ => return,
     };
+
     self.typing = false;
     self.select(index);
   }
@@ -279,6 +285,7 @@ impl Info {
       true => fds.len().to_string(),
       false => format!("{shown}/{}", fds.len()),
     };
+
     let kinds =
       COUNTS.iter().map(|&(kind, label)| (fds.iter().filter(|f| f.kind == kind).count(), label));
     let kinds = kinds.filter(|&(n, _)| n > 0).map(|(n, label)| (n.to_string(), label));
@@ -290,8 +297,10 @@ impl Info {
       if used > width {
         break;
       }
+
       spans.extend([text(n), faint(format!(" {label}"))]);
     }
+
     Line::from(spans)
   }
 
@@ -306,6 +315,7 @@ impl Info {
       }
       false => hint("/", "filter"),
     };
+
     let hints = join([hint("Enter", "keep"), hint("Esc", "clear")]);
     if self.typing { Titles::new(filter).right(hints) } else { Titles::new(filter) }
   }
@@ -328,13 +338,16 @@ impl Info {
       f.render_widget(self.counts(&rows, usize::from(list.width)), list);
       (list.y, list.height) = (list.y + 1, list.height - 1);
     }
+
     if list.height >= 2 {
       draw_divider(f, area, list.y, self.divider_titles(area.width));
       (list.y, list.height) = (list.y + 1, list.height - 1);
     }
+
     if let Err(error) = &self.files {
       f.render_widget(Line::from(faint(format!(" {error}"))), list);
     }
+
     self.page = usize::from(list.height);
     let len = rows.len();
     self.offset = scroll_offset(self.offset, Some(self.index), self.page, len);
@@ -350,12 +363,14 @@ impl Info {
         true => cut_path(&self.tilde(&row.text), room),
         false => cut_middle(&self.tilde(&row.text), room),
       };
+
       let line = Rect { y, height: 1, ..list };
       f.render_widget(Line::from(vec![side(columns), text(shown), side(count)]), line);
       if i == self.index {
         f.buffer_mut().set_style(line, theme::SELECTED);
       }
     }
+
     draw_scrollbar(f, area, list, len, self.offset);
 
     // Filter keys stay on the divider while typing; paused remains visible on the bottom.
@@ -543,6 +558,7 @@ mod tests {
       info.handle_mouse(mouse);
       info.index
     };
+
     // the first row, the exe, selected; a page is the 5 rows on screen below the divider; ↑ / ↓
     // wrap around at the ends, PgUp / PgDn and Home / End stop there
     assert_eq!(selected(&info), EXE);
@@ -552,6 +568,7 @@ mod tests {
       assert!(press(&mut info, &fake, code));
       assert_eq!(info.index, index, "{code:?}");
     }
+
     // the wheel stops at the ends too
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollUp), 0);
     assert_eq!(wheel(&mut info, MouseEventKind::ScrollDown), 1);
@@ -595,6 +612,7 @@ mod tests {
     let divider =
       "├─ / tcp, unix█ ────────────────────────────────────── Enter keep | Esc clear ─┤";
     assert_eq!(shown[1], divider);
+
     // nothing on the bottom border while typing
     assert_eq!(shown[7], format!("╰{}╯", "─".repeat(78)));
     assert!(press(&mut info, &fake, KeyCode::Down));
@@ -621,6 +639,7 @@ mod tests {
       assert!(press(&mut info, &fake, KeyCode::Char('e')));
       assert!(press(&mut info, &fake, KeyCode::Down));
     }
+
     assert_eq!(revealed(&fake), [EXE, "/Users/vlad/Code/macmon", "/Users/vlad/Downloads", LOG]);
 
     // typed, it is text
@@ -633,11 +652,13 @@ mod tests {
   #[test]
   fn c_copies_the_full_text_of_the_selected_row() {
     let (mut info, fake) = info(Ok(files()));
+
     // the exe, then a socket: their own text, not the `~` form or the cut one
     assert!(press(&mut info, &fake, KeyCode::Char('c')));
     (0..3).for_each(|_| assert!(press(&mut info, &fake, KeyCode::Down)));
     assert!(press(&mut info, &fake, KeyCode::Char('c')));
     assert_eq!(fake.0.borrow().copied, [EXE, ROWS[3]]);
+
     // `copied` faint on the bottom border until the next key or the wheel
     let buf = render(&mut info, 80, 8);
     assert!(rows(&buf)[7].starts_with("╰─ copied ─") && buf[(3, 7)].modifier == Modifier::DIM);
@@ -649,12 +670,14 @@ mod tests {
     };
     info.handle_mouse(wheel);
     assert_eq!(rows(&render(&mut info, 80, 8))[7], format!("╰{} ? | q back ─╯", "─".repeat(65)));
+
     // a click too
     assert!(press(&mut info, &fake, KeyCode::Char('c')));
     info.handle_mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), ..wheel });
     assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
     assert!(press(&mut info, &fake, KeyCode::Char('c')) && press(&mut info, &fake, KeyCode::Up));
     assert!(!rows(&render(&mut info, 80, 8))[7].contains("copied"));
+
     // typed, it is text
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
     type_str(&mut info, &fake, "c");
@@ -686,6 +709,7 @@ mod tests {
     for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
       assert!(info.handle_key(KeyEvent::new(KeyCode::Char('q'), modifiers), &fake));
     }
+
     assert!(press(&mut info, &fake, KeyCode::Char('Q')));
     // typed, it is text; then it closes, the filter set or not
     assert!(press(&mut info, &fake, KeyCode::Char('/')));
@@ -731,6 +755,7 @@ mod tests {
   #[test]
   fn processes_that_cant_be_read_show_why() {
     let (left, reused) = (Some((631, 0)), Some((2000, 0)));
+
     // the files, the start time sampled, the text
     let cases = [
       (Err(libc::EPERM), left, " Not permitted"),
@@ -744,16 +769,19 @@ mod tests {
       let mut info = Info::new(&ProcInfo { started, ..proc() }, &fake);
       let buf = render(&mut info, 40, 12);
       let shown = rows(&buf);
+
       // no `copy | finder`, no counts line, the divider, then the text
       assert_eq!(shown[0], format!("╭─ WindowServer 631 {}╮", "─".repeat(19)));
       assert_eq!(shown[1], format!("├─ / filter {}┤", "─".repeat(27)));
       assert_eq!(shown[2], format!("│{text:38}│"));
       assert_eq!((buf[(2, 2)].fg, buf[(2, 2)].modifier), (theme::TEXT, Modifier::DIM), "{text}");
       assert_eq!(shown[11], format!("╰{} ? | q back ─╯", "─".repeat(25)));
+
       // nothing to select or reveal
       for code in [KeyCode::Down, KeyCode::End, KeyCode::Char('e')] {
         assert!(press(&mut info, &fake, code));
       }
+
       assert_eq!((info.index, revealed(&fake)), (0, Vec::<String>::new()), "{text}");
     }
 
@@ -810,20 +838,25 @@ mod tests {
     let (mut info, fake) = info(Ok(files()));
     assert!(press(&mut info, &fake, KeyCode::Char('f')));
     assert!(info.filter_enabled);
+
     press(&mut info, &fake, KeyCode::Char('/'));
     type_str(&mut info, &fake, "tcp, /var, !unix");
     press(&mut info, &fake, KeyCode::Enter);
     assert_eq!(texts(&info), [ROWS[3], ROWS[4]]);
+
     let selected = selected(&info);
     press(&mut info, &fake, KeyCode::Char('f'));
     assert_eq!(texts(&info), ROWS);
     assert_eq!(self::selected(&info), selected);
+
     info.refresh(&fake);
     assert_eq!(texts(&info), ROWS);
     assert_eq!(info.filter, "tcp, /var, !unix");
+
     press(&mut info, &fake, KeyCode::Char('f'));
     assert_eq!(texts(&info), [ROWS[3], ROWS[4]]);
     assert_eq!(self::selected(&info), selected);
+
     press(&mut info, &fake, KeyCode::Char('f'));
     press(&mut info, &fake, KeyCode::Char('/'));
     assert!(info.filter_enabled && info.typing);
@@ -839,9 +872,11 @@ mod tests {
     type_str(&mut info, &fake, "a-long-filter-with-no-matches");
     press(&mut info, &fake, KeyCode::Enter);
     assert!(texts(&info).is_empty());
+
     press(&mut info, &fake, KeyCode::Char('f'));
     let wide = rows(&render(&mut info, 100, 16));
     assert!(wide[1].starts_with("│ 16 fds  5 files "), "{}", wide[1]);
+
     let buf = render(&mut info, 14, 8);
     let shown = rows(&buf);
     assert!(shown[1].contains("/ …tches"), "{}", shown[1]);
@@ -884,6 +919,7 @@ mod tests {
   #[test]
   fn the_counts_line_shows_with_room_and_drops_pairs_that_dont_fit() {
     let (mut info, _fake) = chrome();
+
     // below 8 inner rows the list takes its place, below 2 the divider too
     assert!(rows(&render(&mut info, 100, 9))[2].starts_with("│ exe "));
     assert!(rows(&render(&mut info, 100, 3))[1].starts_with("│ exe "));
@@ -894,6 +930,7 @@ mod tests {
     assert_eq!(shown[1], "│ 16 fds  5 files  3 dev  1 tcp  2 unix │");
     let shown = rows(&render(&mut info, 40, 10));
     assert_eq!(shown[1], "│ 16 fds  5 files  3 dev  1 tcp        │");
+
     // the numbers plain, the labels faint, the divider in the border color
     let buf = render(&mut info, 40, 10);
     let cell = |x: u16, y: u16| (buf[(x, y)].fg, buf[(x, y)].modifier);
@@ -908,10 +945,12 @@ mod tests {
     for (width, height) in (1..110).flat_map(|w| (1..14).map(move |h| (w, h))) {
       render(&mut chrome, width, height);
     }
+
     let (mut info, fake) = info(Ok(files()));
     for (width, height) in (1..70).flat_map(|w| (1..12).map(move |h| (w, h))) {
       render(&mut info, width, height);
     }
+
     // `finder` on the top border, `/ filter` on the divider, 5 of the 7 rows beside a scrollbar
     assert!(press(&mut info, &fake, KeyCode::Down));
     let buf = render(&mut info, 60, 8);
@@ -927,6 +966,7 @@ mod tests {
     ];
     let shown = rows(&buf);
     assert_eq!(shown, overlay);
+
     // the type and mode faint, the path in the default color, the selected row plain text
     // reversed from border to border, the key of the hint cyan, its label faint
     let cell = |x: u16, y: u16| (buf[(x, y)].fg, buf[(x, y)].modifier);

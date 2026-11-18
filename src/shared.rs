@@ -73,6 +73,7 @@ mod tests {
       assert!(ioreport_channels_filter("CLPC", "Energy Counters", channel, "nJ"));
       assert!(!ioreport_channels_filter("CLPC", "Energy Counters", channel, "events"));
     }
+
     assert!(ioreport_channels_filter("CLPC", "Energy Counters", "AVE", "mJ"));
     assert!(!ioreport_channels_filter("CLPC", "Energy Counters", "VDEC", "nJ"));
     assert!(!ioreport_channels_filter("CLPC", "Performance States", "ANE", "nJ"));
@@ -93,6 +94,7 @@ mod tests {
       assert!(ioreport_channels_filter("Energy Model", "", channel, "mJ"));
       assert!(ioreport_channels_filter("PMP", "Energy Counters", channel, "mJ"));
     }
+
     assert!(!ioreport_channels_filter("PMP", "Energy Counters", "DRAM", "events"));
     assert!(!ioreport_channels_filter("PMP", "Bandwidth", "DRAM", "mJ"));
     for channel in ["F0", "F1", "F2", "DRAM"] {

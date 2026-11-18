@@ -34,7 +34,7 @@ struct JsonMetrics<'a> {
   gpu_usage: (u32, f32),
 }
 
-#[allow(deprecated)]
+#[expect(deprecated, reason = "JSON keeps the v0.7 field names")]
 fn metrics_to_json_value(metrics: &Metrics) -> Result<Value, serde_json::Error> {
   let mut value = serde_json::to_value(JsonMetrics {
     metrics,
@@ -192,6 +192,7 @@ fn run_stress(
     StressMode::Ane => "ANE OCR".to_string(),
     StressMode::All => format!("CPU + GPU + ANE · {workers} CPU worker{plural}"),
   };
+
   if let Some(seconds) = pulse {
     label.push_str(&format!(" · {seconds}s busy / {seconds}s idle"));
   }
@@ -214,6 +215,7 @@ fn run_stress(
           ),
           None => format!("{} elapsed · Ctrl-C to stop", clock(elapsed)),
         };
+
         let mut stderr = io::stderr().lock();
         let _ = write!(stderr, "\r\x1b[2K{} {label} · {timing}", frames[frame]);
         let _ = stderr.flush();
@@ -303,6 +305,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(ref soc) = soc_info_val {
           doc["soc"] = serde_json::to_value(soc)?;
         }
+
         doc["timestamp"] = serde_json::to_value(chrono::Utc::now().to_rfc3339())?;
         let doc = serde_json::to_string(&doc)?;
 
