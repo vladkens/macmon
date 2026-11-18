@@ -34,7 +34,7 @@ struct JsonMetrics<'a> {
   gpu_usage: (u32, f32),
 }
 
-#[allow(deprecated)]
+#[expect(deprecated, reason = "JSON keeps the v0.7 field names")]
 fn metrics_to_json_value(metrics: &Metrics) -> Result<Value, serde_json::Error> {
   let mut value = serde_json::to_value(JsonMetrics {
     metrics,

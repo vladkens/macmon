@@ -33,7 +33,6 @@ const PS_WARM_UP: Duration = Duration::from_secs(1);
 /// it, so the same buffer serves both flavors.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
-#[allow(dead_code)] // FFI layout, most fields are unused
 struct rusage_info_v6 {
   ri_uuid: [u8; 16],
   ri_user_time: u64,

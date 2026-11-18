@@ -25,7 +25,7 @@ fn escape_label_value(value: &str) -> String {
 }
 
 #[rustfmt::skip]
-#[allow(deprecated)] // keeps exporting macmon_ecpu_* / macmon_pcpu_*
+#[expect(deprecated, reason = "keeps exporting macmon_ecpu_* / macmon_pcpu_*")]
 fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   let chip = escape_label_value(&soc.chip_name);
   let l = format!(r#"chip="{chip}""#);

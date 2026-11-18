@@ -303,7 +303,7 @@ fn checked_power(watts: f32, sys: Option<f32>) -> f32 {
 /// Drops bad `ram_power`, `dcs_power` and package total `chip_power` readings, then sets
 /// `chip_power` to at least the sum of its parts and `sys_power` to the SMC total `sys`, at least
 /// `chip_power`.
-#[allow(deprecated)] // all_power
+#[expect(deprecated, reason = "sets all_power")]
 fn with_power_totals(mut rs: Metrics, sys: Option<f32>) -> Metrics {
   rs.ram_power = checked_power(rs.ram_power, sys);
   rs.dcs_power = rs.dcs_power.map(|x| checked_power(x, sys));
@@ -358,7 +358,7 @@ fn aggregate_ioreport_metrics(mut rs: Metrics, soc: &SocInfo) -> Metrics {
 
 impl Metrics {
   // Fills the deprecated `ecpu_*` / `pcpu_*` fields from the lowest and the highest CPU tier.
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "fills the deprecated fields")]
   fn with_deprecated_tiers(mut self) -> Self {
     if let Some(tier) = self.cpu_tiers.first() {
       self.ecpu_freq_mhz = tier.freq_mhz;
@@ -807,7 +807,7 @@ impl Sampler {
     })
   }
 
-  #[allow(deprecated)] // gpu_ram_power
+  #[expect(deprecated, reason = "sets gpu_ram_power")]
   fn get_ioreport_metrics(
     &mut self,
     sample: impl IntoIterator<Item = IOReportIteratorItem>,
@@ -1267,7 +1267,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)] // all_power
+  #[expect(deprecated, reason = "checks all_power")]
   fn chip_power_drops_spikes_and_covers_its_parts() {
     // DRAM, DCS, package total, SMC total; then DRAM, DCS, chip and system power; CPU 2 W and
     // media 1 W in every case
@@ -1337,7 +1337,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "checks the deprecated fields")]
   fn aggregates_ioreport_metrics() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
@@ -1366,7 +1366,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "checks the deprecated fields")]
   fn deprecated_fields_keep_the_lowest_and_the_highest_tier() {
     // two tiers with different values, so a swapped or unfilled field shows
     let rs = aggregate_ioreport_metrics(
@@ -1405,7 +1405,7 @@ mod tests {
   }
 
   #[test]
-  #[allow(deprecated)]
+  #[expect(deprecated, reason = "checks the deprecated fields")]
   fn frequency_uses_minimum_floor_when_cluster_is_idle() {
     let rs = aggregate_ioreport_metrics(
       Metrics {
