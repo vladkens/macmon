@@ -58,8 +58,10 @@ pub fn run(powermetrics: bool) -> WithError<()> {
     if unsafe { IORegistryEntryGetRegistryEntryID(entry.0, &mut id) } != 0 {
       return Err("Cannot read CLPC registry ID".into());
     }
+
     services.push((id, bundle));
   }
+
   if services.len() != 1 {
     return Err("Power diagnostics currently require exactly one AppleCLPC service".into());
   }
@@ -94,6 +96,7 @@ pub fn run(powermetrics: bool) -> WithError<()> {
       "If a reference is unavailable, extra load/recovery tests take about 2 more minutes."
     );
   }
+
   let mut reference = if powermetrics { Some(start_reference()?) } else { None };
   let mut phases = Vec::new();
   let mut schedule = vec!["idle", "cpu", "gpu", "ane"];
@@ -107,6 +110,7 @@ pub fn run(powermetrics: bool) -> WithError<()> {
       while reference.output.try_recv().is_ok() {}
       reference.next()?;
     }
+
     let mut samples = Vec::new();
     for _ in 0..6 {
       let (sample, msec) = ior.get_samples(1000, 1).pop().ok_or("Missing diagnostic sample")?;
@@ -117,6 +121,7 @@ pub fn run(powermetrics: bool) -> WithError<()> {
           row.raw.insert(x.channel, cfio_integer_value(x.item));
           continue;
         }
+
         let component = if x.group == "Energy Model" {
           match x.channel.as_str() {
             x if x.ends_with("CPU Energy") => "cpu",
@@ -129,15 +134,19 @@ pub fn run(powermetrics: bool) -> WithError<()> {
         } else {
           continue;
         };
+
         let watts = cfio_watts(x.item, &x.unit, dt)? as f64;
         *row.legacy_watts.entry(component.into()).or_default() += watts;
       }
+
       row.powermetrics_watts = reference.as_mut().map(Reference::next).transpose()?;
       samples.push(row);
     }
+
     if samples.iter().any(|x| x.raw.is_empty()) {
       return Err("The driver accepted no discovered scalar reports".into());
     }
+
     if let Some(load) = &mut load
       && load.0.try_wait()?.is_some()
     {
@@ -146,6 +155,7 @@ pub fn run(powermetrics: bool) -> WithError<()> {
     if let Some(mut load) = load {
       load.wait(Duration::from_secs(10))?;
     }
+
     phases.push(Phase { load: mode.into(), samples });
     if !powermetrics
       && phases.len() == 4
@@ -157,9 +167,11 @@ pub fn run(powermetrics: bool) -> WithError<()> {
       for load in ["cpu-light", "ane", "gpu", "cpu", "all"] {
         schedule.extend(["idle", load]);
       }
+
       schedule.push("idle");
     }
   }
+
   drop(reference);
   print!("{}", summary(&classify(&counters, &phases, powermetrics)));
   Ok(())
@@ -188,14 +200,17 @@ fn summary(mappings: &[Mapping]) -> String {
       "no_match" => "no match",
       _ => "ambiguous match",
     };
+
     writeln!(out, "{}: {status} ({})", mapping.component.to_uppercase(), mapping.source).unwrap();
     if !mapping.matching_ids.is_empty() {
       writeln!(out, "  Matched IDs: {}", mapping.matching_ids.join(", ")).unwrap();
     }
+
     if mapping.status != "verified" && !mapping.behavioral_ids.is_empty() {
       writeln!(out, "  Candidates (unverified): {}", mapping.behavioral_ids.join(", ")).unwrap();
     }
   }
+
   out
 }
 
@@ -209,9 +224,11 @@ fn mean(phase: &Phase, get: impl Fn(&Sample) -> Option<f64>) -> Option<f64> {
     if !value.is_finite() || value < 0. || row.seconds <= 0. {
       return None;
     }
+
     sum += value * row.seconds;
     seconds += row.seconds;
   }
+
   (seconds > 0.).then(|| sum / seconds)
 }
 
@@ -244,6 +261,7 @@ fn classify(counters: &[String], phases: &[Phase], powermetrics: bool) -> Vec<Ma
       } else {
         "Energy Model"
       };
+
       let reference: Option<Vec<f64>> = phases
         .iter()
         .map(|phase| {
@@ -255,6 +273,7 @@ fn classify(counters: &[String], phases: &[Phase], powermetrics: bool) -> Vec<Ma
           }
         })
         .collect();
+
       let loaded = phases.iter().position(|x| x.load == component);
       let idle = phases.iter().position(|x| x.load == "idle");
       let active =
@@ -263,6 +282,7 @@ fn classify(counters: &[String], phases: &[Phase], powermetrics: bool) -> Vec<Ma
             && values[load] > 0.1
             && values[load] > values[idle] * 1.2 + 0.05
         });
+
       let mut matches = Vec::new();
       let mut behavioral_ids = Vec::new();
       for (id, watts) in &values {
@@ -276,16 +296,19 @@ fn classify(counters: &[String], phases: &[Phase], powermetrics: bool) -> Vec<Ma
         if (reactive || matched) && follows_load(watts, phases, component) {
           behavioral_ids.push((*id).clone());
         }
+
         if matched {
           matches.push((*id).clone());
         }
       }
+
       let status = match (active, matches.len()) {
         (false, _) => "no_active_reference",
         (true, 1) => "verified",
         (true, 0) => "no_match",
         _ => "ambiguous",
       };
+
       Mapping { component, status, source, matching_ids: matches, behavioral_ids }
     })
     .collect()
@@ -301,6 +324,7 @@ fn follows_load(values: &[f64], phases: &[Phase], component: &str) -> bool {
     } else {
       values[idle]
     };
+
     Some((values[index] - baseline).max(0.))
   };
   let loads: Vec<usize> =
@@ -327,6 +351,7 @@ fn follows_load(values: &[f64], phases: &[Phase], component: &str) -> bool {
   if !recovers || rise(mixed).unwrap_or(0.) < peak * 0.25 {
     return false;
   }
+
   if component == "cpu" && !(0.05..peak * 0.9).contains(&rise(light).unwrap_or(0.)) {
     return false;
   }
@@ -358,9 +383,11 @@ impl Process {
           Err(format!("Child exited: {status}").into())
         };
       }
+
       if start.elapsed() > timeout {
         return Err("Timed out waiting for bounded subprocess".into());
       }
+
       thread::sleep(Duration::from_millis(50));
     }
   }
@@ -382,6 +409,7 @@ fn start_load(mode: &str) -> WithError<Process> {
   if mode == "cpu-light" {
     command.args(["--workers", "1"]);
   }
+
   let mut child =
     Process(command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?);
   let stderr = child.0.stderr.take().ok_or("Missing workload stderr")?;
@@ -391,12 +419,14 @@ fn start_load(mode: &str) -> WithError<Process> {
       if line.contains("warmup recognized") {
         let _ = tx.send(());
       }
+
       eprintln!("{line}");
     }
   });
   if matches!(mode, "ane" | "all") {
     rx.recv_timeout(Duration::from_secs(60)).map_err(|_| "ANE warmup failed or timed out")?;
   }
+
   Ok(child)
 }
 
@@ -430,6 +460,7 @@ fn start_reference() -> WithError<Reference> {
         Ok(None) => break,
         Err(err) => Err(err.to_string()),
       };
+
       let failed = result.is_err();
       if tx.send(result).is_err() || failed {
         break;
@@ -474,9 +505,11 @@ fn read_reference(reader: &mut impl BufRead) -> WithError<Option<BTreeMap<String
     if data.ends_with(b"</plist>") {
       return parse_reference(&data).map(Some);
     }
+
     if count == 0 && data.iter().all(|x| *x == 0 || x.is_ascii_whitespace()) {
       return Ok(None);
     }
+
     if count == 0 || data.len() >= 8 * 1024 * 1024 {
       return Err("Truncated or oversized powermetrics sample".into());
     }
@@ -502,11 +535,13 @@ fn parse_reference(data: &[u8]) -> WithError<BTreeMap<String, f64>> {
     if !value.is_finite() || value < 0. {
       return Err("Invalid reference measurement".into());
     }
+
     Ok(value)
   };
   if !(0.8..=1.5).contains(&(number(&root, "elapsed_ns")? / 1e9)) {
     return Err("Incomplete or delayed powermetrics reference window".into());
   }
+
   let processor = dict_value(&root, "processor")
     .and_then(|x| x.downcast::<CFDictionary>())
     .ok_or("Missing powermetrics processor dictionary")?;
@@ -558,6 +593,7 @@ fn property(entry: u32, key: &str) -> WithError<CFType> {
   if value.is_null() {
     return Err("Required IORegistry property unavailable".into());
   }
+
   Ok(unsafe { CFType::wrap_under_create_rule(value) })
 }
 
@@ -566,6 +602,7 @@ fn kernel_image() -> WithError<Vec<u8>> {
   if chosen.0 == 0 {
     return Err("Boot device tree unavailable".into());
   }
+
   let path = property(chosen.0, "boot-objects-path")?;
   let path = path.downcast::<CFData>().ok_or("Invalid boot-objects-path type")?;
   let path = std::str::from_utf8(path.bytes())?.trim_end_matches('\0');
@@ -582,6 +619,7 @@ fn kernel_image() -> WithError<Vec<u8>> {
   if data.len() > 256 * 1024 * 1024 {
     return Err("Kernel image exceeds size limit".into());
   }
+
   unpack(&data)
 }
 
@@ -589,6 +627,7 @@ fn der(data: &[u8]) -> WithError<(u8, &[u8], &[u8])> {
   if data.len() < 2 {
     return Err("Truncated IMG4 header".into());
   }
+
   let mut size = data[1] as usize;
   let mut offset = 2;
   if size & 0x80 != 0 {
@@ -596,16 +635,20 @@ fn der(data: &[u8]) -> WithError<(u8, &[u8], &[u8])> {
     if n == 0 || n > 4 || data.len() < 2 + n {
       return Err("Invalid IMG4 length".into());
     }
+
     size = 0;
     for byte in &data[2..2 + n] {
       size = size * 256 + *byte as usize;
     }
+
     offset += n;
   }
+
   let end = offset + size;
   if end > data.len() {
     return Err("Truncated IMG4 payload".into());
   }
+
   Ok((data[0], &data[offset..end], &data[end..]))
 }
 
@@ -613,20 +656,24 @@ fn unpack(data: &[u8]) -> WithError<Vec<u8>> {
   if data.starts_with(&0xfeedfacfu32.to_le_bytes()) {
     return Ok(data.to_vec());
   }
+
   let (tag, seq, _) = der(data)?;
   if tag != 0x30 {
     return Err("Expected IMG4 sequence".into());
   }
+
   let (_, magic, rest) = der(seq)?;
   let seq = if magic == b"IMG4" {
     let (tag, seq, _) = der(rest)?;
     if tag != 0x30 {
       return Err("Expected IM4P sequence".into());
     }
+
     seq
   } else {
     seq
   };
+
   let (_, magic, rest) = der(seq)?;
   let (_, kind, rest) = der(rest)?;
   let (_, _, rest) = der(rest)?;
@@ -634,12 +681,15 @@ fn unpack(data: &[u8]) -> WithError<Vec<u8>> {
   if magic != b"IM4P" || kind != b"krnl" || tag != 4 {
     return Err("Not a kernel IM4P payload".into());
   }
+
   if payload.starts_with(&0xfeedfacfu32.to_le_bytes()) {
     return Ok(payload.to_vec());
   }
+
   if !payload.starts_with(b"bvx2") {
     return Err("Unsupported kernel compression (expected LZFSE)".into());
   }
+
   for size in [128, 256, 512].map(|x| x * 1024 * 1024) {
     let mut out = vec![0; size];
     let len = unsafe {
@@ -657,6 +707,7 @@ fn unpack(data: &[u8]) -> WithError<Vec<u8>> {
       return Ok(out);
     }
   }
+
   Err("Cannot decompress kernel within 512 MiB limit".into())
 }
 
@@ -687,6 +738,7 @@ impl<'a> Bytes<'a> {
     if self.u32(header)? != 0xfeedfacf || self.u32(header + 4)? != 0x0100000c {
       return Err("Expected ARM64 Mach-O image".into());
     }
+
     let mut rest = self.slice(header + 32, self.u32(header + 20)? as usize)?;
     let mut commands = Vec::new();
     for _ in 0..self.u32(header + 16)? {
@@ -694,12 +746,15 @@ impl<'a> Bytes<'a> {
       if size < 8 || size > rest.len() {
         return Err("Invalid Mach-O load command".into());
       }
+
       commands.push(Bytes(&rest[..size]));
       rest = &rest[size..];
     }
+
     if !rest.is_empty() {
       return Err("Inconsistent Mach-O load command count".into());
     }
+
     Ok(commands)
   }
 }
@@ -709,6 +764,7 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
   if data.u32(12)? != 12 {
     return Err("Expected a kernel Mach-O fileset".into());
   }
+
   let mut segments = Vec::new();
   let mut header = None;
   let mut fixups = None;
@@ -720,10 +776,12 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
         if start >= cmd.0.len() {
           return Err("Invalid fileset entry name".into());
         }
+
         if cmd.string(start, cmd.0.len() - start)? == bundle {
           if header.is_some() {
             return Err("Duplicate CLPC fileset entry".into());
           }
+
           header = Some(cmd.u64(16)? as usize);
         }
       }
@@ -731,6 +789,7 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
       _ => {}
     }
   }
+
   let base = segments.iter().map(|x| x.0).min().ok_or("Missing kernel segments")?;
   let at = |addr: u64, len: usize| -> WithError<usize> {
     for (vm, size, off) in &segments {
@@ -742,6 +801,7 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
         return Ok(off);
       }
     }
+
     Err("Report table is outside mapped kernel segments".into())
   };
   let fixups = Bytes(fixups.ok_or("Missing chained kernel fixups")?);
@@ -755,13 +815,16 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
       formats.push(u16::from_le_bytes(fixups.slice(start + off + 6, 2)?.try_into()?));
     }
   }
+
   if formats.is_empty() || formats.iter().any(|x| *x != 8) {
     return Err("Unsupported kernel chained pointer format".into());
   }
+
   let pointer = |value: u64| -> WithError<u64> {
     if (value >> 30) & 3 != 0 {
       return Err("Unsupported kernel pointer cache level".into());
     }
+
     base.checked_add(value & 0x3fffffff).ok_or_else(|| "Kernel pointer overflow".into())
   };
 
@@ -777,15 +840,18 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
         if data.slice(sym + 4, 1)?[0] & 0xee != 0x0e {
           continue;
         }
+
         let index = data.u32(sym)? as usize;
         if index >= strings.0.len() {
           return Err("Invalid symbol string index".into());
         }
+
         let name = strings.string(index, strings.0.len() - index)?;
         symbols.insert(name, data.u64(sym + 8)?);
       }
     }
   }
+
   let symbol =
     |name: &str| symbols.get(name).copied().ok_or_else(|| format!("Missing CLPC symbol: {name}"));
   let names = symbol("__ZN4clpc12_GLOBAL__N_119merged_report_namesE")?;
@@ -804,10 +870,12 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
   if count == 0 || count > 1024 || action_size % 24 != 0 || name_size % count != 0 {
     return Err("Unsupported CLPC table boundaries".into());
   }
+
   let stride = name_size / count;
   if ![72, 80].contains(&stride) {
     return Err(format!("Unsupported CLPC name stride: {stride}").into());
   }
+
   let names = at(names, name_size)?;
   let actions = at(actions, action_size)?;
   let configure = symbol("__ZN4clpc21configureSimpleReportIyEENS_6report11ChannelTypeEyytbPv")?;
@@ -823,12 +891,15 @@ fn parse_table(data: &[u8], bundle: &str) -> WithError<Vec<String>> {
     if name.is_empty() || !name.bytes().all(|x| x.is_ascii_graphic()) {
       return Err("Invalid CLPC report name".into());
     }
+
     let id = ((i as u64) << 32) | data.u32(names + i * stride + 64)? as u64;
     counters.push(format!("0x{id:016x}"));
   }
+
   if counters.is_empty() {
     return Err("No supported scalar CLPC reports found".into());
   }
+
   Ok(counters)
 }
 
@@ -848,22 +919,27 @@ mod tests {
       put32(&mut data, header, 0xfeedfacf);
       put32(&mut data, header + 4, 0x0100000c);
     }
+
     put32(&mut data, 12, 12);
     put32(&mut data, 16, 3);
     put32(&mut data, 20, 128);
+
     put32(&mut data, 32, 0x19);
     put32(&mut data, 36, 72);
     put64(&mut data, 56, 0x100000);
     put64(&mut data, 80, 4096);
+
     put32(&mut data, 104, 0x80000035);
     put32(&mut data, 108, 40);
     put64(&mut data, 120, 256);
     put32(&mut data, 128, 32);
     data[136..140].copy_from_slice(b"clpc");
+
     put32(&mut data, 144, 0x80000034);
     put32(&mut data, 148, 16);
     put32(&mut data, 152, 768);
     put32(&mut data, 156, 64);
+
     put32(&mut data, 772, 28);
     put32(&mut data, 796, 1);
     put32(&mut data, 800, 8);
@@ -885,18 +961,21 @@ mod tests {
       strings.extend(name.bytes());
       strings.push(0);
     }
+
     data[1408..1408 + strings.len()].copy_from_slice(&strings);
     put32(&mut data, 272, 2);
     put32(&mut data, 276, 48);
     for (i, value) in [2, 24, 1024, 6, 1408, strings.len() as u32, 0x1b, 24].iter().enumerate() {
       put32(&mut data, 288 + i * 4, *value);
     }
+
     for i in 0..3 {
       data[2048 + i * stride] = b'a' + i as u8;
       put32(&mut data, 2048 + i * stride + 64, 100 + i as u32);
       put64(&mut data, 3008 + i * 24 + 8, 4000);
       put64(&mut data, 3008 + i * 24 + 16, if i == 2 { 4016 } else { 4008 });
     }
+
     data
   }
 
@@ -916,6 +995,7 @@ mod tests {
     for size in 0..3080 {
       assert!(parse_table(&data[..size], "clpc").is_err(), "accepted {size} bytes");
     }
+
     assert!(parse_table(&fixture(88), "clpc").is_err());
     assert!(parse_table(&data, "different.driver").is_err());
     let mut data = data;
@@ -954,6 +1034,7 @@ mod tests {
       let raw = &mut phase.samples[0].raw;
       raw.insert("combined".into(), raw["cpu"] + raw["gpu"] + raw["ane"]);
     }
+
     let mappings = classify(&counters, &phases, false);
     assert!(mappings.iter().all(|x| x.status == "verified"));
     assert!(mappings.iter().all(|x| !x.matching_ids.iter().any(|id| id == "combined")));
@@ -962,6 +1043,7 @@ mod tests {
       let value = phase.samples[0].raw["cpu"];
       phase.samples[0].raw.insert("duplicate".into(), value);
     }
+
     counters.push("duplicate".into());
     let mappings = classify(&counters, &phases, false);
     assert_eq!(mappings[0].status, "ambiguous");
@@ -995,6 +1077,7 @@ mod tests {
     for id in ["scaled-cpu", "combined", "stuck"] {
       counters.push(id.into());
     }
+
     for phase in &mut phases {
       let row = &mut phase.samples[0];
       row.legacy_watts.clear();
@@ -1002,6 +1085,7 @@ mod tests {
       row.raw.insert("combined".into(), row.raw["cpu"] + row.raw["gpu"] + row.raw["ane"]);
       row.raw.insert("stuck".into(), 42_000_000_000);
     }
+
     let mappings = classify(&counters, &phases, false);
     assert!(mappings.iter().all(|x| x.status == "no_active_reference"));
     assert_eq!(mappings[0].behavioral_ids, ["cpu", "scaled-cpu"]);
@@ -1054,6 +1138,7 @@ mod tests {
     let parsed = parse_reference(&data).unwrap();
     assert_eq!(parsed["cpu"], 12.);
     assert!((parsed["ane"] - 0.8).abs() < 1e-9);
+
     // A pipe has delivered the document, but not the next sample's NUL separator.
     struct NotReady;
     impl Read for NotReady {
@@ -1063,6 +1148,7 @@ mod tests {
     }
     let mut stream = BufReader::new(std::io::Cursor::new(sample).chain(NotReady));
     assert_eq!(read_reference(&mut stream).unwrap().unwrap()["cpu"], 12.);
+
     let frames = [data.clone(), data.clone()].concat();
     let mut stream = std::io::Cursor::new(frames);
     assert!(read_reference(&mut stream).unwrap().is_some());

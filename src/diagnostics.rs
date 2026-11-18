@@ -62,9 +62,11 @@ fn cluster_type_counts(types: &[String]) -> String {
   for x in types {
     *counts.entry(x).or_default() += 1;
   }
+
   if counts.is_empty() {
     return "-".into();
   }
+
   counts.iter().map(|(x, n)| format!("{x} x{n}")).collect::<Vec<_>>().join(", ")
 }
 
@@ -99,6 +101,7 @@ pub fn print_debug() -> WithError<()> {
   if let Err(err) = &native {
     println!("Native: error={err}");
   }
+
   if let Err(err) = &profiler {
     println!("Profiler: error={err}");
   }
@@ -114,6 +117,7 @@ pub fn print_debug() -> WithError<()> {
     let cores = cores.map_or("-".into(), |x| x.to_string());
     println!("{:<18} {name} x{cores}", format!("hw.perflevel{i}"));
   }
+
   match cpu_cluster_types() {
     Ok(types) => println!("{:<18} {}", "cluster-type", cluster_type_counts(&types)),
     Err(err) => println!("{:<18} error={err}", "cluster-type"),
@@ -129,10 +133,12 @@ pub fn print_debug() -> WithError<()> {
     Ok((used, total)) => println!("RAM  used={used} bytes total={total} bytes"),
     Err(err) => println!("RAM  error={err}"),
   }
+
   match libc_swap() {
     Ok((used, total)) => println!("Swap used={used} bytes total={total} bytes"),
     Err(err) => println!("Swap error={err}"),
   }
+
   println!("Pressure {}", pressure_text("level", memory_pressure_raw(), memory_pressure_level));
   let percent = pressure_text("percent", memory_status_raw(), memory_pressure_percent);
   println!("Pressure {percent}");
@@ -195,9 +201,11 @@ fn print_pmgr() -> WithError<()> {
       unsafe { CFRelease(item as _) }
     }
   }
+
   if !found {
     println!("no pmgr node");
   }
+
   Ok(())
 }
 
@@ -231,6 +239,7 @@ fn print_ioreport() -> WithError<()> {
       }
     }
   }
+
   Ok(())
 }
 
@@ -283,6 +292,7 @@ fn print_smc() -> WithError<()> {
     let val = val.unwrap();
     println!("{} type={} size={} bytes={:?}", key, val.unit, ki.data_size, val.data);
   }
+
   Ok(())
 }
 
@@ -291,6 +301,7 @@ fn print_hid() -> WithError<()> {
   for (key, val) in hid.get_metrics() {
     println!("{:>32}: {:6.2}", key, val);
   }
+
   Ok(())
 }
 

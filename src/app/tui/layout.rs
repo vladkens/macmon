@@ -97,6 +97,7 @@ pub(super) fn compute_layout(area: Rect, procs: bool, clusters: usize, power: bo
     top.height = metrics_height(area.height);
     plan.proc = Some(Rect { y: top.bottom(), height: area.height - top.height, ..area });
   }
+
   plan.top = Some(top);
 
   let inner = top.inner(Margin::new(1, 1));
@@ -109,6 +110,7 @@ pub(super) fn compute_layout(area: Rect, procs: bool, clusters: usize, power: bo
     if row.is_empty() {
       continue;
     }
+
     let count = metrics.len();
     plan.boxes.extend(metrics.into_iter().zip(split_row(row, count)));
   }

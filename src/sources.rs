@@ -85,6 +85,7 @@ pub fn from_cfstr(val: CFStringRef) -> String {
     if CFStringGetCString(val, buf.as_mut_ptr(), 128, kCFStringEncodingUTF8) == 0 {
       panic!("Failed to convert CFString to CString");
     }
+
     std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().to_string()
   }
 }
@@ -233,6 +234,7 @@ pub fn cfio_get_residencies(item: CFDictionaryRef) -> Vec<(String, i64)> {
       x if x.is_null() => format!("S{i}"),
       x => from_cfstr(x),
     };
+
     res.push((name, val));
   }
 
@@ -279,6 +281,7 @@ impl IOServiceIterator {
       if IOServiceGetMatchingServices(0, service, &mut existing) != 0 {
         return Err(format!("{} not found", service_name.to_string_lossy()).into());
       }
+
       existing
     };
 
@@ -722,11 +725,13 @@ impl SocInfo {
       self.ecpu_label = tier.label.clone();
       self.ecpu_freqs = tier.freqs.clone();
     }
+
     if let Some(tier) = self.cpu_tiers.last() {
       self.pcpu_cores = tier.cores;
       self.pcpu_label = tier.label.clone();
       self.pcpu_freqs = tier.freqs.clone();
     }
+
     self
   }
 }
@@ -761,10 +766,12 @@ fn parse_acc_clusters(data: &[u8]) -> Option<(String, String)> {
   for chunk in data.as_chunks::<8>().0 {
     clusters.push((chunk[1], format!("voltage-states{}-sram", chunk[0])));
   }
+
   clusters.sort_by_key(|c| c.0);
   if clusters.len() < 2 {
     return None;
   }
+
   let ecpu_key = clusters[clusters.len() - 2].1.clone();
   let pcpu_key = clusters.last()?.1.clone();
   Some((ecpu_key, pcpu_key))
@@ -799,6 +806,7 @@ fn cpu_freqs(item: CFDictionaryRef, key: &str, is_ecpu: bool, scale: u32) -> Opt
   if let Some((_, freqs)) = get_dvfs_mhz(item, key) {
     return Some(to_mhz(freqs, scale));
   }
+
   let (ecpu_key, pcpu_key) = parse_acc_clusters_from(item)?;
   let key = if is_ecpu { ecpu_key } else { pcpu_key };
   let (_, freqs) = get_dvfs_mhz(item, &key)?;
@@ -975,6 +983,7 @@ pub(crate) fn hw_native() -> WithError<HwInfo> {
       if let Some(cores) = cfnum_get_i64(item, "gpu-core-count") {
         gpu_cores = cores as u8;
       }
+
       unsafe { CFRelease(item as _) }
     }
   }
@@ -1049,10 +1058,13 @@ pub(crate) fn cpu_cluster_types() -> WithError<Vec<String>> {
       if let Some(data) = cfdict_data(item, "cluster-type") {
         cluster_type = String::from_utf8_lossy(&data).trim_end_matches('\0').to_string();
       }
+
       unsafe { CFRelease(item as _) }
     }
+
     types.push(cluster_type);
   }
+
   Ok(types)
 }
 
@@ -1133,6 +1145,7 @@ fn soc_info_from(hw: HwInfo, freqs: Option<(Vec<u32>, Vec<u32>, Vec<u32>)>) -> W
   if freqs.as_ref().is_some_and(|(ecpu, pcpu, _)| ecpu.is_empty() || pcpu.is_empty()) {
     return Err("No CPU frequencies found".into());
   }
+
   let (ecpu_freqs, pcpu_freqs, gpu_freqs) = freqs.unwrap_or_default();
 
   let info = SocInfo {
@@ -1280,6 +1293,7 @@ fn cfio_get_chan(filter: Option<ChannelFilterRef<'_>>) -> WithError<IOReportChan
       unsafe { CFArrayAppendValue(selected, item as _) };
     }
   }
+
   cfio_add_clpc_channels(selected, filter);
 
   let key = cfstr("IOReportChannels");
@@ -1322,6 +1336,7 @@ fn cfio_get_subs(
       if !rs.is_null() {
         CFRelease(rs as _);
       }
+
       if !subscribed.is_null() {
         CFRelease(subscribed as _);
       }
@@ -1354,6 +1369,7 @@ impl IOReport {
       let channel = clpc_energy_channel(driver, *id, &format!("0x{id:016x}"), "nJ");
       unsafe { CFArrayAppendValue(channels.selected, channel.as_CFTypeRef()) };
     }
+
     let (subs, chan) = cfio_get_subs(channels.chan)?;
     Ok(Self { subs, chan, prev: None })
   }
@@ -1364,6 +1380,7 @@ impl IOReport {
     if unsafe { CFArrayGetCount(channels.selected) } == 0 {
       return Ok(None);
     }
+
     let (subs, chan) = cfio_get_subs(channels.chan)?;
     Ok(Some(Self { subs, chan, prev: None }))
   }
@@ -1581,6 +1598,7 @@ impl IOHIDSensors {
         if temp <= 0.0 || temp > 150.0 {
           continue;
         }
+
         items.push((name, temp as f32));
       }
 
@@ -1936,6 +1954,7 @@ mod tests {
         assert!(sample.count() > 0);
         earliest = before;
       }
+
       std::thread::sleep(Duration::from_millis(30));
       earliest = std::time::Instant::now();
       ior.reset_sample();

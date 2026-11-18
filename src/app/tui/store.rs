@@ -208,6 +208,7 @@ impl FanStore {
     if self.items.is_empty() {
       return String::new();
     }
+
     let rpms: Vec<String> = self.items.iter().map(|fan| fan.rpm.to_string()).collect();
     format!("{} rpm", rpms.join("/"))
   }
@@ -254,6 +255,7 @@ mod tests {
     for i in 0..STATS_LEN {
       store.push(if i % 2 == 0 { 1.0 } else { 3.0 });
     }
+
     assert_eq!(store.items.last(), Some(&50_000));
     assert_close(store.avg_value, 2.0);
     assert_close(store.max_value, 3.0);
@@ -277,6 +279,7 @@ mod tests {
     for mode in [RatioMode::Scaled, RatioMode::Active] {
       assert_eq!(freq.ratio(mode).items.len(), HISTORY_LEN, "{mode:?}");
     }
+
     assert_eq!((temp.items.len(), temp.last()), (MAX_TEMPS, Some(last as f32 + 1.0)));
   }
 

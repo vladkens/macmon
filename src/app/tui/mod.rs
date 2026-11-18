@@ -287,6 +287,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
           }
           _ => None,
         };
+
         if tx.send(Event::Update { metrics, procs: list }).is_err() {
           return Ok(());
         }
@@ -400,6 +401,7 @@ impl App {
     if self.soc.vm {
       procs.iter_mut().for_each(|proc| proc.power_w = None);
     }
+
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
       if let Some(info) = &mut self.info
@@ -475,6 +477,7 @@ impl App {
       self.info = info.handle_key(key, &*self.kill.sys).then_some(info);
       return ControlFlow::Continue(());
     }
+
     if self.kill.is_open() {
       self.kill.handle_key(key);
       return ControlFlow::Continue(());
@@ -527,6 +530,7 @@ impl App {
     if self.help.is_some() {
       return;
     }
+
     self.proc_view.copied = false;
     if let Some(info) = &mut self.info {
       info.handle_mouse(mouse);
@@ -544,6 +548,7 @@ impl App {
     if (self.proc_view.sort, self.proc_view.sort_desc) != sort {
       self.cfg.set_proc_sort(self.proc_view.sort, self.proc_view.sort_desc);
     }
+
     result
   }
 
@@ -572,6 +577,7 @@ impl App {
       self.info.iter_mut().for_each(|info| info.render(f, r, self.proc_view.paused));
       self.kill.render(f, r);
     }
+
     if let Some(scroll) = self.help {
       self.help = Some(help::render(f, f.area(), scroll));
     }
@@ -582,6 +588,7 @@ impl App {
     if let Some(interval) = interval {
       self.cfg.set_run_interval(interval);
     }
+
     let msec = Arc::new(RwLock::new(self.cfg.interval()));
 
     let (tx, rx) = mpsc::channel::<Event>();
@@ -600,6 +607,7 @@ impl App {
       if let Event::Failed(err) = event {
         return Err(err.into());
       }
+
       if self.handle_event(event, &msec).is_break() {
         break;
       }
@@ -707,6 +715,7 @@ mod tests {
       edit(&mut metrics);
       app.update_metrics(metrics);
     }
+
     app
   }
 
@@ -841,16 +850,19 @@ mod tests {
     let mut cfg = Config::default();
     cfg.proc_sort = ProcSort::Power;
     let mut app = App::from_parts(soc, cfg);
+
     let mut seed = 7u32;
     let mut noise = move || {
       seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
       (seed >> 16) as f32 / 65_536.0
     };
+
     for i in 0..240 {
       let t = i as f32;
       let e = (0.35 + 0.2 * (t / 6.0).sin() + 0.25 * noise()).clamp(0.05, 0.95);
       let pc = (0.6 + 0.25 * (t / 9.0).sin() + 0.2 * noise()).clamp(0.05, 0.98);
       let g = (0.55 + 0.3 * (t / 13.0).cos() + 0.15 * noise()).clamp(0.05, 0.98);
+
       let mut m = test_metrics();
       m.temp =
         TempMetrics { cpu_temp_avg: Some(48.0 + 30.0 * pc), gpu_temp_avg: Some(42.0 + 25.0 * g) };
@@ -862,16 +874,19 @@ mod tests {
         pressure_level: Some(0),
         pressure_percent: Some((35.0 + 30.0 * (t / 30.0).sin().abs()) as u8),
       };
+
       m.cpu_tiers = vec![cpu_tier("P", 3900, e * 0.9, e), cpu_tier("S", 4600, pc * 0.95, pc)];
       m.gpu_freq_mhz = 1578;
       m.gpu_scaled_ratio = g * 0.9;
       m.gpu_active_ratio = g;
+
       m.cpu_power = 3.0 + 28.0 * pc;
       m.gpu_power = 1.0 + 22.0 * g;
       m.ane_power = 0.6 + 0.5 * (t / 4.0).sin().abs();
       m.ram_power = 0.6 + 2.0 * pc;
       m.chip_power = m.cpu_power + m.gpu_power + m.ane_power + m.ram_power;
       m.sys_power = m.chip_power + 9.0;
+
       m.fans = vec![FanMetric {
         name: "fan0".to_string(),
         rpm: (1800.0 + 2400.0 * pc) as u32,
@@ -879,6 +894,7 @@ mod tests {
       }];
       app.update_metrics(m);
     }
+
     let (w, h) = (92, 27);
     render_buffer(&mut app, w, h);
     let proc =
@@ -957,6 +973,7 @@ mod tests {
     for mode in modes {
       assert!(text.contains(&format!("\x1b[?{mode}l")), "{mode} stays on: {text:?}");
     }
+
     assert!(text.contains("\x1b[?1004l"), "focus reports stay on: {text:?}");
     // the main screen, with the cursor that drawing hid (a panic never drops the terminal)
     assert!(text.ends_with("\x1b[?1049l\x1b[?25h"), "{text:?}");
@@ -1077,6 +1094,7 @@ mod tests {
     for c in ['p', 'v', 'r', '+', 's', '/'] {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     assert!(!file.path().exists(), "nothing saved");
     assert!(app.handle_key(key('q')).is_continue(), "q closes the help");
     assert_eq!(render_to_string(&mut app, 200, 50), screen);
@@ -1085,6 +1103,7 @@ mod tests {
       assert!(press(&mut app, close).is_continue());
       assert!(app.help.is_none(), "{close:?}");
     }
+
     assert_eq!(app.proc_view.selected_pid(), Some(631));
   }
 
@@ -1172,6 +1191,7 @@ mod tests {
     for c in ['q', 'v', 'r', 'p', '+', '-', 's', '?', 'c'] {
       assert_eq!(app.handle_key(key(c)), ControlFlow::Continue(()), "{c:?} while typing");
     }
+
     assert_eq!(app.proc_view.filter(), "qvrp+-s?c");
     assert_eq!((app.cfg.view_type, app.cfg.ratio_mode), (ViewType::Graph, RatioMode::Scaled));
     assert_eq!((app.cfg.interval(), app.cfg.show_procs), (1000, true));
@@ -1192,6 +1212,7 @@ mod tests {
       for c in "/saf".chars() {
         assert!(app.handle_key(key(c)).is_continue());
       }
+
       assert!(app.proc_view.typing());
     };
 
@@ -1303,6 +1324,7 @@ mod tests {
     for _ in 0..12 {
       app.handle_mouse(mouse(MouseEventKind::ScrollDown, 100, PROC_Y + 10));
     }
+
     assert_eq!(border(&mut app), bar(9, 9));
     assert!(press(&mut app, KeyCode::End).is_continue());
     assert_eq!(border(&mut app), bar(18, 0));
@@ -1315,6 +1337,7 @@ mod tests {
     for c in "/proc9".chars() {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     assert_eq!(border(&mut app), format!("{}╯", "│".repeat(28)));
 
     // in any window the box keeps its corners
@@ -1342,6 +1365,7 @@ mod tests {
         click(app, x, y);
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, x, y));
       }
+
       assert_eq!((app.cfg.proc_sort, app.proc_view.selected_pid()), (ProcSort::Cpu, None));
     };
 
@@ -1384,6 +1408,7 @@ mod tests {
         m.fans.clear();
         m.sys_power = 0.0;
       });
+
       // with every sensor, without swap, fans and system power, and before the first sample
       for (i, mut app) in [test_app(), bare, App::default()].into_iter().enumerate() {
         app.proc_view.set_procs(varied_procs());
@@ -1486,6 +1511,7 @@ mod tests {
     for title in ["CPU 63% ─", "GPU 0% ─"] {
       assert!(screen.contains(&format!("╭─ {title}")), "missing {title}");
     }
+
     assert!(!screen.contains("MHz") && !screen.contains("_-CPU"));
 
     // no power row: CPU, GPU and RAM take the whole metrics box, the process box stays
@@ -1499,6 +1525,7 @@ mod tests {
       let words = proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
       assert_eq!(words[words.len() - 2], "-", "{words:?}");
     }
+
     assert!(!row(&buf, 49).contains("POWER"), "{}", row(&buf, 49));
   }
 
@@ -1524,14 +1551,17 @@ mod tests {
     for title in TITLES {
       assert!(screen.contains(&format!("╭─ {title} ─")), "missing {title}");
     }
+
     // the chip with its core counts left on the metrics box, the version right
     let version = format!("─ macmon v{} ─╮", env!("CARGO_PKG_VERSION"));
     let top = row(&buf, 0);
     assert!(top.starts_with("╭─ Apple M3 Pro (6E+6P+18GPU 36GB) ─") && top.ends_with(&version));
+
     // whole-degree temperatures right on the CPU / GPU power boxes, none for ANE
     assert!(box_top(&app, &buf, Metric::CpuPower).ends_with("─ 45°C ─╮"));
     assert!(box_top(&app, &buf, Metric::GpuPower).ends_with("─ 40°C ─╮"));
     assert!(box_top(&app, &buf, Metric::AnePower).ends_with("───╮"));
+
     // nothing right on the total power box; no summary on the bottom border of the metrics box
     assert!(box_top(&app, &buf, Metric::TotalPower).ends_with("───╮"));
     assert_eq!(row(&buf, PROC_Y - 1), format!("╰{}╯", "─".repeat(198)));
@@ -1690,6 +1720,7 @@ mod tests {
     let wide = title(&mut app, 200);
     assert!(wide.starts_with("╭─ proc 3 ─ / filter ─ sort ───"), "{wide}");
     assert!(wide.ends_with("─ info | finder | copy | kill ─╮"), "{wide}");
+
     // the count bold and plain, the hint keys cyan, their labels faint, the separators dim
     let buf = render_buffer(&mut app, 200, 50);
     let style = |text| {
@@ -1701,9 +1732,11 @@ mod tests {
     let sep = (theme::DIM, Modifier::empty());
     let cells = ["proc", " 3", "/ ", " filter", "sort", "ort", "info", "nfo", " | "];
     assert_eq!(cells.map(style), [bold, plain, cyan, faint, cyan, faint, cyan, faint, sep]);
+
     // `e` inside `finder`
     let cells = ["finder", "er | ", "r | ", "| copy", "copy", "opy", "| kill", "kill", "ill"];
     assert_eq!(cells.map(style), [faint, cyan, faint, sep, cyan, faint, sep, cyan, faint]);
+
     // on a narrow box they go first, all together
     let narrow = "╭─ proc 3 ─ / filter ─ sort ─ info | finder | copy | kill ─╮";
     assert_eq!(title(&mut app, 60), narrow);
@@ -1713,6 +1746,7 @@ mod tests {
     for c in "/saf".chars() {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     let typing = title(&mut app, 200);
     assert!(typing.starts_with("╭─ proc 1/3 ─ / saf█ ───") && !typing.contains("sort"), "{typing}");
     assert!(!typing.contains("kill"), "{typing}");
@@ -1730,6 +1764,7 @@ mod tests {
     for c in "/a, w".chars() {
       assert!(press(&mut app, KeyCode::Char(c)).is_continue());
     }
+
     let buf = render_buffer(&mut app, 200, 50);
     let words = |y| proc_row(&buf, y).split_whitespace().map(str::to_string).collect::<Vec<_>>();
 
@@ -1768,6 +1803,7 @@ mod tests {
     for (pid, args) in [(1, "no"), (631, "-daemon"), (2301, &format!("--a {}", "x".repeat(300)))] {
       fake.0.borrow_mut().args.insert(pid, args.to_string());
     }
+
     assert!(press(&mut app, KeyCode::Esc).is_continue());
     put_procs(&mut app, varied_procs());
 
@@ -1871,11 +1907,13 @@ mod tests {
     assert!(app.handle_key(key('i')).is_continue());
     assert!(app.handle_key(key(' ')).is_continue());
     let before = proc_row(&render_buffer(&mut app, 200, 50), 1);
+
     fake.0.borrow_mut().files.get_mut(&631).unwrap().as_mut().unwrap().clear();
     let mut procs = varied_procs();
     procs[1].cpu_pct = 99.0;
     put_procs(&mut app, procs);
     assert_eq!(proc_row(&render_buffer(&mut app, 200, 50), 1), before);
+
     let metrics = Metrics { sys_power: 42.0, ..test_metrics() };
     assert!(
       app
@@ -1886,16 +1924,20 @@ mod tests {
         .is_continue()
     );
     assert_eq!(app.sys_power.items[0], 42000);
+
     assert!(app.handle_key(key('q')).is_continue());
     assert_eq!(app.proc_view.selected().unwrap().cpu_pct, 99.0);
+
     assert!(app.handle_key(key('i')).is_continue());
     assert!(proc_row(&render_buffer(&mut app, 200, 50), 1).contains("0 fds"));
     assert!(app.handle_key(key('/')).is_continue());
     assert!(app.handle_key(key(' ')).is_continue());
     assert!(app.proc_view.paused, "Space in a filter is text");
+
     let mut term = Terminal::new(TestBackend::new(20, 20)).unwrap();
     term.draw(|f| app.info.as_mut().unwrap().render(f, f.area(), true)).unwrap();
     assert!(row(term.backend().buffer(), 19).contains("paused"));
+
     assert!(press(&mut app, KeyCode::Esc).is_continue());
     for width in [200, 60, 20] {
       let mut term = Terminal::new(TestBackend::new(width, 20)).unwrap();
@@ -1912,6 +1954,7 @@ mod tests {
   fn paused_rows_dim_exits_preserve_safe_actions_and_indicator_with_filters() {
     let (mut app, fake) = info_app();
     assert!(app.handle_key(key(' ')).is_continue());
+
     let mut procs = varied_procs();
     procs.retain(|p| p.pid != 631);
     let mut new = procs[1].clone();
@@ -1919,20 +1962,24 @@ mod tests {
     new.name = "new worker".into();
     procs.push(new);
     put_procs(&mut app, procs);
+
     let buf = render_buffer(&mut app, 200, 50);
     let exited = proc_row(&buf, 2);
     assert!(exited.contains("WindowServer") && !exited.contains("(exited)"), "{exited}");
     assert_eq!(exited.split_whitespace().filter(|s| *s == "-").count(), 5);
     assert!(!screen_text(&buf).contains("new worker"));
+
     let pid = &buf[(2, PROC_Y + 2)];
     assert_eq!(pid.fg, ratatui::style::Color::Red);
     assert!(pid.modifier.contains(Modifier::DIM));
     assert!(!pid.modifier.contains(Modifier::REVERSED));
+
     let name_x = exited[..exited.find("WindowServer").unwrap()].chars().count() as u16;
     let name = &buf[(name_x, PROC_Y + 2)];
     assert!(name.modifier.contains(Modifier::REVERSED));
     assert!(!name.modifier.contains(Modifier::DIM));
     assert_eq!(name.fg, theme::TEXT);
+
     assert!(press(&mut app, KeyCode::Down).is_continue());
     let dimmed = render_buffer(&mut app, 200, 50);
     assert!(dimmed[(2, PROC_Y + 2)].modifier.contains(Modifier::DIM));
@@ -1941,6 +1988,7 @@ mod tests {
     assert_eq!(live_pid.fg, theme::TEXT);
     assert!(live_pid.modifier.contains(Modifier::REVERSED));
     assert!(!live_pid.modifier.contains(Modifier::DIM));
+
     assert!(press(&mut app, KeyCode::Up).is_continue());
     for width in [200, 60, 30, 20, 12] {
       let mut term = Terminal::new(TestBackend::new(width, 50)).unwrap();
@@ -1996,6 +2044,7 @@ mod tests {
     for c in ['k', 'i', 'p', 's', 'v'] {
       assert!(app.handle_key(key(c)).is_continue(), "{c}");
     }
+
     assert!(!app.kill.is_open() && app.cfg.show_procs && app.cfg.view_type == ViewType::Graph);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_c), ControlFlow::Break(()));
@@ -2017,6 +2066,7 @@ mod tests {
     assert!(proc_row(&buf, 0).starts_with("╭─ zsh 631 ─"), "{}", proc_row(&buf, 0));
     assert!(proc_row(&buf, 1).starts_with("│ 2 fds  1 files  1 pipes "));
     assert!(proc_row(&buf, 3).starts_with("│ exe       /bin/zsh "));
+
     // focus loss ends filter input, Esc then closes it and the list has its keys back
     assert!(app.handle_key(key('/')).is_continue());
     assert!(app.handle_event(Event::FocusLost, &RwLock::new(TUI_MIN_MS)).is_continue());
@@ -2089,6 +2139,7 @@ mod tests {
     for code in [KeyCode::Esc, KeyCode::Esc, KeyCode::Char('e'), KeyCode::Char('i')] {
       assert!(press(&mut app, code).is_continue());
     }
+
     assert_eq!((app.proc_view.selected_pid(), app.info.is_none()), (None, true));
     assert_eq!(fake.0.borrow().revealed.len(), 1);
 
@@ -2136,6 +2187,7 @@ mod tests {
     for c in "/saf".chars() {
       assert!(app.handle_key(key(c)).is_continue());
     }
+
     assert!(press(&mut app, KeyCode::Down).is_continue());
     assert!(app.handle_key(key('k')).is_continue());
     assert_eq!((app.proc_view.filter(), app.kill.is_open()), ("saf", true));

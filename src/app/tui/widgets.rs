@@ -109,6 +109,7 @@ impl Widget for Graph<'_> {
         if symbol != ' ' {
           buf[(x, y)].set_char(symbol).set_fg(color);
         }
+
         level -= eighths;
       }
     }

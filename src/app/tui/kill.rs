@@ -151,12 +151,14 @@ impl Kill {
       _ if pid as u32 == process::id() => return Err("Won't kill macmon itself".into()),
       _ => {}
     }
+
     self.sys.signal(pid, 0).map_err(failure)?;
     let started = started.ok_or_else(|| failure(libc::EPERM))?;
     // gone since the sample, or a zombie (unreadable)
     if self.sys.identity(pid) != Some(started) {
       return Err(failure(libc::ESRCH));
     }
+
     Ok(started)
   }
 
@@ -218,15 +220,19 @@ impl Kill {
       Ok(_) => vec![text(owner), dim(cut_start(&proc.path, width.saturating_sub(6)))],
       Err(error) => vec![text(error.as_str()), dim(owner)],
     };
+
     let rows = cells(lines.len());
     let rect = area.centered(Constraint::Length(cells(width)), Constraint::Length(rows + 6));
     f.render_widget(Clear, rect);
+
     // cut by hand, so `?` stays: `Kill ` and `?` and a blank cell and a border cell on both sides
     let name = cut_end(&proc.name, width.saturating_sub(12)) + if ok { "?" } else { "" };
     let inner = draw_box(f, rect, Titles::new(heading(format!("Kill {name}"))));
+
     // a blank row above, between and below when there is room
     let gap = u16::from(inner.height >= rows + 4);
     f.render_widget(Text::from_iter(lines), inner.inner(Margin::new(2, gap)));
+
     // centred; cut, or none, when they don't fit
     let row = buttons.iter().map(|b| b.0.len() + 7).sum::<usize>() - 3;
     let y = inner.y + rows + 2 * gap;
@@ -243,6 +249,7 @@ impl Kill {
         }
         (false, None) => Line::from(vec![dim("[ "), faint(label), dim(" ]")]),
       };
+
       let rect = Rect::new(x, y, cells(label.len() + 4), 1).intersection(inner);
       f.render_widget(line, rect);
       popup.rects.push(rect);
@@ -405,6 +412,7 @@ pub(super) mod tests {
         kill.handle_key(key);
         assert_eq!(shown(&kill), Some((Err(error.into()), 0)), "{error}");
       }
+
       kill.handle_key(code(KeyCode::Enter));
       // refusals make no system call at all, the rest only checks
       let checked = if pid == 631 { vec![(631, 0)] } else { vec![] };
@@ -471,6 +479,7 @@ pub(super) mod tests {
         kill.handle_key(key);
         assert_eq!(shown(&kill), Some((Err(error.into()), 0)), "{error}");
       }
+
       kill.handle_key(close);
       assert_eq!((shown(&kill), fake.calls()), (None, [vec![(631, 0)], sent].concat()), "{error}");
     }
@@ -523,6 +532,7 @@ pub(super) mod tests {
       mouse_on(&mut kill, &buf, left, button);
       assert_eq!(shown(&kill), None, "{button}");
     }
+
     assert_eq!(fake.calls(), [(631, 0), (631, libc::SIGKILL), (631, 0)]);
   }
 
@@ -535,6 +545,7 @@ pub(super) mod tests {
     for (width, height) in (0..70).flat_map(|w| (0..10).map(move |h| (w, h))) {
       render(&mut kill, width, height);
     }
+
     // the path cut from the start, the buttons centred
     let popup = [
       "╭─ Kill Microsoft Teams WebView Helper (Renderer)? ────────╮",
@@ -549,6 +560,7 @@ pub(super) mod tests {
     let buf = render(&mut kill, 60, 8);
     let shown = rows(&buf);
     assert_eq!(shown, popup);
+
     // the selected button reversed plain text; the others with dim brackets, the letter of their
     // shortcut a key and the rest faint, Cancel (no shortcut) all faint; the path dim
     let style = |text| {
