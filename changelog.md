@@ -3,6 +3,8 @@
 ### Fixes
 
 - Fixed Mac Studio on macOS 27 reporting a battery at 0 % and `sys_power` equal to `chip_power` instead of the adapter power (#145, by @JondelaVega)
+- Fixed power graphs in the TUI filling their whole box at idle: they now scale to at least 2 W, and Total to at least 5 W (#148)
+- Stopped fans show as `fans off` instead of `0/0 rpm` (#148)
 
 **Full Changelog**: https://github.com/vladkens/macmon/compare/v0.12.0...v0.12.1
 
