@@ -633,12 +633,27 @@ pub(crate) fn uptime_secs() -> Option<u64> {
 /// of `AppleSmartBattery`. As in `pmset -g batt`: on Apple Silicon `CurrentCapacity` is the
 /// percent, not mAh.
 fn battery_from(props: CFDictionaryRef) -> Option<(u8, bool, bool)> {
-  let flag = |key| {
-    let val = cfdict_get_val(props, key)?;
-    Some(bool::from(unsafe { CFBoolean::wrap_under_get_rule(val as _) }))
-  };
+  if !battery_installed(props) {
+    return None;
+  }
   let percent = u8::try_from(cfnum_get_i64(props, "CurrentCapacity")?).ok()?;
-  Some((percent, flag("IsCharging")?, flag("ExternalConnected")?))
+  Some((
+    percent,
+    cfdict_get_bool(props, "IsCharging")?,
+    cfdict_get_bool(props, "ExternalConnected")?,
+  ))
+}
+
+/// Whether `AppleSmartBattery` describes a real battery. Desktops can publish the service too:
+/// Mac Studio (Mac17,15, macOS 27.2) has it with `BatteryInstalled = No` and every reading at 0.
+/// Without the key the service counts as a battery, as before.
+fn battery_installed(props: CFDictionaryRef) -> bool {
+  cfdict_get_bool(props, "BatteryInstalled").unwrap_or(true)
+}
+
+fn cfdict_get_bool(props: CFDictionaryRef, key: &str) -> Option<bool> {
+  let val = cfdict_get_val(props, key)?;
+  Some(bool::from(unsafe { CFBoolean::wrap_under_get_rule(val as _) }))
 }
 
 /// Percent, charging and plugged in state of the internal battery, or None on a desktop.
@@ -648,7 +663,7 @@ pub(crate) fn battery() -> Option<(u8, bool, bool)> {
 
 /// Whether the Mac has an internal battery.
 pub(crate) fn has_battery() -> bool {
-  !read_services("AppleSmartBattery", |_, _| Some(())).is_empty()
+  !read_services("AppleSmartBattery", |_, props| battery_installed(props).then_some(())).is_empty()
 }
 
 // MARK: SockInfo
@@ -1875,6 +1890,39 @@ mod tests {
     assert_eq!(read(&[percent(87), charging.clone()]), None);
     assert_eq!(read(&[percent(87), plugged.clone()]), None);
     assert_eq!(read(&[percent(-1), charging, plugged]), None);
+  }
+
+  #[test]
+  fn battery_service_without_installed_battery_is_no_battery() {
+    let key = |x| CFString::new(x).as_CFType();
+    let flag = |x, v: bool| {
+      (key(x), if v { CFBoolean::true_value() } else { CFBoolean::false_value() }.as_CFType())
+    };
+    let percent = (key("CurrentCapacity"), CFNumber::from(0).as_CFType());
+    let dict = |pairs: &[(CFType, CFType)]| CFDictionary::from_CFType_pairs(pairs);
+
+    // Mac Studio (Mac17,15, macOS 27.2): the service exists, BatteryInstalled = No
+    let studio = dict(&[
+      percent.clone(),
+      flag("IsCharging", false),
+      flag("ExternalConnected", true),
+      flag("BatteryInstalled", false),
+    ]);
+    assert!(!battery_installed(studio.as_concrete_TypeRef()));
+    assert_eq!(battery_from(studio.as_concrete_TypeRef()), None);
+
+    let laptop = dict(&[
+      percent.clone(),
+      flag("IsCharging", false),
+      flag("ExternalConnected", true),
+      flag("BatteryInstalled", true),
+    ]);
+    assert!(battery_installed(laptop.as_concrete_TypeRef()));
+    assert_eq!(battery_from(laptop.as_concrete_TypeRef()), Some((0, false, true)));
+
+    // older macOS without the key: unchanged, counts as a battery
+    let no_key = dict(&[percent, flag("IsCharging", false), flag("ExternalConnected", true)]);
+    assert!(battery_installed(no_key.as_concrete_TypeRef()));
   }
 
   #[test]
