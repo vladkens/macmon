@@ -250,8 +250,9 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
       let mut tick = last_tick + Duration::from_millis(100);
       // the showing, its sampler and the start of its last sample
       let mut procs: Option<(u64, ProcSampler, Instant)> = None;
-      // GPU energy (J) and time (s) of the ticks since the last process sample: its GPU power
-      let mut gpu = (0.0, 0.0);
+      // GPU energy (J) and time (s) of the metrics since the last process sample, for its GPU
+      // power, and when the last metrics were taken: their window ends there
+      let (mut gpu, mut metrics_at) = ((0.0, 0.0), Instant::now());
 
       loop {
         let showing = procs.as_ref().map(|p| p.0);
@@ -284,8 +285,9 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
         // metrics first, so they stay on the tick and their windows even; processes after, as
         // their windows are coarse (>= 250 ms) and a slow `ps` delays only the list
         let metrics = Box::new(sampler.get_metrics_now()?);
-        let secs = tick.saturating_duration_since(last_tick).as_secs_f64();
-        gpu = (gpu.0 + metrics.gpu_power as f64 * secs, gpu.1 + secs);
+        let now = Instant::now();
+        let secs = now.duration_since(metrics_at).as_secs_f64();
+        (gpu, metrics_at) = ((gpu.0 + metrics.gpu_power as f64 * secs, gpu.1 + secs), now);
         let list = match &mut procs {
           Some((showing, sampler, last)) if procs_due(*last, tick) => {
             *last = tick;
