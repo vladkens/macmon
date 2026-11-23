@@ -20,6 +20,8 @@ mod tui;
 
 use macmon::diagnostics::print_debug;
 use macmon::{Metrics, Sampler};
+use procs::ProcSampler;
+use query::Query;
 use serde_json::{Number, Value};
 use tui::App;
 
@@ -110,6 +112,11 @@ enum Commands {
     /// With --install: a LaunchAgent that starts at login instead, no sudo
     #[arg(long, default_value_t = false, requires = "install")]
     agent: bool,
+
+    /// Export the processes that match QUERY, the TUI filter (`/`), to /metrics: `gpu:>0`,
+    /// `app:llama-server`, or "" for all. Their names and pids go to anyone who can reach the port
+    #[arg(long, value_name = "QUERY")]
+    processes: Option<String>,
   },
 
   /// Print debug information
@@ -314,13 +321,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       }
     }
-    Some(Commands::Serve { host, port, install, uninstall, agent }) => {
+    Some(Commands::Serve { host, port, install, uninstall, agent, processes }) => {
       if *install && *agent {
-        return serve::install_agent(host, *port);
+        return serve::install_agent(host, *port, processes.as_deref());
       }
 
       if *install {
-        return serve::install_daemon(host, *port);
+        return serve::install_daemon(host, *port, processes.as_deref());
       }
 
       if *uninstall {
@@ -344,10 +351,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
       });
 
+      // processes only with `--processes`, sampled right after the metrics
+      let mut procs = processes.as_deref().map(|x| (Query::parse(x), ProcSampler::new()));
       loop {
         wait_until_scheduled_sample(&mut sampled_at, interval);
         match sampler.get_metrics_now() {
-          Ok(m) => *shared.write().unwrap() = Some(m),
+          Ok(m) => {
+            let rows = procs.as_mut().map_or(vec![], |(query, procs)| {
+              procs.sample().into_iter().filter(|p| query.matches(p)).collect()
+            });
+            *shared.write().unwrap() = Some((m, rows));
+          }
           Err(e) => eprintln!("sampling error: {e}"),
         }
       }
@@ -430,6 +444,13 @@ mod tests {
     assert!(Cli::try_parse_from(["macmon", "serve", "--install", "--agent"]).is_ok());
     assert!(Cli::try_parse_from(["macmon", "serve", "--agent"]).is_err());
     assert!(Cli::try_parse_from(["macmon", "serve", "--uninstall", "--agent"]).is_err());
+  }
+
+  #[test]
+  fn serve_takes_a_process_query() {
+    let cli = Cli::try_parse_from(["macmon", "serve", "--processes", "gpu:>0", "--install"]);
+    let Some(Commands::Serve { processes, .. }) = cli.unwrap().command else { panic!() };
+    assert_eq!(processes.as_deref(), Some("gpu:>0"));
   }
 
   #[test]
