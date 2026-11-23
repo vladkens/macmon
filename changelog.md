@@ -1,3 +1,19 @@
+## v0.12.1 – 2026-11-23
+
+### Features
+
+- Added `macmon serve --processes "<query>"`: the processes that match a TUI filter query go to `/metrics` with their CPU, CPU time, memory, GPU and power, e.g. `--processes "gpu:>0"` (#149)
+
+### Fixes
+
+- Fixed Mac Studio on macOS 27 reporting a battery at 0 % and `sys_power` equal to `chip_power` instead of the adapter power (#145, by @JondelaVega)
+- Fixed power graphs in the TUI filling their whole box at idle: they now scale to at least 2 W, and Total to at least 5 W (#148)
+- Stopped fans show as `fans off` instead of `0/0 rpm` (#148)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.12.0...v0.12.1
+
+---
+
 ## v0.12.0 – 2026-11-15
 
 ### Breaking Changes
