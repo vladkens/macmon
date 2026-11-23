@@ -234,11 +234,13 @@ impl ProcsShown {
 /// Sends `Event::Update` with metrics on every tick of the interval in `msec`: the first after
 /// 100 ms, then anchored on the previous tick. A shorter interval moves the pending tick closer
 /// at once, a longer one applies after it. While the panel is `shown` the update also carries
-/// processes, when the tick is at least `PROCS_MIN_GAP` after the previous process sample. Each
-/// showing gets a new process sampler with a baseline, so rates don't span the hidden time, and
-/// moves the next tick to `PROCS_MIN_GAP` after it, so the list fills in quickly (also the first
-/// tick, as the panel shows on the first frame). Process samples carry their showing, so the app
-/// can drop one a hide overtook. Stops once the app is gone or after a metrics error.
+/// processes, when the tick is at least `PROCS_MIN_GAP` after the previous process sample, with
+/// the average GPU power of the metrics in between to share by GPU time. Each showing gets a new
+/// process sampler with a baseline, so rates don't span the hidden time, ends the metrics window
+/// there unless it is shorter than `PROCS_MIN_GAP`, and moves the next tick to `PROCS_MIN_GAP`
+/// after it, so the list fills in quickly (also the first tick, as the panel shows on the first
+/// frame). Process samples carry their showing, so the app can drop one a hide overtook. Stops
+/// once the app is gone or after a metrics error.
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Arc<ProcsShown>) {
   thread::spawn(move || {
     let sample = || -> WithError<()> {
@@ -249,6 +251,9 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
       let mut tick = last_tick + Duration::from_millis(100);
       // the showing, its sampler and the start of its last sample
       let mut procs: Option<(u64, ProcSampler, Instant)> = None;
+      // GPU energy (J) and time (s) of the metrics since the last process sample, for its GPU
+      // power, and when the last metrics were taken: their window ends there
+      let (mut gpu_joules, mut gpu_secs, mut metrics_at) = (0.0, 0.0, Instant::now());
 
       loop {
         let showing = procs.as_ref().map(|p| p.0);
@@ -257,12 +262,22 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
           match now_showing {
             // the panel was hidden: stop sampling processes
             None => procs = None,
-            // the panel was shown (or hidden and shown again): a new sampler and its baseline,
+            // the panel was shown (or hidden and shown again): the metrics up to now, so the GPU
+            // power of the first list covers its own window; a new sampler and its baseline,
             // which has no rates yet, and the first list `PROCS_MIN_GAP` later
             Some(showing) => {
+              if metrics_at.elapsed() >= PROCS_MIN_GAP {
+                let metrics = Box::new(sampler.get_metrics_now()?);
+                metrics_at = Instant::now();
+                if tx.send(Event::Update { metrics, procs: None }).is_err() {
+                  return Ok(());
+                }
+              }
+
               let (started, mut sampler) = (Instant::now(), ProcSampler::new());
-              sampler.sample();
+              sampler.sample(0.0);
               procs = Some((showing, sampler, started));
+              (gpu_joules, gpu_secs) = (0.0, 0.0);
               tick = started + PROCS_MIN_GAP;
             }
           }
@@ -280,10 +295,17 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
         // metrics first, so they stay on the tick and their windows even; processes after, as
         // their windows are coarse (>= 250 ms) and a slow `ps` delays only the list
         let metrics = Box::new(sampler.get_metrics_now()?);
+        let now = Instant::now();
+        let secs = now.duration_since(metrics_at).as_secs_f64();
+        gpu_joules += metrics.gpu_power as f64 * secs;
+        gpu_secs += secs;
+        metrics_at = now;
         let list = match &mut procs {
           Some((showing, sampler, last)) if procs_due(*last, tick) => {
             *last = tick;
-            Some((*showing, sampler.sample()))
+            let gpu_w = (gpu_joules / gpu_secs.max(f64::MIN_POSITIVE)) as f32;
+            (gpu_joules, gpu_secs) = (0.0, 0.0);
+            Some((*showing, sampler.sample(gpu_w)))
           }
           _ => None,
         };
@@ -398,7 +420,7 @@ impl App {
   /// process has a power reading: process energy doesn't move there.
   fn update_procs(&mut self, showing: u64, mut procs: Vec<ProcInfo>) {
     if self.soc.vm {
-      procs.iter_mut().for_each(|proc| proc.power_w = None);
+      procs.iter_mut().for_each(|proc| proc.cpu_power_w = None);
     }
     if self.procs_shown.showing() == Some(showing) {
       self.proc_view.set_procs(procs);
@@ -757,7 +779,8 @@ mod tests {
       cpu_pct: 12.5,
       cpu_time_ns: 0,
       mem_bytes: 64 << 20,
-      power_w: Some(0.5),
+      cpu_power_w: Some(0.5),
+      gpu_power_w: 0.0,
       gpu_pct: 3.0,
       started: None,
     };
@@ -784,7 +807,8 @@ mod tests {
       cpu_pct: cpu,
       cpu_time_ns: secs * 1_000_000_000,
       mem_bytes: mem_mb << 20,
-      power_w,
+      cpu_power_w: power_w,
+      gpu_power_w: 0.0,
       gpu_pct,
       started: (pid >= 100).then_some((pid as u64, 0)),
     };
@@ -890,7 +914,8 @@ mod tests {
         cpu_pct: cpu,
         cpu_time_ns: mins * 60_000_000_000,
         mem_bytes: mem_mb << 20,
-        power_w: power,
+        cpu_power_w: power,
+        gpu_power_w: 0.0,
         gpu_pct: gpu,
         started: Some((pid as u64, 0)),
       };

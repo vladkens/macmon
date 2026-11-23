@@ -52,6 +52,7 @@ const HELP: &[Row] = &[
   Term("CPU%", "100% is one fully busy core"),
   Term("TIME", "CPU time used since the process started"),
   Term("freq", "usage weighted by frequency; raw: share of time busy"),
+  Term("POWER", "CPU power + an estimated share of GPU power"),
   Term("POWER -", "not available for other users' processes"),
 ];
 

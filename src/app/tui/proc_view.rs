@@ -201,7 +201,7 @@ fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
     ProcSort::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
     ProcSort::Time => a.cpu_time_ns.cmp(&b.cpu_time_ns),
     ProcSort::Mem => a.mem_bytes.cmp(&b.mem_bytes),
-    ProcSort::Power => a.power_w.unwrap_or(0.0).total_cmp(&b.power_w.unwrap_or(0.0)),
+    ProcSort::Power => a.power_w().unwrap_or(0.0).total_cmp(&b.power_w().unwrap_or(0.0)),
     ProcSort::Gpu => a.gpu_pct.total_cmp(&b.gpu_pct),
     ProcSort::Pid => a.pid.cmp(&b.pid),
     ProcSort::Name => lower(&a.name).cmp(lower(&b.name)),
@@ -212,7 +212,7 @@ fn compare(a: &ProcInfo, b: &ProcInfo, sort: ProcSort) -> Ordering {
 /// Sorts by `sort` in the given direction. Processes without a power reading go last when sorted
 /// by power, ties are ordered by pid.
 fn sort_procs(procs: &mut [ProcInfo], sort: ProcSort, desc: bool) {
-  let missing = |p: &ProcInfo| sort == ProcSort::Power && p.power_w.is_none();
+  let missing = |p: &ProcInfo| sort == ProcSort::Power && p.power_w().is_none();
   procs.sort_by(|a, b| {
     let ord = compare(a, b, sort);
     let ord = if desc { ord.reverse() } else { ord };
@@ -295,7 +295,7 @@ impl Group {
       group.cpu_time_ns += proc.cpu_time_ns;
       group.mem_bytes += proc.mem_bytes;
       group.gpu_pct += proc.gpu_pct;
-      match proc.power_w {
+      match proc.power_w() {
         Some(watts) => *group.power_w.get_or_insert(0.0) += watts,
         None => group.power_partial = true,
       }
@@ -1033,7 +1033,7 @@ impl ProcView {
   /// without it next to some with it.
   fn border_text(&self, power_shown: bool) -> Vec<Span<'static>> {
     let procs = self.procs().unwrap_or_default();
-    let power = |known: bool| procs.iter().any(|p| p.power_w.is_some() == known);
+    let power = |known: bool| procs.iter().any(|p| p.power_w().is_some() == known);
     if self.copied {
       vec![faint("copied")]
     } else if power_shown && power(true) && power(false) {
@@ -1168,7 +1168,7 @@ impl App {
       ProcSort::Cpu => pct_cell(proc.cpu_pct),
       ProcSort::Time => time_cell(proc.cpu_time_ns),
       ProcSort::Mem => self.mem_cell(proc.mem_bytes),
-      ProcSort::Power => power_cell(proc.power_w, false),
+      ProcSort::Power => power_cell(proc.power_w(), false),
       ProcSort::Gpu => pct_cell(proc.gpu_pct),
     }
   }
@@ -1299,7 +1299,8 @@ mod tests {
       // an order of its own: the last two digits of the pid in seconds
       cpu_time_ns: (pid % 100) as u64 * 1_000_000_000,
       mem_bytes: mem_mb * MIB,
-      power_w: power,
+      cpu_power_w: power,
+      gpu_power_w: 0.0,
       gpu_pct: gpu,
       started: None,
     }
@@ -1697,6 +1698,28 @@ mod tests {
       type_str(&mut view, filter);
       assert_eq!(pids(&view), expected, "{filter:?}");
     }
+  }
+
+  #[test]
+  fn power_adds_the_gpu_share() {
+    // a process busy on the GPU with little CPU power goes above cargo's 3.2 W; launchd, of
+    // another user, keeps no reading with a GPU share
+    let mut procs = sample();
+    procs.push(ProcInfo { gpu_power_w: 27.0, ..proc(5120, "python3", 4.6, 4700, Some(0.1), 98.0) });
+    procs[0].gpu_power_w = 2.0;
+    let mut view = ProcView::new(ProcSort::Power, true);
+    view.set_procs(procs);
+    assert_eq!(pids(&view), [5120, 4410, 631, 2301, 77, 1]);
+
+    let power = |pid| view.rows().find(|p| p.pid == pid).and_then(ProcInfo::power_w);
+    assert_eq!(super::power_cell(power(5120), false).content, "27.10W");
+    assert_eq!(super::power_cell(power(1), false).content, "-");
+
+    // group totals add the shares of the processes with a reading
+    assert!(press(&mut view, KeyCode::Char('/')));
+    type_str(&mut view, "python, d");
+    let totals: Vec<_> = view.groups().iter().map(|g| (g.power_w, g.power_partial)).collect();
+    assert_eq!(totals, [(Some(27.1), false), (Some(1.5), true)]);
   }
 
   #[test]

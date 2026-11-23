@@ -53,7 +53,7 @@ impl Cond {
       "port" => value.parse().ok().map(Self::Port),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
-      "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
+      "power" => Self::num(|p| p.power_w().map(f64::from), NUM, value),
       "mem" => Self::num(|p| Some(p.mem_bytes as f64), MEM, value.trim_end_matches('b')),
       "time" => Self::num(|p| Some(p.cpu_time_ns as f64 / 1e9), TIME, value),
       _ => Some(Self::Text(word.to_string())),
@@ -173,7 +173,8 @@ mod tests {
       // an order of its own: the last two digits of the pid in seconds
       cpu_time_ns: (pid % 100) as u64 * 1_000_000_000,
       mem_bytes: mem_mb << 20,
-      power_w: power,
+      cpu_power_w: power,
+      gpu_power_w: 0.0,
       gpu_pct: gpu,
       started: None,
     }
@@ -214,6 +215,9 @@ mod tests {
     procs[0].user = "root".to_string();
     procs[1].path = String::new();
     procs[2].path = "/Applications/Safari.app/Contents/MacOS/Safari".to_string();
+    // `power:` reads CPU power and the GPU share: Safari 1.3 W, launchd still none
+    procs[2].gpu_power_w = 0.5;
+    procs[0].gpu_power_w = 5.0;
     procs.push(proc(500, "Google Chrome", 1.0, 5, Some(0.1), 0.0));
     procs.push(proc(501, "Google Chrome Helper", 1.0, 5, Some(0.1), 0.0));
     procs.push(proc(502, "node:worker", 1.0, 5, Some(0.1), 0.0));
@@ -240,7 +244,7 @@ mod tests {
       ("cpu:<0.5", &[77]),
       ("gpu:>5", &[631]),
       ("gpu:<5", &[1, 4410, 77, 500, 501, 502]),
-      ("power:>1", &[631, 4410]),
+      ("power:>1", &[631, 2301, 4410]),
       ("power:<0.5", &[77, 500, 501, 502]),
       ("mem:>500m", &[2301]),
       ("mem:<6", &[]),
@@ -285,7 +289,7 @@ mod tests {
       ("foo:>1", &[]),
       // no value for a key
       ("power:<1000", &[631, 2301, 4410, 77, 500, 501, 502]),
-      ("!power:>1", &[1, 2301, 77, 500, 501, 502]),
+      ("!power:>1", &[1, 77, 500, 501, 502]),
       ("path:/", &[1, 2301, 4410, 77, 500, 501, 502]),
     ];
 

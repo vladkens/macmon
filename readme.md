@@ -83,6 +83,8 @@ Options:
 
 Run `macmon` without a subcommand to open the terminal UI: the metric boxes on top and the process list below. Press `?` in the app to see the keys.
 
+POWER in the process list is the CPU power of a process plus its share of the GPU power, which macmon splits between processes by their GPU time. The share is an estimate, as good as the GPU time macOS records: under very long GPU jobs, such as `macmon stress gpu`, most of it goes to WindowServer. Other users' processes show `-`: their CPU energy isn't readable without root.
+
 When the TUI runs as root, preference changes apply only to that session and are not saved. Run without `sudo` to persist settings.
 
 Press `/` to filter the process list: commas separate alternatives, spaces combine words, `!` negates a word. For example `chrome, !helper`, `node mem:500m !user:root` or `app:safari`, which shows the Safari app with its helpers. A plain word looks in the name or pid. Keys take a number, above it or below it with `<`: `cpu:`, `gpu:`, `power:`, `mem:` (`k`, `m`, `g`) and `time:` (`s`, `m`, `h`, `d`); or text: `user:`, `path:`, `dir:` (the working directory), `cmd:` (the command line, of your own processes) and `app:` (the name of the `.app` the process or its responsible process runs from); or an exact local TCP or UDP port, of your own processes: `port:3000`. `Enter` keeps the filter, `Esc` clears it.
@@ -126,7 +128,7 @@ Two endpoints are available:
 | `GET /json`    | JSON       | Current metrics snapshot (same format as `pipe --soc-info`)                                       |
 | `GET /metrics` | Prometheus | Metrics in [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/) |
 
-`--processes` adds the processes that match a [process filter](#interactive-mode) query to `/metrics`, with their `pid` and `name`: CPU and GPU percent, CPU time, memory and, for your own processes, power, as the TUI columns show them.
+`--processes` adds the processes that match a [process filter](#interactive-mode) query to `/metrics`, with their `pid` and `name`: CPU and GPU percent, CPU time and memory as in the TUI, the GPU power share (`macmon_process_gpu_power_watts`) and, for your own processes, CPU power (`macmon_process_power_watts`). POWER in the TUI and the `power:` filter use the sum of the two.
 
 ```sh
 macmon serve --host 127.0.0.1 --processes "gpu:>0"        # whoever uses the GPU
