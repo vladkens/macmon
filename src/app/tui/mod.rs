@@ -253,7 +253,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
       let mut procs: Option<(u64, ProcSampler, Instant)> = None;
       // GPU energy (J) and time (s) of the metrics since the last process sample, for its GPU
       // power, and when the last metrics were taken: their window ends there
-      let (mut gpu, mut metrics_at) = ((0.0, 0.0), Instant::now());
+      let (mut gpu_joules, mut gpu_secs, mut metrics_at) = (0.0, 0.0, Instant::now());
 
       loop {
         let showing = procs.as_ref().map(|p| p.0);
@@ -277,7 +277,7 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
               let (started, mut sampler) = (Instant::now(), ProcSampler::new());
               sampler.sample(0.0);
               procs = Some((showing, sampler, started));
-              gpu = (0.0, 0.0);
+              (gpu_joules, gpu_secs) = (0.0, 0.0);
               tick = started + PROCS_MIN_GAP;
             }
           }
@@ -297,12 +297,14 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
         let metrics = Box::new(sampler.get_metrics_now()?);
         let now = Instant::now();
         let secs = now.duration_since(metrics_at).as_secs_f64();
-        (gpu, metrics_at) = ((gpu.0 + metrics.gpu_power as f64 * secs, gpu.1 + secs), now);
+        gpu_joules += metrics.gpu_power as f64 * secs;
+        gpu_secs += secs;
+        metrics_at = now;
         let list = match &mut procs {
           Some((showing, sampler, last)) if procs_due(*last, tick) => {
             *last = tick;
-            let gpu_w = if gpu.1 > 0.0 { (gpu.0 / gpu.1) as f32 } else { metrics.gpu_power };
-            gpu = (0.0, 0.0);
+            let gpu_w = (gpu_joules / gpu_secs.max(f64::MIN_POSITIVE)) as f32;
+            (gpu_joules, gpu_secs) = (0.0, 0.0);
             Some((*showing, sampler.sample(gpu_w)))
           }
           _ => None,

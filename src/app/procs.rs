@@ -106,6 +106,7 @@ unsafe extern "C" {
   fn IOServiceMatching(name: *const c_char) -> CFDictionaryRef;
   fn IOServiceGetMatchingServices(main_port: u32, matching: CFDictionaryRef, existing: *mut u32) -> c_int;
   fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32) -> c_int;
+  fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> c_int;
   fn IORegistryEntryCreateCFProperty(entry: u32, key: CFStringRef, allocator: CFAllocatorRef, options: u32) -> CFTypeRef;
   fn IOIteratorNext(iterator: u32) -> u32;
   fn IOIteratorIsValid(iterator: u32) -> c_int;
@@ -203,11 +204,11 @@ fn gpu_ns(prev: Option<u64>, cur: Option<u64>) -> u64 {
   }
 }
 
-/// GPU share from GPU time snapshots `elapsed_ns` apart.
-fn gpu_pct(prev: Option<u64>, cur: Option<u64>, elapsed_ns: u64) -> f32 {
+/// GPU share of `gpu_ns` GPU time in `elapsed_ns`.
+fn gpu_pct(gpu_ns: u64, elapsed_ns: u64) -> f32 {
   match elapsed_ns {
     0 => 0.0,
-    _ => (gpu_ns(prev, cur) as f64 / elapsed_ns as f64 * 100.0).min(100.0) as f32,
+    _ => (gpu_ns as f64 / elapsed_ns as f64 * 100.0).min(100.0) as f32,
   }
 }
 
@@ -237,13 +238,14 @@ fn usage(prev: Option<&Counters>, cur: &Counters, elapsed_ns: u64) -> Usage {
     (_, None) => None,
   };
 
-  let gpu_pct = gpu_pct(prev.gpu_ns, cur.gpu_ns, elapsed_ns);
+  let gpu_ns = gpu_ns(prev.gpu_ns, cur.gpu_ns);
+  let gpu_pct = gpu_pct(gpu_ns, elapsed_ns);
   let elapsed_ns = elapsed_ns as f64;
   Usage {
     cpu_pct: ((cur.cpu_ns - prev.cpu_ns) as f64 / elapsed_ns * 100.0) as f32,
     power_w: energy_nj.map(|nj| (nj as f64 / elapsed_ns) as f32), // nJ per ns = W
     gpu_pct,
-    gpu_ns: gpu_ns(prev.gpu_ns, cur.gpu_ns),
+    gpu_ns,
   }
 }
 
@@ -567,6 +569,12 @@ impl IoObject {
     let value = unsafe { IORegistryEntryCreateCFProperty(self.0, key, kCFAllocatorDefault, 0) };
     (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) })
   }
+
+  /// Registry entry ID, unique for the entry's lifetime.
+  fn id(&self) -> Option<u64> {
+    let mut id = 0;
+    (unsafe { IORegistryEntryGetRegistryEntryID(self.0, &mut id) } == 0).then_some(id)
+  }
 }
 
 /// IOKit iterator yielding owned objects.
@@ -631,9 +639,9 @@ fn app_usage_ns(usage: &CFType) -> u64 {
   entries.iter().filter_map(|entry| entry_ns(*entry)).fold(0, u64::saturating_add)
 }
 
-/// `(pid, GPU time in ns)` of every GPU user client. The clients are unregistered children of
-/// the `IOAccelerator` services, so they're only found by walking the service plane.
-fn read_gpu_clients() -> Option<Vec<(i32, u64)>> {
+/// `(entry ID, pid, GPU time in ns)` of every GPU user client. The clients are unregistered
+/// children of the `IOAccelerator` services, so they're only found by walking the service plane.
+fn read_gpu_clients() -> Option<Vec<(u64, i32, u64)>> {
   let creator_key = CFString::from_static_string("IOUserClientCreator");
   let usage_key = CFString::from_static_string("AppUsage");
   let mut clients = Vec::new();
@@ -647,8 +655,9 @@ fn read_gpu_clients() -> Option<Vec<(i32, u64)>> {
         let Some(pid) = creator.and_then(|creator| parse_creator(&creator.to_string())) else {
           continue;
         };
+        let Some(id) = client.id() else { continue };
         let gpu_ns = client.property(&usage_key).map_or(0, |usage| app_usage_ns(&usage));
-        clients.push((pid, gpu_ns));
+        clients.push((id, pid, gpu_ns));
       }
       Some(iter.is_valid())
     })?;
@@ -675,19 +684,36 @@ fn walk_until_consistent<T>(
   Some(())
 }
 
-/// GPU time per pid; a process may own several clients.
-fn sum_gpu_times(clients: impl IntoIterator<Item = (i32, u64)>) -> HashMap<i32, u64> {
-  let mut times = HashMap::new();
-  for (pid, gpu_ns) in clients {
-    let total: &mut u64 = times.entry(pid).or_default();
-    *total = total.saturating_add(gpu_ns);
-  }
-  times
+/// GPU time per pid, grown by what each of its clients gained since the last read: a closed
+/// client doesn't take its time back, and a client new to the read (also one the last walk
+/// missed) starts from its current time instead of bringing all of it at once.
+#[derive(Debug, Default)]
+struct GpuTimes {
+  /// The last read of each client by entry ID: its pid and GPU time.
+  clients: HashMap<u64, (i32, u64)>,
+  /// GPU time of the processes with clients.
+  totals: HashMap<i32, u64>,
 }
 
-/// GPU time per pid, empty when the IORegistry isn't readable.
-fn gpu_times() -> HashMap<i32, u64> {
-  read_gpu_clients().map(sum_gpu_times).unwrap_or_default()
+impl GpuTimes {
+  /// Takes a read of `(entry ID, pid, GPU time)` per client; a process may own several.
+  fn update(&mut self, clients: impl IntoIterator<Item = (u64, i32, u64)>) -> HashMap<i32, u64> {
+    let mut seen = HashMap::new();
+    let mut totals = HashMap::new();
+    for (id, pid, gpu_ns) in clients {
+      let gained = match self.clients.get(&id) {
+        Some(&(last_pid, last_ns)) if last_pid == pid => gpu_ns.saturating_sub(last_ns),
+        _ => 0,
+      };
+      let total = totals.entry(pid).or_insert_with(|| self.totals.get(&pid).copied().unwrap_or(0));
+      *total = total.saturating_add(gained);
+      seen.insert(id, (pid, gpu_ns));
+    }
+
+    self.clients = seen;
+    self.totals = totals.clone();
+    totals
+  }
 }
 
 // MARK: Sampler
@@ -720,6 +746,7 @@ pub struct ProcSampler {
   ps_rows: HashMap<i32, Raw>,
   ps_last: Option<Instant>,
   ps_next: Option<Instant>,
+  gpu: GpuTimes,
 }
 
 impl ProcSampler {
@@ -745,6 +772,7 @@ impl ProcSampler {
       ps_rows: HashMap::new(),
       ps_last: None,
       ps_next: None,
+      gpu: GpuTimes::default(),
     }
   }
 
@@ -755,7 +783,9 @@ impl ProcSampler {
     let now = Instant::now();
     let elapsed_ns = self.last.map_or(0, |last| now.duration_since(last).as_nanos() as u64);
     self.last = Some(now);
-    let gpu = gpu_times(); // Read next to `now`: the counters carry no timestamp of their own.
+    // Read next to `now`: the counters carry no timestamp of their own. Empty when the IORegistry
+    // isn't readable.
+    let gpu = read_gpu_clients().map(|clients| self.gpu.update(clients)).unwrap_or_default();
     let ps_due = self.ps_next.is_none_or(|next| now >= next);
 
     list_pids(&mut self.pids);
@@ -861,7 +891,7 @@ impl ProcSampler {
       self.known.retain(|pid, _| alive.contains(pid));
     }
 
-    let total_ns = gpu_ns.iter().sum();
+    let total_ns = gpu_ns.iter().fold(0, |sum: u64, &ns| sum.saturating_add(ns));
     for (proc, gpu_ns) in procs.iter_mut().zip(gpu_ns) {
       proc.gpu_power_w = gpu_share(gpu_w, gpu_ns, total_ns);
     }
@@ -880,6 +910,7 @@ mod tests {
   /// Pids of made-up processes.
   const A: i32 = 1_000_001;
   const B: i32 = 1_000_002;
+  const C: i32 = 1_000_003;
 
   fn counters(cpu_ns: u64, energy_nj: Option<u64>) -> Counters {
     Counters { start: 42, cpu_ns, energy_nj, ..Counters::default() }
@@ -916,9 +947,10 @@ mod tests {
 
   #[test]
   fn gpu_rates() {
+    let gpu_pct = |prev, cur, elapsed_ns| gpu_pct(gpu_ns(prev, cur), elapsed_ns);
     assert_eq!(gpu_pct(Some(0), Some(SEC / 2), SEC), 50.0);
     assert_eq!(gpu_pct(Some(0), Some(3 * SEC), SEC), 100.0); // several queues busy at once
-    assert_eq!(gpu_pct(Some(SEC), Some(0), SEC), 0.0); // a client closed
+    assert_eq!(gpu_pct(Some(SEC), Some(0), SEC), 0.0); // a queue closed
     assert_eq!(gpu_pct(None, Some(SEC), SEC), 0.0); // first GPU client: no baseline
     assert_eq!(gpu_pct(Some(0), None, SEC), 0.0); // GPU clients gone
     assert_eq!(gpu_pct(Some(0), Some(SEC), 0), 0.0);
@@ -1089,6 +1121,34 @@ mod tests {
     let second = sampler.update(rows, SEC, None, 8.0);
     assert_eq!(power(&second), [(6.0, Some(7.0)), (2.0, None)]);
     assert_eq!((second[0].gpu_pct, second[1].gpu_pct), (100.0, 50.0));
+
+    // A without GPU clients now, a new process B under the same pid with GPU time from before,
+    // C new: nobody has GPU time in the tick, nobody is billed
+    let new_b = |gpu_ns| {
+      let raw = at(B, None, gpu_ns);
+      Raw { counters: Counters { start: 43, ..raw.counters }, ..raw }
+    };
+    let rows = vec![row(A, 0, Some(SEC), "x"), new_b(SEC), at(C, Some(0), 0)];
+    let third = sampler.update(rows, SEC, None, 8.0);
+    assert_eq!(power(&third), [(0.0, Some(0.0)), (0.0, None), (0.0, Some(0.0))]);
+    let rows = vec![row(A, 0, Some(SEC), "x"), new_b(SEC), at(C, Some(0), SEC / 10)];
+    let fourth = sampler.update(rows, SEC, None, 8.0);
+    assert_eq!(power(&fourth), [(0.0, Some(0.0)), (0.0, None), (8.0, Some(8.0))]);
+  }
+
+  #[test]
+  fn gpu_times_grow_by_client() {
+    let mut gpu = GpuTimes::default();
+    // the first read is a baseline
+    assert_eq!(gpu.update([(1, A, 50), (2, A, 10), (3, B, 7)]), HashMap::from([(A, 0), (B, 0)]));
+    assert_eq!(gpu.update([(1, A, 55), (2, A, 12), (3, B, 10)]), HashMap::from([(A, 7), (B, 3)]));
+    // A closes client 1: its time stays; the walk misses client 3, B's new client 4 starts from
+    // its current time
+    assert_eq!(gpu.update([(2, A, 16), (4, B, 100)]), HashMap::from([(A, 11), (B, 3)]));
+    // client 3 is back: from its current time, no spike of its whole time
+    assert_eq!(gpu.update([(2, A, 16), (3, B, 90), (4, B, 101)]), HashMap::from([(A, 11), (B, 4)]));
+    // a process without clients drops out
+    assert_eq!(gpu.update([(2, A, 17)]), HashMap::from([(A, 12)]));
   }
 
   #[test]
