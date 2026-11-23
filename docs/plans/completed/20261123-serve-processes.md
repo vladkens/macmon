@@ -1,3 +1,5 @@
+Done: 2026-11-23, PR #149
+
 # Processes in `serve`
 
 `macmon serve --processes "<query>"` exports the processes that match a TUI filter query to `/metrics`, as proposed in #133: `--processes "gpu:>0"` for whoever uses the GPU, `--processes "app:llama-server"` for one app. Without the option nothing per-process is exported, as today.
@@ -34,3 +36,7 @@ Compatibility: a new option and new metrics only; existing Prometheus and JSON o
 - [x] Tests: Prometheus output of a process with and without power, label escaping, the plist with and without the option, the CLI.
 - [x] `make check`, `make test`, `make loc REF=origin/main`.
 - [x] By hand on M5 / macOS 27.2: `macmon serve --processes "gpu:>0"` and `"app:Safari"` under `macmon stress gpu`, `curl /metrics`; CPU cost of `serve` with and without the option.
+
+## Result
+
+`serve --processes` exports the five process metrics for the matching processes; a query with a bad word is refused, as it would match every process. On M5 / macOS 27.2.1 `gpu:>0` under `macmon stress gpu` showed the stress process, WindowServer and Rex; `""` exported 822 processes. A release build idle at 1 s used 0.45 s of CPU in 30 s with the option against 0.23 s without. Untested: `--install` with a query by hand, other chips and macOS versions.
