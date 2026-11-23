@@ -1,3 +1,5 @@
+Done: 2026-11-23, PR #142
+
 # Fallback sources from mactop
 
 A backup way to get the same power and temperature numbers if Apple breaks the sources macmon reads now, as macOS 27 broke `Energy Model`: the sources [mactop](https://github.com/metaspartan/mactop) (MIT) uses, as last resorts after the ones macmon already has. They stay unused while the current sources work. One PR; the maintainer waived the ~200-line limit for it.
@@ -36,4 +38,8 @@ No JSON, Prometheus, library API or config change, and no new dependency.
 - [x] `Ts*` per key idle and under `macmon stress cpu` on M1, M2 and M5; then the key rule, the 10 °C floor and skipping unreadable keys.
 - [x] `make check`, `make test`, `make loc REF=origin/main`; own cost of the PMP channels.
 - [x] On M5 / macOS 27.2, M2 / macOS 27.0.1 and M1 / macOS 15.8.1: `macmon debug`, `macmon pipe -s 5 -i 1000` idle, under `macmon stress cpu`, `stress gpu` and a memory load; each fallback forced in a local build (CLPC off, `Energy Model` off, no battery, no `PSTR`) against the primary source; temperatures per key.
-- [ ] A Mac Studio or Mac mini owner's `macmon debug` and `macmon pipe` (desktop `sys_power`).
+- [x] A Mac Studio or Mac mini owner's `macmon debug` and `macmon pipe` (desktop `sys_power`).
+
+## Result
+
+Shipped in #142: the power, `sys_power` and temperature fallbacks above, in `src/fallback.rs`. The desktop run came with #145, on a Mac Studio (M5 Ultra, macOS 27.2.1): `PSTR` and `PDTR` read 0 and `PD0R` 6.54 W at idle, as mactop#96 reported. macOS publishes `AppleSmartBattery` there with `BatteryInstalled = No`, so `sys_power` never reached `PD0R` and read `chip_power`; since #145 only a service with an installed battery counts. Untested: Mac mini, Mac Pro, M3, M4, M6, per-die PMP and several `PZD` keys, macOS 26, a real Mac without CLPC counters, and `PD0R` against a wall meter.
