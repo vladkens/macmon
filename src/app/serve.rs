@@ -14,8 +14,11 @@ use macmon::sources::WithError;
 use macmon::{Metrics, SocInfo};
 
 use crate::metrics_to_json_value;
+use crate::procs::ProcInfo;
 
-pub type SharedMetrics = Arc<RwLock<Option<Metrics>>>;
+/// The last sample: the metrics and the processes of `--processes`, together so that one scrape
+/// never mixes two samples.
+pub type SharedMetrics = Arc<RwLock<Option<(Metrics, Vec<ProcInfo>)>>>;
 
 const DAEMON_PATH: &str = "/Library/LaunchDaemons/com.macmon.plist";
 const DAEMON_TARGET: &str = "system/com.macmon";
@@ -152,6 +155,41 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
   out
 }
 
+/// Process metrics of `--processes`: a series per process with its `pid` and `name`, as the TUI
+/// columns show them; `macmon_process_power_watts` only for processes with an energy counter.
+fn procs_to_prometheus(procs: &[ProcInfo], soc: &SocInfo) -> String {
+  type Read = fn(&ProcInfo) -> Option<String>;
+  #[rustfmt::skip]
+  let metrics: [(&str, &str, &str, Read); 5] = [
+    ("cpu_percent", "gauge", "Process CPU usage in percent, 100 is one busy core", |p| Some(p.cpu_pct.to_string())),
+    ("cpu_seconds_total", "counter", "Process user and system CPU time in seconds", |p| Some((p.cpu_time_ns as f64 / 1e9).to_string())),
+    ("memory_bytes", "gauge", "Process memory in bytes: physical footprint of own processes, resident size of others", |p| Some(p.mem_bytes.to_string())),
+    ("gpu_percent", "gauge", "Share of the interval the GPU spent on the process in percent", |p| Some(p.gpu_pct.to_string())),
+    ("power_watts", "gauge", "Process CPU power in Watts, own processes only", |p| p.power_w.map(|x| x.to_string())),
+  ];
+
+  let chip = escape_label_value(&soc.chip_name);
+  let mut out = String::new();
+  for (name, kind, help, read) in metrics {
+    let rows: Vec<_> = procs.iter().filter_map(|p| read(p).map(|x| (p, x))).collect();
+    if rows.is_empty() {
+      continue;
+    }
+
+    let name = format!("macmon_process_{name}");
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+    for (p, x) in rows {
+      let proc_name = escape_label_value(&p.name);
+      out.push_str(&format!(
+        "{name}{{chip=\"{chip}\",pid=\"{}\",name=\"{proc_name}\"}} {x}\n",
+        p.pid
+      ));
+    }
+    out.push('\n');
+  }
+  out
+}
+
 fn to_json(m: &Metrics, soc: &SocInfo) -> String {
   let mut doc = metrics_to_json_value(m).unwrap_or_default();
   doc["soc"] = serde_json::to_value(soc).unwrap_or_default();
@@ -215,7 +253,7 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
 
   let lock = shared.read().unwrap();
 
-  let Some(m) = lock.as_ref() else {
+  let Some((m, procs)) = lock.as_ref() else {
     drop(lock);
     write_response(&mut stream, 503, "application/json", r#"{"error":"no data yet"}"#.to_string());
     return;
@@ -228,7 +266,7 @@ fn handle_conn(mut stream: TcpStream, shared: SharedMetrics, soc: Arc<SocInfo>) 
       write_response(&mut stream, 200, "application/json", body);
     }
     "/metrics" => {
-      let body = to_prometheus(m, &soc);
+      let body = to_prometheus(m, &soc) + &procs_to_prometheus(procs, &soc);
       drop(lock);
       write_response(&mut stream, 200, "text/plain; version=0.0.4; charset=utf-8", body);
     }
@@ -303,9 +341,13 @@ pub fn run(host: &str, port: u16, shared: SharedMetrics, soc: Arc<SocInfo>) -> W
 
 // MARK: launchd
 
-fn plist_text(bin: &str, host: &str, port: u16, user: Option<&str>) -> String {
+fn plist_text(bin: &str, host: &str, port: u16, procs: Option<&str>, user: Option<&str>) -> String {
   let bin = escape_xml(bin);
   let host_xml = escape_xml(host);
+  let procs = procs.map(escape_xml);
+  let procs =
+    procs.map(|x| format!("    <string>--processes</string>\n    <string>{x}</string>\n"));
+  let procs = procs.unwrap_or_default();
   let user = user.map(escape_xml);
   let user = user.map(|x| format!("  <key>UserName</key>\n  <string>{x}</string>\n"));
   let user = user.unwrap_or_default();
@@ -325,7 +367,7 @@ fn plist_text(bin: &str, host: &str, port: u16, user: Option<&str>) -> String {
     <string>{host_xml}</string>
     <string>--port</string>
     <string>{port}</string>
-  </array>
+{procs}  </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -378,7 +420,7 @@ fn remove_agent(uid: u32, home: &str) -> std::io::Result<bool> {
   Ok(found)
 }
 
-pub fn install_agent(host: &str, port: u16) -> WithError<()> {
+pub fn install_agent(host: &str, port: u16, procs: Option<&str>) -> WithError<()> {
   if is_root() {
     return Err("the macmon agent belongs to your user, run without sudo".into());
   }
@@ -393,7 +435,7 @@ pub fn install_agent(host: &str, port: u16) -> WithError<()> {
   let path = agent_path(&home);
 
   let bin = std::env::current_exe()?;
-  let plist = plist_text(&bin.to_string_lossy(), host, port, None);
+  let plist = plist_text(&bin.to_string_lossy(), host, port, procs, None);
 
   std::fs::create_dir_all(format!("{home}/Library/LaunchAgents"))?;
   remove_agent(unsafe { libc::getuid() }, &home)?;
@@ -406,7 +448,7 @@ pub fn install_agent(host: &str, port: u16) -> WithError<()> {
   Ok(())
 }
 
-pub fn install_daemon(host: &str, port: u16) -> WithError<()> {
+pub fn install_daemon(host: &str, port: u16, procs: Option<&str>) -> WithError<()> {
   if !is_root() {
     return Err("installing needs sudo, or --agent to start at login without it".into());
   }
@@ -416,7 +458,8 @@ pub fn install_daemon(host: &str, port: u16) -> WithError<()> {
   };
 
   let bin = std::env::current_exe()?;
-  std::fs::write(DAEMON_PATH, plist_text(&bin.to_string_lossy(), host, port, Some(&user)))?;
+  let plist = plist_text(&bin.to_string_lossy(), host, port, procs, Some(&user));
+  std::fs::write(DAEMON_PATH, plist)?;
 
   let _ = Command::new("launchctl").args(["bootout", DAEMON_TARGET]).output();
 
@@ -484,8 +527,10 @@ mod tests {
   use macmon::{CpuTierMetrics, Metrics, SocInfo};
 
   use super::{
-    daemon_user, escape_label_value, escape_xml, plist_text, serve_url, to_json, to_prometheus,
+    daemon_user, escape_label_value, escape_xml, plist_text, procs_to_prometheus, serve_url,
+    to_json, to_prometheus,
   };
+  use crate::procs::ProcInfo;
 
   #[test]
   fn rejects_connections_above_the_worker_limit() {
@@ -497,7 +542,7 @@ mod tests {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let active = Arc::new(AtomicUsize::new(0));
-    let shared = Arc::new(RwLock::new(Some(Metrics::default())));
+    let shared = Arc::new(RwLock::new(Some((Metrics::default(), vec![]))));
     let soc = Arc::new(SocInfo::default());
     let mut clients = Vec::new();
     // Keep all admitted clients connected until the excess connection is closed.
@@ -737,14 +782,64 @@ mod tests {
 
   #[test]
   fn agent_plist_stays_the_same() {
-    assert_eq!(plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, None), AGENT_PLIST);
+    assert_eq!(plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, None, None), AGENT_PLIST);
   }
 
   #[test]
   fn daemon_plist_names_its_user() {
     let user = "  <key>UserName</key>\n  <string>a&amp;b</string>\n";
     let expected = AGENT_PLIST.replace("</dict>", &format!("{user}</dict>"));
-    assert_eq!(plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, Some("a&b")), expected);
+    assert_eq!(
+      plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, None, Some("a&b")),
+      expected
+    );
+  }
+
+  #[test]
+  fn plist_keeps_the_process_query() {
+    let procs = "    <string>--processes</string>\n    <string>gpu:&gt;0</string>\n";
+    let expected = AGENT_PLIST.replace("  </array>", &format!("{procs}  </array>"));
+    let plist = plist_text("/opt/homebrew/bin/macmon", "0.0.0.0", 9090, Some("gpu:>0"), None);
+    assert_eq!(plist, expected);
+  }
+
+  #[test]
+  fn process_series_per_process_with_power_only_when_known() {
+    let proc = |pid, name: &str, power_w| ProcInfo {
+      pid,
+      name: name.into(),
+      path: String::new(),
+      user: String::new(),
+      cpu_pct: 12.5,
+      cpu_time_ns: 1_500_000_000,
+      mem_bytes: 2048,
+      power_w,
+      gpu_pct: 50.0,
+      started: None,
+    };
+    let procs = [proc(42, "llama-server", Some(1.25)), proc(7, "a\"b", None)];
+    let output = procs_to_prometheus(&procs, &SocInfo::default());
+    assert!(output.contains("# TYPE macmon_process_cpu_seconds_total counter\n"));
+    assert!(
+      output
+        .contains("macmon_process_cpu_percent{chip=\"\",pid=\"42\",name=\"llama-server\"} 12.5\n")
+    );
+    assert!(output.contains(
+      "macmon_process_cpu_seconds_total{chip=\"\",pid=\"42\",name=\"llama-server\"} 1.5\n"
+    ));
+    assert!(
+      output.contains("macmon_process_memory_bytes{chip=\"\",pid=\"7\",name=\"a\\\"b\"} 2048\n")
+    );
+    assert!(
+      output.contains("macmon_process_gpu_percent{chip=\"\",pid=\"7\",name=\"a\\\"b\"} 50\n")
+    );
+    assert!(
+      output
+        .contains("macmon_process_power_watts{chip=\"\",pid=\"42\",name=\"llama-server\"} 1.25\n")
+    );
+    assert!(!output.contains("macmon_process_power_watts{chip=\"\",pid=\"7\""));
+
+    assert_eq!(procs_to_prometheus(&[], &SocInfo::default()), "");
   }
 
   #[test]

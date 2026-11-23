@@ -126,6 +126,15 @@ Two endpoints are available:
 | `GET /json`    | JSON       | Current metrics snapshot (same format as `pipe --soc-info`)                                       |
 | `GET /metrics` | Prometheus | Metrics in [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/) |
 
+`--processes` adds the processes that match a [process filter](#interactive-mode) query to `/metrics`, with their `pid` and `name`: CPU and GPU percent, CPU time, memory and, for your own processes, power, as the TUI columns show them.
+
+```sh
+macmon serve --host 127.0.0.1 --processes "gpu:>0"        # whoever uses the GPU
+macmon serve --host 127.0.0.1 --processes "llama-server"  # by name
+```
+
+The port has no authentication, so process names and pids are visible to anyone who can reach it. Every matching process is a series of its own: keep the query narrow. `--install` keeps the query.
+
 #### launchd service
 
 To start `macmon serve` at boot, with nobody logged in, and keep it running:
