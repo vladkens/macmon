@@ -1,3 +1,13 @@
+## v0.12.1 – 2026-11-23
+
+### Fixes
+
+- Fixed Mac Studio on macOS 27 reporting a battery at 0 % and `sys_power` equal to `chip_power` instead of the adapter power (#145, by @JondelaVega)
+
+**Full Changelog**: https://github.com/vladkens/macmon/compare/v0.12.0...v0.12.1
+
+---
+
 ## v0.12.0 – 2026-11-15
 
 ### Breaking Changes
