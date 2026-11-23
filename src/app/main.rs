@@ -368,7 +368,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         match sampler.get_metrics_now() {
           Ok(m) => {
             let rows = procs.as_mut().map_or(vec![], |(query, procs)| {
-              procs.sample().into_iter().filter(|p| query.matches(p)).collect()
+              procs.sample(m.gpu_power).into_iter().filter(|p| query.matches(p)).collect()
             });
             *shared.write().unwrap() = Some((m, rows));
           }

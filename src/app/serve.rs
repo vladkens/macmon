@@ -156,23 +156,25 @@ fn to_prometheus(m: &Metrics, soc: &SocInfo) -> String {
 }
 
 /// Process metrics of `--processes`: a series per process with its `pid` and `name`, as the TUI
-/// columns show them; `macmon_process_power_watts` only for processes with an energy counter.
+/// columns show them; POWER in two parts, CPU power only for processes with an energy counter.
+/// Power is left out in a VM, as the power gauges of the chip are.
 fn procs_to_prometheus(procs: &[ProcInfo], soc: &SocInfo) -> String {
   type Read = fn(&ProcInfo) -> Option<String>;
   #[rustfmt::skip]
-  let metrics: [(&str, &str, &str, Read); 5] = [
+  let metrics: [(&str, &str, &str, Read); 6] = [
     ("cpu_percent", "gauge", "Process CPU usage in percent, 100 is one busy core", |p| Some(p.cpu_pct.to_string())),
     ("cpu_seconds_total", "counter", "Process user and system CPU time in seconds", |p| Some((p.cpu_time_ns as f64 / 1e9).to_string())),
     ("memory_bytes", "gauge", "Process memory in bytes: physical footprint of own processes, resident size of others", |p| Some(p.mem_bytes.to_string())),
     ("gpu_percent", "gauge", "Share of the interval the GPU spent on the process in percent", |p| Some(p.gpu_pct.to_string())),
-    ("power_watts", "gauge", "Process CPU power in Watts, own processes only", |p| p.power_w.map(|x| x.to_string())),
+    ("power_watts", "gauge", "Process CPU power in Watts, own processes only", |p| p.cpu_power_w.map(|x| x.to_string())),
+    ("gpu_power_watts", "gauge", "Process share of the GPU power in Watts, split by GPU time", |p| Some(p.gpu_power_w.to_string())),
   ];
 
   let chip = escape_label_value(&soc.chip_name);
   let mut out = String::new();
   for (name, kind, help, read) in metrics {
     let rows: Vec<_> = procs.iter().filter_map(|p| read(p).map(|x| (p, x))).collect();
-    if rows.is_empty() {
+    if rows.is_empty() || (soc.vm && name.ends_with("_watts")) {
       continue;
     }
 
@@ -805,7 +807,7 @@ mod tests {
 
   #[test]
   fn process_series_per_process_with_power_only_when_known() {
-    let proc = |pid, name: &str, power_w| ProcInfo {
+    let proc = |pid, name: &str, cpu_power_w| ProcInfo {
       pid,
       name: name.into(),
       path: String::new(),
@@ -813,7 +815,8 @@ mod tests {
       cpu_pct: 12.5,
       cpu_time_ns: 1_500_000_000,
       mem_bytes: 2048,
-      power_w,
+      cpu_power_w,
+      gpu_power_w: 0.5,
       gpu_pct: 50.0,
       started: None,
     };
@@ -838,6 +841,13 @@ mod tests {
         .contains("macmon_process_power_watts{chip=\"\",pid=\"42\",name=\"llama-server\"} 1.25\n")
     );
     assert!(!output.contains("macmon_process_power_watts{chip=\"\",pid=\"7\""));
+    assert!(
+      output.contains("macmon_process_gpu_power_watts{chip=\"\",pid=\"7\",name=\"a\\\"b\"} 0.5\n")
+    );
+
+    // no power in a VM, as for the chip
+    let vm = procs_to_prometheus(&procs, &SocInfo { vm: true, ..SocInfo::default() });
+    assert!(vm.contains("macmon_process_cpu_percent") && !vm.contains("_watts"), "{vm}");
 
     assert_eq!(procs_to_prometheus(&[], &SocInfo::default()), "");
   }

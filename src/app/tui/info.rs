@@ -471,7 +471,8 @@ mod tests {
       cpu_pct: 0.0,
       cpu_time_ns: 0,
       mem_bytes: 0,
-      power_w: None,
+      cpu_power_w: None,
+      gpu_power_w: 0.0,
       gpu_pct: 0.0,
       started: Some((631, 0)),
     }

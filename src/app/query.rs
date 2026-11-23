@@ -53,7 +53,7 @@ impl Cond {
       "port" => value.parse().ok().map(Self::Port),
       "cpu" => Self::num(|p| Some(f64::from(p.cpu_pct)), NUM, value),
       "gpu" => Self::num(|p| Some(f64::from(p.gpu_pct)), NUM, value),
-      "power" => Self::num(|p| p.power_w.map(f64::from), NUM, value),
+      "power" => Self::num(|p| p.power_w().map(f64::from), NUM, value),
       "mem" => Self::num(|p| Some(p.mem_bytes as f64), MEM, value.trim_end_matches('b')),
       "time" => Self::num(|p| Some(p.cpu_time_ns as f64 / 1e9), TIME, value),
       _ => Some(Self::Text(word.to_string())),
@@ -173,7 +173,8 @@ mod tests {
       // an order of its own: the last two digits of the pid in seconds
       cpu_time_ns: (pid % 100) as u64 * 1_000_000_000,
       mem_bytes: mem_mb << 20,
-      power_w: power,
+      cpu_power_w: power,
+      gpu_power_w: 0.0,
       gpu_pct: gpu,
       started: None,
     }

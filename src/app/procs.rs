@@ -128,14 +128,24 @@ pub struct ProcInfo {
   /// users' processes come from `ps`, which has only the resident size: it counts shared pages and
   /// leaves out compressed memory, so the two compare only roughly.
   pub mem_bytes: u64,
-  /// `None` when the energy counter isn't readable: other users' processes, and every process
-  /// before macOS 13 (no `rusage_info_v6`).
-  pub power_w: Option<f32>,
+  /// CPU power from the energy counter; `None` when it isn't readable: other users' processes,
+  /// and every process before macOS 13 (no `rusage_info_v6`).
+  pub cpu_power_w: Option<f32>,
+  /// Share of the GPU power: the GPU power of the interval split between processes by GPU time.
+  pub gpu_power_w: f32,
   /// Share of the interval the GPU spent on the process, 0..=100.
   pub gpu_pct: f32,
   /// Start time in seconds and microseconds, tells the process from a later one with the same
   /// pid; `None` for other users' processes (`ps` has no exact start time).
   pub started: Option<(u64, u64)>,
+}
+
+impl ProcInfo {
+  /// Power of the POWER column: CPU power and the GPU share. `None` without CPU power, as the GPU
+  /// share alone would read as the whole power.
+  pub fn power_w(&self) -> Option<f32> {
+    self.cpu_power_w.map(|w| w + self.gpu_power_w)
+  }
 }
 
 /// Cumulative counters of one process; rates come from two snapshots.
@@ -180,23 +190,41 @@ struct Usage {
   cpu_pct: f32,
   power_w: Option<f32>,
   gpu_pct: f32,
+  /// GPU time in the interval.
+  gpu_ns: u64,
 }
 
-/// GPU share from GPU time snapshots `elapsed_ns` apart. Missing time on either side (no GPU
-/// clients, unreadable IORegistry) and time going backwards (a client closed) read as idle.
-fn gpu_pct(prev: Option<u64>, cur: Option<u64>, elapsed_ns: u64) -> f32 {
+/// GPU time between two snapshots. Missing time on either side (no GPU clients, unreadable
+/// IORegistry) and time going backwards (a client closed) read as idle.
+fn gpu_ns(prev: Option<u64>, cur: Option<u64>) -> u64 {
   match (prev, cur) {
-    (Some(prev), Some(cur)) if cur > prev && elapsed_ns > 0 => {
-      ((cur - prev) as f64 / elapsed_ns as f64 * 100.0).min(100.0) as f32
-    }
-    _ => 0.0,
+    (Some(prev), Some(cur)) => cur.saturating_sub(prev),
+    _ => 0,
+  }
+}
+
+/// GPU share from GPU time snapshots `elapsed_ns` apart.
+fn gpu_pct(prev: Option<u64>, cur: Option<u64>, elapsed_ns: u64) -> f32 {
+  match elapsed_ns {
+    0 => 0.0,
+    _ => (gpu_ns(prev, cur) as f64 / elapsed_ns as f64 * 100.0).min(100.0) as f32,
+  }
+}
+
+/// Share of `gpu_w`, the GPU power of the interval, for `gpu_ns` of the `total_ns` GPU time of
+/// all processes. Clients busy at once add up to more than the interval, so shares of the time,
+/// not GPU%, never bill more than the GPU drew.
+fn gpu_share(gpu_w: f32, gpu_ns: u64, total_ns: u64) -> f32 {
+  match total_ns {
+    0 => 0.0,
+    _ => (gpu_w as f64 * gpu_ns as f64 / total_ns as f64) as f32,
   }
 }
 
 /// Rates between two snapshots taken `elapsed_ns` apart. A first sample, a reused pid (different
 /// start time) or a counter going backwards reads as idle instead of a spike.
 fn usage(prev: Option<&Counters>, cur: &Counters, elapsed_ns: u64) -> Usage {
-  let idle = Usage { cpu_pct: 0.0, power_w: cur.energy_nj.map(|_| 0.0), gpu_pct: 0.0 };
+  let idle = Usage { cpu_pct: 0.0, power_w: cur.energy_nj.map(|_| 0.0), gpu_pct: 0.0, gpu_ns: 0 };
   let Some(prev) = prev else { return idle };
   if elapsed_ns == 0 || prev.start != cur.start || cur.cpu_ns < prev.cpu_ns {
     return idle;
@@ -215,6 +243,7 @@ fn usage(prev: Option<&Counters>, cur: &Counters, elapsed_ns: u64) -> Usage {
     cpu_pct: ((cur.cpu_ns - prev.cpu_ns) as f64 / elapsed_ns * 100.0) as f32,
     power_w: energy_nj.map(|nj| (nj as f64 / elapsed_ns) as f32), // nJ per ns = W
     gpu_pct,
+    gpu_ns: gpu_ns(prev.gpu_ns, cur.gpu_ns),
   }
 }
 
@@ -720,8 +749,9 @@ impl ProcSampler {
   }
 
   /// CPU and power are rates since the previous call, other users' CPU the rate between two `ps`
-  /// runs; the first call reports them as zero.
-  pub fn sample(&mut self) -> Vec<ProcInfo> {
+  /// runs; the first call reports them as zero. `gpu_w` is the average GPU power since the
+  /// previous call, shared between the processes by their GPU time.
+  pub fn sample(&mut self, gpu_w: f32) -> Vec<ProcInfo> {
     let now = Instant::now();
     let elapsed_ns = self.last.map_or(0, |last| now.duration_since(last).as_nanos() as u64);
     self.last = Some(now);
@@ -765,15 +795,22 @@ impl ProcSampler {
       }
     }
 
-    self.update(rows, elapsed_ns, ps_ns)
+    self.update(rows, elapsed_ns, ps_ns, gpu_w)
   }
 
   /// Rates against the previous tick; a process is the same while its pid, start time, command and
   /// executable path stay the same. A path that isn't readable on this tick keeps the last one.
   /// CPU of `ps` rows is the rate since the last `ps` run, `ps_ns` ago when this tick has one;
-  /// other ticks keep it.
-  fn update(&mut self, rows: Vec<Raw>, elapsed_ns: u64, ps_ns: Option<u64>) -> Vec<ProcInfo> {
+  /// other ticks keep it. `gpu_w` is shared by the GPU time of the tick.
+  fn update(
+    &mut self,
+    rows: Vec<Raw>,
+    elapsed_ns: u64,
+    ps_ns: Option<u64>,
+    gpu_w: f32,
+  ) -> Vec<ProcInfo> {
     let mut procs = Vec::with_capacity(rows.len());
+    let mut gpu_ns = Vec::with_capacity(rows.len());
 
     for raw in rows {
       let prev = self.known.remove(&raw.pid).filter(|prev| {
@@ -808,10 +845,12 @@ impl ProcSampler {
         cpu_pct: rates.cpu_pct,
         cpu_time_ns: raw.counters.cpu_ns,
         mem_bytes: raw.mem_bytes,
-        power_w: rates.power_w,
+        cpu_power_w: rates.power_w,
+        gpu_power_w: 0.0,
         gpu_pct: rates.gpu_pct,
         started: raw.started,
       });
+      gpu_ns.push(rates.gpu_ns);
       let (uid, counters, comm, cpu_pct, started) =
         (raw.uid, raw.counters, raw.comm, rates.cpu_pct, raw.started);
       self.known.insert(raw.pid, Known { uid, counters, comm, name, path, cpu_pct, started });
@@ -820,6 +859,11 @@ impl ProcSampler {
     if self.known.len() > procs.len() {
       let alive: HashSet<i32> = procs.iter().map(|proc| proc.pid).collect();
       self.known.retain(|pid, _| alive.contains(pid));
+    }
+
+    let total_ns = gpu_ns.iter().sum();
+    for (proc, gpu_ns) in procs.iter_mut().zip(gpu_ns) {
+      proc.gpu_power_w = gpu_share(gpu_w, gpu_ns, total_ns);
     }
 
     procs
@@ -852,7 +896,7 @@ mod tests {
   fn cpu_and_power_rates() {
     // one busy core is 100 %, as in Activity Monitor; nJ per ns is W
     let busy = usage(Some(&counters(5 * SEC, Some(SEC))), &counters(6 * SEC, Some(2 * SEC)), SEC);
-    assert_eq!(busy, Usage { cpu_pct: 100.0, power_w: Some(1.0), gpu_pct: 0.0 });
+    assert_eq!(busy, Usage { cpu_pct: 100.0, power_w: Some(1.0), gpu_pct: 0.0, gpu_ns: 0 });
     let two_cores = usage(Some(&counters(0, Some(0))), &counters(SEC, Some(SEC)), SEC / 2);
     assert_eq!((two_cores.cpu_pct, two_cores.power_w), (200.0, Some(2.0)));
     assert_eq!(usage(Some(&counters(0, None)), &counters(SEC, None), SEC).power_w, None);
@@ -861,7 +905,7 @@ mod tests {
 
     // a first sample, a reused pid (another start time), a counter going backwards or no time
     // passed: idle instead of a spike
-    let idle = Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0 };
+    let idle = Usage { cpu_pct: 0.0, power_w: Some(0.0), gpu_pct: 0.0, gpu_ns: 0 };
     let cur = counters(100 * SEC, Some(100 * SEC));
     assert_eq!(usage(None, &cur, SEC), idle);
     assert_eq!(usage(Some(&counters(0, Some(0))), &Counters { start: 43, ..cur }, SEC), idle);
@@ -881,7 +925,7 @@ mod tests {
 
     let gpu = |cpu_ns: u64, gpu_ns: Option<u64>| Counters { gpu_ns, ..counters(cpu_ns, None) };
     let busy = usage(Some(&gpu(0, Some(0))), &gpu(SEC, Some(SEC / 4)), SEC);
-    assert_eq!((busy.cpu_pct, busy.gpu_pct), (100.0, 25.0));
+    assert_eq!((busy.cpu_pct, busy.gpu_pct, busy.gpu_ns), (100.0, 25.0, SEC / 4));
     // GPU time going backwards doesn't affect the CPU rate
     let closed = usage(Some(&gpu(0, Some(SEC))), &gpu(SEC, Some(0)), SEC);
     assert_eq!((closed.cpu_pct, closed.gpu_pct), (100.0, 0.0));
@@ -1003,24 +1047,48 @@ mod tests {
     // rows without a path take their name from the fallback.
     let mut sampler = ProcSampler::new();
 
-    let first = sampler.update(vec![row(A, SEC, None, "a"), row(B, 0, Some(0), "b")], 0, None);
+    let first = sampler.update(vec![row(A, SEC, None, "a"), row(B, 0, Some(0), "b")], 0, None, 0.0);
     assert_eq!(first.len(), 2);
-    assert_eq!((first[0].cpu_pct, first[0].power_w), (0.0, None));
-    assert_eq!((first[1].cpu_pct, first[1].power_w), (0.0, Some(0.0)));
+    assert_eq!((first[0].cpu_pct, first[0].cpu_power_w), (0.0, None));
+    assert_eq!((first[1].cpu_pct, first[1].cpu_power_w), (0.0, Some(0.0)));
     assert_eq!((first[0].name.as_str(), first[0].path.as_str()), ("a", ""));
     assert_eq!(first[0].user, "root");
 
     let second =
-      sampler.update(vec![row(A, 2 * SEC, None, "a"), row(B, SEC, Some(SEC), "b")], SEC, None);
-    assert_eq!((second[0].cpu_pct, second[0].power_w), (100.0, None)); // no energy counter
-    assert_eq!((second[1].cpu_pct, second[1].power_w), (100.0, Some(1.0)));
+      sampler.update(vec![row(A, 2 * SEC, None, "a"), row(B, SEC, Some(SEC), "b")], SEC, None, 0.0);
+    assert_eq!((second[0].cpu_pct, second[0].cpu_power_w), (100.0, None)); // no energy counter
+    assert_eq!((second[1].cpu_pct, second[1].cpu_power_w), (100.0, Some(1.0)));
     assert_eq!((second[0].cpu_time_ns, second[1].cpu_time_ns), (2 * SEC, SEC)); // the totals
 
     // A new command under the same pid is a new process: no spike, fresh name.
-    let third = sampler.update(vec![row(A, 9 * SEC, None, "c")], SEC, None);
+    let third = sampler.update(vec![row(A, 9 * SEC, None, "c")], SEC, None, 0.0);
     assert_eq!(third[0].cpu_pct, 0.0);
     assert_eq!(third[0].name, "c");
     assert_eq!(sampler.known.len(), 1); // gone processes are forgotten
+  }
+
+  #[test]
+  fn gpu_power_is_shared_by_gpu_time() {
+    let at = |pid, energy_nj, gpu_ns| {
+      let raw = row(pid, 0, energy_nj, "x");
+      Raw { counters: Counters { gpu_ns: Some(gpu_ns), ..raw.counters }, ..raw }
+    };
+    let power = |procs: &[ProcInfo]| -> Vec<_> {
+      procs.iter().map(|p| (p.gpu_power_w, p.power_w())).collect()
+    };
+    let mut sampler = ProcSampler::new();
+
+    // the first tick has no GPU time to share by
+    let first = sampler.update(vec![at(A, Some(0), 0), at(B, None, 0)], 0, None, 8.0);
+    assert_eq!(power(&first), [(0.0, Some(0.0)), (0.0, None)]);
+
+    // A and B busy at once for 1.5 s and 0.5 s of a 1 s tick: 6 and 2 of the 8 W, where GPU%
+    // (100 and 50) would bill 12 W; POWER adds the 1 W of A's CPU and leaves B, without an energy
+    // counter, out
+    let rows = vec![at(A, Some(SEC), 3 * SEC / 2), at(B, None, SEC / 2)];
+    let second = sampler.update(rows, SEC, None, 8.0);
+    assert_eq!(power(&second), [(6.0, Some(7.0)), (2.0, None)]);
+    assert_eq!((second[0].gpu_pct, second[1].gpu_pct), (100.0, 50.0));
   }
 
   #[test]
@@ -1037,17 +1105,17 @@ mod tests {
     let shown = |p: &[ProcInfo]| (p[0].name.clone(), p[0].path.clone(), p[0].cpu_pct);
     let mut sampler = ProcSampler::new();
 
-    let first = sampler.update(vec![at(Some(helper), 0)], 0, None);
+    let first = sampler.update(vec![at(Some(helper), 0)], 0, None, 0.0);
     assert_eq!(shown(&first), ("Google Chrome Helper".into(), helper.into(), 0.0));
-    let same = sampler.update(vec![at(Some(helper), SEC)], SEC, None);
+    let same = sampler.update(vec![at(Some(helper), SEC)], SEC, None, 0.0);
     assert_eq!(shown(&same), ("Google Chrome Helper".into(), helper.into(), 100.0));
 
     // the other executable: its own name and path, no spike from the CPU time before the exec
-    let exec = sampler.update(vec![at(Some(gpu), 5 * SEC)], SEC, None);
+    let exec = sampler.update(vec![at(Some(gpu), 5 * SEC)], SEC, None, 0.0);
     assert_eq!(shown(&exec), ("Google Chrome Helper (GPU)".into(), gpu.into(), 0.0));
 
     // a path that isn't readable for a tick keeps the last one
-    let unreadable = sampler.update(vec![at(None, 6 * SEC)], SEC, None);
+    let unreadable = sampler.update(vec![at(None, 6 * SEC)], SEC, None, 0.0);
     assert_eq!(shown(&unreadable), ("Google Chrome Helper (GPU)".into(), gpu.into(), 100.0));
   }
 
@@ -1068,7 +1136,7 @@ mod tests {
       .iter()
       .map(|&(elapsed, a, ps, b)| {
         let rows = vec![ps_row(A, ms(a), "a"), row(B, ms(b), Some(0), "b")];
-        let procs = sampler.update(rows, ms(elapsed), ps.map(ms));
+        let procs = sampler.update(rows, ms(elapsed), ps.map(ms), 0.0);
         (procs[0].cpu_pct, procs[1].cpu_pct)
       })
       .collect();
@@ -1078,11 +1146,11 @@ mod tests {
     assert_eq!(cpu, expected);
 
     // a reused pid starts over and gets a rate on its second run, as a libproc row does
-    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100), Some(ms(100)));
+    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100), Some(ms(100)), 0.0);
     assert_eq!(procs[0].cpu_pct, 0.0);
-    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100), None);
+    let procs = sampler.update(vec![ps_row(A, ms(1), "other")], ms(100), None, 0.0);
     assert_eq!(procs[0].cpu_pct, 0.0);
-    let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100), Some(ms(200)));
+    let procs = sampler.update(vec![ps_row(A, ms(3), "other")], ms(100), Some(ms(200)), 0.0);
     assert_eq!(procs[0].cpu_pct, 1.0);
   }
 
@@ -1152,12 +1220,12 @@ mod tests {
     let launchd_mem = |procs: Vec<ProcInfo>| procs.iter().find(|p| p.pid == 1).unwrap().mem_bytes;
     let mut sampler = ProcSampler::new();
 
-    sampler.sample();
+    sampler.sample(0.0);
     sampler.ps_rows.get_mut(&1).unwrap().mem_bytes = 1;
-    assert_eq!(launchd_mem(sampler.sample()), 1);
+    assert_eq!(launchd_mem(sampler.sample(0.0)), 1);
 
     sampler.ps_next = Some(Instant::now());
-    assert!(launchd_mem(sampler.sample()) > 1);
+    assert!(launchd_mem(sampler.sample(0.0)) > 1);
   }
 
   #[test]
@@ -1168,7 +1236,7 @@ mod tests {
     let pid = child.id() as i32;
     let mut sampler = ProcSampler::new();
     let path = |sampler: &mut ProcSampler| {
-      sampler.sample().into_iter().find(|p| p.pid == pid).map(|p| p.path)
+      sampler.sample(0.0).into_iter().find(|p| p.pid == pid).map(|p| p.path)
     };
 
     let shell = path(&mut sampler).unwrap();
@@ -1189,7 +1257,7 @@ mod tests {
     let pid = std::process::id() as i32;
     let mut sampler = ProcSampler::new();
 
-    let first = sampler.sample();
+    let first = sampler.sample(0.0);
     let me = first.iter().find(|p| p.pid == pid).expect("own process is sampled");
     let exe = std::env::current_exe().unwrap();
     assert_eq!(me.path, exe.to_string_lossy(), "the full executable path");
@@ -1206,18 +1274,18 @@ mod tests {
     assert_eq!((launchd.name.as_str(), launchd.path.as_str()), ("launchd", "/sbin/launchd"));
     assert_eq!(launchd.user, "root");
     assert!(launchd.mem_bytes > 0);
-    assert_eq!((launchd.power_w, launchd.started), (None, None));
+    assert_eq!((launchd.cpu_power_w, launchd.started), (None, None));
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_millis(50) {
       black_box(started);
     }
 
-    let second = sampler.sample();
+    let second = sampler.sample(0.0);
     let me = second.iter().find(|p| p.pid == pid).expect("own process is sampled");
     assert!(me.cpu_pct > 0.0, "cpu_pct = {}", me.cpu_pct);
     assert!(me.cpu_time_ns > 0);
-    assert!(me.power_w.is_none_or(|w| w >= 0.0));
+    assert!(me.cpu_power_w.is_none_or(|w| w >= 0.0));
     assert!(second.iter().all(|p| (0.0..=100.0).contains(&p.gpu_pct)));
   }
 }
