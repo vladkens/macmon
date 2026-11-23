@@ -234,12 +234,13 @@ impl ProcsShown {
 /// Sends `Event::Update` with metrics on every tick of the interval in `msec`: the first after
 /// 100 ms, then anchored on the previous tick. A shorter interval moves the pending tick closer
 /// at once, a longer one applies after it. While the panel is `shown` the update also carries
-/// processes, when the tick is at least `PROCS_MIN_GAP` after the previous process sample, with the
-/// average GPU power of the ticks in between to share by GPU time. Each
-/// showing gets a new process sampler with a baseline, so rates don't span the hidden time, and
-/// moves the next tick to `PROCS_MIN_GAP` after it, so the list fills in quickly (also the first
-/// tick, as the panel shows on the first frame). Process samples carry their showing, so the app
-/// can drop one a hide overtook. Stops once the app is gone or after a metrics error.
+/// processes, when the tick is at least `PROCS_MIN_GAP` after the previous process sample, with
+/// the average GPU power of the metrics in between to share by GPU time. Each showing gets a new
+/// process sampler with a baseline, so rates don't span the hidden time, ends the metrics window
+/// there unless it is shorter than `PROCS_MIN_GAP`, and moves the next tick to `PROCS_MIN_GAP`
+/// after it, so the list fills in quickly (also the first tick, as the panel shows on the first
+/// frame). Process samples carry their showing, so the app can drop one a hide overtook. Stops
+/// once the app is gone or after a metrics error.
 fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Arc<ProcsShown>) {
   thread::spawn(move || {
     let sample = || -> WithError<()> {
@@ -261,9 +262,18 @@ fn run_sampler_thread(tx: mpsc::Sender<Event>, msec: Arc<RwLock<u32>>, shown: Ar
           match now_showing {
             // the panel was hidden: stop sampling processes
             None => procs = None,
-            // the panel was shown (or hidden and shown again): a new sampler and its baseline,
+            // the panel was shown (or hidden and shown again): the metrics up to now, so the GPU
+            // power of the first list covers its own window; a new sampler and its baseline,
             // which has no rates yet, and the first list `PROCS_MIN_GAP` later
             Some(showing) => {
+              if metrics_at.elapsed() >= PROCS_MIN_GAP {
+                let metrics = Box::new(sampler.get_metrics_now()?);
+                metrics_at = Instant::now();
+                if tx.send(Event::Update { metrics, procs: None }).is_err() {
+                  return Ok(());
+                }
+              }
+
               let (started, mut sampler) = (Instant::now(), ProcSampler::new());
               sampler.sample(0.0);
               procs = Some((showing, sampler, started));
