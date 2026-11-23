@@ -25,6 +25,10 @@ const GIB: f64 = (1u64 << 30) as f64;
 const SEPARATOR: &str = " | ";
 /// Fewest cells worth a text on the left of a bottom border; with less room it is left out.
 const BORDER_TEXT_MIN: u16 = 8;
+/// Least full height of a power graph (mW), so an idle 0.05 W doesn't fill its box.
+const POWER_FLOOR_MW: u64 = 2000;
+/// The same for the total power box: the whole Mac draws a few watts even at rest.
+const TOTAL_FLOOR_MW: u64 = 5000;
 
 /// Temperature position on the load gradient: 30 °C is cool, 100 °C is hot.
 fn temp_ratio(celsius: f32) -> f64 {
@@ -316,9 +320,9 @@ enum Scale {
   /// A load (CPU cluster, GPU, RAM): the graph is scaled to `max` and colored by load or in
   /// `color`, and `v` switches it to a gauge of the current `load` (`0.0..=1.0`).
   Load { max: u64, load: f64, color: Option<Color> },
-  /// Power: the graph is scaled to its largest visible sample, in the low load color, as in the
-  /// original; no gauge.
-  Power,
+  /// Power: the graph is scaled to its largest visible sample, but at least `floor` (mW), in the
+  /// low load color, as in the original; no gauge.
+  Power { floor: u64 },
 }
 
 /// Titles and graph of one metric box.
@@ -374,7 +378,7 @@ impl App {
           f.render_widget(Gauge::new(load, color), inner)
         }
         Scale::Load { max, color, .. } => f.render_widget(graph.max(max).color(color), inner),
-        Scale::Power => f.render_widget(graph.color(gradient(0.0)), inner),
+        Scale::Power { floor } => f.render_widget(graph.floor(floor).color(gradient(0.0)), inner),
       }
 
       // the fans (`1200 rpm`) right on the bottom border of the total power box
@@ -505,8 +509,8 @@ impl App {
 
   /// `CPU 4.50W (3.10, 8.20)` (current, average, maximum; original format), or `CPU 4.50W` when
   /// that doesn't fit, with the temperature (`45°C`) on the right when the sensor exists, over the
-  /// power history in the low load color, scaled to its largest visible sample. Always a graph,
-  /// as in the original.
+  /// power history in the low load color, scaled to its largest visible sample but at least
+  /// `POWER_FLOOR_MW`. Always a graph, as in the original.
   fn power_box<'a>(
     &self,
     label: &'static str,
@@ -527,18 +531,24 @@ impl App {
       }
     });
 
-    MetricBox { titles: titles.into(), data: &store.items, scale: Scale::Power }
+    MetricBox {
+      titles: titles.into(),
+      data: &store.items,
+      scale: Scale::Power { floor: POWER_FLOOR_MW },
+    }
   }
 
   /// `Total 12.00W (12.00, 12.00)`, the whole system, or `Power 6.60W (6.60, 6.60)`, CPU + GPU +
   /// ANE, without the system power sensor. The fans go on its bottom border (`render_metrics_box`).
   fn total_power_box(&self) -> MetricBox<'_> {
     // the newest sample, not the smoothed `top_value`, so the box switches as soon as it reads 0
-    if self.sys_power.items.first().is_some_and(|&mw| mw > 0) {
+    let metric = if self.sys_power.items.first().is_some_and(|&mw| mw > 0) {
       self.power_box("Total", &self.sys_power, None)
     } else {
       self.power_box("Power", &self.chip_power, None)
-    }
+    };
+
+    MetricBox { scale: Scale::Power { floor: TOTAL_FLOOR_MW }, ..metric }
   }
 }
 

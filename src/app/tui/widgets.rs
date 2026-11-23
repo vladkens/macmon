@@ -56,6 +56,7 @@ impl Widget for Gauge {
 pub(super) struct Graph<'a> {
   data: &'a [u64],
   max: Option<u64>,
+  floor: u64,
   color: Option<Color>,
   three_levels: bool,
 }
@@ -63,7 +64,7 @@ pub(super) struct Graph<'a> {
 impl<'a> Graph<'a> {
   /// Graph scaled to its largest visible sample, each bar in its load color.
   pub(super) fn new(data: &'a [u64]) -> Self {
-    Self { data, max: None, color: None, three_levels: false }
+    Self { data, max: None, floor: 0, color: None, three_levels: false }
   }
 
   /// Bars in three levels (blank, `▄`, `█`) instead of eighths, for Apple Terminal, which draws
@@ -76,6 +77,12 @@ impl<'a> Graph<'a> {
   /// Value drawn at full height.
   pub(super) fn max(mut self, max: u64) -> Self {
     self.max = Some(max);
+    self
+  }
+
+  /// Without `max`: the least value drawn at full height, so small samples stay low.
+  pub(super) fn floor(mut self, floor: u64) -> Self {
+    self.floor = floor;
     self
   }
 
@@ -94,7 +101,8 @@ impl Widget for Graph<'_> {
     }
 
     let visible = &self.data[..self.data.len().min(usize::from(area.width))];
-    let max = self.max.unwrap_or_else(|| visible.iter().copied().max().unwrap_or(0)).max(1);
+    let top = visible.iter().copied().max().unwrap_or(0).max(self.floor);
+    let max = self.max.unwrap_or(top).max(1);
     let levels = u64::from(area.height) * BAR_LEVELS;
     for (x, &value) in (area.left()..area.right()).rev().zip(visible) {
       let mut level = bar_level(value, max, levels);
@@ -173,6 +181,10 @@ mod tests {
 
     // without a maximum: scaled to the largest sample on screen, the older 100 doesn't fit
     assert_eq!(rows(&draw(Graph::new(&[10, 20, 100]), 2, 2)), ["█ ", "██"]);
+
+    // with a floor: small samples stay low, larger ones scale as without it
+    assert_eq!(rows(&draw(Graph::new(&[10, 20]).floor(80), 2, 2)), ["  ", "▄▂"]);
+    assert_eq!(rows(&draw(Graph::new(&[10, 20]).floor(5), 2, 2)), ["█ ", "██"]);
   }
 
   #[test]
